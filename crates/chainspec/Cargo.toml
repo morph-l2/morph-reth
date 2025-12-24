@@ -1,0 +1,37 @@
+[package]
+name = "morph-chainspec"
+description = "TODO:"
+
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+reth-cli = { workspace = true, optional = true }
+reth-chainspec.workspace = true
+reth-network-peers.workspace = true
+
+alloy-consensus.workspace = true
+alloy-evm.workspace = true
+alloy-genesis.workspace = true
+alloy-primitives.workspace = true
+alloy-eips.workspace = true
+alloy-hardforks.workspace = true
+
+eyre = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+
+[features]
+default = ["serde", "cli"]
+serde = [
+    "alloy-eips/serde",
+    "alloy-hardforks/serde",
+    "alloy-primitives/serde",
+]
+cli = ["dep:reth-cli", "dep:eyre"]

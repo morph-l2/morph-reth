@@ -1,0 +1,40 @@
+[package]
+name = "morph-revm"
+
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+morph-primitives.workspace = true
+morph-chainspec.workspace = true
+
+reth-evm.workspace = true
+reth-storage-api = { workspace = true, optional = true }
+reth-rpc-eth-types = { workspace = true, optional = true }
+
+revm.workspace = true
+
+alloy-evm.workspace = true
+alloy-primitives.workspace = true
+alloy-consensus.workspace = true
+alloy-sol-types.workspace = true
+
+auto_impl.workspace = true
+derive_more.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+eyre.workspace = true
+alloy-primitives = { workspace = true, features = ["rand"] }
+morph-evm.workspace = true
+
+[features]
+reth = ["dep:reth-storage-api"]
+rpc = ["dep:reth-rpc-eth-types"]
