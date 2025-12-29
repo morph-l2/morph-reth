@@ -16,8 +16,13 @@ reth-ethereum-primitives.workspace = true
 
 # Alloy
 alloy-consensus.workspace = true
+alloy-eips.workspace = true
+alloy-primitives.workspace = true
+alloy-rlp.workspace = true
+alloy-serde = { workspace = true, optional = true }
 
 [dev-dependencies]
 
 [features]
 default = []
+serde = ["dep:alloy-serde", "alloy-primitives/serde", "alloy-eips/serde"]

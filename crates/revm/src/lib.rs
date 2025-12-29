@@ -11,8 +11,6 @@ use tracing as _;
 use alloy_consensus as _;
 #[cfg(not(test))]
 use alloy_sol_types as _;
-#[cfg(not(test))]
-use morph_primitives as _;
 
 mod common;
 pub use common::{MorphStateAccess, MorphTx};
@@ -27,4 +25,4 @@ pub use block::MorphBlockEnv;
 pub use error::{MorphHaltReason, MorphInvalidTransaction};
 pub use evm::MorphEvm;
 pub use l1block::{L1BlockInfo, L1_GAS_PRICE_ORACLE_ADDRESS};
-pub use tx::MorphTxEnv;
+pub use tx::{MorphTxEnv, MorphTxExt};

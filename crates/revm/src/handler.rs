@@ -26,6 +26,7 @@ use crate::{
     error::MorphHaltReason,
     evm::MorphContext,
     l1block::L1BlockInfo,
+    tx::MorphTxExt,
 };
 
 /// Morph EVM [`Handler`] implementation.
@@ -34,6 +35,7 @@ use crate::{
 /// - L1 data fee calculation and deduction
 /// - L2 execution fee handling
 /// - Gas reimbursement for unused gas
+/// - L1 message transaction handling (no gas fees)
 #[derive(Debug)]
 pub struct MorphEvmHandler<DB, I> {
     /// Phantom data to avoid type inference issues.
@@ -100,6 +102,11 @@ where
         &self,
         evm: &mut Self::Evm,
     ) -> Result<(), Self::Error> {
+        // L1 message transactions skip all validation - everything is handled on L1 side
+        if evm.ctx_ref().tx().is_l1_msg() {
+            return Ok(());
+        }
+
         // Get the current hardfork for L1 fee calculation
         let hardfork = evm.ctx_ref().cfg().spec();
 
@@ -144,9 +151,14 @@ where
 
     fn reimburse_caller(
         &self,
-        _evm: &mut Self::Evm,
+        evm: &mut Self::Evm,
         _exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
     ) -> Result<(), Self::Error> {
+        // For L1 message transactions, no reimbursement is needed
+        if evm.ctx_ref().tx().is_l1_msg() {
+            return Ok(());
+        }
+
         // For Morph L2, we don't reimburse caller
         // The L2 execution fee is handled by the sequencer
         // L1 data fee is a fixed cost that is not refunded
@@ -166,6 +178,12 @@ where
 
     #[inline]
     fn validate_env(&self, evm: &mut Self::Evm) -> Result<(), Self::Error> {
+        // For L1 message transactions, skip certain validations
+        if evm.ctx_ref().tx().is_l1_msg() {
+            // L1 messages have zero gas price, so skip gas price validation
+            return Ok(());
+        }
+
         validation::validate_env::<_, Self::Error>(evm.ctx())?;
         Ok(())
     }

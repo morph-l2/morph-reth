@@ -3682,6 +3682,10 @@ name = "morph-primitives"
 version = "0.7.5"
 dependencies = [
  "alloy-consensus",
+ "alloy-eips",
+ "alloy-primitives",
+ "alloy-rlp",
+ "alloy-serde",
  "reth-ethereum-primitives",
 ]
 

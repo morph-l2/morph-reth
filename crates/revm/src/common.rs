@@ -11,7 +11,7 @@ pub trait MorphTx {
 
 impl MorphTx for MorphTxEnv {
     fn caller(&self) -> Address {
-        self.caller
+        revm::context::Transaction::caller(self)
     }
 }
 
