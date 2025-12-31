@@ -101,8 +101,8 @@ where
             return Ok(());
         }
 
-        // Check if transaction uses token fee (tx_type is MORPH_TX_TYPE_ID 0x7F)
-        if evm.ctx_ref().tx().uses_token_fee() {
+        // Check if transaction is MorphTransaction (tx_type 0x7F) which uses token fee
+        if evm.ctx_ref().tx().is_morph_tx() {
             // Get fee_token_id directly from MorphTxEnv
             let token_id = evm.ctx_ref().tx().fee_token_id;
             return self.validate_and_deduct_token_fee(evm, token_id);

@@ -303,12 +303,6 @@ pub trait MorphTxExt {
     /// Returns whether this transaction is a Morph transaction (type 0x7F).
     /// Morph transactions support ERC20 token-based gas payment.
     fn is_morph_tx(&self) -> bool;
-
-    /// Returns whether this transaction uses a token for gas payment.
-    /// This is true when tx_type is MORPH_TX_TYPE_ID (0x7F).
-    fn uses_token_fee(&self) -> bool {
-        self.is_morph_tx()
-    }
 }
 
 impl MorphTxExt for MorphTxEnv {
@@ -345,7 +339,6 @@ mod tests {
         tx.inner.tx_type = L1_TX_TYPE_ID;
         assert!(tx.is_l1_msg());
         assert!(!tx.is_morph_tx());
-        assert!(!tx.uses_token_fee());
 
         let regular_tx = MorphTxEnv::default();
         assert!(!regular_tx.is_l1_msg());
@@ -357,20 +350,6 @@ mod tests {
         tx.inner.tx_type = MORPH_TX_TYPE_ID;
         assert!(tx.is_morph_tx());
         assert!(!tx.is_l1_msg());
-        // MorphTransaction (0x7F) automatically enables token fee
-        assert!(tx.uses_token_fee());
-    }
-
-    #[test]
-    fn test_token_fee() {
-        // Default tx (type 0) doesn't use token fee
-        let tx = MorphTxEnv::default();
-        assert!(!tx.uses_token_fee());
-
-        // MorphTransaction type (0x7F) enables token fee
-        let mut morph_tx = MorphTxEnv::default();
-        morph_tx.inner.tx_type = MORPH_TX_TYPE_ID;
-        assert!(morph_tx.uses_token_fee());
     }
 
     #[test]
@@ -378,11 +357,9 @@ mod tests {
         let mut tx = TxEnv::default();
         tx.tx_type = MORPH_TX_TYPE_ID;
         assert!(tx.is_morph_tx());
-        assert!(tx.uses_token_fee());
 
         let regular_tx = TxEnv::default();
         assert!(!regular_tx.is_morph_tx());
-        assert!(!regular_tx.uses_token_fee());
     }
 
     #[test]
