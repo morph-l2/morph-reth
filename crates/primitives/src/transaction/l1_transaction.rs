@@ -6,8 +6,8 @@
 //! Reference: <https://github.com/morph-l2/morph/blob/main/prover/crates/primitives/src/types/tx.rs>
 
 use alloy_consensus::Transaction;
-use alloy_eips::{eip2718::Encodable2718, Typed2718};
-use alloy_primitives::{Address, Bytes, ChainId, TxKind, B256, U256, keccak256};
+use alloy_eips::{Typed2718, eip2718::Encodable2718};
+use alloy_primitives::{Address, B256, Bytes, ChainId, TxKind, U256, keccak256};
 use alloy_rlp::{BufMut, Decodable, Encodable, Header};
 use core::mem;
 
@@ -372,7 +372,10 @@ mod tests {
             from: address!("0000000000000000000000000000000000000001"),
             ..Default::default()
         };
-        assert_eq!(tx.sender(), address!("0000000000000000000000000000000000000001"));
+        assert_eq!(
+            tx.sender(),
+            address!("0000000000000000000000000000000000000001")
+        );
     }
 
     #[test]
@@ -486,7 +489,10 @@ mod tests {
         buf.truncate(original_len - 5);
 
         let result = L1Transaction::decode(&mut buf.as_slice());
-        assert!(result.is_err(), "Decoding should fail when data is truncated");
+        assert!(
+            result.is_err(),
+            "Decoding should fail when data is truncated"
+        );
         assert!(matches!(
             result.unwrap_err(),
             alloy_rlp::Error::InputTooShort | alloy_rlp::Error::UnexpectedLength

@@ -44,9 +44,9 @@ hardfork!(
         /// Curie hardfork.
         Curie,
         /// Morph203 hardfork.
-        #[default]
         Morph203,
         /// Viridian hardfork.
+        #[default]
         Viridian,
     }
 );

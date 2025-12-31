@@ -23,15 +23,15 @@ use alloy_evm::{
     revm::{Inspector, database::State},
 };
 pub use evm::MorphEvmFactory;
+use morph_primitives::{Block, MorphHeader, MorphPrimitives, MorphReceipt, MorphTxEnvelope};
 use reth_chainspec::EthChainSpec;
 use reth_evm::{self, ConfigureEvm, EvmEnvFor};
 use reth_primitives_traits::{SealedBlock, SealedHeader};
-use morph_primitives::{Block, MorphHeader, MorphPrimitives, MorphReceipt, MorphTxEnvelope};
 
 use crate::{block::MorphBlockExecutor, evm::MorphEvm};
-use reth_evm_ethereum::EthEvmConfig;
 use morph_chainspec::{MorphChainSpec, hardfork::MorphHardforks};
 use morph_revm::evm::MorphContext;
+use reth_evm_ethereum::EthEvmConfig;
 
 pub use morph_revm::{MorphBlockEnv, MorphHaltReason};
 
@@ -204,7 +204,11 @@ mod tests {
 
         // Should be able to query Morph hardforks through the chainspec
         assert!(evm_config.chain_spec().is_bernoulli_active_at_timestamp(0));
-        assert!(evm_config.chain_spec().is_bernoulli_active_at_timestamp(1000));
+        assert!(
+            evm_config
+                .chain_spec()
+                .is_bernoulli_active_at_timestamp(1000)
+        );
 
         // Should be able to query activation condition
         let activation = evm_config

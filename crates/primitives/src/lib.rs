@@ -21,7 +21,9 @@ pub use reth_ethereum_primitives::{
 };
 
 // Re-export transaction types
-pub use transaction::{L1Transaction, L1_TX_TYPE_ID};
+pub use transaction::{
+    L1_TX_TYPE_ID, L1Transaction, MORPH_TX_TYPE_ID, MorphTransaction, MorphTransactionExt,
+};
 
 /// Header alias for backwards compatibility.
 pub type MorphHeader = Header;

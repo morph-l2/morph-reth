@@ -3694,8 +3694,10 @@ name = "morph-revm"
 version = "0.7.5"
 dependencies = [
  "alloy-consensus",
+ "alloy-eips",
  "alloy-evm",
  "alloy-primitives",
+ "alloy-rlp",
  "alloy-sol-types",
  "auto_impl",
  "derive_more",

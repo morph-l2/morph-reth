@@ -7,11 +7,10 @@ use alloy_evm::{
         receipt_builder::{ReceiptBuilder, ReceiptBuilderCtx},
     },
 };
-use reth_revm::{Inspector, State, context::result::ResultAndState};
 use morph_chainspec::MorphChainSpec;
 use morph_primitives::{MorphReceipt, MorphTxEnvelope};
 use morph_revm::{MorphHaltReason, evm::MorphContext};
-
+use reth_revm::{Inspector, State, context::result::ResultAndState};
 
 /// Builder for [`MorphReceipt`].
 #[derive(Debug, Clone, Copy, Default)]
@@ -64,7 +63,12 @@ where
         chain_spec: &'a MorphChainSpec,
     ) -> Self {
         Self {
-            inner: EthBlockExecutor::new(evm, ctx.inner, chain_spec, MorphReceiptBuilder::default()),
+            inner: EthBlockExecutor::new(
+                evm,
+                ctx.inner,
+                chain_spec,
+                MorphReceiptBuilder::default(),
+            ),
         }
     }
 }

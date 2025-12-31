@@ -2,11 +2,11 @@ use crate::{
     MorphEvmConfig, MorphEvmFactory, block::MorphReceiptBuilder, context::MorphBlockExecutionCtx,
 };
 use alloy_evm::{block::BlockExecutionError, eth::EthBlockExecutorFactory};
+use morph_chainspec::MorphChainSpec;
+use morph_primitives::MorphHeader;
 use reth_evm::execute::{BlockAssembler, BlockAssemblerInput};
 use reth_evm_ethereum::EthBlockAssembler;
 use std::sync::Arc;
-use morph_chainspec::MorphChainSpec;
-use morph_primitives::MorphHeader;
 
 /// Assembler for Morph blocks.
 #[derive(Debug, Clone)]
