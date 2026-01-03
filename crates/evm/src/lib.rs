@@ -3,6 +3,8 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+#[cfg(feature = "engine")]
+mod engine;
 mod assemble;
 use alloy_consensus::BlockHeader as _;
 pub use assemble::MorphBlockAssembler;

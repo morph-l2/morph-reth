@@ -104,7 +104,7 @@ where
         // Check if transaction is AltFeeTx (tx_type 0x7F) which uses token fee
         if evm.ctx_ref().tx().is_alt_fee_tx() {
             // Get fee_token_id directly from MorphTxEnv
-            let token_id = evm.ctx_ref().tx().fee_token_id;
+            let token_id = evm.ctx_ref().tx().fee_token_id.unwrap_or_default();
             return self.validate_and_deduct_token_fee(evm, token_id);
         }
 
@@ -131,11 +131,56 @@ where
     #[inline]
     fn reward_beneficiary(
         &self,
-        _evm: &mut Self::Evm,
-        _exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
+        evm: &mut Self::Evm,
+        exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
     ) -> Result<(), Self::Error> {
-        // For Morph L2, beneficiary reward is handled differently
-        // The sequencer collects fees through the L1 fee vault mechanism
+        // L1 message transactions skip all validation - everything is handled on L1 side
+        if evm.ctx_ref().tx().is_l1_msg() {
+            return Ok(());
+        }
+        // AltFeeTx rewards are already applied when gasFee is deducted.
+        if evm.ctx_ref().tx().is_alt_fee_tx() {
+            return Ok(());
+        }
+
+        let beneficiary = evm.ctx_ref().block().beneficiary();
+
+        let basefee = evm.ctx_ref().block().basefee() as u128;
+        let effective_gas_price = evm.ctx_ref().tx().effective_gas_price(basefee);
+
+        // Get the current hardfork for L1 fee calculation
+        let hardfork = evm.ctx_ref().cfg().spec();
+
+        // Fetch L1 block info from the L1 Gas Price Oracle contract
+        let l1_block_info = L1BlockInfo::try_fetch(evm.ctx_mut().db_mut(), hardfork)?;
+
+        // Get RLP-encoded transaction bytes for L1 fee calculation
+        // This represents the full transaction data posted to L1 for data availability
+        let rlp_bytes = evm
+            .ctx_ref()
+            .tx()
+            .rlp_bytes
+            .as_ref()
+            .map(|b| b.as_ref())
+            .unwrap_or_default();
+
+        // Calculate L1 data fee based on full RLP-encoded transaction
+        let l1_data_fee = l1_block_info.calculate_tx_l1_cost(rlp_bytes, hardfork);
+
+        // Get mutable access to context components
+        let journal = evm.ctx().journal_mut();
+
+        let gas_spent = exec_result.gas().spent();
+        let gas_refunded = exec_result.gas().refunded() as u64;
+        let gas_used = gas_spent - gas_refunded;
+
+        let execution_fee = U256::from(effective_gas_price).saturating_mul(U256::from(gas_used));
+
+        // reward beneficiary
+        journal
+            .load_account_mut(beneficiary)?
+            .incr_balance(execution_fee.saturating_add(l1_data_fee));
+
         Ok(())
     }
 
@@ -260,6 +305,8 @@ where
     ) -> Result<(), EVMError<DB::Error, MorphInvalidTransaction>> {
         // Get caller address
         let caller_addr = evm.ctx_ref().tx().caller();
+        // Get coinbase address
+        let beneficiary = evm.ctx_ref().block().beneficiary();
 
         // Fetch token fee info from Token Registry
         let token_fee_info =
@@ -316,14 +363,24 @@ where
         // First, deduct token fee from caller's ERC20 balance
         // This updates the ERC20 token's storage directly
         if let Some(balance_slot) = token_fee_info.balance_slot {
+            // Sub amount
             let token_storage_slot = get_mapping_account_slot(balance_slot, caller_addr);
             let new_token_balance = token_fee_info.balance.saturating_sub(token_amount_required);
-
-            // Update the token balance in storage
             journal.sstore(
                 token_fee_info.token_address,
                 token_storage_slot,
                 new_token_balance,
+            )?;
+
+            // Add amount
+            let token_storage_slot = get_mapping_account_slot(balance_slot, beneficiary);
+            let balance = journal
+                .sload(token_fee_info.token_address, token_storage_slot)
+                .unwrap_or_default();
+            journal.sstore(
+                beneficiary,
+                token_storage_slot,
+                balance.saturating_sub(token_amount_required),
             )?;
         }
 
@@ -379,7 +436,6 @@ fn calculate_caller_fee_with_l1_cost(
 
     // Total spending = L2 fees + L1 data fee
     let total_spending = effective_balance_spending.saturating_add(l1_data_fee);
-
     // Check if caller has enough balance for total spending
     if !is_balance_check_disabled {
         if balance < total_spending {

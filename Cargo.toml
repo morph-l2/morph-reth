@@ -33,6 +33,7 @@ morph-evm = { path = "crates/evm", default-features = false }
 morph-revm = { path = "crates/revm", default-features = false }
 morph-primitives = { path = "crates/primitives", default-features = false, features = [
   "serde",
+  "reth",
 ] }
 
 reth-basic-payload-builder = { git = "https://github.com/paradigmxyz/reth", rev = "64909d3" }

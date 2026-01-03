@@ -31,9 +31,11 @@ pub struct MorphTxEnv {
     /// RLP encoded transaction bytes.
     /// Used only for L1 data fee calculation.
     pub rlp_bytes: Option<Bytes>,
+    /// Maximum amount of tokens the sender is willing to pay as fee.
+    pub fee_limit: Option<U256>,
     /// Token ID for fee payment (only for AltFeeTx type 0x7F).
     /// 0 means ETH payment, > 0 means ERC20 token payment.
-    pub fee_token_id: u16,
+    pub fee_token_id: Option<u16>,
 }
 
 impl Default for MorphTxEnv {
@@ -41,7 +43,8 @@ impl Default for MorphTxEnv {
         Self {
             inner: TxEnv::default(),
             rlp_bytes: None,
-            fee_token_id: 0,
+            fee_limit: None,
+            fee_token_id: None,
         }
     }
 }
@@ -52,7 +55,8 @@ impl MorphTxEnv {
         Self {
             inner,
             rlp_bytes: None,
-            fee_token_id: 0,
+            fee_limit: None,
+            fee_token_id: None,
         }
     }
 
@@ -62,9 +66,15 @@ impl MorphTxEnv {
         self
     }
 
+    /// Set the fee limit.
+    pub fn with_fee_limit(mut self, fee_limit: U256) -> Self {
+        self.fee_limit = Some(fee_limit);
+        self
+    }
+
     /// Set the fee token ID.
     pub fn with_fee_token_id(mut self, fee_token_id: u16) -> Self {
-        self.fee_token_id = fee_token_id;
+        self.fee_token_id = Some(fee_token_id);
         self
     }
 
