@@ -1,13 +1,16 @@
 //! L1 Message Transaction type for Morph L2.
 //!
-//! This module defines the L1Transaction type which represents L1 message
+//! This module defines the TxL1Msg type which represents L1 message
 //! transactions that are processed on Morph L2.
 //!
 //! Reference: <https://github.com/morph-l2/morph/blob/main/prover/crates/primitives/src/types/tx.rs>
 
-use alloy_consensus::Transaction;
-use alloy_eips::{eip2718::Encodable2718, Typed2718};
-use alloy_primitives::{Address, Bytes, ChainId, TxKind, B256, U256, keccak256};
+use alloy_consensus::{
+    SignableTransaction, Transaction,
+    transaction::{RlpEcdsaDecodableTx, RlpEcdsaEncodableTx},
+};
+use alloy_eips::{Typed2718, eip2718::Encodable2718};
+use alloy_primitives::{Address, B256, Bytes, ChainId, Signature, TxKind, U256, keccak256};
 use alloy_rlp::{BufMut, Decodable, Encodable, Header};
 use core::mem;
 
@@ -23,7 +26,8 @@ pub const L1_TX_TYPE_ID: u8 = 0x7E;
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
-pub struct L1Transaction {
+#[cfg_attr(feature = "reth-codec", derive(reth_codecs::Compact))]
+pub struct TxL1Msg {
     /// The 32-byte hash of the transaction.
     pub tx_hash: B256,
 
@@ -59,7 +63,7 @@ pub struct L1Transaction {
     pub input: Bytes,
 }
 
-impl L1Transaction {
+impl TxL1Msg {
     /// Get the transaction type
     #[doc(alias = "transaction_type")]
     pub const fn tx_type() -> u8 {
@@ -120,6 +124,18 @@ impl L1Transaction {
         self.from.encode(out);
     }
 
+    pub fn decode_fields(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
+        Ok(Self {
+            tx_hash: Decodable::decode(buf)?,
+            nonce: Decodable::decode(buf)?,
+            gas_limit: Decodable::decode(buf)?,
+            to: Decodable::decode(buf)?,
+            value: Decodable::decode(buf)?,
+            input: Decodable::decode(buf)?,
+            from: Decodable::decode(buf)?,
+        })
+    }
+
     /// Computes the hash used for the transaction.
     ///
     /// For L1 messages, this computes the keccak256 hash of the RLP encoding.
@@ -138,13 +154,13 @@ impl L1Transaction {
     }
 }
 
-impl Typed2718 for L1Transaction {
+impl Typed2718 for TxL1Msg {
     fn ty(&self) -> u8 {
         L1_TX_TYPE_ID
     }
 }
 
-impl Transaction for L1Transaction {
+impl Transaction for TxL1Msg {
     fn chain_id(&self) -> Option<ChainId> {
         None
     }
@@ -214,7 +230,39 @@ impl Transaction for L1Transaction {
     }
 }
 
-impl Encodable for L1Transaction {
+impl RlpEcdsaEncodableTx for TxL1Msg {
+    fn rlp_encoded_fields_length(&self) -> usize {
+        self.fields_len()
+    }
+
+    fn rlp_encode_fields(&self, out: &mut dyn BufMut) {
+        self.encode_fields(out);
+    }
+}
+
+impl RlpEcdsaDecodableTx for TxL1Msg {
+    const DEFAULT_TX_TYPE: u8 = { Self::tx_type() as u8 };
+
+    /// Decodes the inner [TxEip1559] fields from RLP bytes.
+    fn rlp_decode_fields(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
+        Self::decode_fields(buf)
+    }
+}
+
+impl SignableTransaction<Signature> for TxL1Msg {
+    fn set_chain_id(&mut self, _chain_id: ChainId) {}
+
+    fn encode_for_signing(&self, out: &mut dyn alloy_rlp::BufMut) {
+        out.put_u8(Self::tx_type() as u8);
+        self.encode(out)
+    }
+
+    fn payload_len_for_signature(&self) -> usize {
+        self.length() + 1
+    }
+}
+
+impl Encodable for TxL1Msg {
     fn encode(&self, out: &mut dyn BufMut) {
         self.rlp_header().encode(out);
         self.encode_fields(out);
@@ -225,7 +273,7 @@ impl Encodable for L1Transaction {
     }
 }
 
-impl Decodable for L1Transaction {
+impl Decodable for TxL1Msg {
     fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
         let header = Header::decode(buf)?;
         if !header.list {
@@ -263,7 +311,7 @@ impl Decodable for L1Transaction {
     }
 }
 
-impl Encodable2718 for L1Transaction {
+impl Encodable2718 for TxL1Msg {
     fn type_flag(&self) -> Option<u8> {
         Some(L1_TX_TYPE_ID)
     }
@@ -289,6 +337,12 @@ impl Encodable2718 for L1Transaction {
     }
 }
 
+impl reth_primitives_traits::InMemorySize for TxL1Msg {
+    fn size(&self) -> usize {
+        Self::size(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,7 +350,7 @@ mod tests {
 
     #[test]
     fn test_l1_transaction_default() {
-        let tx = L1Transaction::default();
+        let tx = TxL1Msg::default();
         assert_eq!(tx.nonce, 0);
         assert_eq!(tx.gas_limit, 0);
         assert_eq!(tx.value, U256::ZERO);
@@ -305,19 +359,19 @@ mod tests {
 
     #[test]
     fn test_l1_transaction_tx_type() {
-        assert_eq!(L1Transaction::tx_type(), L1_TX_TYPE_ID);
-        assert_eq!(L1Transaction::tx_type(), 0x7E);
+        assert_eq!(TxL1Msg::tx_type(), L1_TX_TYPE_ID);
+        assert_eq!(TxL1Msg::tx_type(), 0x7E);
     }
 
     #[test]
     fn test_l1_transaction_validate() {
-        let tx = L1Transaction::default();
+        let tx = TxL1Msg::default();
         assert!(tx.validate().is_ok());
     }
 
     #[test]
     fn test_l1_transaction_trait_methods() {
-        let tx = L1Transaction {
+        let tx = TxL1Msg {
             tx_hash: B256::ZERO,
             from: address!("0000000000000000000000000000000000000001"),
             nonce: 42,
@@ -353,13 +407,13 @@ mod tests {
 
     #[test]
     fn test_l1_transaction_is_create() {
-        let create_tx = L1Transaction {
+        let create_tx = TxL1Msg {
             to: TxKind::Create,
             ..Default::default()
         };
         assert!(create_tx.is_create());
 
-        let call_tx = L1Transaction {
+        let call_tx = TxL1Msg {
             to: TxKind::Call(address!("0000000000000000000000000000000000000001")),
             ..Default::default()
         };
@@ -368,16 +422,19 @@ mod tests {
 
     #[test]
     fn test_l1_transaction_sender() {
-        let tx = L1Transaction {
+        let tx = TxL1Msg {
             from: address!("0000000000000000000000000000000000000001"),
             ..Default::default()
         };
-        assert_eq!(tx.sender(), address!("0000000000000000000000000000000000000001"));
+        assert_eq!(
+            tx.sender(),
+            address!("0000000000000000000000000000000000000001")
+        );
     }
 
     #[test]
     fn test_l1_transaction_signature_hash() {
-        let tx = L1Transaction {
+        let tx = TxL1Msg {
             tx_hash: B256::ZERO,
             from: address!("0000000000000000000000000000000000000001"),
             nonce: 1,
@@ -393,7 +450,7 @@ mod tests {
 
     #[test]
     fn test_l1_transaction_rlp_roundtrip() {
-        let tx = L1Transaction {
+        let tx = TxL1Msg {
             tx_hash: B256::ZERO,
             from: address!("0000000000000000000000000000000000000001"),
             nonce: 42,
@@ -408,7 +465,7 @@ mod tests {
         tx.encode(&mut buf);
 
         // Decode
-        let decoded = L1Transaction::decode(&mut buf.as_slice()).expect("Should decode");
+        let decoded = TxL1Msg::decode(&mut buf.as_slice()).expect("Should decode");
 
         assert_eq!(tx.from, decoded.from);
         assert_eq!(tx.nonce, decoded.nonce);
@@ -420,7 +477,7 @@ mod tests {
 
     #[test]
     fn test_l1_transaction_create() {
-        let tx = L1Transaction {
+        let tx = TxL1Msg {
             tx_hash: B256::ZERO,
             from: address!("0000000000000000000000000000000000000001"),
             nonce: 0,
@@ -435,14 +492,14 @@ mod tests {
         tx.encode(&mut buf);
 
         // Decode
-        let decoded = L1Transaction::decode(&mut buf.as_slice()).expect("Should decode");
+        let decoded = TxL1Msg::decode(&mut buf.as_slice()).expect("Should decode");
 
         assert_eq!(decoded.to, TxKind::Create);
     }
 
     #[test]
     fn test_l1_transaction_encode_2718() {
-        let tx = L1Transaction {
+        let tx = TxL1Msg {
             tx_hash: B256::ZERO,
             from: address!("0000000000000000000000000000000000000001"),
             nonce: 1,
@@ -467,7 +524,7 @@ mod tests {
 
     #[test]
     fn test_l1_transaction_decode_rejects_malformed_rlp() {
-        let tx = L1Transaction {
+        let tx = TxL1Msg {
             tx_hash: B256::ZERO,
             from: address!("0000000000000000000000000000000000000001"),
             nonce: 42,
@@ -485,8 +542,11 @@ mod tests {
         let original_len = buf.len();
         buf.truncate(original_len - 5);
 
-        let result = L1Transaction::decode(&mut buf.as_slice());
-        assert!(result.is_err(), "Decoding should fail when data is truncated");
+        let result = TxL1Msg::decode(&mut buf.as_slice());
+        assert!(
+            result.is_err(),
+            "Decoding should fail when data is truncated"
+        );
         assert!(matches!(
             result.unwrap_err(),
             alloy_rlp::Error::InputTooShort | alloy_rlp::Error::UnexpectedLength
@@ -495,7 +555,7 @@ mod tests {
 
     #[test]
     fn test_l1_transaction_size() {
-        let tx = L1Transaction {
+        let tx = TxL1Msg {
             tx_hash: B256::ZERO,
             from: Address::ZERO,
             nonce: 0,
@@ -518,7 +578,7 @@ mod tests {
 
     #[test]
     fn test_l1_transaction_fields_len() {
-        let tx = L1Transaction {
+        let tx = TxL1Msg {
             tx_hash: B256::ZERO,
             from: address!("0000000000000000000000000000000000000001"),
             nonce: 1,
@@ -538,7 +598,7 @@ mod tests {
 
     #[test]
     fn test_l1_transaction_encode_fields() {
-        let tx = L1Transaction {
+        let tx = TxL1Msg {
             tx_hash: B256::ZERO,
             from: address!("0000000000000000000000000000000000000001"),
             nonce: 1,

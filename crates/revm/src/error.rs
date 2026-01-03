@@ -1,6 +1,7 @@
 //! Morph-specific transaction validation errors.
 
 use alloy_evm::error::InvalidTxError;
+use alloy_primitives::U256;
 use revm::context::result::{EVMError, HaltReason, InvalidTransaction};
 
 /// Morph-specific invalid transaction errors.
@@ -9,18 +10,39 @@ pub enum MorphInvalidTransaction {
     /// Standard Ethereum transaction validation error.
     #[error(transparent)]
     EthInvalidTransaction(#[from] InvalidTransaction),
+
+    /// Token is not registered in the Token Registry.
+    #[error("Token with ID {0} is not registered")]
+    TokenNotRegistered(u16),
+
+    /// Token is not active for gas payment.
+    #[error("Token with ID {0} is not active for gas payment")]
+    TokenNotActive(u16),
+
+    /// Insufficient token balance for gas payment.
+    #[error(
+        "Insufficient token balance for gas payment: required {required}, available {available}"
+    )]
+    InsufficientTokenBalance {
+        /// Required token amount.
+        required: U256,
+        /// Available token balance.
+        available: U256,
+    },
 }
 
 impl InvalidTxError for MorphInvalidTransaction {
     fn is_nonce_too_low(&self) -> bool {
         match self {
             Self::EthInvalidTransaction(err) => err.is_nonce_too_low(),
+            _ => false,
         }
     }
 
     fn as_invalid_tx_err(&self) -> Option<&InvalidTransaction> {
         match self {
             Self::EthInvalidTransaction(err) => Some(err),
+            _ => None,
         }
     }
 }

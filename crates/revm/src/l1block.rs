@@ -217,4 +217,3 @@ mod tests {
         assert_eq!(cost, U256::from(80_000_000_000u64));
     }
 }
-

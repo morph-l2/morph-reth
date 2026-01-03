@@ -10,7 +10,7 @@ use reth_chainspec::{
     Head,
 };
 use reth_network_peers::NodeRecord;
-use std::sync::{Arc};
+use std::sync::Arc;
 
 pub const MORPH_BASE_FEE: u64 = 10_000_000_000;
 
@@ -289,7 +289,10 @@ mod tests {
         let has_bernoulli = chainspec
             .forks_iter()
             .any(|(fork, _)| fork.name() == "Bernoulli");
-        assert!(has_bernoulli, "Bernoulli hardfork should be in inner.hardforks");
+        assert!(
+            has_bernoulli,
+            "Bernoulli hardfork should be in inner.hardforks"
+        );
     }
 
     #[test]

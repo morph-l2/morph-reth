@@ -12,7 +12,10 @@ workspace = true
 
 [dependencies]
 # Reth
-reth-ethereum-primitives.workspace = true
+reth-db-api = { workspace = true, optional = true }
+reth-ethereum-primitives = { workspace = true, optional = true }
+reth-primitives-traits = { workspace = true, optional = true }
+reth-codecs = { workspace = true, optional = true }
 
 # Alloy
 alloy-consensus.workspace = true
@@ -21,8 +24,32 @@ alloy-primitives.workspace = true
 alloy-rlp.workspace = true
 alloy-serde = { workspace = true, optional = true }
 
+# Utils
+serde = { workspace = true, features = ["derive"], optional = true }
+modular-bitfield = { version = "0.11.2", optional = true }
+
+
 [dev-dependencies]
 
 [features]
-default = []
-serde = ["dep:alloy-serde", "alloy-primitives/serde", "alloy-eips/serde"]
+default = ["serde", "reth-codec"]
+serde = [
+    "dep:serde",
+    "dep:alloy-serde",
+    "alloy-primitives/serde",
+    "alloy-eips/serde",
+]
+reth = [
+	"dep:reth-ethereum-primitives",
+	"dep:reth-primitives-traits",
+]
+reth-codec = [
+	"reth",
+	"serde",
+	"dep:reth-codecs",
+	"dep:reth-db-api",
+	"dep:modular-bitfield",
+	"reth-ethereum-primitives/reth-codec",
+	"reth-codecs/alloy",
+	"reth-primitives-traits/reth-codec",
+]

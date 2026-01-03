@@ -3,14 +3,15 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+#[cfg(feature = "engine")]
+mod engine;
 mod assemble;
 use alloy_consensus::BlockHeader as _;
 pub use assemble::MorphBlockAssembler;
 mod block;
 mod context;
 pub use context::{MorphBlockExecutionCtx, MorphNextBlockEnvAttributes};
-#[cfg(feature = "engine")]
-mod engine;
+
 mod error;
 pub use error::MorphEvmError;
 pub mod evm;
@@ -23,15 +24,15 @@ use alloy_evm::{
     revm::{Inspector, database::State},
 };
 pub use evm::MorphEvmFactory;
+use morph_primitives::{Block, MorphHeader, MorphPrimitives, MorphReceipt, MorphTxEnvelope};
 use reth_chainspec::EthChainSpec;
 use reth_evm::{self, ConfigureEvm, EvmEnvFor};
 use reth_primitives_traits::{SealedBlock, SealedHeader};
-use morph_primitives::{Block, MorphHeader, MorphPrimitives, MorphReceipt, MorphTxEnvelope};
 
 use crate::{block::MorphBlockExecutor, evm::MorphEvm};
-use reth_evm_ethereum::EthEvmConfig;
 use morph_chainspec::{MorphChainSpec, hardfork::MorphHardforks};
 use morph_revm::evm::MorphContext;
+use reth_evm_ethereum::EthEvmConfig;
 
 pub use morph_revm::{MorphBlockEnv, MorphHaltReason};
 
@@ -197,14 +198,18 @@ mod tests {
     fn test_evm_config_can_query_morph_hardforks() {
         // Create a test chainspec with Bernoulli at genesis
         let chainspec = Arc::new(morph_chainspec::MorphChainSpec::from_genesis(
-            morph_chainspec::spec::ANDANTINO.genesis().clone(),
+            Default::default(),
         ));
 
         let evm_config = MorphEvmConfig::new_with_default_factory(chainspec);
 
         // Should be able to query Morph hardforks through the chainspec
         assert!(evm_config.chain_spec().is_bernoulli_active_at_timestamp(0));
-        assert!(evm_config.chain_spec().is_bernoulli_active_at_timestamp(1000));
+        assert!(
+            evm_config
+                .chain_spec()
+                .is_bernoulli_active_at_timestamp(1000)
+        );
 
         // Should be able to query activation condition
         let activation = evm_config

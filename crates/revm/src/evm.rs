@@ -1,6 +1,7 @@
 use crate::{MorphBlockEnv, MorphTxEnv};
 use alloy_evm::{Database, precompiles::PrecompilesMap};
 use alloy_primitives::Log;
+use morph_chainspec::hardfork::MorphHardfork;
 use revm::{
     Context, Inspector,
     context::{CfgEnv, ContextError, Evm, FrameStack},
@@ -11,7 +12,6 @@ use revm::{
     inspector::InspectorEvmTr,
     interpreter::interpreter::EthInterpreter,
 };
-use morph_chainspec::hardfork::MorphHardfork;
 
 /// The Morph EVM context type.
 pub type MorphContext<DB> = Context<MorphBlockEnv, MorphTxEnv, CfgEnv<MorphHardfork>, DB>;

@@ -9,16 +9,9 @@ use revm::{
         result::{EVMError, ExecutionResult, InvalidTransaction},
     },
     context_interface::Block,
-    handler::{
-        EvmTr, FrameTr, Handler, MainnetHandler,
-        pre_execution,
-        validation,
-    },
+    handler::{EvmTr, FrameTr, Handler, MainnetHandler, pre_execution, validation},
     inspector::{Inspector, InspectorHandler},
-    interpreter::{
-        InitialAndFloorGas,
-        interpreter::EthInterpreter,
-    },
+    interpreter::{InitialAndFloorGas, interpreter::EthInterpreter},
 };
 
 use crate::{
@@ -26,6 +19,7 @@ use crate::{
     error::MorphHaltReason,
     evm::MorphContext,
     l1block::L1BlockInfo,
+    token_fee::{TokenFeeInfo, get_mapping_account_slot},
     tx::MorphTxExt,
 };
 
@@ -107,46 +101,15 @@ where
             return Ok(());
         }
 
-        // Get the current hardfork for L1 fee calculation
-        let hardfork = evm.ctx_ref().cfg().spec();
-
-        // Fetch L1 block info from the L1 Gas Price Oracle contract
-        let l1_block_info = L1BlockInfo::try_fetch(evm.ctx_mut().db_mut(), hardfork)?;
-
-        // Get transaction input data for L1 fee calculation
-        let tx_input = evm.ctx_ref().tx().input();
-
-        // Calculate L1 data fee
-        let l1_data_fee = l1_block_info.calculate_tx_l1_cost(tx_input, hardfork);
-
-        // Get mutable access to context components
-        let (block, tx, cfg, journal, _, _) = evm.ctx().all_mut();
-
-        // Load caller's account
-        let mut caller = journal.load_account_with_code_mut(tx.caller())?.data;
-
-        // Validate account nonce and code (EIP-3607)
-        pre_execution::validate_account_nonce_and_code(
-            &caller.info,
-            tx.nonce(),
-            cfg.is_eip3607_disabled(),
-            cfg.is_nonce_check_disabled(),
-        )?;
-
-        // Calculate L2 fee and validate balance
-        // This includes: gas_limit * gas_price + value + blob_fee
-        let new_balance_after_l2_fee =
-            calculate_caller_fee_with_l1_cost(*caller.balance(), tx, block, cfg, l1_data_fee)?;
-
-        // Set the new balance (deducting L2 fee + L1 data fee)
-        caller.set_balance(new_balance_after_l2_fee);
-
-        // Bump nonce for calls (CREATE nonce is bumped in make_create_frame)
-        if tx.kind().is_call() {
-            caller.bump_nonce();
+        // Check if transaction is AltFeeTx (tx_type 0x7F) which uses token fee
+        if evm.ctx_ref().tx().is_alt_fee_tx() {
+            // Get fee_token_id directly from MorphTxEnv
+            let token_id = evm.ctx_ref().tx().fee_token_id.unwrap_or_default();
+            return self.validate_and_deduct_token_fee(evm, token_id);
         }
 
-        Ok(())
+        // Standard ETH-based fee handling
+        self.validate_and_deduct_eth_fee(evm)
     }
 
     fn reimburse_caller(
@@ -168,11 +131,56 @@ where
     #[inline]
     fn reward_beneficiary(
         &self,
-        _evm: &mut Self::Evm,
-        _exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
+        evm: &mut Self::Evm,
+        exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
     ) -> Result<(), Self::Error> {
-        // For Morph L2, beneficiary reward is handled differently
-        // The sequencer collects fees through the L1 fee vault mechanism
+        // L1 message transactions skip all validation - everything is handled on L1 side
+        if evm.ctx_ref().tx().is_l1_msg() {
+            return Ok(());
+        }
+        // AltFeeTx rewards are already applied when gasFee is deducted.
+        if evm.ctx_ref().tx().is_alt_fee_tx() {
+            return Ok(());
+        }
+
+        let beneficiary = evm.ctx_ref().block().beneficiary();
+
+        let basefee = evm.ctx_ref().block().basefee() as u128;
+        let effective_gas_price = evm.ctx_ref().tx().effective_gas_price(basefee);
+
+        // Get the current hardfork for L1 fee calculation
+        let hardfork = evm.ctx_ref().cfg().spec();
+
+        // Fetch L1 block info from the L1 Gas Price Oracle contract
+        let l1_block_info = L1BlockInfo::try_fetch(evm.ctx_mut().db_mut(), hardfork)?;
+
+        // Get RLP-encoded transaction bytes for L1 fee calculation
+        // This represents the full transaction data posted to L1 for data availability
+        let rlp_bytes = evm
+            .ctx_ref()
+            .tx()
+            .rlp_bytes
+            .as_ref()
+            .map(|b| b.as_ref())
+            .unwrap_or_default();
+
+        // Calculate L1 data fee based on full RLP-encoded transaction
+        let l1_data_fee = l1_block_info.calculate_tx_l1_cost(rlp_bytes, hardfork);
+
+        // Get mutable access to context components
+        let journal = evm.ctx().journal_mut();
+
+        let gas_spent = exec_result.gas().spent();
+        let gas_refunded = exec_result.gas().refunded() as u64;
+        let gas_used = gas_spent - gas_refunded;
+
+        let execution_fee = U256::from(effective_gas_price).saturating_mul(U256::from(gas_used));
+
+        // reward beneficiary
+        journal
+            .load_account_mut(beneficiary)?
+            .incr_balance(execution_fee.saturating_add(l1_data_fee));
+
         Ok(())
     }
 
@@ -228,6 +236,174 @@ where
     }
 }
 
+// Helper methods for MorphEvmHandler
+impl<DB, I> MorphEvmHandler<DB, I>
+where
+    DB: alloy_evm::Database,
+{
+    /// Validate and deduct ETH-based gas fees.
+    fn validate_and_deduct_eth_fee(
+        &self,
+        evm: &mut MorphEvm<DB, I>,
+    ) -> Result<(), EVMError<DB::Error, MorphInvalidTransaction>> {
+        // Get the current hardfork for L1 fee calculation
+        let hardfork = evm.ctx_ref().cfg().spec();
+
+        // Fetch L1 block info from the L1 Gas Price Oracle contract
+        let l1_block_info = L1BlockInfo::try_fetch(evm.ctx_mut().db_mut(), hardfork)?;
+
+        // Get RLP-encoded transaction bytes for L1 fee calculation
+        // This represents the full transaction data posted to L1 for data availability
+        let rlp_bytes = evm
+            .ctx_ref()
+            .tx()
+            .rlp_bytes
+            .as_ref()
+            .map(|b| b.as_ref())
+            .unwrap_or_default();
+
+        // Calculate L1 data fee based on full RLP-encoded transaction
+        let l1_data_fee = l1_block_info.calculate_tx_l1_cost(rlp_bytes, hardfork);
+
+        // Get mutable access to context components
+        let (block, tx, cfg, journal, _, _) = evm.ctx().all_mut();
+
+        // Load caller's account
+        let mut caller = journal.load_account_with_code_mut(tx.caller())?.data;
+
+        // Validate account nonce and code (EIP-3607)
+        pre_execution::validate_account_nonce_and_code(
+            &caller.info,
+            tx.nonce(),
+            cfg.is_eip3607_disabled(),
+            cfg.is_nonce_check_disabled(),
+        )?;
+
+        // Calculate L2 fee and validate balance
+        // This includes: gas_limit * gas_price + value + blob_fee
+        let new_balance_after_l2_fee =
+            calculate_caller_fee_with_l1_cost(*caller.balance(), tx, block, cfg, l1_data_fee)?;
+
+        // Set the new balance (deducting L2 fee + L1 data fee)
+        caller.set_balance(new_balance_after_l2_fee);
+
+        // Bump nonce for calls (CREATE nonce is bumped in make_create_frame)
+        if tx.kind().is_call() {
+            caller.bump_nonce();
+        }
+
+        Ok(())
+    }
+
+    /// Validate and deduct token-based gas fees.
+    ///
+    /// This handles gas payment using ERC20 tokens instead of ETH.
+    fn validate_and_deduct_token_fee(
+        &self,
+        evm: &mut MorphEvm<DB, I>,
+        token_id: u16,
+    ) -> Result<(), EVMError<DB::Error, MorphInvalidTransaction>> {
+        // Get caller address
+        let caller_addr = evm.ctx_ref().tx().caller();
+        // Get coinbase address
+        let beneficiary = evm.ctx_ref().block().beneficiary();
+
+        // Fetch token fee info from Token Registry
+        let token_fee_info =
+            TokenFeeInfo::try_fetch(evm.ctx_mut().db_mut(), token_id, caller_addr)?
+                .ok_or(MorphInvalidTransaction::TokenNotRegistered(token_id))?;
+
+        // Check if token is active
+        if !token_fee_info.is_active {
+            return Err(MorphInvalidTransaction::TokenNotActive(token_id).into());
+        }
+
+        // Get the current hardfork for L1 fee calculation
+        let hardfork = evm.ctx_ref().cfg().spec();
+
+        // Fetch L1 block info from the L1 Gas Price Oracle contract
+        let l1_block_info = L1BlockInfo::try_fetch(evm.ctx_mut().db_mut(), hardfork)?;
+
+        // Get RLP-encoded transaction bytes for L1 fee calculation
+        // This represents the full transaction data posted to L1 for data availability
+        let rlp_bytes = evm
+            .ctx_ref()
+            .tx()
+            .rlp_bytes
+            .as_ref()
+            .map(|b| b.as_ref())
+            .unwrap_or_default();
+
+        // Calculate L1 data fee (in ETH) based on full RLP-encoded transaction
+        let l1_data_fee = l1_block_info.calculate_tx_l1_cost(rlp_bytes, hardfork);
+
+        // Calculate L2 gas fee (in ETH)
+        let gas_limit = evm.ctx_ref().tx().gas_limit();
+        let gas_price = evm.ctx_ref().tx().gas_price();
+        let l2_gas_fee = U256::from(gas_limit).saturating_mul(U256::from(gas_price));
+
+        // Total fee in ETH
+        let total_eth_fee = l2_gas_fee.saturating_add(l1_data_fee);
+
+        // Calculate token amount required for total fee
+        let token_amount_required = token_fee_info.calculate_token_amount(total_eth_fee);
+
+        // Check if caller has sufficient token balance
+        if token_fee_info.balance < token_amount_required {
+            return Err(MorphInvalidTransaction::InsufficientTokenBalance {
+                required: token_amount_required,
+                available: token_fee_info.balance,
+            }
+            .into());
+        }
+
+        // Get mutable access to context components
+        let (_, tx, cfg, journal, _, _) = evm.ctx().all_mut();
+
+        // First, deduct token fee from caller's ERC20 balance
+        // This updates the ERC20 token's storage directly
+        if let Some(balance_slot) = token_fee_info.balance_slot {
+            // Sub amount
+            let token_storage_slot = get_mapping_account_slot(balance_slot, caller_addr);
+            let new_token_balance = token_fee_info.balance.saturating_sub(token_amount_required);
+            journal.sstore(
+                token_fee_info.token_address,
+                token_storage_slot,
+                new_token_balance,
+            )?;
+
+            // Add amount
+            let token_storage_slot = get_mapping_account_slot(balance_slot, beneficiary);
+            let balance = journal
+                .sload(token_fee_info.token_address, token_storage_slot)
+                .unwrap_or_default();
+            journal.sstore(
+                beneficiary,
+                token_storage_slot,
+                balance.saturating_sub(token_amount_required),
+            )?;
+        }
+
+        // Load caller's account for nonce/code validation
+        let mut caller = journal.load_account_with_code_mut(tx.caller())?.data;
+
+        // Validate account nonce and code (EIP-3607)
+        pre_execution::validate_account_nonce_and_code(
+            &caller.info,
+            tx.nonce(),
+            cfg.is_eip3607_disabled(),
+            cfg.is_nonce_check_disabled(),
+        )?;
+
+        // Bump nonce for calls (CREATE nonce is bumped in make_create_frame)
+        if tx.kind().is_call() {
+            caller.bump_nonce();
+        }
+
+        Ok(())
+    }
+}
+
 /// Calculate the new balance after deducting L2 fees and L1 data fee.
 ///
 /// This is a Morph-specific version of `pre_execution::calculate_caller_fee` that
@@ -260,7 +436,6 @@ fn calculate_caller_fee_with_l1_cost(
 
     // Total spending = L2 fees + L1 data fee
     let total_spending = effective_balance_spending.saturating_add(l1_data_fee);
-
     // Check if caller has enough balance for total spending
     if !is_balance_check_disabled {
         if balance < total_spending {
