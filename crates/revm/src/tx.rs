@@ -2,12 +2,12 @@
 //!
 //! This module defines the Morph-specific transaction environment with token fee support.
 
-use alloy_consensus::Transaction as AlloyTransaction;
+use alloy_consensus::{EthereumTxEnvelope, Transaction as AlloyTransaction, TxEip4844};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_eips::eip2930::AccessList;
 use alloy_primitives::{Address, B256, Bytes, TxKind, U256};
 use alloy_rlp::Decodable;
-use morph_primitives::{L1_TX_TYPE_ID, MORPH_TX_TYPE_ID, MorphTransaction, MorphTxEnvelope};
+use morph_primitives::{ALT_FEE_TX_TYPE_ID, L1_TX_TYPE_ID, MorphTxEnvelope, TxAltFee};
 use reth_evm::{FromRecoveredTx, FromTxWithEncoded, ToTxEnv, TransactionEnv};
 use revm::context::{Transaction, TxEnv};
 use revm::context_interface::transaction::{
@@ -16,7 +16,7 @@ use revm::context_interface::transaction::{
 use std::ops::{Deref, DerefMut};
 
 /// Re-export Either for authorization list
-pub use alloy_consensus::transaction::Either;
+use alloy_consensus::transaction::Either;
 
 /// Morph transaction environment with token fee support.
 ///
@@ -31,7 +31,7 @@ pub struct MorphTxEnv {
     /// RLP encoded transaction bytes.
     /// Used only for L1 data fee calculation.
     pub rlp_bytes: Option<Bytes>,
-    /// Token ID for fee payment (only for MorphTransaction type 0x7F).
+    /// Token ID for fee payment (only for AltFeeTx type 0x7F).
     /// 0 means ETH payment, > 0 means ERC20 token payment.
     pub fee_token_id: u16,
 }
@@ -73,7 +73,7 @@ impl MorphTxEnv {
     /// This method:
     /// - Converts the transaction to `TxEnv`
     /// - Extracts the RLP-encoded transaction bytes for L1 data fee calculation
-    /// - Extracts fee_token_id for MorphTransaction (type 0x7F)
+    /// - Extracts fee_token_id for AltFeeTx (type 0x7F)
     pub fn from_recovered_tx(tx: &MorphTxEnvelope, signer: Address) -> Self {
         // Encode the transaction to RLP bytes for L1 data fee calculation
         let rlp_bytes = tx.encoded_2718();
@@ -86,8 +86,8 @@ impl MorphTxEnv {
     fn from_tx_with_rlp_bytes(tx: &MorphTxEnvelope, signer: Address, rlp_bytes: Bytes) -> Self {
         let tx_type: u8 = tx.tx_type().into();
 
-        // Extract fee_token_id for MorphTransaction (type 0x7F)
-        let fee_token_id = if tx_type == MORPH_TX_TYPE_ID {
+        // Extract fee_token_id for AltFeeTx (type 0x7F)
+        let fee_token_id = if tx_type == ALT_FEE_TX_TYPE_ID {
             extract_fee_token_id_from_rlp(&rlp_bytes)
         } else {
             0
@@ -121,7 +121,7 @@ impl MorphTxEnv {
     }
 }
 
-/// Extract fee_token_id from RLP-encoded MorphTransaction bytes.
+/// Extract fee_token_id from RLP-encoded AltFeeTx bytes.
 ///
 /// The bytes should be EIP-2718 encoded (type byte + RLP payload).
 /// Returns 0 if decoding fails.
@@ -130,9 +130,9 @@ fn extract_fee_token_id_from_rlp(rlp_bytes: &Bytes) -> u16 {
         return 0;
     }
 
-    // Skip the type byte (0x7F) and decode the MorphTransaction
+    // Skip the type byte (0x7F) and decode the AltFeeTx
     let payload = &rlp_bytes[1..];
-    MorphTransaction::decode(&mut &payload[..])
+    TxAltFee::decode(&mut &payload[..])
         .map(|tx| tx.fee_token_id)
         .unwrap_or(0)
 }
@@ -174,6 +174,22 @@ impl ToTxEnv<MorphTxEnv> for MorphTxEnv {
 impl FromRecoveredTx<MorphTxEnvelope> for MorphTxEnv {
     fn from_recovered_tx(tx: &MorphTxEnvelope, sender: Address) -> Self {
         MorphTxEnv::from_recovered_tx(tx, sender)
+    }
+}
+
+impl FromRecoveredTx<EthereumTxEnvelope<TxEip4844>> for MorphTxEnv {
+    fn from_recovered_tx(tx: &EthereumTxEnvelope<TxEip4844>, sender: Address) -> Self {
+        TxEnv::from_recovered_tx(tx, sender).into()
+    }
+}
+
+impl FromTxWithEncoded<EthereumTxEnvelope<TxEip4844>> for MorphTxEnv {
+    fn from_encoded_tx(
+        tx: &EthereumTxEnvelope<TxEip4844>,
+        sender: Address,
+        _encoded: Bytes,
+    ) -> Self {
+        <Self as FromRecoveredTx<EthereumTxEnvelope<TxEip4844>>>::from_recovered_tx(tx, sender)
     }
 }
 
@@ -302,7 +318,7 @@ pub trait MorphTxExt {
 
     /// Returns whether this transaction is a Morph transaction (type 0x7F).
     /// Morph transactions support ERC20 token-based gas payment.
-    fn is_morph_tx(&self) -> bool;
+    fn is_alt_fee_tx(&self) -> bool;
 }
 
 impl MorphTxExt for MorphTxEnv {
@@ -312,8 +328,8 @@ impl MorphTxExt for MorphTxEnv {
     }
 
     #[inline]
-    fn is_morph_tx(&self) -> bool {
-        self.inner.tx_type == MORPH_TX_TYPE_ID
+    fn is_alt_fee_tx(&self) -> bool {
+        self.inner.tx_type == ALT_FEE_TX_TYPE_ID
     }
 }
 
@@ -324,8 +340,8 @@ impl MorphTxExt for TxEnv {
     }
 
     #[inline]
-    fn is_morph_tx(&self) -> bool {
-        self.tx_type == MORPH_TX_TYPE_ID
+    fn is_alt_fee_tx(&self) -> bool {
+        self.tx_type == ALT_FEE_TX_TYPE_ID
     }
 }
 
@@ -338,7 +354,7 @@ mod tests {
         let mut tx = MorphTxEnv::default();
         tx.inner.tx_type = L1_TX_TYPE_ID;
         assert!(tx.is_l1_msg());
-        assert!(!tx.is_morph_tx());
+        assert!(!tx.is_alt_fee_tx());
 
         let regular_tx = MorphTxEnv::default();
         assert!(!regular_tx.is_l1_msg());
@@ -347,19 +363,19 @@ mod tests {
     #[test]
     fn test_morph_tx_detection() {
         let mut tx = MorphTxEnv::default();
-        tx.inner.tx_type = MORPH_TX_TYPE_ID;
-        assert!(tx.is_morph_tx());
+        tx.inner.tx_type = ALT_FEE_TX_TYPE_ID;
+        assert!(tx.is_alt_fee_tx());
         assert!(!tx.is_l1_msg());
     }
 
     #[test]
     fn test_txenv_morph_tx_detection() {
         let mut tx = TxEnv::default();
-        tx.tx_type = MORPH_TX_TYPE_ID;
-        assert!(tx.is_morph_tx());
+        tx.tx_type = ALT_FEE_TX_TYPE_ID;
+        assert!(tx.is_alt_fee_tx());
 
         let regular_tx = TxEnv::default();
-        assert!(!regular_tx.is_morph_tx());
+        assert!(!regular_tx.is_alt_fee_tx());
     }
 
     #[test]

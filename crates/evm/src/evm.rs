@@ -208,7 +208,7 @@ where
 #[cfg(test)]
 mod tests {
     use reth_revm::context::BlockEnv;
-    use revm::database::EmptyDB;
+    use revm::{context::TxEnv, database::EmptyDB};
 
     use super::*;
 
@@ -228,9 +228,12 @@ mod tests {
         );
         let result = evm
             .transact(MorphTxEnv {
-                caller: Address::ZERO,
-                gas_price: 0,
-                gas_limit: 21000,
+                inner: TxEnv {
+                    caller: Address::ZERO,
+                    gas_price: 0,
+                    gas_limit: 21000,
+                    ..Default::default()
+                },
                 ..Default::default()
             })
             .unwrap();

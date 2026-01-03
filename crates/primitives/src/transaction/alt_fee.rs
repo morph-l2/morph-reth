@@ -1,22 +1,25 @@
-//! Morph Transaction type for Morph L2.
+//! Altfee Transaction type for Morph L2.
 //!
-//! This module defines the MorphTransaction type which represents transactions that
+//! This module defines the TxAltFee type which represents transactions that
 //! use ERC20 tokens for gas payment instead of native ETH.
 //!
 //! Reference: <https://github.com/morph-l2/morph/blob/main/prover/crates/primitives/src/types/tx_alt_fee.rs>
 
-use alloy_consensus::Transaction;
+use alloy_consensus::{
+    SignableTransaction, Transaction,
+    transaction::{RlpEcdsaDecodableTx, RlpEcdsaEncodableTx},
+};
 use alloy_eips::{
     Typed2718, eip2718::Encodable2718, eip2930::AccessList, eip7702::SignedAuthorization,
 };
-use alloy_primitives::{B256, Bytes, ChainId, TxKind, U256, keccak256};
+use alloy_primitives::{B256, Bytes, ChainId, Signature, TxKind, U256, keccak256};
 use alloy_rlp::{BufMut, Decodable, Encodable, Header};
 use core::mem;
 
-/// Morph Transaction type ID (0x7F).
-pub const MORPH_TX_TYPE_ID: u8 = 0x7F;
+/// Altfee Transaction type ID (0x7F).
+pub const ALT_FEE_TX_TYPE_ID: u8 = 0x7F;
 
-/// Morph Transaction for Morph L2.
+/// Altfee Transaction for Morph L2.
 ///
 /// This transaction type allows users to pay gas fees using ERC20 tokens
 /// instead of native ETH. It extends EIP-1559 style transactions with
@@ -26,7 +29,7 @@ pub const MORPH_TX_TYPE_ID: u8 = 0x7F;
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
-pub struct MorphTransaction {
+pub struct TxAltFee {
     /// EIP-155: Simple replay attack protection.
     #[cfg_attr(feature = "serde", serde(with = "alloy_serde::quantity"))]
     pub chain_id: ChainId,
@@ -71,6 +74,10 @@ pub struct MorphTransaction {
     /// accessing outside the list.
     pub access_list: AccessList,
 
+    
+    /// Maximum amount of tokens the sender is willing to pay as fee.
+    pub fee_limit: U256,
+
     /// Input has two uses depending if transaction is Create or Call (if `to`
     /// field is None or Some).
     /// - init: An unlimited size byte array specifying the EVM-code for the
@@ -84,16 +91,13 @@ pub struct MorphTransaction {
     /// This corresponds to the token registered in the L2 Token Registry.
     #[cfg_attr(feature = "serde", serde(with = "alloy_serde::quantity"))]
     pub fee_token_id: u16,
-
-    /// Maximum amount of tokens the sender is willing to pay as fee.
-    pub fee_limit: U256,
 }
 
-impl MorphTransaction {
+impl TxAltFee {
     /// Get the transaction type.
     #[doc(alias = "transaction_type")]
     pub const fn tx_type() -> u8 {
-        MORPH_TX_TYPE_ID
+        ALT_FEE_TX_TYPE_ID
     }
 
     /// Returns the effective gas price for the given `base_fee`.
@@ -218,13 +222,13 @@ impl MorphTransaction {
     }
 }
 
-impl Typed2718 for MorphTransaction {
+impl Typed2718 for TxAltFee {
     fn ty(&self) -> u8 {
-        MORPH_TX_TYPE_ID
+        ALT_FEE_TX_TYPE_ID
     }
 }
 
-impl Transaction for MorphTransaction {
+impl Transaction for TxAltFee {
     fn chain_id(&self) -> Option<ChainId> {
         Some(self.chain_id)
     }
@@ -294,7 +298,41 @@ impl Transaction for MorphTransaction {
     }
 }
 
-impl Encodable for MorphTransaction {
+impl RlpEcdsaEncodableTx for TxAltFee {
+    fn rlp_encoded_fields_length(&self) -> usize {
+        self.fields_len()
+    }
+
+    fn rlp_encode_fields(&self, out: &mut dyn BufMut) {
+        self.encode_fields(out);
+    }
+}
+
+impl RlpEcdsaDecodableTx for TxAltFee {
+    const DEFAULT_TX_TYPE: u8 = { Self::tx_type() as u8 };
+
+    /// Decodes the inner [TxEip1559] fields from RLP bytes.
+    fn rlp_decode_fields(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
+        Self::decode_fields(buf)
+    }
+}
+
+impl SignableTransaction<Signature> for TxAltFee {
+    fn set_chain_id(&mut self, chain_id: ChainId) {
+        self.chain_id = chain_id;
+    }
+
+    fn encode_for_signing(&self, out: &mut dyn alloy_rlp::BufMut) {
+        out.put_u8(Self::tx_type() as u8);
+        self.encode(out)
+    }
+
+    fn payload_len_for_signature(&self) -> usize {
+        self.length() + 1
+    }
+}
+
+impl Encodable for TxAltFee {
     fn encode(&self, out: &mut dyn BufMut) {
         self.rlp_header().encode(out);
         self.encode_fields(out);
@@ -305,7 +343,7 @@ impl Encodable for MorphTransaction {
     }
 }
 
-impl Decodable for MorphTransaction {
+impl Decodable for TxAltFee {
     fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
         let header = Header::decode(buf)?;
         if !header.list {
@@ -321,9 +359,9 @@ impl Decodable for MorphTransaction {
     }
 }
 
-impl Encodable2718 for MorphTransaction {
+impl Encodable2718 for TxAltFee {
     fn type_flag(&self) -> Option<u8> {
-        Some(MORPH_TX_TYPE_ID)
+        Some(ALT_FEE_TX_TYPE_ID)
     }
 
     fn encode_2718_len(&self) -> usize {
@@ -337,7 +375,7 @@ impl Encodable2718 for MorphTransaction {
     }
 
     fn encode_2718(&self, out: &mut dyn BufMut) {
-        MORPH_TX_TYPE_ID.encode(out);
+        ALT_FEE_TX_TYPE_ID.encode(out);
         let header = Header {
             list: true,
             payload_length: self.fields_len(),
@@ -347,8 +385,67 @@ impl Encodable2718 for MorphTransaction {
     }
 }
 
-/// Extension trait for [`MorphTransaction`] to access token fee fields.
-pub trait MorphTransactionExt {
+impl reth_primitives_traits::InMemorySize for TxAltFee {
+    fn size(&self) -> usize {
+        Self::size(self)
+    }
+}
+
+#[cfg(feature = "reth-codec")]
+impl reth_codecs::Compact for TxAltFee {
+    fn to_compact<B>(&self, buf: &mut B) -> usize
+    where
+        B: BufMut + AsMut<[u8]>,
+    {
+        let mut len = 0;
+        len += self.chain_id.to_compact(buf);
+        len += self.nonce.to_compact(buf);
+        len += self.gas_limit.to_compact(buf);
+        len += self.max_fee_per_gas.to_compact(buf);
+        len += self.max_priority_fee_per_gas.to_compact(buf);
+        len += self.to.to_compact(buf);
+        len += self.value.to_compact(buf);
+        len += self.access_list.to_compact(buf);
+        len += self.fee_limit.to_compact(buf);
+        len += self.input.to_compact(buf);
+        len += (self.fee_token_id as u64).to_compact(buf);
+        len
+    }
+
+    fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
+        let (chain_id, buf) = ChainId::from_compact(buf, len);
+        let (nonce, buf) = u64::from_compact(buf, len);
+        let (gas_limit, buf) = u128::from_compact(buf, len);
+        let (max_fee_per_gas, buf) = u128::from_compact(buf, len);
+        let (max_priority_fee_per_gas, buf) = u128::from_compact(buf, len);
+        let (to, buf) = TxKind::from_compact(buf, len);
+        let (value, buf) = U256::from_compact(buf, len);
+        let (access_list, buf) = AccessList::from_compact(buf, len);
+        let (fee_limit, buf) = U256::from_compact(buf, len);
+        let (input, buf) = Bytes::from_compact(buf, len);
+        let (fee_token_id, buf) = u64::from_compact(buf, len);
+
+        (
+            Self {
+                chain_id,
+                nonce,
+                gas_limit,
+                max_fee_per_gas,
+                max_priority_fee_per_gas,
+                to,
+                value,
+                access_list,
+                fee_limit,
+                input,
+                fee_token_id: fee_token_id as u16,
+            },
+            buf,
+        )
+    }
+}
+
+/// Extension trait for [`TxAltFee`] to access token fee fields.
+pub trait TxAltFeeExt {
     /// Returns the token ID used for fee payment.
     fn fee_token_id(&self) -> u16;
 
@@ -361,7 +458,7 @@ pub trait MorphTransactionExt {
     }
 }
 
-impl MorphTransactionExt for MorphTransaction {
+impl TxAltFeeExt for TxAltFee {
     fn fee_token_id(&self) -> u16 {
         self.fee_token_id
     }
@@ -378,7 +475,7 @@ mod tests {
 
     #[test]
     fn test_tx_alt_fee_default() {
-        let tx = MorphTransaction::default();
+        let tx = TxAltFee::default();
         assert_eq!(tx.chain_id, 0);
         assert_eq!(tx.nonce, 0);
         assert_eq!(tx.gas_limit, 0);
@@ -391,20 +488,20 @@ mod tests {
 
     #[test]
     fn test_tx_alt_fee_tx_type() {
-        assert_eq!(MorphTransaction::tx_type(), MORPH_TX_TYPE_ID);
-        assert_eq!(MorphTransaction::tx_type(), 0x7F);
+        assert_eq!(TxAltFee::tx_type(), ALT_FEE_TX_TYPE_ID);
+        assert_eq!(TxAltFee::tx_type(), 0x7F);
     }
 
     #[test]
     fn test_tx_alt_fee_validate() {
-        let valid_tx = MorphTransaction {
+        let valid_tx = TxAltFee {
             max_fee_per_gas: 100,
             max_priority_fee_per_gas: 50,
             ..Default::default()
         };
         assert!(valid_tx.validate().is_ok());
 
-        let invalid_tx = MorphTransaction {
+        let invalid_tx = TxAltFee {
             max_fee_per_gas: 50,
             max_priority_fee_per_gas: 100,
             ..Default::default()
@@ -414,7 +511,7 @@ mod tests {
 
     #[test]
     fn test_tx_alt_fee_effective_gas_price() {
-        let tx = MorphTransaction {
+        let tx = TxAltFee {
             max_fee_per_gas: 100,
             max_priority_fee_per_gas: 20,
             ..Default::default()
@@ -432,7 +529,7 @@ mod tests {
 
     #[test]
     fn test_tx_alt_fee_trait_methods() {
-        let tx = MorphTransaction {
+        let tx = TxAltFee {
             chain_id: 1,
             nonce: 42,
             gas_limit: 21_000,
@@ -463,12 +560,12 @@ mod tests {
         );
         assert_eq!(Transaction::value(&tx), U256::from(100u64));
         assert_eq!(Transaction::input(&tx), &Bytes::from(vec![1, 2, 3, 4]));
-        assert_eq!(Typed2718::ty(&tx), MORPH_TX_TYPE_ID);
+        assert_eq!(Typed2718::ty(&tx), ALT_FEE_TX_TYPE_ID);
         assert!(tx.access_list().is_some());
         assert!(tx.blob_versioned_hashes().is_none());
         assert!(tx.authorization_list().is_none());
 
-        // Test MorphTransactionExt trait methods
+        // Test TxAltFeeExt trait methods
         assert_eq!(tx.fee_token_id(), 1);
         assert_eq!(tx.fee_limit(), U256::from(1000u64));
         assert!(tx.uses_token_fee());
@@ -476,13 +573,13 @@ mod tests {
 
     #[test]
     fn test_tx_alt_fee_is_create() {
-        let create_tx = MorphTransaction {
+        let create_tx = TxAltFee {
             to: TxKind::Create,
             ..Default::default()
         };
         assert!(create_tx.is_create());
 
-        let call_tx = MorphTransaction {
+        let call_tx = TxAltFee {
             to: TxKind::Call(address!("0000000000000000000000000000000000000001")),
             ..Default::default()
         };
@@ -491,7 +588,7 @@ mod tests {
 
     #[test]
     fn test_tx_alt_fee_rlp_roundtrip() {
-        let tx = MorphTransaction {
+        let tx = TxAltFee {
             chain_id: 1,
             nonce: 42,
             gas_limit: 21_000,
@@ -510,7 +607,7 @@ mod tests {
         tx.encode(&mut buf);
 
         // Decode
-        let decoded = MorphTransaction::decode(&mut buf.as_slice()).expect("Should decode");
+        let decoded = TxAltFee::decode(&mut buf.as_slice()).expect("Should decode");
 
         assert_eq!(tx.chain_id, decoded.chain_id);
         assert_eq!(tx.nonce, decoded.nonce);
@@ -529,7 +626,7 @@ mod tests {
 
     #[test]
     fn test_tx_alt_fee_create() {
-        let tx = MorphTransaction {
+        let tx = TxAltFee {
             chain_id: 1,
             nonce: 0,
             gas_limit: 100_000,
@@ -548,14 +645,14 @@ mod tests {
         tx.encode(&mut buf);
 
         // Decode
-        let decoded = MorphTransaction::decode(&mut buf.as_slice()).expect("Should decode");
+        let decoded = TxAltFee::decode(&mut buf.as_slice()).expect("Should decode");
 
         assert_eq!(decoded.to, TxKind::Create);
     }
 
     #[test]
     fn test_tx_alt_fee_encode_2718() {
-        let tx = MorphTransaction {
+        let tx = TxAltFee {
             chain_id: 1,
             nonce: 1,
             gas_limit: 21_000,
@@ -573,10 +670,10 @@ mod tests {
         tx.encode_2718(&mut buf);
 
         // First byte should be the type ID
-        assert_eq!(buf[0], MORPH_TX_TYPE_ID);
+        assert_eq!(buf[0], ALT_FEE_TX_TYPE_ID);
 
         // Verify type_flag
-        assert_eq!(tx.type_flag(), Some(MORPH_TX_TYPE_ID));
+        assert_eq!(tx.type_flag(), Some(ALT_FEE_TX_TYPE_ID));
 
         // Verify length consistency
         assert_eq!(buf.len(), tx.encode_2718_len());
@@ -584,7 +681,7 @@ mod tests {
 
     #[test]
     fn test_tx_alt_fee_decode_rejects_malformed_rlp() {
-        let tx = MorphTransaction {
+        let tx = TxAltFee {
             chain_id: 1,
             nonce: 42,
             gas_limit: 21_000,
@@ -606,7 +703,7 @@ mod tests {
         let original_len = buf.len();
         buf.truncate(original_len - 5);
 
-        let result = MorphTransaction::decode(&mut buf.as_slice());
+        let result = TxAltFee::decode(&mut buf.as_slice());
         assert!(
             result.is_err(),
             "Decoding should fail when data is truncated"
@@ -615,7 +712,7 @@ mod tests {
 
     #[test]
     fn test_tx_alt_fee_size() {
-        let tx = MorphTransaction {
+        let tx = TxAltFee {
             chain_id: 1,
             nonce: 0,
             gas_limit: 21_000,
@@ -635,7 +732,7 @@ mod tests {
 
     #[test]
     fn test_tx_alt_fee_fields_len() {
-        let tx = MorphTransaction {
+        let tx = TxAltFee {
             chain_id: 1,
             nonce: 1,
             gas_limit: 21_000,
@@ -659,7 +756,7 @@ mod tests {
 
     #[test]
     fn test_tx_alt_fee_encode_fields() {
-        let tx = MorphTransaction {
+        let tx = TxAltFee {
             chain_id: 1,
             nonce: 1,
             gas_limit: 21_000,
@@ -683,13 +780,13 @@ mod tests {
 
     #[test]
     fn test_tx_alt_fee_uses_token_fee() {
-        let tx_with_token = MorphTransaction {
+        let tx_with_token = TxAltFee {
             fee_token_id: 1,
             ..Default::default()
         };
         assert!(tx_with_token.uses_token_fee());
 
-        let tx_without_token = MorphTransaction {
+        let tx_without_token = TxAltFee {
             fee_token_id: 0,
             ..Default::default()
         };
@@ -698,7 +795,7 @@ mod tests {
 
     #[test]
     fn test_tx_alt_fee_signature_hash() {
-        let tx = MorphTransaction {
+        let tx = TxAltFee {
             chain_id: 1,
             nonce: 1,
             gas_limit: 21_000,

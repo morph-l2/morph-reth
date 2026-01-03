@@ -9,8 +9,7 @@ pub use assemble::MorphBlockAssembler;
 mod block;
 mod context;
 pub use context::{MorphBlockExecutionCtx, MorphNextBlockEnvAttributes};
-#[cfg(feature = "engine")]
-mod engine;
+
 mod error;
 pub use error::MorphEvmError;
 pub mod evm;
@@ -197,7 +196,7 @@ mod tests {
     fn test_evm_config_can_query_morph_hardforks() {
         // Create a test chainspec with Bernoulli at genesis
         let chainspec = Arc::new(morph_chainspec::MorphChainSpec::from_genesis(
-            morph_chainspec::spec::ANDANTINO.genesis().clone(),
+            Default::default(),
         ));
 
         let evm_config = MorphEvmConfig::new_with_default_factory(chainspec);

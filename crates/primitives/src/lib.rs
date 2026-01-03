@@ -12,18 +12,40 @@ use alloy_primitives as _;
 use alloy_rlp as _;
 
 pub mod transaction;
+use crate::transaction::envelope::MorphTxType;
+use alloy_primitives::Log;
 
 // Re-export standard Ethereum types
 pub use alloy_consensus::Header;
-pub use reth_ethereum_primitives::{
-    Block, EthPrimitives as MorphPrimitives, Receipt as MorphReceipt,
-    TransactionSigned as MorphTxEnvelope,
-};
+/// Header alias for backwards compatibility.
+pub type MorphHeader = Header;
+
+use reth_ethereum_primitives::EthereumReceipt;
+use reth_primitives_traits::NodePrimitives;
+
+/// Morph block.
+pub type Block = alloy_consensus::Block<MorphTxEnvelope, MorphHeader>;
+
+/// Morph block body.
+pub type BlockBody = alloy_consensus::BlockBody<MorphTxEnvelope, MorphHeader>;
+
+/// Morph receipt.
+pub type MorphReceipt<L = Log> = EthereumReceipt<MorphTxType, L>;
 
 // Re-export transaction types
 pub use transaction::{
-    L1_TX_TYPE_ID, L1Transaction, MORPH_TX_TYPE_ID, MorphTransaction, MorphTransactionExt,
+    ALT_FEE_TX_TYPE_ID, L1_TX_TYPE_ID, MorphTxEnvelope, TxAltFee, TxAltFeeExt, TxL1Msg,
 };
 
-/// Header alias for backwards compatibility.
-pub type MorphHeader = Header;
+/// A [`NodePrimitives`] implementation for Morph.
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct MorphPrimitives;
+
+impl NodePrimitives for MorphPrimitives {
+    type Block = Block;
+    type BlockHeader = MorphHeader;
+    type BlockBody = BlockBody;
+    type SignedTx = MorphTxEnvelope;
+    type Receipt = MorphReceipt;
+}

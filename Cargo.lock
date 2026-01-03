@@ -3686,7 +3686,12 @@ dependencies = [
  "alloy-primitives",
  "alloy-rlp",
  "alloy-serde",
+ "modular-bitfield",
+ "reth-codecs",
+ "reth-db-api",
  "reth-ethereum-primitives",
+ "reth-primitives-traits",
+ "serde",
 ]
 
 [[package]]
