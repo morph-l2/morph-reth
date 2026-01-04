@@ -67,9 +67,7 @@ pub const SUPPORTED_CHAINS: &[&str] = &["testnet"];
 /// to a json file, or a json formatted string in-memory. The json needs to be a Genesis struct.
 #[cfg(feature = "cli")]
 pub fn chain_value_parser(s: &str) -> eyre::Result<Arc<MorphChainSpec>> {
-    Ok(match s {
-        _ => MorphChainSpec::from_genesis(reth_cli::chainspec::parse_genesis(s)?).into(),
-    })
+    Ok(MorphChainSpec::from_genesis(reth_cli::chainspec::parse_genesis(s)?).into())
 }
 
 #[cfg(feature = "cli")]

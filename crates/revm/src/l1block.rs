@@ -64,13 +64,13 @@ impl L1BlockInfo {
     pub fn try_fetch<DB: Database>(
         db: &mut DB,
         hardfork: MorphHardfork,
-    ) -> Result<L1BlockInfo, DB::Error> {
+    ) -> Result<Self, DB::Error> {
         let l1_base_fee = db.storage(L1_GAS_PRICE_ORACLE_ADDRESS, L1_BASE_FEE_SLOT)?;
         let l1_fee_overhead = db.storage(L1_GAS_PRICE_ORACLE_ADDRESS, L1_OVERHEAD_SLOT)?;
         let l1_base_fee_scalar = db.storage(L1_GAS_PRICE_ORACLE_ADDRESS, L1_SCALAR_SLOT)?;
 
         if !hardfork.is_curie() {
-            Ok(L1BlockInfo {
+            Ok(Self {
                 l1_base_fee,
                 l1_fee_overhead,
                 l1_base_fee_scalar,
@@ -86,7 +86,7 @@ impl L1BlockInfo {
             // calldata component of commit fees (calldata gas + execution)
             let calldata_gas = l1_commit_scalar.saturating_mul(l1_base_fee);
 
-            Ok(L1BlockInfo {
+            Ok(Self {
                 l1_base_fee,
                 l1_fee_overhead,
                 l1_base_fee_scalar,
