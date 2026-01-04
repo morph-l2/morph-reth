@@ -38,7 +38,6 @@ pub struct MorphTxEnv {
     pub fee_token_id: Option<u16>,
 }
 
-
 impl MorphTxEnv {
     /// Create a new Morph transaction environment from a standard TxEnv.
     pub fn new(inner: TxEnv) -> Self {

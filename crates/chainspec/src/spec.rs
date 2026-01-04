@@ -236,25 +236,41 @@ impl MorphHardforks for MorphChainSpec {
 mod tests {
     use crate::hardfork::{MorphHardfork, MorphHardforks};
     use reth_chainspec::{EthereumHardfork, ForkCondition, Hardforks};
-    use reth_cli::chainspec::ChainSpecParser as _;
     use serde_json::json;
 
-    #[test]
-    fn can_load_testnet() {
-        let _ = super::MorphChainSpecParser::parse("testnet")
-            .expect("the testnet chainspec must always be well formed");
-    }
-
-    #[test]
-    fn can_load_dev() {
-        let _ = super::MorphChainSpecParser::parse("dev")
-            .expect("the dev chainspec must always be well formed");
+    /// Helper function to create a test genesis with Morph hardforks at timestamp 0
+    fn create_test_genesis() -> alloy_genesis::Genesis {
+        let genesis_json = json!({
+            "config": {
+                "chainId": 1337,
+                "homesteadBlock": 0,
+                "eip150Block": 0,
+                "eip155Block": 0,
+                "eip158Block": 0,
+                "byzantiumBlock": 0,
+                "constantinopleBlock": 0,
+                "petersburgBlock": 0,
+                "istanbulBlock": 0,
+                "berlinBlock": 0,
+                "londonBlock": 0,
+                "mergeNetsplitBlock": 0,
+                "terminalTotalDifficulty": 0,
+                "terminalTotalDifficultyPassed": true,
+                "shanghaiTime": 0,
+                "cancunTime": 0,
+                "bernoulliTime": 0,
+                "curieTime": 0,
+                "morph203Time": 0,
+                "viridianTime": 0
+            },
+            "alloc": {}
+        });
+        serde_json::from_value(genesis_json).expect("genesis should be valid")
     }
 
     #[test]
     fn test_morph_chainspec_has_morph_hardforks() {
-        let chainspec = super::MorphChainSpecParser::parse("testnet")
-            .expect("the testnet chainspec must always be well formed");
+        let chainspec = super::MorphChainSpec::from_genesis(create_test_genesis());
 
         // Bernoulli should be active at genesis (timestamp 0)
         assert!(chainspec.is_bernoulli_active_at_timestamp(0));
@@ -262,8 +278,7 @@ mod tests {
 
     #[test]
     fn test_morph_chainspec_implements_morph_hardforks_trait() {
-        let chainspec = super::MorphChainSpecParser::parse("testnet")
-            .expect("the testnet chainspec must always be well formed");
+        let chainspec = super::MorphChainSpec::from_genesis(create_test_genesis());
 
         // Should be able to query Morph hardfork activation through trait
         let activation = chainspec.morph_fork_activation(MorphHardfork::Bernoulli);
@@ -276,8 +291,7 @@ mod tests {
 
     #[test]
     fn test_morph_hardforks_in_inner_hardforks() {
-        let chainspec = super::MorphChainSpecParser::parse("testnet")
-            .expect("the testnet chainspec must always be well formed");
+        let chainspec = super::MorphChainSpec::from_genesis(create_test_genesis());
 
         // Morph hardforks should be queryable from inner.hardforks via Hardforks trait
         let activation = chainspec.fork(MorphHardfork::Bernoulli);

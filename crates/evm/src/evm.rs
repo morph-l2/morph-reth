@@ -207,15 +207,30 @@ where
 
 #[cfg(test)]
 mod tests {
+    use alloy_primitives::U256;
     use reth_revm::context::BlockEnv;
-    use revm::{context::TxEnv, database::EmptyDB};
+    use revm::{
+        context::TxEnv,
+        database::{CacheDB, EmptyDB},
+        state::AccountInfo,
+    };
 
     use super::*;
 
     #[test]
     fn can_execute_tx() {
+        // Create a database with the caller having sufficient balance
+        let mut db = CacheDB::new(EmptyDB::default());
+        db.insert_account_info(
+            Address::ZERO,
+            AccountInfo {
+                balance: U256::from(1_000_000),
+                ..Default::default()
+            },
+        );
+
         let mut evm = MorphEvm::new(
-            EmptyDB::default(),
+            db,
             EvmEnv {
                 block_env: MorphBlockEnv {
                     inner: BlockEnv {
@@ -230,7 +245,7 @@ mod tests {
             .transact(MorphTxEnv {
                 inner: TxEnv {
                     caller: Address::ZERO,
-                    gas_price: 0,
+                    gas_price: 1, // Must be >= basefee
                     gas_limit: 21000,
                     ..Default::default()
                 },

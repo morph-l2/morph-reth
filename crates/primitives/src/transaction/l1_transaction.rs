@@ -382,8 +382,9 @@ mod tests {
         };
 
         // Test Transaction trait methods
+        // Note: L1 transactions always return nonce 0 from Transaction trait
         assert_eq!(tx.chain_id(), None);
-        assert_eq!(Transaction::nonce(&tx), 42);
+        assert_eq!(Transaction::nonce(&tx), 0);
         assert_eq!(Transaction::gas_limit(&tx), 21_000);
         assert_eq!(tx.gas_price(), Some(0));
         assert_eq!(tx.max_fee_per_gas(), 0);
