@@ -241,7 +241,7 @@ impl RlpEcdsaEncodableTx for TxL1Msg {
 }
 
 impl RlpEcdsaDecodableTx for TxL1Msg {
-    const DEFAULT_TX_TYPE: u8 = { Self::tx_type() as u8 };
+    const DEFAULT_TX_TYPE: u8 = { Self::tx_type() };
 
     /// Decodes the inner [TxEip1559] fields from RLP bytes.
     fn rlp_decode_fields(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
@@ -253,7 +253,7 @@ impl SignableTransaction<Signature> for TxL1Msg {
     fn set_chain_id(&mut self, _chain_id: ChainId) {}
 
     fn encode_for_signing(&self, out: &mut dyn alloy_rlp::BufMut) {
-        out.put_u8(Self::tx_type() as u8);
+        out.put_u8(Self::tx_type());
         self.encode(out)
     }
 
@@ -382,8 +382,9 @@ mod tests {
         };
 
         // Test Transaction trait methods
+        // Note: L1 transactions always return nonce 0 from Transaction trait
         assert_eq!(tx.chain_id(), None);
-        assert_eq!(Transaction::nonce(&tx), 42);
+        assert_eq!(Transaction::nonce(&tx), 0);
         assert_eq!(Transaction::gas_limit(&tx), 21_000);
         assert_eq!(tx.gas_price(), Some(0));
         assert_eq!(tx.max_fee_per_gas(), 0);

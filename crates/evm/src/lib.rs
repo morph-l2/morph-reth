@@ -3,9 +3,9 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+mod assemble;
 #[cfg(feature = "engine")]
 mod engine;
-mod assemble;
 use alloy_consensus::BlockHeader as _;
 pub use assemble::MorphBlockAssembler;
 mod block;
@@ -193,12 +193,43 @@ impl ConfigureEvm for MorphEvmConfig {
 mod tests {
     use super::*;
     use morph_chainspec::hardfork::{MorphHardfork, MorphHardforks};
+    use serde_json::json;
+
+    /// Helper function to create a test genesis with Morph hardforks at timestamp 0
+    fn create_test_genesis() -> alloy_genesis::Genesis {
+        let genesis_json = json!({
+            "config": {
+                "chainId": 1337,
+                "homesteadBlock": 0,
+                "eip150Block": 0,
+                "eip155Block": 0,
+                "eip158Block": 0,
+                "byzantiumBlock": 0,
+                "constantinopleBlock": 0,
+                "petersburgBlock": 0,
+                "istanbulBlock": 0,
+                "berlinBlock": 0,
+                "londonBlock": 0,
+                "mergeNetsplitBlock": 0,
+                "terminalTotalDifficulty": 0,
+                "terminalTotalDifficultyPassed": true,
+                "shanghaiTime": 0,
+                "cancunTime": 0,
+                "bernoulliTime": 0,
+                "curieTime": 0,
+                "morph203Time": 0,
+                "viridianTime": 0
+            },
+            "alloc": {}
+        });
+        serde_json::from_value(genesis_json).expect("genesis should be valid")
+    }
 
     #[test]
     fn test_evm_config_can_query_morph_hardforks() {
         // Create a test chainspec with Bernoulli at genesis
         let chainspec = Arc::new(morph_chainspec::MorphChainSpec::from_genesis(
-            Default::default(),
+            create_test_genesis(),
         ));
 
         let evm_config = MorphEvmConfig::new_with_default_factory(chainspec);
