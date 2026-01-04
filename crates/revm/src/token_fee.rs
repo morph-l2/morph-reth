@@ -60,7 +60,7 @@ impl TokenFeeInfo {
         db: &mut DB,
         token_id: u16,
         caller: Address,
-    ) -> Result<Option<TokenFeeInfo>, DB::Error> {
+    ) -> Result<Option<Self>, DB::Error> {
         // Get the base slot for this token_id in tokenRegistry mapping
         let mut token_id_bytes = [0u8; 32];
         token_id_bytes[30..32].copy_from_slice(&token_id.to_be_bytes());
@@ -119,7 +119,7 @@ impl TokenFeeInfo {
         let caller_token_balance =
             get_erc20_balance(db, token_address, caller, token_balance_slot)?;
 
-        let token_fee = TokenFeeInfo {
+        let token_fee = Self {
             token_address,
             is_active,
             decimals,
@@ -246,14 +246,16 @@ where
     let calldata = build_balance_of_calldata(account);
 
     // Create a minimal transaction environment for the call
-    let mut tx = TxEnv::default();
-    tx.caller = Address::ZERO;
-    tx.gas_limit = BALANCE_OF_GAS_LIMIT;
-    tx.kind = TxKind::Call(token);
-    tx.value = U256::ZERO;
-    tx.data = calldata;
-    tx.nonce = 0;
-    tx.tx_type = L1_TX_TYPE_ID; // Mark as L1 message to skip gas validation
+    let tx = TxEnv {
+        caller: Address::ZERO,
+        gas_limit: BALANCE_OF_GAS_LIMIT,
+        kind: TxKind::Call(token),
+        value: U256::ZERO,
+        data: calldata,
+        nonce: 0,
+        tx_type: L1_TX_TYPE_ID, // Mark as L1 message to skip gas validation
+        ..Default::default()
+    };
 
     // Convert to MorphTxEnv
     let morph_tx = crate::MorphTxEnv::new(tx);
@@ -263,10 +265,10 @@ where
         Ok(result) => {
             if result.is_success() {
                 // Parse the returned balance (32 bytes)
-                if let Some(output) = result.output() {
-                    if output.len() >= 32 {
-                        return Ok(U256::from_be_slice(&output[..32]));
-                    }
+                if let Some(output) = result.output()
+                    && output.len() >= 32
+                {
+                    return Ok(U256::from_be_slice(&output[..32]));
                 }
             }
             Ok(U256::ZERO)

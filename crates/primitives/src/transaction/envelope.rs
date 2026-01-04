@@ -6,7 +6,6 @@ use crate::{TxAltFee, TxL1Msg};
 
 #[derive(Debug, Clone, TransactionEnvelope)]
 #[envelope(tx_type_name = MorphTxType)]
-#[expect(clippy::large_enum_variant)]
 pub enum MorphTxEnvelope {
     /// Legacy transaction (type 0x00)
     #[envelope(ty = 0)]

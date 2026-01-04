@@ -24,7 +24,7 @@ use alloy_consensus::transaction::Either;
 /// - L1 message detection (tx_type 0x7E)
 /// - Morph transaction with token-based gas payment (tx_type 0x7F)
 /// - RLP encoded transaction bytes for L1 data fee calculation
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MorphTxEnv {
     /// Inner transaction environment.
     pub inner: TxEnv,
@@ -36,17 +36,6 @@ pub struct MorphTxEnv {
     /// Token ID for fee payment (only for AltFeeTx type 0x7F).
     /// 0 means ETH payment, > 0 means ERC20 token payment.
     pub fee_token_id: Option<u16>,
-}
-
-impl Default for MorphTxEnv {
-    fn default() -> Self {
-        Self {
-            inner: TxEnv::default(),
-            rlp_bytes: None,
-            fee_limit: None,
-            fee_token_id: None,
-        }
-    }
 }
 
 impl MorphTxEnv {
@@ -107,7 +96,7 @@ impl MorphTxEnv {
         let inner = TxEnv {
             tx_type,
             caller: signer,
-            gas_limit: AlloyTransaction::gas_limit(tx) as u64,
+            gas_limit: AlloyTransaction::gas_limit(tx),
             gas_price: tx.effective_gas_price(None),
             kind: AlloyTransaction::kind(tx),
             value: AlloyTransaction::value(tx),
@@ -174,8 +163,8 @@ impl From<MorphTxEnv> for TxEnv {
 }
 
 // Implement ToTxEnv for MorphTxEnv (identity conversion)
-impl ToTxEnv<MorphTxEnv> for MorphTxEnv {
-    fn to_tx_env(&self) -> MorphTxEnv {
+impl ToTxEnv<Self> for MorphTxEnv {
+    fn to_tx_env(&self) -> Self {
         self.clone()
     }
 }
@@ -183,7 +172,7 @@ impl ToTxEnv<MorphTxEnv> for MorphTxEnv {
 // Implement FromRecoveredTx for MorphTxEnv
 impl FromRecoveredTx<MorphTxEnvelope> for MorphTxEnv {
     fn from_recovered_tx(tx: &MorphTxEnvelope, sender: Address) -> Self {
-        MorphTxEnv::from_recovered_tx(tx, sender)
+        Self::from_recovered_tx(tx, sender)
     }
 }
 
@@ -206,7 +195,7 @@ impl FromTxWithEncoded<EthereumTxEnvelope<TxEip4844>> for MorphTxEnv {
 // Implement FromTxWithEncoded for MorphTxEnv
 impl FromTxWithEncoded<MorphTxEnvelope> for MorphTxEnv {
     fn from_encoded_tx(tx: &MorphTxEnvelope, sender: Address, encoded: Bytes) -> Self {
-        MorphTxEnv::from_tx_with_rlp_bytes(tx, sender, encoded)
+        Self::from_tx_with_rlp_bytes(tx, sender, encoded)
     }
 }
 
@@ -380,8 +369,10 @@ mod tests {
 
     #[test]
     fn test_txenv_morph_tx_detection() {
-        let mut tx = TxEnv::default();
-        tx.tx_type = ALT_FEE_TX_TYPE_ID;
+        let tx = TxEnv {
+            tx_type: ALT_FEE_TX_TYPE_ID,
+            ..Default::default()
+        };
         assert!(tx.is_alt_fee_tx());
 
         let regular_tx = TxEnv::default();
@@ -390,8 +381,13 @@ mod tests {
 
     #[test]
     fn test_deref() {
-        let mut tx = MorphTxEnv::default();
-        tx.gas_limit = 21000;
+        let tx = MorphTxEnv {
+            inner: TxEnv {
+                gas_limit: 21000,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         assert_eq!(tx.gas_limit, 21000);
         assert_eq!(tx.inner.gas_limit, 21000);
     }

@@ -437,13 +437,11 @@ fn calculate_caller_fee_with_l1_cost(
     // Total spending = L2 fees + L1 data fee
     let total_spending = effective_balance_spending.saturating_add(l1_data_fee);
     // Check if caller has enough balance for total spending
-    if !is_balance_check_disabled {
-        if balance < total_spending {
-            return Err(InvalidTransaction::LackOfFundForMaxFee {
-                fee: Box::new(total_spending),
-                balance: Box::new(balance),
-            });
-        }
+    if !is_balance_check_disabled && balance < total_spending {
+        return Err(InvalidTransaction::LackOfFundForMaxFee {
+            fee: Box::new(total_spending),
+            balance: Box::new(balance),
+        });
     }
 
     // Calculate gas balance spending (excluding value transfer)
