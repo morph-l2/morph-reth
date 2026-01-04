@@ -74,7 +74,6 @@ pub struct TxAltFee {
     /// accessing outside the list.
     pub access_list: AccessList,
 
-    
     /// Maximum amount of tokens the sender is willing to pay as fee.
     pub fee_limit: U256,
 
@@ -212,14 +211,6 @@ impl TxAltFee {
         self.encode_2718(&mut buf);
         keccak256(&buf)
     }
-
-    /// Returns the RLP header for this transaction.
-    fn rlp_header(&self) -> Header {
-        Header {
-            list: true,
-            payload_length: self.fields_len(),
-        }
-    }
 }
 
 impl Typed2718 for TxAltFee {
@@ -334,12 +325,11 @@ impl SignableTransaction<Signature> for TxAltFee {
 
 impl Encodable for TxAltFee {
     fn encode(&self, out: &mut dyn BufMut) {
-        self.rlp_header().encode(out);
-        self.encode_fields(out);
+        self.rlp_encode(out);
     }
 
     fn length(&self) -> usize {
-        self.rlp_header().length_with_payload()
+        self.rlp_encoded_length()
     }
 }
 

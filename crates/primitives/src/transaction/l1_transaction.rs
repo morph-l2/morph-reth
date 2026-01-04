@@ -144,14 +144,6 @@ impl TxL1Msg {
         self.encode_2718(&mut buf);
         keccak256(&buf)
     }
-
-    /// Returns the RLP header for this transaction.
-    fn rlp_header(&self) -> Header {
-        Header {
-            list: true,
-            payload_length: self.fields_len(),
-        }
-    }
 }
 
 impl Typed2718 for TxL1Msg {
@@ -264,12 +256,11 @@ impl SignableTransaction<Signature> for TxL1Msg {
 
 impl Encodable for TxL1Msg {
     fn encode(&self, out: &mut dyn BufMut) {
-        self.rlp_header().encode(out);
-        self.encode_fields(out);
+        self.rlp_encode(out);
     }
 
     fn length(&self) -> usize {
-        self.rlp_header().length_with_payload()
+        self.rlp_encoded_length()
     }
 }
 
@@ -374,7 +365,7 @@ mod tests {
         let tx = TxL1Msg {
             tx_hash: B256::ZERO,
             from: address!("0000000000000000000000000000000000000001"),
-            nonce: 42,
+            nonce: 0,
             gas_limit: 21_000,
             to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
             value: U256::from(100u64),
@@ -383,7 +374,7 @@ mod tests {
 
         // Test Transaction trait methods
         assert_eq!(tx.chain_id(), None);
-        assert_eq!(Transaction::nonce(&tx), 42);
+        assert_eq!(Transaction::nonce(&tx),0);
         assert_eq!(Transaction::gas_limit(&tx), 21_000);
         assert_eq!(tx.gas_price(), Some(0));
         assert_eq!(tx.max_fee_per_gas(), 0);
