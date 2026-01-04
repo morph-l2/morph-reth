@@ -74,7 +74,6 @@ pub struct TxAltFee {
     /// accessing outside the list.
     pub access_list: AccessList,
 
-    
     /// Maximum amount of tokens the sender is willing to pay as fee.
     pub fee_limit: U256,
 
