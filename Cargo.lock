@@ -3662,6 +3662,7 @@ version = "0.7.5"
 dependencies = [
  "alloy-consensus",
  "alloy-evm",
+ "alloy-genesis",
  "alloy-primitives",
  "derive_more",
  "morph-chainspec",
@@ -3674,7 +3675,31 @@ dependencies = [
  "reth-revm",
  "reth-rpc-eth-api",
  "revm",
+ "serde_json",
  "thiserror 2.0.17",
+]
+
+[[package]]
+name = "morph-payload-builder"
+version = "0.7.5"
+
+[[package]]
+name = "morph-payload-types"
+version = "0.7.5"
+dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
+ "alloy-primitives",
+ "alloy-rlp",
+ "alloy-rpc-types-engine",
+ "alloy-serde",
+ "morph-primitives",
+ "rand 0.8.5",
+ "reth-payload-primitives",
+ "reth-primitives-traits",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]
