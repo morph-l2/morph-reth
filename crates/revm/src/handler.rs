@@ -9,9 +9,9 @@ use revm::{
         result::{EVMError, ExecutionResult, InvalidTransaction},
     },
     context_interface::Block,
-    handler::{EvmTr, FrameTr, Handler, MainnetHandler, pre_execution, validation},
+    handler::{EvmTr, FrameTr, Handler, MainnetHandler, post_execution, pre_execution, validation},
     inspector::{Inspector, InspectorHandler},
-    interpreter::{InitialAndFloorGas, interpreter::EthInterpreter},
+    interpreter::{Gas, InitialAndFloorGas, interpreter::EthInterpreter},
 };
 
 use crate::{
@@ -115,16 +115,22 @@ where
     fn reimburse_caller(
         &self,
         evm: &mut Self::Evm,
-        _exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
+        exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
     ) -> Result<(), Self::Error> {
         // For L1 message transactions, no reimbursement is needed
         if evm.ctx_ref().tx().is_l1_msg() {
             return Ok(());
         }
 
-        // For Morph L2, we don't reimburse caller
-        // The L2 execution fee is handled by the sequencer
-        // L1 data fee is a fixed cost that is not refunded
+        // Check if transaction is AltFeeTx (tx_type 0x7F) which uses token fee
+        if evm.ctx_ref().tx().is_alt_fee_tx() {
+            // Get fee_token_id directly from MorphTxEnv
+            let token_id = evm.ctx_ref().tx().fee_token_id.unwrap_or_default();
+            return self.reimburse_caller_token_fee(evm, exec_result.gas(), token_id);
+        }
+
+        // Standard ETH-based fee handling
+        post_execution::reimburse_caller(evm.ctx(), exec_result.gas(), U256::ZERO)?;
         Ok(())
     }
 
@@ -167,7 +173,7 @@ where
         // Calculate L1 data fee based on full RLP-encoded transaction
         let l1_data_fee = l1_block_info.calculate_tx_l1_cost(rlp_bytes, hardfork);
 
-        // Get mutable access to context components
+        // Get mutable access to journal components
         let journal = evm.ctx().journal_mut();
 
         let gas_spent = exec_result.gas().spent();
@@ -298,6 +304,68 @@ where
     /// Validate and deduct token-based gas fees.
     ///
     /// This handles gas payment using ERC20 tokens instead of ETH.
+    fn reimburse_caller_token_fee(
+        &self,
+        evm: &mut MorphEvm<DB, I>,
+        gas: &Gas,
+        token_id: u16,
+    ) -> Result<(), EVMError<DB::Error, MorphInvalidTransaction>> {
+        // Get caller address
+        let caller = evm.ctx_ref().tx().caller();
+        // Get coinbase address
+        let beneficiary = evm.ctx_ref().block().beneficiary();
+        let basefee = evm.ctx.block().basefee() as u128;
+        let effective_gas_price = evm.ctx.tx().effective_gas_price(basefee);
+
+        let reimburse_eth = U256::from(
+            effective_gas_price.saturating_mul((gas.remaining() + gas.refunded() as u64) as u128),
+        );
+
+        // Fetch token fee info from Token Registry
+        let token_fee_info = TokenFeeInfo::try_fetch(evm.ctx_mut().db_mut(), token_id, caller)?
+            .ok_or(MorphInvalidTransaction::TokenNotRegistered(token_id))?;
+
+        // Check if token is active
+        if !token_fee_info.is_active {
+            return Err(MorphInvalidTransaction::TokenNotActive(token_id).into());
+        }
+
+        // Calculate token amount required for total fee
+        let token_amount_required = token_fee_info.calculate_token_amount(reimburse_eth);
+
+        // Get mutable access to journal components
+        let journal = evm.ctx().journal_mut();
+
+        // Transfer with token slot.
+        if let Some(balance_slot) = token_fee_info.balance_slot {
+            // Sub amount
+            let token_storage_slot = get_mapping_account_slot(balance_slot, beneficiary);
+            let balance = journal
+                .sload(token_fee_info.token_address, token_storage_slot)
+                .unwrap_or_default();
+            journal.sstore(
+                caller,
+                token_storage_slot,
+                balance.saturating_sub(token_amount_required),
+            )?;
+
+            // Add amount
+            let token_storage_slot = get_mapping_account_slot(balance_slot, caller);
+            let balance = journal
+                .sload(token_fee_info.token_address, token_storage_slot)
+                .unwrap_or_default();
+            journal.sstore(
+                caller,
+                token_storage_slot,
+                balance.saturating_add(token_amount_required),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Validate and deduct token-based gas fees.
+    ///
+    /// This handles gas payment using ERC20 tokens instead of ETH.
     fn validate_and_deduct_token_fee(
         &self,
         evm: &mut MorphEvm<DB, I>,
@@ -360,8 +428,7 @@ where
         // Get mutable access to context components
         let (_, tx, cfg, journal, _, _) = evm.ctx().all_mut();
 
-        // First, deduct token fee from caller's ERC20 balance
-        // This updates the ERC20 token's storage directly
+        // Transfer with token slot.
         if let Some(balance_slot) = token_fee_info.balance_slot {
             // Sub amount
             let token_storage_slot = get_mapping_account_slot(balance_slot, caller_addr);
@@ -378,9 +445,9 @@ where
                 .sload(token_fee_info.token_address, token_storage_slot)
                 .unwrap_or_default();
             journal.sstore(
-                beneficiary,
+                token_fee_info.token_address,
                 token_storage_slot,
-                balance.saturating_sub(token_amount_required),
+                balance.saturating_add(token_amount_required),
             )?;
         }
 
