@@ -56,6 +56,17 @@ impl MorphTxEnvelope {
         self.tx_type() == MorphTxType::L1Msg
     }
 
+    pub fn queue_index(&self) -> Option<u64> {
+        match self {
+            Self::Legacy(_)
+            | Self::Eip2930(_)
+            | Self::Eip1559(_)
+            | Self::Eip7702(_)
+            | Self::AltFee(_) => None,
+            Self::L1Msg(tx) => Some(tx.tx().queue_index),
+        }
+    }
+
     /// Encode the transaction according to [EIP-2718] rules. First a 1-byte
     /// type flag in the range 0x0-0x7f, then the body of the transaction.
     pub fn rlp(&self) -> Bytes {
