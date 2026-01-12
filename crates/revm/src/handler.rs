@@ -441,25 +441,41 @@ where
 
         // Transfer with token slot.
         if let Some(balance_slot) = token_fee_info.balance_slot {
+            // Ensure token account is loaded into the journal state, because `sload`/`sstore`
+            // assume the account is present.
+            let _ = journal.load_account_mut(token_fee_info.token_address)?;
+
             // Sub amount
-            let token_storage_slot = get_mapping_account_slot(balance_slot, caller_addr);
+            let caller_token_storage_slot = get_mapping_account_slot(balance_slot, caller_addr);
             let new_token_balance = token_fee_info.balance.saturating_sub(token_amount_required);
             journal.sstore(
                 token_fee_info.token_address,
-                token_storage_slot,
+                caller_token_storage_slot,
                 new_token_balance,
             )?;
 
             // Add amount
-            let token_storage_slot = get_mapping_account_slot(balance_slot, beneficiary);
+            let beneficiary_token_storage_slot = get_mapping_account_slot(balance_slot, beneficiary);
             let balance = journal
-                .sload(token_fee_info.token_address, token_storage_slot)
+                .sload(token_fee_info.token_address, beneficiary_token_storage_slot)
                 .unwrap_or_default();
             journal.sstore(
                 token_fee_info.token_address,
-                token_storage_slot,
+                beneficiary_token_storage_slot,
                 balance.saturating_add(token_amount_required),
             )?;
+
+            // We don't want the fee-token account/slots we touched during validation to become
+            // warm for the rest of the transaction execution.
+            if let Some(token_acc) = journal.state.get_mut(&token_fee_info.token_address) {
+                token_acc.mark_cold();
+                if let Some(slot) = token_acc.storage.get_mut(&caller_token_storage_slot) {
+                    slot.mark_cold();
+                }
+                if let Some(slot) = token_acc.storage.get_mut(&beneficiary_token_storage_slot) {
+                    slot.mark_cold();
+                }
+            }
         }
 
         // Load caller's account for nonce/code validation
@@ -538,3 +554,4 @@ fn calculate_caller_fee_with_l1_cost(
 
     Ok(new_balance)
 }
+
