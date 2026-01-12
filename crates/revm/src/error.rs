@@ -15,6 +15,10 @@ pub enum MorphInvalidTransaction {
     #[error("Token with ID {0} is not registered")]
     TokenNotRegistered(u16),
 
+    /// Token ID 0 not supported for gas payment.
+    #[error("Token ID 0 is not supported for gas payment")]
+    TokenIdZeroNotSupported,
+
     /// Token is not active for gas payment.
     #[error("Token with ID {0} is not active for gas payment")]
     TokenNotActive(u16),

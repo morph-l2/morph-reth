@@ -371,6 +371,11 @@ where
         evm: &mut MorphEvm<DB, I>,
         token_id: u16,
     ) -> Result<(), EVMError<DB::Error, MorphInvalidTransaction>> {
+        // Token ID 0 not supported for gas payment.
+        if token_id == 0 {
+            return Err(MorphInvalidTransaction::TokenIdZeroNotSupported.into());
+        }
+
         // Get caller address
         let caller_addr = evm.ctx_ref().tx().caller();
         // Get coinbase address
@@ -416,11 +421,17 @@ where
         // Calculate token amount required for total fee
         let token_amount_required = token_fee_info.calculate_token_amount(total_eth_fee);
 
+        // Determine fee limit
+        let mut fee_limit = evm.ctx_ref().tx().fee_limit.unwrap_or_default();
+        if fee_limit.is_zero() || fee_limit > token_fee_info.balance {
+            fee_limit = token_fee_info.balance
+        }
+
         // Check if caller has sufficient token balance
-        if token_fee_info.balance < token_amount_required {
+        if fee_limit < token_amount_required {
             return Err(MorphInvalidTransaction::InsufficientTokenBalance {
                 required: token_amount_required,
-                available: token_fee_info.balance,
+                available: fee_limit,
             }
             .into());
         }
