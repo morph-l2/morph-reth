@@ -294,7 +294,7 @@ where
         caller.set_balance(new_balance_after_l2_fee);
 
         // Bump nonce for calls (CREATE nonce is bumped in make_create_frame)
-        if tx.kind().is_call() || !tx.is_l1_msg() {
+        if tx.kind().is_call() {
             caller.bump_nonce();
         }
 
