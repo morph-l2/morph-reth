@@ -23,6 +23,12 @@ pub enum MorphInvalidTransaction {
     #[error("Token with ID {0} is not active for gas payment")]
     TokenNotActive(u16),
 
+    #[error("Token transfer failed: {reason}")]
+    TokenTransferFailed {
+        /// Token transfer failure reason.
+        reason: String,
+    },
+
     /// Insufficient token balance for gas payment.
     #[error(
         "Insufficient token balance for gas payment: required {required}, available {available}"
