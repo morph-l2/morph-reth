@@ -45,7 +45,10 @@ impl MorphTxEnvelope {
         }
     }
 
-    /// Same as [`Self::signer`], but skips signature validation checks.
+    /// Recovers the signer of the transaction without validating the signature.
+    ///
+    /// This is faster than validating the signature first, but should only be used
+    /// when the signature is already known to be valid.
     pub fn signer_unchecked(
         &self,
     ) -> Result<alloy_primitives::Address, alloy_consensus::crypto::RecoveryError> {
@@ -99,6 +102,20 @@ impl reth_primitives_traits::InMemorySize for MorphTxEnvelope {
 impl reth_primitives_traits::InMemorySize for MorphTxType {
     fn size(&self) -> usize {
         core::mem::size_of::<Self>()
+    }
+}
+
+impl MorphTxType {
+    /// Returns `true` if this is a legacy transaction.
+    pub const fn is_legacy(&self) -> bool {
+        matches!(self, Self::Legacy)
+    }
+
+    /// Decodes the transaction type from the buffer.
+    pub fn rlp_decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
+        use alloy_rlp::Decodable;
+        let ty = u8::decode(buf)?;
+        Self::try_from(ty).map_err(|_| alloy_rlp::Error::Custom("unknown tx type"))
     }
 }
 

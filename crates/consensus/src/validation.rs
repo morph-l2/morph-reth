@@ -8,6 +8,7 @@
 use crate::MorphConsensusError;
 use alloy_consensus::{BlockHeader as _, EMPTY_OMMER_ROOT_HASH, TxReceipt};
 use alloy_evm::block::BlockExecutionResult;
+use alloy_primitives::{B256, Bloom};
 use morph_chainspec::{MorphChainSpec, hardfork::MorphHardforks};
 use morph_primitives::{Block, BlockBody, MorphReceipt, MorphTxEnvelope};
 use reth_consensus::{Consensus, ConsensusError, FullConsensus, HeaderValidator};
@@ -247,6 +248,9 @@ impl FullConsensus<morph_primitives::MorphPrimitives> for MorphConsensus {
             });
         }
 
+        // Verify the receipts logs bloom and root
+        verify_receipts(block.receipts_root(), block.logs_bloom(), &result.receipts)?;
+
         Ok(())
     }
 }
@@ -345,6 +349,56 @@ fn validate_l1_messages(txs: &[&MorphTxEnvelope]) -> Result<(), ConsensusError> 
             ));
         }
         saw_l2_transaction = !tx.is_l1_msg();
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// Receipts Validation
+// ============================================================================
+
+/// Verifies the receipts root and logs bloom against the expected values.
+///
+/// This function:
+/// 1. Calculates the receipts root from the provided receipts
+/// 2. Calculates the logs bloom by combining all receipt blooms
+/// 3. Compares both against the expected values from the block header
+#[inline]
+fn verify_receipts(
+    expected_receipts_root: B256,
+    expected_logs_bloom: Bloom,
+    receipts: &[MorphReceipt],
+) -> Result<(), ConsensusError> {
+    // Calculate receipts root
+    let receipts_with_bloom: Vec<_> = receipts.iter().map(TxReceipt::with_bloom_ref).collect();
+    let receipts_root = alloy_consensus::proofs::calculate_receipt_root(&receipts_with_bloom);
+
+    // Calculate logs bloom by combining all receipt blooms
+    let logs_bloom = receipts_with_bloom
+        .iter()
+        .fold(Bloom::ZERO, |bloom, r| bloom | r.bloom_ref());
+
+    // Compare receipts root
+    if receipts_root != expected_receipts_root {
+        return Err(ConsensusError::BodyReceiptRootDiff(
+            GotExpected {
+                got: receipts_root,
+                expected: expected_receipts_root,
+            }
+            .into(),
+        ));
+    }
+
+    // Compare logs bloom
+    if logs_bloom != expected_logs_bloom {
+        return Err(ConsensusError::BodyBloomLogDiff(
+            GotExpected {
+                got: logs_bloom,
+                expected: expected_logs_bloom,
+            }
+            .into(),
+        ));
     }
 
     Ok(())
@@ -550,5 +604,494 @@ mod tests {
         let sealed = SealedHeader::seal_slow(header);
         let result = consensus.validate_header(&sealed);
         assert!(result.is_ok());
+    }
+
+    // ========================================================================
+    // L1 Message Validation Tests
+    // ========================================================================
+
+    #[test]
+    fn test_validate_l1_messages_empty_block() {
+        let txs: Vec<MorphTxEnvelope> = vec![];
+        let txs_refs: Vec<_> = txs.iter().collect();
+        assert!(validate_l1_messages(&txs_refs).is_ok());
+    }
+
+    #[test]
+    fn test_validate_l1_messages_only_l1_messages() {
+        let txs = vec![
+            create_l1_msg_tx(0),
+            create_l1_msg_tx(1),
+            create_l1_msg_tx(2),
+        ];
+        let txs_refs: Vec<_> = txs.iter().collect();
+        assert!(validate_l1_messages(&txs_refs).is_ok());
+    }
+
+    #[test]
+    fn test_validate_l1_messages_only_regular_txs() {
+        let txs = vec![
+            create_regular_tx(),
+            create_regular_tx(),
+            create_regular_tx(),
+        ];
+        let txs_refs: Vec<_> = txs.iter().collect();
+        assert!(validate_l1_messages(&txs_refs).is_ok());
+    }
+
+    #[test]
+    fn test_validate_l1_messages_skipped_index() {
+        // Skip index 1: 0, 2
+        let txs = vec![create_l1_msg_tx(0), create_l1_msg_tx(2)];
+        let txs_refs: Vec<_> = txs.iter().collect();
+        let result = validate_l1_messages(&txs_refs);
+        assert!(result.is_err());
+        let err_str = result.unwrap_err().to_string();
+        assert!(err_str.contains("expected 1"));
+        assert!(err_str.contains("got 2"));
+    }
+
+    #[test]
+    fn test_validate_l1_messages_non_zero_start_index() {
+        // Starting from index 100 is valid
+        let txs = vec![
+            create_l1_msg_tx(100),
+            create_l1_msg_tx(101),
+            create_regular_tx(),
+        ];
+        let txs_refs: Vec<_> = txs.iter().collect();
+        assert!(validate_l1_messages(&txs_refs).is_ok());
+    }
+
+    #[test]
+    fn test_validate_l1_messages_duplicate_index() {
+        // Duplicate index: 0, 0
+        let txs = vec![create_l1_msg_tx(0), create_l1_msg_tx(0)];
+        let txs_refs: Vec<_> = txs.iter().collect();
+        let result = validate_l1_messages(&txs_refs);
+        assert!(result.is_err());
+        let err_str = result.unwrap_err().to_string();
+        assert!(err_str.contains("expected 1"));
+        assert!(err_str.contains("got 0"));
+    }
+
+    #[test]
+    fn test_validate_l1_messages_out_of_order() {
+        // Reversed order: 1, 0
+        let txs = vec![create_l1_msg_tx(1), create_l1_msg_tx(0)];
+        let txs_refs: Vec<_> = txs.iter().collect();
+        let result = validate_l1_messages(&txs_refs);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_l1_messages_multiple_l1_after_regular() {
+        // Multiple L1 messages after regular tx
+        let txs = vec![
+            create_l1_msg_tx(0),
+            create_regular_tx(),
+            create_l1_msg_tx(1),
+            create_l1_msg_tx(2),
+        ];
+        let txs_refs: Vec<_> = txs.iter().collect();
+        assert!(validate_l1_messages(&txs_refs).is_err());
+    }
+
+    // ========================================================================
+    // Header Validation Tests (Additional)
+    // ========================================================================
+
+    #[test]
+    fn test_validate_header_timestamp_in_future() {
+        let chain_spec = create_test_chainspec();
+        let consensus = MorphConsensus::new(chain_spec);
+        let future_ts = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3600; // 1 hour in the future
+
+        let header = Header {
+            nonce: B64::ZERO,
+            ommers_hash: EMPTY_OMMER_ROOT_HASH,
+            gas_limit: 30_000_000,
+            timestamp: future_ts,
+            base_fee_per_gas: Some(1_000_000),
+            ..Default::default()
+        };
+        let sealed = SealedHeader::seal_slow(header);
+        let result = consensus.validate_header(&sealed);
+        assert!(matches!(
+            result,
+            Err(ConsensusError::TimestampIsInFuture { .. })
+        ));
+    }
+
+    #[test]
+    fn test_validate_header_gas_limit_exceeds_max() {
+        let chain_spec = create_test_chainspec();
+        let consensus = MorphConsensus::new(chain_spec);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let header = Header {
+            nonce: B64::ZERO,
+            ommers_hash: EMPTY_OMMER_ROOT_HASH,
+            gas_limit: MAX_GAS_LIMIT + 1, // Exceeds max
+            timestamp: now - 10,
+            base_fee_per_gas: Some(1_000_000),
+            ..Default::default()
+        };
+        let sealed = SealedHeader::seal_slow(header);
+        let result = consensus.validate_header(&sealed);
+        assert!(matches!(
+            result,
+            Err(ConsensusError::HeaderGasLimitExceedsMax { .. })
+        ));
+    }
+
+    #[test]
+    fn test_validate_header_base_fee_over_limit() {
+        let chain_spec = create_test_chainspec();
+        let consensus = MorphConsensus::new(chain_spec);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let header = Header {
+            nonce: B64::ZERO,
+            ommers_hash: EMPTY_OMMER_ROOT_HASH,
+            gas_limit: 30_000_000,
+            timestamp: now - 10,
+            base_fee_per_gas: Some(MORPH_MAXIMUM_BASE_FEE + 1), // Over limit
+            ..Default::default()
+        };
+        let sealed = SealedHeader::seal_slow(header);
+        let result = consensus.validate_header(&sealed);
+        assert!(result.is_err());
+        let err_str = result.unwrap_err().to_string();
+        assert!(err_str.contains("over limit"));
+    }
+
+    #[test]
+    fn test_validate_header_base_fee_missing_after_curie() {
+        let chain_spec = create_test_chainspec();
+        let consensus = MorphConsensus::new(chain_spec);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let header = Header {
+            nonce: B64::ZERO,
+            ommers_hash: EMPTY_OMMER_ROOT_HASH,
+            gas_limit: 30_000_000,
+            timestamp: now - 10,
+            base_fee_per_gas: None, // Missing after Curie
+            ..Default::default()
+        };
+        let sealed = SealedHeader::seal_slow(header);
+        let result = consensus.validate_header(&sealed);
+        assert!(matches!(result, Err(ConsensusError::BaseFeeMissing)));
+    }
+
+    #[test]
+    fn test_validate_header_base_fee_at_max() {
+        let chain_spec = create_test_chainspec();
+        let consensus = MorphConsensus::new(chain_spec);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let header = Header {
+            nonce: B64::ZERO,
+            ommers_hash: EMPTY_OMMER_ROOT_HASH,
+            gas_limit: 30_000_000,
+            timestamp: now - 10,
+            base_fee_per_gas: Some(MORPH_MAXIMUM_BASE_FEE), // Exactly at max (valid)
+            ..Default::default()
+        };
+        let sealed = SealedHeader::seal_slow(header);
+        let result = consensus.validate_header(&sealed);
+        assert!(result.is_ok());
+    }
+
+    // ========================================================================
+    // Header Against Parent Validation Tests
+    // ========================================================================
+
+    fn create_valid_header(timestamp: u64, gas_limit: u64, number: u64) -> Header {
+        Header {
+            nonce: B64::ZERO,
+            ommers_hash: EMPTY_OMMER_ROOT_HASH,
+            gas_limit,
+            timestamp,
+            number,
+            base_fee_per_gas: Some(1_000_000),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_validate_header_against_parent_valid() {
+        let chain_spec = create_test_chainspec();
+        let consensus = MorphConsensus::new(chain_spec);
+
+        let parent = create_valid_header(1000, 30_000_000, 100);
+        let parent_sealed = SealedHeader::seal_slow(parent);
+
+        let mut child = create_valid_header(1001, 30_000_000, 101);
+        child.parent_hash = parent_sealed.hash();
+        let child_sealed = SealedHeader::seal_slow(child);
+
+        let result = consensus.validate_header_against_parent(&child_sealed, &parent_sealed);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_header_against_parent_timestamp_less_than_parent() {
+        let chain_spec = create_test_chainspec();
+        let consensus = MorphConsensus::new(chain_spec);
+
+        let parent = create_valid_header(1000, 30_000_000, 100);
+        let parent_sealed = SealedHeader::seal_slow(parent);
+
+        let mut child = create_valid_header(999, 30_000_000, 101); // timestamp < parent
+        child.parent_hash = parent_sealed.hash();
+        let child_sealed = SealedHeader::seal_slow(child);
+
+        let result = consensus.validate_header_against_parent(&child_sealed, &parent_sealed);
+        assert!(matches!(
+            result,
+            Err(ConsensusError::TimestampIsInPast { .. })
+        ));
+    }
+
+    #[test]
+    fn test_validate_header_against_parent_timestamp_equal_to_parent() {
+        let chain_spec = create_test_chainspec();
+        let consensus = MorphConsensus::new(chain_spec);
+
+        let parent = create_valid_header(1000, 30_000_000, 100);
+        let parent_sealed = SealedHeader::seal_slow(parent);
+
+        let mut child = create_valid_header(1000, 30_000_000, 101); // timestamp == parent (valid)
+        child.parent_hash = parent_sealed.hash();
+        let child_sealed = SealedHeader::seal_slow(child);
+
+        let result = consensus.validate_header_against_parent(&child_sealed, &parent_sealed);
+        // timestamp >= parent is valid
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_header_against_parent_gas_limit_increase_too_much() {
+        let chain_spec = create_test_chainspec();
+        let consensus = MorphConsensus::new(chain_spec);
+
+        let parent_gas_limit = 30_000_000u64;
+        let max_increase = parent_gas_limit / GAS_LIMIT_BOUND_DIVISOR;
+
+        let parent = create_valid_header(1000, parent_gas_limit, 100);
+        let parent_sealed = SealedHeader::seal_slow(parent);
+
+        // Increase by more than allowed
+        let mut child = create_valid_header(1001, parent_gas_limit + max_increase + 1, 101);
+        child.parent_hash = parent_sealed.hash();
+        let child_sealed = SealedHeader::seal_slow(child);
+
+        let result = consensus.validate_header_against_parent(&child_sealed, &parent_sealed);
+        assert!(matches!(
+            result,
+            Err(ConsensusError::GasLimitInvalidIncrease { .. })
+        ));
+    }
+
+    #[test]
+    fn test_validate_header_against_parent_gas_limit_decrease_too_much() {
+        let chain_spec = create_test_chainspec();
+        let consensus = MorphConsensus::new(chain_spec);
+
+        let parent_gas_limit = 30_000_000u64;
+        let max_decrease = parent_gas_limit / GAS_LIMIT_BOUND_DIVISOR;
+
+        let parent = create_valid_header(1000, parent_gas_limit, 100);
+        let parent_sealed = SealedHeader::seal_slow(parent);
+
+        // Decrease by more than allowed
+        let mut child = create_valid_header(1001, parent_gas_limit - max_decrease - 1, 101);
+        child.parent_hash = parent_sealed.hash();
+        let child_sealed = SealedHeader::seal_slow(child);
+
+        let result = consensus.validate_header_against_parent(&child_sealed, &parent_sealed);
+        assert!(matches!(
+            result,
+            Err(ConsensusError::GasLimitInvalidDecrease { .. })
+        ));
+    }
+
+    #[test]
+    fn test_validate_header_against_parent_gas_limit_at_boundary() {
+        let chain_spec = create_test_chainspec();
+        let consensus = MorphConsensus::new(chain_spec);
+
+        let parent_gas_limit = 30_000_000u64;
+        let max_change = parent_gas_limit / GAS_LIMIT_BOUND_DIVISOR;
+
+        let parent = create_valid_header(1000, parent_gas_limit, 100);
+        let parent_sealed = SealedHeader::seal_slow(parent);
+
+        // Increase by exactly the allowed amount (valid)
+        let mut child = create_valid_header(1001, parent_gas_limit + max_change, 101);
+        child.parent_hash = parent_sealed.hash();
+        let child_sealed = SealedHeader::seal_slow(child);
+
+        let result = consensus.validate_header_against_parent(&child_sealed, &parent_sealed);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_header_against_parent_gas_limit_below_minimum() {
+        let chain_spec = create_test_chainspec();
+        let consensus = MorphConsensus::new(chain_spec);
+
+        // Use a parent gas limit that allows decreasing to below minimum within bounds
+        // Parent = MINIMUM_GAS_LIMIT, so max decrease = MINIMUM_GAS_LIMIT / 1024 = 4
+        // Child = MINIMUM_GAS_LIMIT - 1 = 4999, change = 1 which is < 4 (within bounds)
+        let parent = create_valid_header(1000, MINIMUM_GAS_LIMIT, 100);
+        let parent_sealed = SealedHeader::seal_slow(parent);
+
+        let mut child = create_valid_header(1001, MINIMUM_GAS_LIMIT - 1, 101);
+        child.parent_hash = parent_sealed.hash();
+        let child_sealed = SealedHeader::seal_slow(child);
+
+        let result = consensus.validate_header_against_parent(&child_sealed, &parent_sealed);
+        assert!(matches!(
+            result,
+            Err(ConsensusError::GasLimitInvalidMinimum { .. })
+        ));
+    }
+
+    #[test]
+    fn test_validate_header_against_parent_wrong_parent_hash() {
+        let chain_spec = create_test_chainspec();
+        let consensus = MorphConsensus::new(chain_spec);
+
+        let parent = create_valid_header(1000, 30_000_000, 100);
+        let parent_sealed = SealedHeader::seal_slow(parent);
+
+        let mut child = create_valid_header(1001, 30_000_000, 101);
+        child.parent_hash = B256::random(); // Wrong parent hash
+        let child_sealed = SealedHeader::seal_slow(child);
+
+        let result = consensus.validate_header_against_parent(&child_sealed, &parent_sealed);
+        assert!(matches!(result, Err(ConsensusError::ParentHashMismatch(_))));
+    }
+
+    #[test]
+    fn test_validate_header_against_parent_wrong_block_number() {
+        let chain_spec = create_test_chainspec();
+        let consensus = MorphConsensus::new(chain_spec);
+
+        let parent = create_valid_header(1000, 30_000_000, 100);
+        let parent_sealed = SealedHeader::seal_slow(parent);
+
+        let mut child = create_valid_header(1001, 30_000_000, 102); // Should be 101
+        child.parent_hash = parent_sealed.hash();
+        let child_sealed = SealedHeader::seal_slow(child);
+
+        let result = consensus.validate_header_against_parent(&child_sealed, &parent_sealed);
+        assert!(matches!(
+            result,
+            Err(ConsensusError::ParentBlockNumberMismatch { .. })
+        ));
+    }
+
+    // ========================================================================
+    // Receipts Validation Tests
+    // ========================================================================
+
+    #[test]
+    fn test_verify_receipts_empty() {
+        let receipts: Vec<MorphReceipt> = vec![];
+        let expected_root = alloy_consensus::proofs::calculate_receipt_root::<
+            alloy_consensus::ReceiptWithBloom<&MorphReceipt>,
+        >(&[]);
+        let expected_bloom = Bloom::ZERO;
+
+        let result = verify_receipts(expected_root, expected_bloom, &receipts);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_verify_receipts_root_mismatch() {
+        let receipts: Vec<MorphReceipt> = vec![];
+        let wrong_root = B256::random(); // Wrong root
+        let expected_bloom = Bloom::ZERO;
+
+        let result = verify_receipts(wrong_root, expected_bloom, &receipts);
+        assert!(matches!(
+            result,
+            Err(ConsensusError::BodyReceiptRootDiff(_))
+        ));
+    }
+
+    #[test]
+    fn test_verify_receipts_bloom_mismatch() {
+        let receipts: Vec<MorphReceipt> = vec![];
+        let expected_root = alloy_consensus::proofs::calculate_receipt_root::<
+            alloy_consensus::ReceiptWithBloom<&MorphReceipt>,
+        >(&[]);
+        let wrong_bloom = Bloom::repeat_byte(0xff); // Wrong bloom
+
+        let result = verify_receipts(expected_root, wrong_bloom, &receipts);
+        assert!(matches!(result, Err(ConsensusError::BodyBloomLogDiff(_))));
+    }
+
+    // ========================================================================
+    // Gas Limit Validation Helper Tests
+    // ========================================================================
+
+    #[test]
+    fn test_validate_against_parent_gas_limit_no_change() {
+        let parent = create_valid_header(1000, 30_000_000, 100);
+        let child = create_valid_header(1001, 30_000_000, 101);
+
+        let result = validate_against_parent_gas_limit(&child, &parent);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_against_parent_timestamp_valid() {
+        let parent = create_valid_header(1000, 30_000_000, 100);
+        let child = create_valid_header(1001, 30_000_000, 101);
+
+        let result = validate_against_parent_timestamp(&child, &parent);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_against_parent_timestamp_equal() {
+        let parent = create_valid_header(1000, 30_000_000, 100);
+        let child = create_valid_header(1000, 30_000_000, 101); // Same timestamp
+
+        let result = validate_against_parent_timestamp(&child, &parent);
+        assert!(result.is_ok()); // Equal timestamp is allowed
+    }
+
+    #[test]
+    fn test_validate_against_parent_timestamp_past() {
+        let parent = create_valid_header(1000, 30_000_000, 100);
+        let child = create_valid_header(999, 30_000_000, 101); // Earlier timestamp
+
+        let result = validate_against_parent_timestamp(&child, &parent);
+        assert!(matches!(
+            result,
+            Err(ConsensusError::TimestampIsInPast { .. })
+        ));
     }
 }

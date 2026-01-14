@@ -3733,11 +3733,13 @@ dependencies = [
  "alloy-primitives",
  "alloy-rlp",
  "alloy-serde",
+ "bytes",
  "modular-bitfield",
  "reth-codecs",
  "reth-db-api",
  "reth-ethereum-primitives",
  "reth-primitives-traits",
+ "reth-zstd-compressors",
  "serde",
 ]
 
