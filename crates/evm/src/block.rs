@@ -1,4 +1,5 @@
 use crate::{MorphBlockExecutionCtx, evm::MorphEvm};
+use alloy_consensus::Receipt;
 use alloy_evm::{
     Database, Evm,
     block::{BlockExecutionError, BlockExecutionResult, BlockExecutor, ExecutableTx, OnStateHook},
@@ -8,7 +9,7 @@ use alloy_evm::{
     },
 };
 use morph_chainspec::MorphChainSpec;
-use morph_primitives::{MorphReceipt, MorphTxEnvelope};
+use morph_primitives::{MorphReceipt, MorphTransactionReceipt, MorphTxEnvelope, MorphTxType};
 use morph_revm::{MorphHaltReason, evm::MorphContext};
 use reth_revm::{Inspector, State, context::result::ResultAndState};
 
@@ -31,13 +32,22 @@ impl ReceiptBuilder for MorphReceiptBuilder {
             cumulative_gas_used,
             ..
         } = ctx;
-        MorphReceipt {
-            tx_type: tx.tx_type(),
-            // Success flag was added in `EIP-658: Embedding transaction status code in
-            // receipts`.
-            success: result.is_success(),
+
+        let inner = Receipt {
+            status: result.is_success().into(),
             cumulative_gas_used,
             logs: result.into_logs(),
+        };
+
+        // Create the appropriate receipt variant based on transaction type
+        // TODO: Add L1 fee calculation from execution context
+        match tx.tx_type() {
+            MorphTxType::Legacy => MorphReceipt::Legacy(MorphTransactionReceipt::new(inner)),
+            MorphTxType::Eip2930 => MorphReceipt::Eip2930(MorphTransactionReceipt::new(inner)),
+            MorphTxType::Eip1559 => MorphReceipt::Eip1559(MorphTransactionReceipt::new(inner)),
+            MorphTxType::Eip7702 => MorphReceipt::Eip7702(MorphTransactionReceipt::new(inner)),
+            MorphTxType::L1Msg => MorphReceipt::L1Msg(inner),
+            MorphTxType::AltFee => MorphReceipt::AltFee(MorphTransactionReceipt::new(inner)),
         }
     }
 }

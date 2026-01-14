@@ -228,9 +228,7 @@ mod tests {
     #[test]
     fn test_evm_config_can_query_morph_hardforks() {
         // Create a test chainspec with Bernoulli at genesis
-        let chainspec = Arc::new(morph_chainspec::MorphChainSpec::from_genesis(
-            create_test_genesis(),
-        ));
+        let chainspec = Arc::new(morph_chainspec::MorphChainSpec::from(create_test_genesis()));
 
         let evm_config = MorphEvmConfig::new_with_default_factory(chainspec);
 

@@ -3642,18 +3642,39 @@ checksum = "1fafa6961cabd9c63bcd77a45d7e3b7f3b552b70417831fb0f56db717e72407e"
 name = "morph-chainspec"
 version = "0.7.5"
 dependencies = [
+ "alloy-chains",
  "alloy-consensus",
  "alloy-eips",
  "alloy-evm",
  "alloy-genesis",
  "alloy-hardforks",
  "alloy-primitives",
+ "alloy-serde",
+ "auto_impl",
  "eyre",
  "reth-chainspec",
  "reth-cli",
  "reth-network-peers",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "morph-consensus"
+version = "0.7.5"
+dependencies = [
+ "alloy-consensus",
+ "alloy-evm",
+ "alloy-genesis",
+ "alloy-primitives",
+ "alloy-rlp",
+ "morph-chainspec",
+ "morph-primitives",
+ "reth-consensus",
+ "reth-consensus-common",
+ "reth-primitives-traits",
+ "serde_json",
+ "thiserror 2.0.17",
 ]
 
 [[package]]
@@ -3695,6 +3716,7 @@ dependencies = [
  "alloy-serde",
  "morph-primitives",
  "rand 0.8.5",
+ "reth-engine-primitives",
  "reth-payload-primitives",
  "reth-primitives-traits",
  "serde",
@@ -3711,11 +3733,13 @@ dependencies = [
  "alloy-primitives",
  "alloy-rlp",
  "alloy-serde",
+ "bytes",
  "modular-bitfield",
  "reth-codecs",
  "reth-db-api",
  "reth-ethereum-primitives",
  "reth-primitives-traits",
+ "reth-zstd-compressors",
  "serde",
 ]
 
@@ -5027,6 +5051,18 @@ dependencies = [
  "reth-execution-types",
  "reth-primitives-traits",
  "thiserror 2.0.17",
+]
+
+[[package]]
+name = "reth-consensus-common"
+version = "1.9.3"
+source = "git+https://github.com/paradigmxyz/reth?rev=64909d3#64909d33e6b7ab60774e37f5508fb5ad17f41897"
+dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
+ "reth-chainspec",
+ "reth-consensus",
+ "reth-primitives-traits",
 ]
 
 [[package]]

@@ -14,8 +14,9 @@ workspace = true
 # Reth
 reth-db-api = { workspace = true, optional = true }
 reth-ethereum-primitives = { workspace = true, optional = true }
-reth-primitives-traits = { workspace = true, optional = true }
+reth-primitives-traits.workspace = true
 reth-codecs = { workspace = true, optional = true }
+reth-zstd-compressors = { workspace = true, optional = true }
 
 # Alloy
 alloy-consensus.workspace = true
@@ -25,6 +26,7 @@ alloy-rlp.workspace = true
 alloy-serde = { workspace = true, optional = true }
 
 # Utils
+bytes.workspace = true
 serde = { workspace = true, features = ["derive"], optional = true }
 modular-bitfield = { version = "0.11.2", optional = true }
 
@@ -38,10 +40,10 @@ serde = [
     "dep:alloy-serde",
     "alloy-primitives/serde",
     "alloy-eips/serde",
+    "alloy-consensus/serde",
 ]
 reth = [
 	"dep:reth-ethereum-primitives",
-	"dep:reth-primitives-traits",
 ]
 reth-codec = [
 	"reth",
@@ -49,6 +51,7 @@ reth-codec = [
 	"dep:reth-codecs",
 	"dep:reth-db-api",
 	"dep:modular-bitfield",
+	"dep:reth-zstd-compressors",
 	"reth-ethereum-primitives/reth-codec",
 	"reth-codecs/alloy",
 	"reth-primitives-traits/reth-codec",

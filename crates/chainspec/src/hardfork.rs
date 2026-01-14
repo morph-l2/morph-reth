@@ -17,7 +17,7 @@
 //!
 //! ### In `spec.rs`:
 //! 8. Add `vivace_time: Option<u64>` field to `MorphGenesisInfo`
-//! 9. Extract `vivace_time` in `MorphChainSpec::from_genesis`
+//! 9. Extract `vivace_time` in `From<Genesis> for MorphChainSpec`
 //! 10. Add `(MorphHardfork::Vivace, vivace_time)` to `morph_forks` vec
 //! 11. Update tests to include `"vivaceTime": <timestamp>` in genesis JSON
 //!
@@ -46,8 +46,10 @@ hardfork!(
         /// Morph203 hardfork.
         Morph203,
         /// Viridian hardfork.
-        #[default]
         Viridian,
+        /// Emerald hardfork.
+        #[default]
+        Emerald,
     }
 );
 
@@ -63,9 +65,14 @@ impl MorphHardfork {
         self >= Self::Morph203
     }
 
-    /// Returns `true` if this hardfork is viridian or later.
+    /// Returns `true` if this hardfork is Viridian or later.
     pub fn is_viridian(self) -> bool {
         self >= Self::Viridian
+    }
+
+    /// Returns `true` if this hardfork is Emerald or later.
+    pub fn is_emerald(self) -> bool {
+        self >= Self::Emerald
     }
 }
 
@@ -80,7 +87,7 @@ pub trait MorphHardforks: EthereumHardforks {
             .active_at_timestamp(timestamp)
     }
 
-    /// Convenience method to check if Andantino hardfork is active at a given timestamp
+    /// Convenience method to check if Curie hardfork is active at a given timestamp
     fn is_curie_active_at_timestamp(&self, timestamp: u64) -> bool {
         self.morph_fork_activation(MorphHardfork::Curie)
             .active_at_timestamp(timestamp)
@@ -92,15 +99,23 @@ pub trait MorphHardforks: EthereumHardforks {
             .active_at_timestamp(timestamp)
     }
 
-    /// Convenience method to check if viridian hardfork is active at a given timestamp
+    /// Convenience method to check if Viridian hardfork is active at a given timestamp
     fn is_viridian_active_at_timestamp(&self, timestamp: u64) -> bool {
         self.morph_fork_activation(MorphHardfork::Viridian)
             .active_at_timestamp(timestamp)
     }
 
+    /// Convenience method to check if Emerald hardfork is active at a given timestamp
+    fn is_emerald_active_at_timestamp(&self, timestamp: u64) -> bool {
+        self.morph_fork_activation(MorphHardfork::Emerald)
+            .active_at_timestamp(timestamp)
+    }
+
     /// Retrieves the latest Morph hardfork active at a given timestamp.
     fn morph_hardfork_at(&self, timestamp: u64) -> MorphHardfork {
-        if self.is_viridian_active_at_timestamp(timestamp) {
+        if self.is_emerald_active_at_timestamp(timestamp) {
+            MorphHardfork::Emerald
+        } else if self.is_viridian_active_at_timestamp(timestamp) {
             MorphHardfork::Viridian
         } else if self.is_morph203_active_at_timestamp(timestamp) {
             MorphHardfork::Morph203
@@ -119,6 +134,7 @@ impl From<MorphHardfork> for SpecId {
             MorphHardfork::Curie => Self::OSAKA,
             MorphHardfork::Morph203 => Self::OSAKA,
             MorphHardfork::Viridian => Self::OSAKA,
+            MorphHardfork::Emerald => Self::OSAKA,
         }
     }
 }
@@ -130,7 +146,9 @@ impl From<SpecId> for MorphHardfork {
     /// `From<MorphHardfork> for SpecId`, because multiple Morph
     /// hardforks may share the same underlying EVM spec.
     fn from(spec: SpecId) -> Self {
-        if spec.is_enabled_in(SpecId::from(Self::Viridian)) {
+        if spec.is_enabled_in(SpecId::from(Self::Emerald)) {
+            Self::Emerald
+        } else if spec.is_enabled_in(SpecId::from(Self::Viridian)) {
             Self::Viridian
         } else if spec.is_enabled_in(SpecId::from(Self::Morph203)) {
             Self::Morph203
@@ -180,6 +198,7 @@ mod tests {
         assert!(MorphHardfork::Curie.is_curie());
         assert!(MorphHardfork::Morph203.is_curie());
         assert!(MorphHardfork::Viridian.is_curie());
+        assert!(MorphHardfork::Emerald.is_curie());
     }
 
     #[test]
@@ -189,6 +208,7 @@ mod tests {
 
         assert!(MorphHardfork::Morph203.is_morph203());
         assert!(MorphHardfork::Viridian.is_morph203());
+        assert!(MorphHardfork::Emerald.is_morph203());
 
         assert!(MorphHardfork::Morph203.is_curie());
     }
@@ -201,5 +221,18 @@ mod tests {
         assert!(MorphHardfork::Viridian.is_viridian());
         assert!(MorphHardfork::Viridian.is_morph203());
         assert!(MorphHardfork::Viridian.is_curie());
+        assert!(MorphHardfork::Emerald.is_viridian());
+    }
+
+    #[test]
+    fn test_is_emerald() {
+        assert!(!MorphHardfork::Bernoulli.is_emerald());
+        assert!(!MorphHardfork::Curie.is_emerald());
+        assert!(!MorphHardfork::Morph203.is_emerald());
+        assert!(!MorphHardfork::Viridian.is_emerald());
+        assert!(MorphHardfork::Emerald.is_emerald());
+        assert!(MorphHardfork::Emerald.is_viridian());
+        assert!(MorphHardfork::Emerald.is_morph203());
+        assert!(MorphHardfork::Emerald.is_curie());
     }
 }

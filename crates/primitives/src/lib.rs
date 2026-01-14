@@ -10,17 +10,20 @@ use alloy_consensus as _;
 use alloy_eips as _;
 use alloy_primitives as _;
 use alloy_rlp as _;
+use bytes as _;
+#[cfg(feature = "reth")]
+use reth_ethereum_primitives as _;
+#[cfg(feature = "reth-codec")]
+use reth_zstd_compressors as _;
 
+pub mod receipt;
 pub mod transaction;
-use crate::transaction::envelope::MorphTxType;
-use alloy_primitives::Log;
 
 // Re-export standard Ethereum types
 pub use alloy_consensus::Header;
 /// Header alias for backwards compatibility.
 pub type MorphHeader = Header;
 
-use reth_ethereum_primitives::EthereumReceipt;
 use reth_primitives_traits::NodePrimitives;
 
 /// Morph block.
@@ -29,12 +32,12 @@ pub type Block = alloy_consensus::Block<MorphTxEnvelope, MorphHeader>;
 /// Morph block body.
 pub type BlockBody = alloy_consensus::BlockBody<MorphTxEnvelope, MorphHeader>;
 
-/// Morph receipt.
-pub type MorphReceipt<L = Log> = EthereumReceipt<MorphTxType, L>;
+// Re-export receipt types
+pub use receipt::{MorphReceipt, MorphReceiptWithBloom, MorphTransactionReceipt};
 
 // Re-export transaction types
 pub use transaction::{
-    ALT_FEE_TX_TYPE_ID, L1_TX_TYPE_ID, MorphTxEnvelope, TxAltFee, TxAltFeeExt, TxL1Msg,
+    ALT_FEE_TX_TYPE_ID, L1_TX_TYPE_ID, MorphTxEnvelope, MorphTxType, TxAltFee, TxAltFeeExt, TxL1Msg,
 };
 
 /// A [`NodePrimitives`] implementation for Morph.
