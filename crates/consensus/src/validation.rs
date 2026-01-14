@@ -474,7 +474,7 @@ mod tests {
 
     #[test]
     fn test_validate_l1_messages_valid() {
-        let txs = vec![
+        let txs = [
             create_l1_msg_tx(0),
             create_l1_msg_tx(1),
             create_regular_tx(),
@@ -485,7 +485,7 @@ mod tests {
 
     #[test]
     fn test_validate_l1_messages_after_regular() {
-        let txs = vec![
+        let txs = [
             create_l1_msg_tx(0),
             create_regular_tx(),
             create_l1_msg_tx(1),
@@ -499,7 +499,7 @@ mod tests {
         let chain_spec = create_test_chainspec();
         let consensus = MorphConsensus::new(chain_spec);
         let header = Header {
-            extra_data: Bytes::from(vec![1, 2, 3]),
+            extra_data: Bytes::from([1, 2, 3].as_slice()),
             nonce: B64::ZERO,
             ommers_hash: EMPTY_OMMER_ROOT_HASH,
             ..Default::default()
@@ -612,14 +612,14 @@ mod tests {
 
     #[test]
     fn test_validate_l1_messages_empty_block() {
-        let txs: Vec<MorphTxEnvelope> = vec![];
+        let txs: [MorphTxEnvelope; 0] = [];
         let txs_refs: Vec<_> = txs.iter().collect();
         assert!(validate_l1_messages(&txs_refs).is_ok());
     }
 
     #[test]
     fn test_validate_l1_messages_only_l1_messages() {
-        let txs = vec![
+        let txs = [
             create_l1_msg_tx(0),
             create_l1_msg_tx(1),
             create_l1_msg_tx(2),
@@ -630,7 +630,7 @@ mod tests {
 
     #[test]
     fn test_validate_l1_messages_only_regular_txs() {
-        let txs = vec![
+        let txs = [
             create_regular_tx(),
             create_regular_tx(),
             create_regular_tx(),
@@ -642,7 +642,7 @@ mod tests {
     #[test]
     fn test_validate_l1_messages_skipped_index() {
         // Skip index 1: 0, 2
-        let txs = vec![create_l1_msg_tx(0), create_l1_msg_tx(2)];
+        let txs = [create_l1_msg_tx(0), create_l1_msg_tx(2)];
         let txs_refs: Vec<_> = txs.iter().collect();
         let result = validate_l1_messages(&txs_refs);
         assert!(result.is_err());
@@ -654,7 +654,7 @@ mod tests {
     #[test]
     fn test_validate_l1_messages_non_zero_start_index() {
         // Starting from index 100 is valid
-        let txs = vec![
+        let txs = [
             create_l1_msg_tx(100),
             create_l1_msg_tx(101),
             create_regular_tx(),
@@ -666,7 +666,7 @@ mod tests {
     #[test]
     fn test_validate_l1_messages_duplicate_index() {
         // Duplicate index: 0, 0
-        let txs = vec![create_l1_msg_tx(0), create_l1_msg_tx(0)];
+        let txs = [create_l1_msg_tx(0), create_l1_msg_tx(0)];
         let txs_refs: Vec<_> = txs.iter().collect();
         let result = validate_l1_messages(&txs_refs);
         assert!(result.is_err());
@@ -678,7 +678,7 @@ mod tests {
     #[test]
     fn test_validate_l1_messages_out_of_order() {
         // Reversed order: 1, 0
-        let txs = vec![create_l1_msg_tx(1), create_l1_msg_tx(0)];
+        let txs = [create_l1_msg_tx(1), create_l1_msg_tx(0)];
         let txs_refs: Vec<_> = txs.iter().collect();
         let result = validate_l1_messages(&txs_refs);
         assert!(result.is_err());
@@ -687,7 +687,7 @@ mod tests {
     #[test]
     fn test_validate_l1_messages_multiple_l1_after_regular() {
         // Multiple L1 messages after regular tx
-        let txs = vec![
+        let txs = [
             create_l1_msg_tx(0),
             create_regular_tx(),
             create_l1_msg_tx(1),
@@ -1017,7 +1017,7 @@ mod tests {
 
     #[test]
     fn test_verify_receipts_empty() {
-        let receipts: Vec<MorphReceipt> = vec![];
+        let receipts: [MorphReceipt; 0] = [];
         let expected_root = alloy_consensus::proofs::calculate_receipt_root::<
             alloy_consensus::ReceiptWithBloom<&MorphReceipt>,
         >(&[]);
@@ -1029,7 +1029,7 @@ mod tests {
 
     #[test]
     fn test_verify_receipts_root_mismatch() {
-        let receipts: Vec<MorphReceipt> = vec![];
+        let receipts: [MorphReceipt; 0] = [];
         let wrong_root = B256::random(); // Wrong root
         let expected_bloom = Bloom::ZERO;
 
@@ -1042,7 +1042,7 @@ mod tests {
 
     #[test]
     fn test_verify_receipts_bloom_mismatch() {
-        let receipts: Vec<MorphReceipt> = vec![];
+        let receipts: [MorphReceipt; 0] = [];
         let expected_root = alloy_consensus::proofs::calculate_receipt_root::<
             alloy_consensus::ReceiptWithBloom<&MorphReceipt>,
         >(&[]);
