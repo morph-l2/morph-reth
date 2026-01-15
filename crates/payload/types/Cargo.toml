@@ -17,6 +17,7 @@ morph-primitives = { workspace = true, features = ["serde"] }
 
 # Reth
 reth-engine-primitives.workspace = true
+reth-payload-builder.workspace = true
 reth-payload-primitives.workspace = true
 reth-primitives-traits.workspace = true
 

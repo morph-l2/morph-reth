@@ -3703,6 +3703,29 @@ dependencies = [
 [[package]]
 name = "morph-payload-builder"
 version = "0.7.5"
+dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
+ "alloy-primitives",
+ "alloy-rlp",
+ "morph-chainspec",
+ "morph-evm",
+ "morph-payload-types",
+ "morph-primitives",
+ "reth-basic-payload-builder",
+ "reth-chainspec",
+ "reth-evm",
+ "reth-payload-builder",
+ "reth-payload-primitives",
+ "reth-payload-util",
+ "reth-primitives-traits",
+ "reth-revm",
+ "reth-storage-api",
+ "reth-transaction-pool",
+ "revm",
+ "thiserror 2.0.17",
+ "tracing",
+]
 
 [[package]]
 name = "morph-payload-types"
@@ -3717,6 +3740,7 @@ dependencies = [
  "morph-primitives",
  "rand 0.8.5",
  "reth-engine-primitives",
+ "reth-payload-builder",
  "reth-payload-primitives",
  "reth-primitives-traits",
  "serde",
@@ -5825,6 +5849,16 @@ dependencies = [
  "serde",
  "thiserror 2.0.17",
  "tokio",
+]
+
+[[package]]
+name = "reth-payload-util"
+version = "1.9.3"
+source = "git+https://github.com/paradigmxyz/reth?rev=64909d3#64909d33e6b7ab60774e37f5508fb5ad17f41897"
+dependencies = [
+ "alloy-consensus",
+ "alloy-primitives",
+ "reth-transaction-pool",
 ]
 
 [[package]]
