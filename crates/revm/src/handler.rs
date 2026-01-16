@@ -562,14 +562,14 @@ where
         Ok(result) => {
             if !result.is_success() {
                 return Err(MorphInvalidTransaction::TokenTransferFailed {
-                    reason: format!("{:?}", result),
+                    reason: format!("{result:?}"),
                 }
                 .into());
             }
         }
         Err(e) => {
             return Err(MorphInvalidTransaction::TokenTransferFailed {
-                reason: format!("Error: {:?}", e),
+                reason: format!("Error: {e:?}"),
             }
             .into());
         }
