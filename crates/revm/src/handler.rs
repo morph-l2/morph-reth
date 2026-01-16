@@ -176,9 +176,7 @@ where
         // Get mutable access to journal components
         let journal = evm.ctx().journal_mut();
 
-        let gas_spent = exec_result.gas().spent();
-        let gas_refunded = exec_result.gas().refunded() as u64;
-        let gas_used = gas_spent - gas_refunded;
+        let gas_used = exec_result.gas().used();
 
         let execution_fee = U256::from(effective_gas_price).saturating_mul(U256::from(gas_used));
 
@@ -516,7 +514,7 @@ where
 {
     // Sub amount
     let from_storage_slot = get_mapping_account_slot(token_balance_slot, from);
-    let balance = journal.sload(token, from_storage_slot).unwrap_or_default();
+    let balance = journal.sload(token, from_storage_slot)?;
     journal.sstore(
         token,
         from_storage_slot,
@@ -525,7 +523,7 @@ where
 
     // Add amount
     let to_storage_slot = get_mapping_account_slot(token_balance_slot, to);
-    let balance = journal.sload(token, to_storage_slot).unwrap_or_default();
+    let balance = journal.sload(token, to_storage_slot)?;
     journal.sstore(token, to_storage_slot, balance.saturating_add(token_amount))?;
     Ok((from_storage_slot, to_storage_slot))
 }
