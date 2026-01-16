@@ -1,5 +1,5 @@
 use alloy_consensus::{Signed, TransactionEnvelope, TxEip1559, TxEip2930, TxEip7702, TxLegacy};
-use alloy_primitives::{B256, Bytes};
+use alloy_primitives::{B256, Bytes, U256};
 use alloy_rlp::BytesMut;
 
 use crate::{TxAltFee, TxL1Msg};
@@ -69,6 +69,22 @@ impl MorphTxEnvelope {
             Self::AltFee(tx) => tx.encode_2718(&mut bytes),
         }
         Bytes(bytes.freeze())
+    }
+
+    /// Returns the fee token id if this is an AltFee transaction.
+    pub fn fee_token_id(&self) -> Option<u16> {
+        match self {
+            Self::AltFee(tx) => Some(tx.tx().fee_token_id),
+            _ => None,
+        }
+    }
+
+    /// Returns the fee limit if this is an AltFee transaction.
+    pub fn fee_limit(&self) -> Option<U256> {
+        match self {
+            Self::AltFee(tx) => Some(tx.tx().fee_limit),
+            _ => None,
+        }
     }
 }
 

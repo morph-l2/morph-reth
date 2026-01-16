@@ -7,12 +7,11 @@
 
 use alloy_evm::Database;
 use alloy_primitives::{Address, Bytes, TxKind, U256, address, keccak256};
+use morph_chainspec::hardfork::MorphHardfork;
 use morph_primitives::L1_TX_TYPE_ID;
 use revm::{
-    ExecuteEvm, Inspector,
-    context::TxEnv,
-    context_interface::{ContextTr, result::EVMError},
-    handler::EvmTr,
+    ExecuteEvm, Inspector, context::TxEnv, context_interface::result::EVMError,
+    inspector::NoOpInspector,
 };
 
 use crate::evm::MorphContext;
@@ -142,9 +141,15 @@ impl TokenFeeInfo {
         }
 
         // token_amount = eth_amount * scale / price_ratio
-        eth_amount
+        let (token_amount, remainder) = eth_amount
             .saturating_mul(self.scale)
-            .wrapping_div(self.price_ratio)
+            .div_rem(self.price_ratio);
+        // If there's a remainder, round up by adding 1
+        if !remainder.is_zero() {
+            token_amount.saturating_add(U256::from(1))
+        } else {
+            token_amount
+        }
     }
 
     /// Check if the caller has sufficient token balance for the given ETH amount.
@@ -188,7 +193,7 @@ fn load_mapping_value<DB: Database>(
 }
 
 /// Gas limit for ERC20 balance query calls.
-const BALANCE_OF_GAS_LIMIT: u64 = 1_000_000;
+const BALANCE_OF_GAS_LIMIT: u64 = 200000;
 
 /// Get ERC20 token balance for an account (storage-only version).
 ///
@@ -207,14 +212,29 @@ pub fn get_erc20_balance<DB: Database>(
     if let Some(slot) = token_balance_slot {
         let mut data = [0u8; 32];
         data[12..32].copy_from_slice(account.as_slice());
-        if let Ok(balance) = load_mapping_value(db, token, slot, data.to_vec()) {
-            return Ok(balance);
+        load_mapping_value(db, token, slot, data.to_vec())
+    } else {
+        // For the EVM fallback we construct a temporary MorphEvm instance.
+        //
+        // Notes:
+        // - `MorphContext::new` requires a hardfork/spec parameter.
+        // - We pass `&mut DB` as the context database type (so we don't move `db`).
+        // - `NoOpInspector` satisfies the `Inspector` bound without adding side effects.
+        let db: &mut dyn Database<Error = DB::Error> = db;
+
+        let mut evm = MorphEvm::new(
+            MorphContext::new(db, MorphHardfork::Curie),
+            NoOpInspector {},
+        );
+        evm.cfg.disable_balance_check = true;
+
+        match get_erc20_balance_with_evm(&mut evm, token, account) {
+            Ok(balance) => Ok(balance),
+            Err(EVMError::Database(db_err)) => Err(db_err),
+            // For non-database EVM errors, fall back to zero (matches original behavior).
+            Err(_) => Ok(U256::ZERO),
         }
     }
-
-    // If balance slot is not available, return zero.
-    // Use get_erc20_balance_with_evm for EVM call fallback.
-    Ok(U256::ZERO)
 }
 
 /// Get ERC20 token balance for an account with EVM call fallback.
@@ -226,22 +246,11 @@ pub fn get_erc20_balance_with_evm<DB, I>(
     evm: &mut MorphEvm<DB, I>,
     token: Address,
     account: Address,
-    token_balance_slot: Option<U256>,
 ) -> Result<U256, EVMError<DB::Error, MorphInvalidTransaction>>
 where
     DB: Database,
     I: Inspector<MorphContext<DB>>,
 {
-    // First try storage-based lookup
-    if let Some(slot) = token_balance_slot {
-        let mut data = [0u8; 32];
-        data[12..32].copy_from_slice(account.as_slice());
-        let storage_slot = get_mapping_slot(slot, data.to_vec());
-        if let Ok(balance) = evm.ctx_mut().db_mut().storage(token, storage_slot) {
-            return Ok(balance);
-        }
-    }
-
     // Fallback: Execute EVM call to balanceOf(address)
     let calldata = build_balance_of_calldata(account);
 
