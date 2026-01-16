@@ -15,16 +15,6 @@
 //! 1. All L1 messages must be at the beginning of the block
 //! 2. L1 messages must be in ascending `queue_index` order
 //! 3. No gaps in the `queue_index` sequence
-//!
-//! # Example
-//!
-//! ```ignore
-//! use morph_consensus::MorphConsensus;
-//! use std::sync::Arc;
-//!
-//! let chain_spec = Arc::new(MorphChainSpec::from(genesis));
-//! let consensus = MorphConsensus::new(chain_spec);
-//! ```
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]

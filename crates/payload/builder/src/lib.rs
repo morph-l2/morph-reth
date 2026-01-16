@@ -25,7 +25,9 @@
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
 mod builder;
+mod config;
 mod error;
 
 pub use builder::{MorphPayloadBuilder, MorphPayloadTransactions};
+pub use config::{MorphBuilderConfig, PayloadBuildingBreaker};
 pub use error::MorphPayloadBuilderError;

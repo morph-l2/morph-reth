@@ -35,8 +35,6 @@ mod tests {
     #[test]
     fn test_morph_mainnet_hardforks() {
         // All hardforks should be active at genesis
-        assert!(MORPH_MAINNET.is_bernoulli_active_at_timestamp(0));
-        assert!(MORPH_MAINNET.is_curie_active_at_timestamp(0));
         assert!(MORPH_MAINNET.is_morph203_active_at_timestamp(0));
         assert!(MORPH_MAINNET.is_viridian_active_at_timestamp(0));
         assert!(MORPH_MAINNET.is_emerald_active_at_timestamp(0));

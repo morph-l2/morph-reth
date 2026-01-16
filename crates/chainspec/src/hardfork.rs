@@ -36,43 +36,50 @@ use reth_chainspec::{EthereumHardforks, ForkCondition};
 
 hardfork!(
     /// Morph-specific hardforks for network upgrades.
+    ///
+    /// Note: Earlier hardforks (Archimedes, Shanghai, Bernoulli, Curie) are omitted as they
+    /// were already active at genesis for both mainnet and testnet. The reth client assumes
+    /// these features are always enabled.
+    ///
+    /// All remaining hardforks are timestamp-based.
     #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
     #[derive(Default)]
     MorphHardfork {
-        /// Bernoulli.
-        Bernoulli,
-        /// Curie hardfork.
-        Curie,
-        /// Morph203 hardfork.
+        /// Morph203 hardfork (timestamp-based).
         Morph203,
-        /// Viridian hardfork.
+        /// Viridian hardfork (timestamp-based).
         Viridian,
-        /// Emerald hardfork.
-        #[default]
+        /// Emerald hardfork (timestamp-based).
         Emerald,
+        /// MPTFork hardfork (timestamp-based).
+        #[default]
+        MPTFork,
     }
 );
 
 impl MorphHardfork {
-    /// Returns `true` if this hardfork is Curie or later.
-    #[inline]
-    pub fn is_curie(self) -> bool {
-        self >= Self::Curie
-    }
-
     /// Returns `true` if this hardfork is Morph203 or later.
+    #[inline]
     pub fn is_morph203(self) -> bool {
         self >= Self::Morph203
     }
 
     /// Returns `true` if this hardfork is Viridian or later.
+    #[inline]
     pub fn is_viridian(self) -> bool {
         self >= Self::Viridian
     }
 
     /// Returns `true` if this hardfork is Emerald or later.
+    #[inline]
     pub fn is_emerald(self) -> bool {
         self >= Self::Emerald
+    }
+
+    /// Returns `true` if this hardfork is MPTFork or later.
+    #[inline]
+    pub fn is_mpt_fork(self) -> bool {
+        self >= Self::MPTFork
     }
 }
 
@@ -80,18 +87,6 @@ impl MorphHardfork {
 pub trait MorphHardforks: EthereumHardforks {
     /// Retrieves activation condition for a Morph-specific hardfork
     fn morph_fork_activation(&self, fork: MorphHardfork) -> ForkCondition;
-
-    /// Convenience method to check if Bernoulli hardfork is active at a given timestamp
-    fn is_bernoulli_active_at_timestamp(&self, timestamp: u64) -> bool {
-        self.morph_fork_activation(MorphHardfork::Bernoulli)
-            .active_at_timestamp(timestamp)
-    }
-
-    /// Convenience method to check if Curie hardfork is active at a given timestamp
-    fn is_curie_active_at_timestamp(&self, timestamp: u64) -> bool {
-        self.morph_fork_activation(MorphHardfork::Curie)
-            .active_at_timestamp(timestamp)
-    }
 
     /// Convenience method to check if Morph203 hardfork is active at a given timestamp
     fn is_morph203_active_at_timestamp(&self, timestamp: u64) -> bool {
@@ -111,18 +106,25 @@ pub trait MorphHardforks: EthereumHardforks {
             .active_at_timestamp(timestamp)
     }
 
+    /// Convenience method to check if MPTFork hardfork is active at a given timestamp
+    fn is_mpt_fork_active_at_timestamp(&self, timestamp: u64) -> bool {
+        self.morph_fork_activation(MorphHardfork::MPTFork)
+            .active_at_timestamp(timestamp)
+    }
+
     /// Retrieves the latest Morph hardfork active at a given timestamp.
+    ///
+    /// Note: All Morph hardforks are timestamp-based.
     fn morph_hardfork_at(&self, timestamp: u64) -> MorphHardfork {
-        if self.is_emerald_active_at_timestamp(timestamp) {
+        if self.is_mpt_fork_active_at_timestamp(timestamp) {
+            MorphHardfork::MPTFork
+        } else if self.is_emerald_active_at_timestamp(timestamp) {
             MorphHardfork::Emerald
         } else if self.is_viridian_active_at_timestamp(timestamp) {
             MorphHardfork::Viridian
-        } else if self.is_morph203_active_at_timestamp(timestamp) {
-            MorphHardfork::Morph203
-        } else if self.is_curie_active_at_timestamp(timestamp) {
-            MorphHardfork::Curie
         } else {
-            MorphHardfork::Bernoulli
+            // Default to Morph203 (baseline)
+            MorphHardfork::Morph203
         }
     }
 }
@@ -130,11 +132,10 @@ pub trait MorphHardforks: EthereumHardforks {
 impl From<MorphHardfork> for SpecId {
     fn from(value: MorphHardfork) -> Self {
         match value {
-            MorphHardfork::Bernoulli => Self::OSAKA,
-            MorphHardfork::Curie => Self::OSAKA,
             MorphHardfork::Morph203 => Self::OSAKA,
             MorphHardfork::Viridian => Self::OSAKA,
             MorphHardfork::Emerald => Self::OSAKA,
+            MorphHardfork::MPTFork => Self::OSAKA,
         }
     }
 }
@@ -146,16 +147,14 @@ impl From<SpecId> for MorphHardfork {
     /// `From<MorphHardfork> for SpecId`, because multiple Morph
     /// hardforks may share the same underlying EVM spec.
     fn from(spec: SpecId) -> Self {
-        if spec.is_enabled_in(SpecId::from(Self::Emerald)) {
+        if spec.is_enabled_in(SpecId::from(Self::MPTFork)) {
+            Self::MPTFork
+        } else if spec.is_enabled_in(SpecId::from(Self::Emerald)) {
             Self::Emerald
         } else if spec.is_enabled_in(SpecId::from(Self::Viridian)) {
             Self::Viridian
-        } else if spec.is_enabled_in(SpecId::from(Self::Morph203)) {
-            Self::Morph203
-        } else if spec.is_enabled_in(SpecId::from(Self::Curie)) {
-            Self::Curie
         } else {
-            Self::Bernoulli
+            Self::Morph203
         }
     }
 }
@@ -166,14 +165,14 @@ mod tests {
     use reth_chainspec::Hardfork;
 
     #[test]
-    fn test_bernoulli_hardfork_name() {
-        let fork = MorphHardfork::Bernoulli;
-        assert_eq!(fork.name(), "Bernoulli");
+    fn test_morph203_hardfork_name() {
+        let fork = MorphHardfork::Morph203;
+        assert_eq!(fork.name(), "Morph203");
     }
 
     #[test]
     fn test_hardfork_trait_implementation() {
-        let fork = MorphHardfork::Bernoulli;
+        let fork = MorphHardfork::Morph203;
         // Should implement Hardfork trait
         let _name: &str = Hardfork::name(&fork);
     }
@@ -181,11 +180,11 @@ mod tests {
     #[test]
     #[cfg(feature = "serde")]
     fn test_morph_hardfork_serde() {
-        let fork = MorphHardfork::Bernoulli;
+        let fork = MorphHardfork::Morph203;
 
         // Serialize to JSON
         let json = serde_json::to_string(&fork).unwrap();
-        assert_eq!(json, "\"Bernoulli\"");
+        assert_eq!(json, "\"Morph203\"");
 
         // Deserialize from JSON
         let deserialized: MorphHardfork = serde_json::from_str(&json).unwrap();
@@ -193,46 +192,34 @@ mod tests {
     }
 
     #[test]
-    fn test_is_curie() {
-        assert!(!MorphHardfork::Bernoulli.is_curie());
-        assert!(MorphHardfork::Curie.is_curie());
-        assert!(MorphHardfork::Morph203.is_curie());
-        assert!(MorphHardfork::Viridian.is_curie());
-        assert!(MorphHardfork::Emerald.is_curie());
-    }
-
-    #[test]
     fn test_is_morph203() {
-        assert!(!MorphHardfork::Bernoulli.is_morph203());
-        assert!(!MorphHardfork::Curie.is_morph203());
-
         assert!(MorphHardfork::Morph203.is_morph203());
         assert!(MorphHardfork::Viridian.is_morph203());
         assert!(MorphHardfork::Emerald.is_morph203());
-
-        assert!(MorphHardfork::Morph203.is_curie());
+        assert!(MorphHardfork::MPTFork.is_morph203());
     }
 
     #[test]
     fn test_is_viridian() {
-        assert!(!MorphHardfork::Bernoulli.is_viridian());
-        assert!(!MorphHardfork::Curie.is_viridian());
         assert!(!MorphHardfork::Morph203.is_viridian());
         assert!(MorphHardfork::Viridian.is_viridian());
-        assert!(MorphHardfork::Viridian.is_morph203());
-        assert!(MorphHardfork::Viridian.is_curie());
         assert!(MorphHardfork::Emerald.is_viridian());
+        assert!(MorphHardfork::MPTFork.is_viridian());
     }
 
     #[test]
     fn test_is_emerald() {
-        assert!(!MorphHardfork::Bernoulli.is_emerald());
-        assert!(!MorphHardfork::Curie.is_emerald());
         assert!(!MorphHardfork::Morph203.is_emerald());
         assert!(!MorphHardfork::Viridian.is_emerald());
         assert!(MorphHardfork::Emerald.is_emerald());
-        assert!(MorphHardfork::Emerald.is_viridian());
-        assert!(MorphHardfork::Emerald.is_morph203());
-        assert!(MorphHardfork::Emerald.is_curie());
+        assert!(MorphHardfork::MPTFork.is_emerald());
+    }
+
+    #[test]
+    fn test_is_mpt_fork() {
+        assert!(!MorphHardfork::Morph203.is_mpt_fork());
+        assert!(!MorphHardfork::Viridian.is_mpt_fork());
+        assert!(!MorphHardfork::Emerald.is_mpt_fork());
+        assert!(MorphHardfork::MPTFork.is_mpt_fork());
     }
 }

@@ -9,7 +9,7 @@ use crate::MorphConsensusError;
 use alloy_consensus::{BlockHeader as _, EMPTY_OMMER_ROOT_HASH, TxReceipt};
 use alloy_evm::block::BlockExecutionResult;
 use alloy_primitives::{B256, Bloom};
-use morph_chainspec::{MorphChainSpec, hardfork::MorphHardforks};
+use morph_chainspec::MorphChainSpec;
 use morph_primitives::{Block, BlockBody, MorphReceipt, MorphTxEnvelope};
 use reth_consensus::{Consensus, ConsensusError, FullConsensus, HeaderValidator};
 use reth_consensus_common::validation::{
@@ -131,19 +131,14 @@ impl HeaderValidator<alloy_consensus::Header> for MorphConsensus {
             });
         }
 
-        // Validate the EIP1559 fee is set if the header is after Curie
-        if self
-            .chain_spec
-            .is_curie_active_at_timestamp(header.timestamp())
-        {
-            let base_fee = header
-                .base_fee_per_gas()
-                .ok_or(ConsensusError::BaseFeeMissing)?;
-            if base_fee > MORPH_MAXIMUM_BASE_FEE {
-                return Err(ConsensusError::Other(
-                    MorphConsensusError::BaseFeeOverLimit(base_fee).to_string(),
-                ));
-            }
+        // Validate base fee (always required, EIP-1559 is always active)
+        let base_fee = header
+            .base_fee_per_gas()
+            .ok_or(ConsensusError::BaseFeeMissing)?;
+        if base_fee > MORPH_MAXIMUM_BASE_FEE {
+            return Err(ConsensusError::Other(
+                MorphConsensusError::BaseFeeOverLimit(base_fee).to_string(),
+            ));
         }
         Ok(())
     }
@@ -273,10 +268,6 @@ fn validate_against_parent_timestamp<H: BlockHeader>(
 /// Validates gas limit change against parent.
 ///
 /// - Gas limit change must be within bounds (parent / GAS_LIMIT_BOUND_DIVISOR)
-/// - Only checked before Curie hardfork
-///
-/// Note: After Curie, gas limit verification is part of EIP-1559 header validation
-/// which Morph doesn't strictly enforce (sequencer can set values).
 #[inline]
 fn validate_against_parent_gas_limit<H: BlockHeader>(
     header: &H,
@@ -413,7 +404,7 @@ mod tests {
     use super::*;
     use alloy_consensus::{Header, Signed};
     use alloy_genesis::Genesis;
-    use alloy_primitives::{Address, B64, B256, Bytes, Signature, TxKind, U256};
+    use alloy_primitives::{Address, B64, B256, Bytes, Signature, U256};
     use morph_primitives::transaction::TxL1Msg;
 
     fn create_test_chainspec() -> Arc<MorphChainSpec> {
@@ -430,8 +421,6 @@ mod tests {
                 "istanbulBlock": 0,
                 "berlinBlock": 0,
                 "londonBlock": 0,
-                "bernoulliTime": 0,
-                "curieTime": 0,
                 "morph203Time": 0,
                 "viridianTime": 0,
                 "emeraldTime": 0
@@ -444,18 +433,17 @@ mod tests {
     }
 
     fn create_l1_msg_tx(queue_index: u64) -> MorphTxEnvelope {
+        use alloy_consensus::Sealed;
         let tx = TxL1Msg {
             queue_index,
-            tx_hash: B256::ZERO,
-            from: Address::ZERO,
-            nonce: queue_index, // nonce is used as queue index for L1 messages
             gas_limit: 21000,
-            to: TxKind::Call(Address::ZERO),
+            to: Address::ZERO,
             value: U256::ZERO,
             input: Bytes::default(),
+            sender: Address::ZERO,
         };
-        let sig = Signature::new(U256::ZERO, U256::ZERO, false);
-        MorphTxEnvelope::L1Msg(Signed::new_unchecked(tx, sig, B256::ZERO))
+        // L1 messages have no signature - use Sealed instead of Signed
+        MorphTxEnvelope::L1Msg(Sealed::new(tx))
     }
 
     fn create_regular_tx() -> MorphTxEnvelope {
@@ -777,7 +765,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_header_base_fee_missing_after_curie() {
+    fn test_validate_header_base_fee_missing() {
         let chain_spec = create_test_chainspec();
         let consensus = MorphConsensus::new(chain_spec);
         let now = std::time::SystemTime::now()
@@ -790,7 +778,7 @@ mod tests {
             ommers_hash: EMPTY_OMMER_ROOT_HASH,
             gas_limit: 30_000_000,
             timestamp: now - 10,
-            base_fee_per_gas: None, // Missing after Curie
+            base_fee_per_gas: None, // Missing (required)
             ..Default::default()
         };
         let sealed = SealedHeader::seal_slow(header);

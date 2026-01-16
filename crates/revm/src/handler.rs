@@ -148,11 +148,8 @@ where
         let basefee = evm.ctx_ref().block().basefee() as u128;
         let effective_gas_price = evm.ctx_ref().tx().effective_gas_price(basefee);
 
-        // Get the current hardfork for L1 fee calculation
-        let hardfork = evm.ctx_ref().cfg().spec();
-
         // Fetch L1 block info from the L1 Gas Price Oracle contract
-        let l1_block_info = L1BlockInfo::try_fetch(evm.ctx_mut().db_mut(), hardfork)?;
+        let l1_block_info = L1BlockInfo::try_fetch(evm.ctx_mut().db_mut())?;
 
         // Get RLP-encoded transaction bytes for L1 fee calculation
         // This represents the full transaction data posted to L1 for data availability
@@ -165,7 +162,7 @@ where
             .unwrap_or_default();
 
         // Calculate L1 data fee based on full RLP-encoded transaction
-        let l1_data_fee = l1_block_info.calculate_tx_l1_cost(rlp_bytes, hardfork);
+        let l1_data_fee = l1_block_info.calculate_tx_l1_cost(rlp_bytes);
 
         // Get mutable access to context components
         let journal = evm.ctx().journal_mut();
@@ -246,11 +243,8 @@ where
         &self,
         evm: &mut MorphEvm<DB, I>,
     ) -> Result<(), EVMError<DB::Error, MorphInvalidTransaction>> {
-        // Get the current hardfork for L1 fee calculation
-        let hardfork = evm.ctx_ref().cfg().spec();
-
         // Fetch L1 block info from the L1 Gas Price Oracle contract
-        let l1_block_info = L1BlockInfo::try_fetch(evm.ctx_mut().db_mut(), hardfork)?;
+        let l1_block_info = L1BlockInfo::try_fetch(evm.ctx_mut().db_mut())?;
 
         // Get RLP-encoded transaction bytes for L1 fee calculation
         // This represents the full transaction data posted to L1 for data availability
@@ -263,7 +257,7 @@ where
             .unwrap_or_default();
 
         // Calculate L1 data fee based on full RLP-encoded transaction
-        let l1_data_fee = l1_block_info.calculate_tx_l1_cost(rlp_bytes, hardfork);
+        let l1_data_fee = l1_block_info.calculate_tx_l1_cost(rlp_bytes);
 
         // Get mutable access to context components
         let (block, tx, cfg, journal, _, _) = evm.ctx().all_mut();
@@ -318,11 +312,8 @@ where
             return Err(MorphInvalidTransaction::TokenNotActive(token_id).into());
         }
 
-        // Get the current hardfork for L1 fee calculation
-        let hardfork = evm.ctx_ref().cfg().spec();
-
         // Fetch L1 block info from the L1 Gas Price Oracle contract
-        let l1_block_info = L1BlockInfo::try_fetch(evm.ctx_mut().db_mut(), hardfork)?;
+        let l1_block_info = L1BlockInfo::try_fetch(evm.ctx_mut().db_mut())?;
 
         // Get RLP-encoded transaction bytes for L1 fee calculation
         // This represents the full transaction data posted to L1 for data availability
@@ -335,7 +326,7 @@ where
             .unwrap_or_default();
 
         // Calculate L1 data fee (in ETH) based on full RLP-encoded transaction
-        let l1_data_fee = l1_block_info.calculate_tx_l1_cost(rlp_bytes, hardfork);
+        let l1_data_fee = l1_block_info.calculate_tx_l1_cost(rlp_bytes);
 
         // Calculate L2 gas fee (in ETH)
         let gas_limit = evm.ctx_ref().tx().gas_limit();

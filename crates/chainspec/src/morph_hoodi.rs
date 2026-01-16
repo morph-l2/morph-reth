@@ -33,8 +33,6 @@ mod tests {
     #[test]
     fn test_morph_hoodi_hardforks() {
         // All hardforks should be active at genesis
-        assert!(MORPH_HOODI.is_bernoulli_active_at_timestamp(0));
-        assert!(MORPH_HOODI.is_curie_active_at_timestamp(0));
         assert!(MORPH_HOODI.is_morph203_active_at_timestamp(0));
         assert!(MORPH_HOODI.is_viridian_active_at_timestamp(0));
         assert!(MORPH_HOODI.is_emerald_active_at_timestamp(0));

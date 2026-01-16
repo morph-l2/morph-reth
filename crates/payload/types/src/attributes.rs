@@ -1,6 +1,7 @@
 //! Morph payload attributes types.
 
-use alloy_eips::{eip2718::Decodable2718, eip4895::Withdrawals};
+use alloy_eips::eip4895::{Withdrawal, Withdrawals};
+use alloy_eips::eip2718::Decodable2718;
 use alloy_primitives::{Address, B256, Bytes};
 use alloy_rpc_types_engine::{PayloadAttributes, PayloadId};
 use morph_primitives::MorphTxEnvelope;
@@ -27,6 +28,20 @@ pub struct MorphPayloadAttributes {
     /// These transactions are not in the mempool and must be explicitly provided.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transactions: Option<Vec<Bytes>>,
+}
+
+impl reth_payload_primitives::PayloadAttributes for MorphPayloadAttributes {
+    fn timestamp(&self) -> u64 {
+        self.inner.timestamp
+    }
+
+    fn withdrawals(&self) -> Option<&Vec<Withdrawal>> {
+        self.inner.withdrawals.as_ref()
+    }
+
+    fn parent_beacon_block_root(&self) -> Option<B256> {
+        self.inner.parent_beacon_block_root
+    }
 }
 
 /// Internal payload builder attributes.

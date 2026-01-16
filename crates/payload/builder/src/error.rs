@@ -1,6 +1,7 @@
 //! Morph payload builder error types.
 
 use alloy_primitives::B256;
+use reth_evm::execute::ProviderError;
 
 /// Errors that can occur during Morph payload building.
 #[derive(Debug, thiserror::Error)]
@@ -47,4 +48,8 @@ pub enum MorphPayloadBuilderError {
         /// Actual hash.
         actual: B256,
     },
+
+    /// Database error when reading contract storage.
+    #[error("database error: {0}")]
+    Database(#[from] ProviderError),
 }

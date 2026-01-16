@@ -16,8 +16,6 @@
     "terminalTotalDifficultyPassed": true,
     "shanghaiTime": 0,
     "cancunTime": 0,
-    "bernoulliTime": 0,
-    "curieTime": 0,
     "morph203Time": 0,
     "viridianTime": 0,
     "emeraldTime": 0,
@@ -35,4 +33,3 @@
   "coinbase": "0x0000000000000000000000000000000000000000",
   "alloc": {}
 }
-

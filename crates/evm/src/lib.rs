@@ -15,6 +15,7 @@ pub use context::{MorphBlockExecutionCtx, MorphNextBlockEnvAttributes};
 mod error;
 pub use error::MorphEvmError;
 pub mod evm;
+pub mod system_contracts;
 use std::{borrow::Cow, sync::Arc};
 
 use alloy_evm::{
@@ -149,6 +150,7 @@ impl ConfigureEvm for MorphEvmConfig {
                 .blob_params_at_timestamp(attributes.timestamp),
         );
 
+        // Next block number is parent + 1
         let spec = self.chain_spec().morph_hardfork_at(attributes.timestamp);
 
         Ok(EvmEnv {
@@ -215,8 +217,6 @@ mod tests {
                 "terminalTotalDifficultyPassed": true,
                 "shanghaiTime": 0,
                 "cancunTime": 0,
-                "bernoulliTime": 0,
-                "curieTime": 0,
                 "morph203Time": 0,
                 "viridianTime": 0
             },
@@ -227,23 +227,23 @@ mod tests {
 
     #[test]
     fn test_evm_config_can_query_morph_hardforks() {
-        // Create a test chainspec with Bernoulli at genesis
+        // Create a test chainspec with Morph203 at genesis
         let chainspec = Arc::new(morph_chainspec::MorphChainSpec::from(create_test_genesis()));
 
         let evm_config = MorphEvmConfig::new_with_default_factory(chainspec);
 
         // Should be able to query Morph hardforks through the chainspec
-        assert!(evm_config.chain_spec().is_bernoulli_active_at_timestamp(0));
+        assert!(evm_config.chain_spec().is_morph203_active_at_timestamp(0));
         assert!(
             evm_config
                 .chain_spec()
-                .is_bernoulli_active_at_timestamp(1000)
+                .is_morph203_active_at_timestamp(1000)
         );
 
         // Should be able to query activation condition
         let activation = evm_config
             .chain_spec()
-            .morph_fork_activation(MorphHardfork::Bernoulli);
+            .morph_fork_activation(MorphHardfork::Morph203);
         assert_eq!(activation, reth_chainspec::ForkCondition::Timestamp(0));
     }
 }

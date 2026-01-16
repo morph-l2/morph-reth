@@ -1,12 +1,14 @@
 //! Morph payload builder implementation.
 
-use crate::MorphPayloadBuilderError;
+use crate::{config::PayloadBuildingBreaker, MorphBuilderConfig, MorphPayloadBuilderError};
 use alloy_consensus::{BlockHeader, Transaction, Typed2718};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{Bytes, U256};
 use alloy_rlp::Encodable;
 use morph_chainspec::MorphChainSpec;
-use morph_evm::{MorphEvmConfig, MorphNextBlockEnvAttributes};
+use morph_evm::{
+    system_contracts::read_withdraw_trie_root, MorphEvmConfig, MorphNextBlockEnvAttributes,
+};
 use morph_payload_types::{ExecutableL2Data, MorphBuiltPayload, MorphPayloadBuilderAttributes};
 use morph_primitives::{MorphHeader, MorphTxEnvelope};
 use reth_basic_payload_builder::{
@@ -15,7 +17,7 @@ use reth_basic_payload_builder::{
 };
 use reth_chainspec::ChainSpecProvider;
 use reth_evm::{
-    block::BlockExecutionError,
+    block::{BlockExecutionError, BlockValidationError},
     execute::{BlockBuilder, BlockBuilderOutcome},
     ConfigureEvm, Database, Evm, NextBlockEnvAttributes,
 };
@@ -65,16 +67,35 @@ pub struct MorphPayloadBuilder<Pool, Client, Txs = ()> {
     pub client: Client,
     /// The type responsible for yielding the best transactions to include.
     pub best_transactions: Txs,
+    /// Builder configuration.
+    pub config: MorphBuilderConfig,
 }
 
 impl<Pool, Client> MorphPayloadBuilder<Pool, Client, ()> {
-    /// Creates a new [`MorphPayloadBuilder`].
-    pub const fn new(pool: Pool, evm_config: MorphEvmConfig, client: Client) -> Self {
+    /// Creates a new [`MorphPayloadBuilder`] with default configuration.
+    pub fn new(pool: Pool, evm_config: MorphEvmConfig, client: Client) -> Self {
         Self {
             evm_config,
             pool,
             client,
             best_transactions: (),
+            config: MorphBuilderConfig::default(),
+        }
+    }
+
+    /// Creates a new [`MorphPayloadBuilder`] with the specified configuration.
+    pub const fn with_config(
+        pool: Pool,
+        evm_config: MorphEvmConfig,
+        client: Client,
+        config: MorphBuilderConfig,
+    ) -> Self {
+        Self {
+            evm_config,
+            pool,
+            client,
+            best_transactions: (),
+            config,
         }
     }
 }
@@ -91,6 +112,7 @@ impl<Pool, Client, Txs> MorphPayloadBuilder<Pool, Client, Txs> {
             evm_config,
             pool,
             client,
+            config,
             ..
         } = self;
         MorphPayloadBuilder {
@@ -98,7 +120,14 @@ impl<Pool, Client, Txs> MorphPayloadBuilder<Pool, Client, Txs> {
             pool,
             client,
             best_transactions,
+            config,
         }
+    }
+
+    /// Sets the builder configuration.
+    pub fn set_config(mut self, config: MorphBuilderConfig) -> Self {
+        self.config = config;
+        self
     }
 }
 
@@ -126,10 +155,10 @@ where
 
         let ctx = MorphPayloadBuilderCtx {
             evm_config: self.evm_config.clone(),
-            chain_spec: self.client.chain_spec(),
             config,
             cancel,
             best_payload,
+            builder_config: self.config.clone(),
         };
 
         let state_provider = self.client.state_by_block_hash(ctx.parent().hash())?;
@@ -189,18 +218,17 @@ where
 
 /// Container type that holds all necessities to build a new payload.
 #[derive(Debug)]
-#[allow(dead_code)]
 struct MorphPayloadBuilderCtx {
     /// The EVM configuration.
     evm_config: MorphEvmConfig,
-    /// The chain specification.
-    chain_spec: Arc<MorphChainSpec>,
     /// Payload configuration.
     config: PayloadConfig<MorphPayloadBuilderAttributes, MorphHeader>,
     /// Marker to check whether the job has been cancelled.
     cancel: reth_revm::cancelled::CancelOnDrop,
     /// The currently best payload.
     best_payload: Option<MorphBuiltPayload>,
+    /// Builder configuration with limits.
+    builder_config: MorphBuilderConfig,
 }
 
 impl MorphPayloadBuilderCtx {
@@ -225,13 +253,228 @@ impl MorphPayloadBuilderCtx {
     }
 
     /// Returns the current fee settings for transactions from the mempool.
-    #[allow(dead_code)]
-    fn best_transaction_attributes(
+    fn best_transaction_attributes(&self, base_fee: u64) -> BestTransactionsAttributes {
+        BestTransactionsAttributes::new(base_fee, None)
+    }
+
+    /// Executes all sequencer transactions that are included in the payload attributes.
+    ///
+    /// These transactions are forced and come from the sequencer (L1 messages first).
+    /// Returns the executed transaction bytes for inclusion in ExecutableL2Data.
+    fn execute_sequencer_transactions(
         &self,
-        base_fee: u64,
-        blob_gas_price: Option<u64>,
-    ) -> BestTransactionsAttributes {
-        BestTransactionsAttributes::new(base_fee, blob_gas_price)
+        builder: &mut impl BlockBuilder<Primitives = morph_primitives::MorphPrimitives>,
+        info: &mut ExecutionInfo,
+    ) -> Result<Vec<Bytes>, PayloadBuilderError> {
+        let block_gas_limit = builder.evm().block().gas_limit();
+        let base_fee = builder.evm().block().basefee();
+        let mut executed_txs: Vec<Bytes> = Vec::new();
+        // Track gas spent by each transaction for error reporting
+        let mut gas_spent_by_transactions: Vec<u64> = Vec::new();
+
+        for tx_with_encoded in &self.attributes().transactions {
+            // The transaction is already recovered in `try_new` via `try_into_recovered()`.
+            // For L1 message transactions (which have no signature), this extracts
+            // the `from` address directly from the transaction.
+            let recovered_tx = tx_with_encoded.value();
+            let tx_bytes = tx_with_encoded.encoded_bytes();
+
+            // Blob transactions are not supported on L2
+            if recovered_tx.is_eip4844() {
+                return Err(PayloadBuilderError::other(
+                    MorphPayloadBuilderError::BlobTransactionRejected,
+                ));
+            }
+
+            let tx_gas = recovered_tx.gas_limit();
+
+            // Check if adding this transaction would exceed block gas limit
+            if info.cumulative_gas_used + tx_gas > block_gas_limit {
+                gas_spent_by_transactions.push(tx_gas);
+                return Err(PayloadBuilderError::other(
+                    MorphPayloadBuilderError::BlockGasLimitExceededBySequencerTransactions {
+                        gas_spent_by_tx: gas_spent_by_transactions,
+                        gas: block_gas_limit,
+                    },
+                ));
+            }
+
+            // Execute the transaction
+            let gas_used = match builder.execute_transaction(recovered_tx.clone()) {
+                Ok(gas_used) => gas_used,
+                Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
+                    error,
+                    ..
+                })) => {
+                    // For sequencer transactions, we log and skip invalid transactions
+                    // but don't fail the entire block build
+                    tracing::trace!(
+                        target: "payload_builder",
+                        %error,
+                        ?recovered_tx,
+                        "Error in sequencer transaction, skipping."
+                    );
+                    continue;
+                }
+                Err(BlockExecutionError::Validation(err)) => {
+                    tracing::trace!(
+                        target: "payload_builder",
+                        %err,
+                        ?recovered_tx,
+                        "Validation error in sequencer transaction, skipping."
+                    );
+                    continue;
+                }
+                Err(err) => {
+                    // Fatal error - this is a bug or misconfiguration
+                    return Err(PayloadBuilderError::EvmExecutionError(Box::new(err)));
+                }
+            };
+
+            // For L1 messages, use full gas limit (no refund) and no fees collected.
+            // L1 gas is prepaid on L1, so unused gas is not refunded.
+            // Also track the next L1 message index.
+            let gas_used = if recovered_tx.is_l1_msg() {
+                // Update next_l1_message_index to be queue_index + 1
+                if let Some(queue_index) = recovered_tx.queue_index() {
+                    info.next_l1_message_index = queue_index + 1;
+                }
+                recovered_tx.gas_limit()
+            } else {
+                // Calculate fees for L2 transactions: effective_tip * gas_used
+                let effective_tip = recovered_tx
+                    .effective_tip_per_gas(base_fee)
+                    .unwrap_or_default();
+                info.total_fees += U256::from(effective_tip) * U256::from(gas_used);
+                gas_used
+            };
+
+            info.cumulative_gas_used += gas_used;
+            gas_spent_by_transactions.push(gas_used);
+
+            // Store the original transaction bytes for ExecutableL2Data
+            executed_txs.push(tx_bytes.clone());
+        }
+
+        Ok(executed_txs)
+    }
+
+    /// Executes the best transactions from the mempool.
+    ///
+    /// Returns `Ok(Some(()))` if the job was cancelled or breaker triggered, `Ok(None)` otherwise.
+    /// Executed transaction bytes are appended to the provided vector.
+    fn execute_pool_transactions<BestTxs>(
+        &self,
+        builder: &mut impl BlockBuilder<Primitives = morph_primitives::MorphPrimitives>,
+        info: &mut ExecutionInfo,
+        executed_txs: &mut Vec<Bytes>,
+        mut best_txs: BestTxs,
+        breaker: &PayloadBuildingBreaker,
+    ) -> Result<Option<()>, PayloadBuilderError>
+    where
+        BestTxs: PayloadTransactions<Transaction: PoolTransaction<Consensus = MorphTxEnvelope>>,
+    {
+        let block_gas_limit = builder.evm().block().gas_limit();
+        let base_fee = builder.evm().block().basefee();
+
+        while let Some(tx) = best_txs.next(()) {
+            // Check if the job was cancelled
+            if self.cancel.is_cancelled() {
+                return Ok(Some(()));
+            }
+
+            // Check if the breaker triggers (time/gas/DA limits)
+            if breaker.should_break(info.cumulative_gas_used, info.cumulative_da_bytes_used) {
+                tracing::debug!(
+                    target: "payload_builder",
+                    cumulative_gas_used = info.cumulative_gas_used,
+                    cumulative_da_bytes_used = info.cumulative_da_bytes_used,
+                    elapsed = ?breaker.elapsed(),
+                    "breaker triggered, stopping pool transaction execution"
+                );
+                return Ok(Some(()));
+            }
+
+            let tx = tx.into_consensus();
+
+            // Skip blob transactions and L1 messages from pool
+            if tx.is_eip4844() || tx.is_l1_msg() {
+                best_txs.mark_invalid(tx.signer(), tx.nonce());
+                continue;
+            }
+
+            // Check if the transaction exceeds block limits
+            if info.is_tx_over_limits(
+                tx.gas_limit(),
+                tx.length() as u64,
+                block_gas_limit,
+                self.builder_config.max_da_block_size,
+            ) {
+                best_txs.mark_invalid(tx.signer(), tx.nonce());
+                continue;
+            }
+
+            // Execute the transaction
+            let gas_used = match builder.execute_transaction(tx.clone()) {
+                Ok(gas_used) => gas_used,
+                Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
+                    error,
+                    ..
+                })) => {
+                    if error.is_nonce_too_low() {
+                        // If the nonce is too low, we can skip this transaction
+                        // but don't mark as invalid - the sender may have other valid txs
+                        tracing::trace!(
+                            target: "payload_builder",
+                            %error,
+                            ?tx,
+                            "skipping nonce too low transaction"
+                        );
+                    } else {
+                        // If the transaction is invalid for other reasons,
+                        // skip it and all of its descendants from this sender
+                        tracing::trace!(
+                            target: "payload_builder",
+                            %error,
+                            ?tx,
+                            "skipping invalid transaction and its descendants"
+                        );
+                        best_txs.mark_invalid(tx.signer(), tx.nonce());
+                    }
+                    continue;
+                }
+                Err(BlockExecutionError::Validation(err)) => {
+                    // Other validation errors - skip transaction and descendants
+                    tracing::trace!(
+                        target: "payload_builder",
+                        %err,
+                        ?tx,
+                        "validation error in pool transaction, skipping"
+                    );
+                    best_txs.mark_invalid(tx.signer(), tx.nonce());
+                    continue;
+                }
+                Err(err) => {
+                    // Fatal error - should not continue
+                    return Err(PayloadBuilderError::EvmExecutionError(Box::new(err)));
+                }
+            };
+
+            // Update execution info
+            info.cumulative_gas_used += gas_used;
+            info.cumulative_da_bytes_used += tx.length() as u64;
+
+            // Calculate fees: effective_tip * gas_used
+            let effective_tip = tx.effective_tip_per_gas(base_fee).unwrap_or_default();
+            info.total_fees += U256::from(effective_tip) * U256::from(gas_used);
+
+            // Store the transaction bytes for ExecutableL2Data
+            let mut tx_bytes = Vec::new();
+            tx.encode_2718(&mut tx_bytes);
+            executed_txs.push(Bytes::from(tx_bytes));
+        }
+
+        Ok(None)
     }
 }
 
@@ -304,7 +547,7 @@ where
         .with_bundle_update()
         .build();
 
-    // Build next block env attributes using the inner EthPayloadBuilderAttributes
+    // Build next block env attributes
     let next_block_attrs = MorphNextBlockEnvAttributes {
         inner: NextBlockEnvAttributes {
             timestamp: attributes.inner.timestamp,
@@ -330,136 +573,49 @@ where
     })?;
 
     let mut info = ExecutionInfo::new();
-    let block_gas_limit = builder.evm().block().gas_limit();
     let base_fee = builder.evm().block().basefee();
+    let block_gas_limit = builder.evm().block().gas_limit();
 
-    // Collect executed transactions for ExecutableL2Data
-    let mut executed_txs: Vec<Bytes> = Vec::new();
+    // Create breaker for early exit from pool transaction execution
+    let breaker = ctx.builder_config.breaker(block_gas_limit);
 
-    // 2. Execute forced transactions from payload attributes (L1 messages first)
-    // Transactions are already decoded and recovered in MorphPayloadBuilderAttributes
-    for tx_with_encoded in &attributes.transactions {
-        let recovered_tx = tx_with_encoded.value();
-        let tx_bytes = tx_with_encoded.encoded_bytes();
-
-        // Blob transactions are not supported
-        if recovered_tx.is_eip4844() {
-            return Err(PayloadBuilderError::other(
-                MorphPayloadBuilderError::BlobTransactionRejected,
-            ));
-        }
-
-        let tx_gas = recovered_tx.gas_limit();
-
-        // Check gas limit
-        if info.cumulative_gas_used + tx_gas > block_gas_limit {
-            return Err(PayloadBuilderError::other(
-                MorphPayloadBuilderError::BlockGasLimitExceededBySequencerTransactions {
-                    gas_spent_by_tx: vec![tx_gas],
-                    gas: block_gas_limit,
-                },
-            ));
-        }
-
-        // Execute the transaction
-        let gas_used = match builder.execute_transaction(recovered_tx.clone()) {
-            Ok(gas_used) => gas_used,
-            Err(BlockExecutionError::Validation(err)) => {
-                tracing::trace!(
-                    target: "payload_builder",
-                    %err,
-                    ?recovered_tx,
-                    "Error in sequencer transaction, skipping."
-                );
-                continue;
-            }
-            Err(err) => {
-                return Err(PayloadBuilderError::EvmExecutionError(Box::new(err)));
-            }
-        };
-
-        // For L1 messages, use full gas limit (no refund) and no fees
-        let gas_used = if recovered_tx.is_l1_msg() {
-            recovered_tx.gas_limit()
-            // L1 messages have zero gas price, so no fees are collected
-        } else {
-            // Calculate fees for L2 transactions: effective_tip * gas_used
-            let effective_tip = recovered_tx
-                .effective_tip_per_gas(base_fee)
-                .unwrap_or_default();
-            info.total_fees += U256::from(effective_tip) * U256::from(gas_used);
-            gas_used
-        };
-
-        info.cumulative_gas_used += gas_used;
-
-        // Store the original transaction bytes for ExecutableL2Data
-        executed_txs.push(tx_bytes.clone());
-    }
+    // 2. Execute sequencer transactions (L1 messages and forced transactions)
+    let mut executed_txs = ctx.execute_sequencer_transactions(&mut builder, &mut info)?;
 
     // 3. Execute pool transactions (best transactions from mempool)
-    let mut best_txs = best(ctx.best_transaction_attributes(base_fee, None));
-
-    while let Some(tx) = best_txs.next(()) {
-        // Check if the job was cancelled
+    let best_txs = best(ctx.best_transaction_attributes(base_fee));
+    if ctx
+        .execute_pool_transactions(&mut builder, &mut info, &mut executed_txs, best_txs, &breaker)?
+        .is_some()
+    {
+        // Check if it was a cancellation or just breaker triggered
         if ctx.cancel.is_cancelled() {
             return Ok(BuildOutcomeKind::Cancelled);
         }
-
-        let tx = tx.into_consensus();
-
-        // Skip blob transactions and L1 messages from pool
-        if tx.is_eip4844() || tx.is_l1_msg() {
-            best_txs.mark_invalid(tx.signer(), tx.nonce());
-            continue;
-        }
-
-        // Check if the transaction exceeds block limits
-        if info.is_tx_over_limits(tx.gas_limit(), tx.length() as u64, block_gas_limit, None) {
-            best_txs.mark_invalid(tx.signer(), tx.nonce());
-            continue;
-        }
-
-        // Execute the transaction
-        let gas_used = match builder.execute_transaction(tx.clone()) {
-            Ok(gas_used) => gas_used,
-            Err(BlockExecutionError::Validation(err)) => {
-                tracing::trace!(
-                    target: "payload_builder",
-                    %err,
-                    ?tx,
-                    "Error in pool transaction, skipping."
-                );
-                best_txs.mark_invalid(tx.signer(), tx.nonce());
-                continue;
-            }
-            Err(err) => {
-                return Err(PayloadBuilderError::EvmExecutionError(Box::new(err)));
-            }
-        };
-
-        // Update execution info
-        info.cumulative_gas_used += gas_used;
-        info.cumulative_da_bytes_used += tx.length() as u64;
-
-        // Calculate fees: effective_tip * gas_used
-        let effective_tip = tx.effective_tip_per_gas(base_fee).unwrap_or_default();
-        info.total_fees += U256::from(effective_tip) * U256::from(gas_used);
-
-        // Store the transaction bytes for ExecutableL2Data
-        let mut tx_bytes = Vec::new();
-        tx.encode_2718(&mut tx_bytes);
-        executed_txs.push(Bytes::from(tx_bytes));
+        // Breaker triggered - continue with current transactions
+        tracing::debug!(
+            target: "payload_builder",
+            elapsed = ?breaker.elapsed(),
+            cumulative_gas_used = info.cumulative_gas_used,
+            cumulative_da_bytes_used = info.cumulative_da_bytes_used,
+            tx_count = executed_txs.len(),
+            "breaker stopped pool execution, finalizing payload"
+        );
     }
 
-    // Check if this payload is better than the previous one
+    // 4. Check if this payload is better than the previous one
     if !ctx.is_better_payload(info.total_fees) {
         return Ok(BuildOutcomeKind::Aborted {
             fees: info.total_fees,
         });
     }
 
-    // Finish building the block
+    // 5. Read withdraw_trie_root from L2MessageQueue contract storage
+    // This must be done before finish() consumes the builder
+    let withdraw_trie_root = read_withdraw_trie_root(builder.evm_mut().db_mut())
+        .map_err(|err| PayloadBuilderError::other(MorphPayloadBuilderError::Database(err)))?;
+
+    // 6. Finish building the block
     let BlockBuilderOutcome {
         execution_result,
         block,
@@ -476,7 +632,7 @@ where
         "sealed built block"
     );
 
-    // Build ExecutableL2Data from the sealed block
+    // 6. Build ExecutableL2Data from the sealed block
     let mut logs_bloom_bytes = Vec::new();
     header.logs_bloom().encode(&mut logs_bloom_bytes);
 
@@ -492,7 +648,7 @@ where
         gas_used: execution_result.gas_used,
         receipts_root: header.receipts_root(),
         logs_bloom: Bytes::from(logs_bloom_bytes),
-        withdraw_trie_root: Default::default(), // TODO: compute withdraw trie root
+        withdraw_trie_root,
         next_l1_message_index: info.next_l1_message_index,
         hash: sealed_block.hash(),
     };

@@ -41,17 +41,16 @@ impl TryFrom<&OtherFields> for MorphGenesisInfo {
     }
 }
 
-/// Morph hardfork info specifies the block numbers and timestamps at which
+/// Morph hardfork info specifies the timestamps at which
 /// the Morph hardforks were activated.
+///
+/// Note: Earlier hardforks (Archimedes, Shanghai, Bernoulli, Curie) are omitted as they
+/// were already active at genesis for both mainnet and testnet.
+///
+/// All hardforks are timestamp-based.
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MorphHardforkInfo {
-    /// Bernoulli hardfork timestamp.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub bernoulli_time: Option<u64>,
-    /// Curie hardfork timestamp.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub curie_time: Option<u64>,
     /// Morph203 hardfork timestamp.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub morph203_time: Option<u64>,
@@ -61,6 +60,9 @@ pub struct MorphHardforkInfo {
     /// Emerald hardfork timestamp.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub emerald_time: Option<u64>,
+    /// MPTFork hardfork timestamp.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mpt_fork_time: Option<u64>,
 }
 
 impl MorphHardforkInfo {
@@ -152,11 +154,10 @@ mod tests {
     fn test_extract_morph_hardfork_info() {
         let genesis_info = r#"
         {
-          "bernoulliTime": 1000,
-          "curieTime": 2000,
           "morph203Time": 3000,
           "viridianTime": 4000,
-          "emeraldTime": 5000
+          "emeraldTime": 5000,
+          "mptForkTime": 6000
         }
         "#;
 
@@ -166,11 +167,10 @@ mod tests {
         assert_eq!(
             hardfork_info,
             MorphHardforkInfo {
-                bernoulli_time: Some(1000),
-                curie_time: Some(2000),
                 morph203_time: Some(3000),
                 viridian_time: Some(4000),
                 emerald_time: Some(5000),
+                mpt_fork_time: Some(6000),
             }
         );
     }

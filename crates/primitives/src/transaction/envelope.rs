@@ -1,4 +1,5 @@
-use alloy_consensus::{Signed, TransactionEnvelope, TxEip1559, TxEip2930, TxEip7702, TxLegacy};
+use alloy_consensus::{Sealed, Signed, TransactionEnvelope, TxEip1559, TxEip2930, TxEip7702, TxLegacy};
+use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{B256, Bytes};
 use alloy_rlp::BytesMut;
 
@@ -25,7 +26,7 @@ pub enum MorphTxEnvelope {
 
     /// Layer1 Message Transaction
     #[envelope(ty = 0x7e)]
-    L1Msg(Signed<TxL1Msg>),
+    L1Msg(Sealed<TxL1Msg>),
 
     /// Alt Fee Transaction
     #[envelope(ty = 0x7f)]
@@ -66,7 +67,7 @@ impl MorphTxEnvelope {
             | Self::Eip1559(_)
             | Self::Eip7702(_)
             | Self::AltFee(_) => None,
-            Self::L1Msg(tx) => Some(tx.tx().queue_index),
+            Self::L1Msg(tx) => Some(tx.queue_index),
         }
     }
 
@@ -126,7 +127,7 @@ impl alloy_consensus::transaction::TxHashRef for MorphTxEnvelope {
             Self::Eip2930(tx) => tx.hash(),
             Self::Eip1559(tx) => tx.hash(),
             Self::Eip7702(tx) => tx.hash(),
-            Self::L1Msg(tx) => tx.hash(),
+            Self::L1Msg(tx) => tx.hash_ref(),
             Self::AltFee(tx) => tx.hash(),
         }
     }
@@ -147,7 +148,8 @@ impl alloy_consensus::transaction::SignerRecoverable for MorphTxEnvelope {
             Self::Eip7702(tx) => {
                 alloy_consensus::transaction::SignerRecoverable::recover_signer(tx)
             }
-            Self::L1Msg(tx) => alloy_consensus::transaction::SignerRecoverable::recover_signer(tx),
+            // L1 messages have no signature - the sender is stored in the transaction itself
+            Self::L1Msg(tx) => Ok(tx.sender),
             Self::AltFee(tx) => alloy_consensus::transaction::SignerRecoverable::recover_signer(tx),
         }
     }
@@ -168,9 +170,8 @@ impl alloy_consensus::transaction::SignerRecoverable for MorphTxEnvelope {
             Self::Eip7702(tx) => {
                 alloy_consensus::transaction::SignerRecoverable::recover_signer_unchecked(tx)
             }
-            Self::L1Msg(tx) => {
-                alloy_consensus::transaction::SignerRecoverable::recover_signer_unchecked(tx)
-            }
+            // L1 messages have no signature - the sender is stored in the transaction itself
+            Self::L1Msg(tx) => Ok(tx.sender),
             Self::AltFee(tx) => {
                 alloy_consensus::transaction::SignerRecoverable::recover_signer_unchecked(tx)
             }
@@ -236,7 +237,8 @@ mod codec {
                 }
                 MorphTxType::L1Msg => {
                     let (tx, buf) = TxL1Msg::from_compact(buf, buf.len());
-                    let tx = Signed::new_unhashed(tx, signature);
+                    // L1 messages have no signature - use Sealed instead of Signed
+                    let tx = Sealed::new(tx);
                     (Self::L1Msg(tx), buf)
                 }
                 MorphTxType::AltFee => {
@@ -255,11 +257,18 @@ mod codec {
                 Self::Eip2930(tx) => tx.tx().to_compact(buf),
                 Self::Eip1559(tx) => tx.tx().to_compact(buf),
                 Self::Eip7702(tx) => tx.tx().to_compact(buf),
-                Self::L1Msg(tx) => tx.tx().to_compact(buf),
+                Self::L1Msg(tx) => tx.to_compact(buf),
                 Self::AltFee(tx) => tx.tx().to_compact(buf),
             };
         }
     }
+
+    /// Dummy signature for L1 messages (which have no signature).
+    const L1_MSG_SIGNATURE: Signature = Signature::new(
+        alloy_primitives::U256::ZERO,
+        alloy_primitives::U256::ZERO,
+        false,
+    );
 
     impl Envelope for MorphTxEnvelope {
         fn signature(&self) -> &Signature {
@@ -268,7 +277,7 @@ mod codec {
                 Self::Eip2930(tx) => tx.signature(),
                 Self::Eip1559(tx) => tx.signature(),
                 Self::Eip7702(tx) => tx.signature(),
-                Self::L1Msg(tx) => tx.signature(),
+                Self::L1Msg(_) => &L1_MSG_SIGNATURE,
                 Self::AltFee(tx) => tx.signature(),
             }
         }
