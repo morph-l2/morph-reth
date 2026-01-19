@@ -4,10 +4,10 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod assemble;
-#[cfg(feature = "engine")]
-mod engine;
 #[cfg(feature = "reth-codec")]
 mod config;
+#[cfg(feature = "engine")]
+mod engine;
 pub use assemble::MorphBlockAssembler;
 mod block;
 mod context;

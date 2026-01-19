@@ -42,7 +42,6 @@ pub use transaction::{
 #[non_exhaustive]
 pub struct MorphPrimitives;
 
-
 #[cfg(feature = "reth-codec")]
 impl NodePrimitives for MorphPrimitives {
     type Block = Block;
