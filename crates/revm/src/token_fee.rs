@@ -226,7 +226,6 @@ pub fn get_erc20_balance<DB: Database>(
             MorphContext::new(db, MorphHardfork::Curie),
             NoOpInspector {},
         );
-        evm.cfg.disable_balance_check = true;
 
         match get_erc20_balance_with_evm(&mut evm, token, account) {
             Ok(balance) => Ok(balance),

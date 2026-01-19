@@ -95,6 +95,7 @@ impl BlockExecutorFactory for MorphEvmConfig {
     }
 }
 
+#[cfg(feature = "reth-codec")]
 impl ConfigureEvm for MorphEvmConfig {
     type Primitives = MorphPrimitives;
     type Error = MorphEvmError;
