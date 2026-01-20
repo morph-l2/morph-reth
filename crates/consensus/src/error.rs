@@ -28,6 +28,10 @@ pub enum MorphConsensusError {
         actual: u64,
     },
 
+    /// Malformed L1 message - missing required fields (e.g., queue_index).
+    #[error("Malformed L1 message: missing required field")]
+    MalformedL1Message,
+
     /// Block base fee over limit.
     #[error("Block base fee is over limit: {0}")]
     BaseFeeOverLimit(u64),

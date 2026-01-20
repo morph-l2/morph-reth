@@ -317,7 +317,9 @@ fn validate_l1_messages(txs: &[&MorphTxEnvelope]) -> Result<(), ConsensusError> 
     for tx in txs {
         // Check queue index is strictly sequential
         if tx.is_l1_msg() {
-            let tx_queue_index = tx.queue_index().expect("is_l1_msg");
+            let tx_queue_index = tx.queue_index().ok_or_else(|| {
+                ConsensusError::Other(MorphConsensusError::MalformedL1Message.to_string())
+            })?;
             if tx_queue_index != queue_index {
                 return Err(ConsensusError::Other(
                     MorphConsensusError::L1MessagesNotInOrder {
@@ -418,9 +420,12 @@ mod tests {
                 "istanbulBlock": 0,
                 "berlinBlock": 0,
                 "londonBlock": 0,
+                "bernoulliBlock": 0,
+                "curieBlock": 0,
                 "morph203Time": 0,
                 "viridianTime": 0,
-                "emeraldTime": 0
+                "emeraldTime": 0,
+                "morph": {}
             },
             "alloc": {}
         });

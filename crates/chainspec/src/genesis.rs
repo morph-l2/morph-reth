@@ -1,9 +1,5 @@
 //! Morph types for genesis data.
 
-use crate::{
-    MORPH_FEE_VAULT_ADDRESS_HOODI, MORPH_FEE_VAULT_ADDRESS_MAINNET,
-    constants::MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK,
-};
 use alloy_primitives::Address;
 use alloy_serde::OtherFields;
 use serde::{Deserialize, Serialize, de::Error as _};
@@ -31,8 +27,7 @@ impl TryFrom<&OtherFields> for MorphGenesisInfo {
 
     fn try_from(others: &OtherFields) -> Result<Self, Self::Error> {
         let hard_fork_info = MorphHardforkInfo::try_from(others).ok();
-        let morph_chain_info =
-            MorphChainConfig::try_from(others).unwrap_or_else(|_| MorphChainConfig::mainnet());
+        let morph_chain_info = MorphChainConfig::try_from(others)?;
 
         Ok(Self {
             hard_fork_info,
@@ -41,16 +36,20 @@ impl TryFrom<&OtherFields> for MorphGenesisInfo {
     }
 }
 
-/// Morph hardfork info specifies the timestamps at which
+/// Morph hardfork info specifies the block numbers and timestamps at which
 /// the Morph hardforks were activated.
 ///
-/// Note: Earlier hardforks (Archimedes, Shanghai, Bernoulli, Curie) are omitted as they
-/// were already active at genesis for both mainnet and testnet.
-///
-/// All hardforks are timestamp-based.
+/// Note: Bernoulli and Curie use block-based activation, while Morph203, Viridian,
+/// Emerald, and MPTFork use timestamp-based activation (matching go-ethereum behavior).
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MorphHardforkInfo {
+    /// Bernoulli hardfork block number.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bernoulli_block: Option<u64>,
+    /// Curie hardfork block number.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub curie_block: Option<u64>,
     /// Morph203 hardfork timestamp.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub morph203_time: Option<u64>,
@@ -81,7 +80,7 @@ impl TryFrom<&OtherFields> for MorphHardforkInfo {
 }
 
 /// The configuration for the Morph chain.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MorphChainConfig {
     /// The address of the L2 transaction fee vault.
@@ -92,32 +91,10 @@ pub struct MorphChainConfig {
     pub max_tx_payload_bytes_per_block: Option<usize>,
 }
 
-impl Default for MorphChainConfig {
-    fn default() -> Self {
-        Self::mainnet()
-    }
-}
-
 impl MorphChainConfig {
     /// Extracts the morph config by looking for the `morph` key in genesis.
     pub fn extract_from(others: &OtherFields) -> Option<Self> {
         Self::try_from(others).ok()
-    }
-
-    /// Returns the MorphChainConfig for Morph Mainnet.
-    pub const fn mainnet() -> Self {
-        Self {
-            fee_vault_address: Some(MORPH_FEE_VAULT_ADDRESS_MAINNET),
-            max_tx_payload_bytes_per_block: Some(MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK),
-        }
-    }
-
-    /// Returns the MorphChainConfig for Morph Hoodi (testnet).
-    pub const fn hoodi() -> Self {
-        Self {
-            fee_vault_address: Some(MORPH_FEE_VAULT_ADDRESS_HOODI),
-            max_tx_payload_bytes_per_block: Some(MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK),
-        }
     }
 
     /// Returns whether the fee vault is enabled.
@@ -154,6 +131,8 @@ mod tests {
     fn test_extract_morph_hardfork_info() {
         let genesis_info = r#"
         {
+          "bernoulliBlock": 0,
+          "curieBlock": 100,
           "morph203Time": 3000,
           "viridianTime": 4000,
           "emeraldTime": 5000,
@@ -167,6 +146,8 @@ mod tests {
         assert_eq!(
             hardfork_info,
             MorphHardforkInfo {
+                bernoulli_block: Some(0),
+                curie_block: Some(100),
                 morph203_time: Some(3000),
                 viridian_time: Some(4000),
                 emerald_time: Some(5000),
@@ -200,22 +181,12 @@ mod tests {
     }
 
     #[test]
-    fn test_mainnet_config() {
-        let config = MorphChainConfig::mainnet();
-        assert!(config.is_fee_vault_enabled());
-        assert_eq!(
-            config.max_tx_payload_bytes_per_block,
-            Some(MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK)
-        );
-    }
-
-    #[test]
-    fn test_hoodi_config() {
-        let config = MorphChainConfig::hoodi();
-        assert!(config.is_fee_vault_enabled());
-        assert_eq!(
-            config.max_tx_payload_bytes_per_block,
-            Some(MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK)
-        );
+    fn test_default_config() {
+        let config = MorphChainConfig::default();
+        assert!(!config.is_fee_vault_enabled());
+        assert_eq!(config.fee_vault_address, None);
+        assert_eq!(config.max_tx_payload_bytes_per_block, None);
+        // Without max size limit, any size is valid
+        assert!(config.is_valid_block_size(usize::MAX));
     }
 }

@@ -19,6 +19,7 @@ reth-chainspec.workspace = true
 reth-network-peers.workspace = true
 
 alloy-chains.workspace = true
+alloy-consensus.workspace = true
 alloy-evm.workspace = true
 alloy-genesis.workspace = true
 alloy-primitives.workspace = true
@@ -32,8 +33,9 @@ serde.workspace = true
 serde_json.workspace = true
 
 [features]
-default = ["serde", "cli"]
+default = ["serde"]
 serde = [
+    "alloy-consensus/serde",
     "alloy-eips/serde",
     "alloy-hardforks/serde",
     "alloy-primitives/serde",

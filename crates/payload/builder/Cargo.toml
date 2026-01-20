@@ -14,7 +14,7 @@ workspace = true
 [dependencies]
 # Morph
 morph-chainspec.workspace = true
-morph-evm.workspace = true
+morph-evm = { workspace = true, features = ["reth-codec"] }
 morph-payload-types.workspace = true
 morph-primitives.workspace = true
 

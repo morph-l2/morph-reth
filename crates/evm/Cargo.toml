@@ -16,7 +16,7 @@ morph-chainspec.workspace = true
 morph-primitives.workspace = true
 morph-revm.workspace = true
 
-reth-chainspec.workspace = true
+reth-chainspec = { workspace = true, optional = true }
 reth-evm.workspace = true
 reth-evm-ethereum.workspace = true
 reth-revm.workspace = true
@@ -37,5 +37,9 @@ serde_json.workspace = true
 alloy-genesis.workspace = true
 
 [features]
-default = ["rpc"]
+default = []
+reth-codec = [
+    "morph-primitives/reth-codec",
+    "dep:reth-chainspec",
+]
 rpc = ["dep:reth-rpc-eth-api", "morph-revm/rpc"]

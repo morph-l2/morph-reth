@@ -5,6 +5,7 @@
 use alloy_consensus::{EthereumTxEnvelope, Transaction as AlloyTransaction, TxEip4844};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_eips::eip2930::AccessList;
+use alloy_eips::eip7702::RecoveredAuthority;
 use alloy_primitives::{Address, B256, Bytes, TxKind, U256};
 use alloy_rlp::Decodable;
 use morph_primitives::{ALT_FEE_TX_TYPE_ID, L1_TX_TYPE_ID, MorphTxEnvelope, TxAltFee};
@@ -86,10 +87,13 @@ impl MorphTxEnv {
         let tx_type: u8 = tx.tx_type().into();
 
         // Extract fee_token_id for AltFeeTx (type 0x7F)
-        let fee_token_id = if tx_type == ALT_FEE_TX_TYPE_ID {
-            extract_fee_token_id_from_rlp(&rlp_bytes)
+        let fee_token_info = if tx_type == ALT_FEE_TX_TYPE_ID {
+            (
+                extract_fee_token_id_from_rlp(&rlp_bytes),
+                extract_fee_limit_from_rlp(&rlp_bytes),
+            )
         } else {
-            0
+            (0, U256::default())
         };
 
         // Build TxEnv from the transaction
@@ -110,13 +114,27 @@ impl MorphTxEnv {
                 .map(|h| h.to_vec())
                 .unwrap_or_default(),
             max_fee_per_blob_gas: AlloyTransaction::max_fee_per_blob_gas(tx).unwrap_or(0),
-            authorization_list: Default::default(),
+            authorization_list: tx
+                .authorization_list()
+                .unwrap_or_default()
+                .iter()
+                .map(|auth| {
+                    let authority = auth
+                        .recover_authority()
+                        .map_or(RecoveredAuthority::Invalid, RecoveredAuthority::Valid);
+                    Either::Right(RecoveredAuthorization::new_unchecked(
+                        auth.inner().clone(),
+                        authority,
+                    ))
+                })
+                .collect(),
         };
 
         // Use builder pattern to set Morph-specific fields
         Self::new(inner)
             .with_rlp_bytes(rlp_bytes)
-            .with_fee_token_id(fee_token_id)
+            .with_fee_token_id(fee_token_info.0)
+            .with_fee_limit(fee_token_info.1)
     }
 }
 
@@ -134,6 +152,22 @@ fn extract_fee_token_id_from_rlp(rlp_bytes: &Bytes) -> u16 {
     TxAltFee::decode(&mut &payload[..])
         .map(|tx| tx.fee_token_id)
         .unwrap_or(0)
+}
+
+/// Extract fee_limit from RLP-encoded AltFeeTx bytes.
+///
+/// The bytes should be EIP-2718 encoded (type byte + RLP payload).
+/// Returns 0 if decoding fails.
+fn extract_fee_limit_from_rlp(rlp_bytes: &Bytes) -> U256 {
+    if rlp_bytes.is_empty() {
+        return U256::default();
+    }
+
+    // Skip the type byte (0x7F) and decode the AltFeeTx
+    let payload = &rlp_bytes[1..];
+    TxAltFee::decode(&mut &payload[..])
+        .map(|tx| tx.fee_limit)
+        .unwrap_or_default()
 }
 
 impl Deref for MorphTxEnv {
