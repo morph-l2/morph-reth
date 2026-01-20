@@ -133,8 +133,7 @@ impl HeaderValidator<alloy_consensus::Header> for MorphConsensus {
 
         // Validate the EIP1559 fee is set if the header is after Curie
         // Note: Curie uses block-based activation
-        if self.chain_spec.is_curie_active_at_block(header.number())
-        {
+        if self.chain_spec.is_curie_active_at_block(header.number()) {
             let base_fee = header
                 .base_fee_per_gas()
                 .ok_or(ConsensusError::BaseFeeMissing)?;

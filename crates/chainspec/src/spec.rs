@@ -443,22 +443,37 @@ mod tests {
         assert_eq!(chainspec.morph_hardfork_at(0, 0), MorphHardfork::Bernoulli);
 
         // At Bernoulli block (block 100, timestamp 0)
-        assert_eq!(chainspec.morph_hardfork_at(100, 0), MorphHardfork::Bernoulli);
+        assert_eq!(
+            chainspec.morph_hardfork_at(100, 0),
+            MorphHardfork::Bernoulli
+        );
 
         // At Curie block (block 200, timestamp 0)
         assert_eq!(chainspec.morph_hardfork_at(200, 0), MorphHardfork::Curie);
 
         // At Morph203 time (block 300, timestamp 3000)
-        assert_eq!(chainspec.morph_hardfork_at(300, 3000), MorphHardfork::Morph203);
+        assert_eq!(
+            chainspec.morph_hardfork_at(300, 3000),
+            MorphHardfork::Morph203
+        );
 
         // At Viridian time (block 400, timestamp 4000)
-        assert_eq!(chainspec.morph_hardfork_at(400, 4000), MorphHardfork::Viridian);
+        assert_eq!(
+            chainspec.morph_hardfork_at(400, 4000),
+            MorphHardfork::Viridian
+        );
 
         // At Emerald time (block 500, timestamp 5000)
-        assert_eq!(chainspec.morph_hardfork_at(500, 5000), MorphHardfork::Emerald);
+        assert_eq!(
+            chainspec.morph_hardfork_at(500, 5000),
+            MorphHardfork::Emerald
+        );
 
         // After Emerald (block 600, timestamp 6000)
-        assert_eq!(chainspec.morph_hardfork_at(600, 6000), MorphHardfork::Emerald);
+        assert_eq!(
+            chainspec.morph_hardfork_at(600, 6000),
+            MorphHardfork::Emerald
+        );
     }
 
     #[test]
