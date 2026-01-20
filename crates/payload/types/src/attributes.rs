@@ -1,6 +1,6 @@
 //! Morph payload attributes types.
 
-use alloy_eips::eip4895::Withdrawals;
+use alloy_eips::eip4895::{Withdrawal, Withdrawals};
 use alloy_primitives::{Address, B256, Bytes};
 use alloy_rpc_types_engine::PayloadAttributes;
 use reth_payload_primitives::PayloadBuilderAttributes;
@@ -86,6 +86,20 @@ impl MorphPayloadAttributes {
 impl From<PayloadAttributes> for MorphPayloadAttributes {
     fn from(inner: PayloadAttributes) -> Self {
         Self::new(inner)
+    }
+}
+
+impl reth_payload_primitives::PayloadAttributes for MorphPayloadAttributes {
+    fn timestamp(&self) -> u64 {
+        self.inner.timestamp
+    }
+
+    fn withdrawals(&self) -> Option<&Vec<Withdrawal>> {
+        self.inner.withdrawals.as_ref()
+    }
+
+    fn parent_beacon_block_root(&self) -> Option<B256> {
+        self.inner.parent_beacon_block_root
     }
 }
 
