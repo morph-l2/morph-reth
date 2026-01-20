@@ -132,9 +132,8 @@ impl HeaderValidator<alloy_consensus::Header> for MorphConsensus {
         }
 
         // Validate the EIP1559 fee is set if the header is after Curie
-        if self
-            .chain_spec
-            .is_curie_active_at_timestamp(header.timestamp())
+        // Note: Curie uses block-based activation
+        if self.chain_spec.is_curie_active_at_block(header.number())
         {
             let base_fee = header
                 .base_fee_per_gas()
@@ -159,7 +158,7 @@ impl HeaderValidator<alloy_consensus::Header> for MorphConsensus {
         // Validate timestamp against parent
         validate_against_parent_timestamp(header.header(), parent.header())?;
 
-        // Validate gas limit change (before Curie only)
+        // Validate gas limit change
         validate_against_parent_gas_limit(header.header(), parent.header())?;
 
         Ok(())
@@ -274,9 +273,6 @@ fn validate_against_parent_timestamp<H: BlockHeader>(
 ///
 /// - Gas limit change must be within bounds (parent / GAS_LIMIT_BOUND_DIVISOR)
 /// - Only checked before Curie hardfork
-///
-/// Note: After Curie, gas limit verification is part of EIP-1559 header validation
-/// which Morph doesn't strictly enforce (sequencer can set values).
 #[inline]
 fn validate_against_parent_gas_limit<H: BlockHeader>(
     header: &H,
@@ -430,8 +426,8 @@ mod tests {
                 "istanbulBlock": 0,
                 "berlinBlock": 0,
                 "londonBlock": 0,
-                "bernoulliTime": 0,
-                "curieTime": 0,
+                "bernoulliBlock": 0,
+                "curieBlock": 0,
                 "morph203Time": 0,
                 "viridianTime": 0,
                 "emeraldTime": 0

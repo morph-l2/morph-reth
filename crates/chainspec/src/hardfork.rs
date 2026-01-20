@@ -81,45 +81,50 @@ pub trait MorphHardforks: EthereumHardforks {
     /// Retrieves activation condition for a Morph-specific hardfork
     fn morph_fork_activation(&self, fork: MorphHardfork) -> ForkCondition;
 
-    /// Convenience method to check if Bernoulli hardfork is active at a given timestamp
-    fn is_bernoulli_active_at_timestamp(&self, timestamp: u64) -> bool {
+    /// Convenience method to check if Bernoulli hardfork is active at a given block number.
+    /// Note: Bernoulli uses block-based activation.
+    fn is_bernoulli_active_at_block(&self, block_number: u64) -> bool {
         self.morph_fork_activation(MorphHardfork::Bernoulli)
-            .active_at_timestamp(timestamp)
+            .active_at_block(block_number)
     }
 
-    /// Convenience method to check if Curie hardfork is active at a given timestamp
-    fn is_curie_active_at_timestamp(&self, timestamp: u64) -> bool {
+    /// Convenience method to check if Curie hardfork is active at a given block number.
+    /// Note: Curie uses block-based activation.
+    fn is_curie_active_at_block(&self, block_number: u64) -> bool {
         self.morph_fork_activation(MorphHardfork::Curie)
-            .active_at_timestamp(timestamp)
+            .active_at_block(block_number)
     }
 
-    /// Convenience method to check if Morph203 hardfork is active at a given timestamp
+    /// Convenience method to check if Morph203 hardfork is active at a given timestamp.
     fn is_morph203_active_at_timestamp(&self, timestamp: u64) -> bool {
         self.morph_fork_activation(MorphHardfork::Morph203)
             .active_at_timestamp(timestamp)
     }
 
-    /// Convenience method to check if Viridian hardfork is active at a given timestamp
+    /// Convenience method to check if Viridian hardfork is active at a given timestamp.
     fn is_viridian_active_at_timestamp(&self, timestamp: u64) -> bool {
         self.morph_fork_activation(MorphHardfork::Viridian)
             .active_at_timestamp(timestamp)
     }
 
-    /// Convenience method to check if Emerald hardfork is active at a given timestamp
+    /// Convenience method to check if Emerald hardfork is active at a given timestamp.
     fn is_emerald_active_at_timestamp(&self, timestamp: u64) -> bool {
         self.morph_fork_activation(MorphHardfork::Emerald)
             .active_at_timestamp(timestamp)
     }
 
-    /// Retrieves the latest Morph hardfork active at a given timestamp.
-    fn morph_hardfork_at(&self, timestamp: u64) -> MorphHardfork {
+    /// Retrieves the latest Morph hardfork active at a given block and timestamp.
+    ///
+    /// Note: This method checks both block-based (Bernoulli, Curie) and
+    /// timestamp-based (Morph203, Viridian, Emerald) hardforks.
+    fn morph_hardfork_at(&self, block_number: u64, timestamp: u64) -> MorphHardfork {
         if self.is_emerald_active_at_timestamp(timestamp) {
             MorphHardfork::Emerald
         } else if self.is_viridian_active_at_timestamp(timestamp) {
             MorphHardfork::Viridian
         } else if self.is_morph203_active_at_timestamp(timestamp) {
             MorphHardfork::Morph203
-        } else if self.is_curie_active_at_timestamp(timestamp) {
+        } else if self.is_curie_active_at_block(block_number) {
             MorphHardfork::Curie
         } else {
             MorphHardfork::Bernoulli

@@ -43,15 +43,18 @@ impl TryFrom<&OtherFields> for MorphGenesisInfo {
 
 /// Morph hardfork info specifies the block numbers and timestamps at which
 /// the Morph hardforks were activated.
+///
+/// Note: Bernoulli and Curie use block-based activation, while Morph203, Viridian,
+/// and Emerald use timestamp-based activation (matching go-ethereum behavior).
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MorphHardforkInfo {
-    /// Bernoulli hardfork timestamp.
+    /// Bernoulli hardfork block number.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bernoulli_time: Option<u64>,
-    /// Curie hardfork timestamp.
+    pub bernoulli_block: Option<u64>,
+    /// Curie hardfork block number.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub curie_time: Option<u64>,
+    pub curie_block: Option<u64>,
     /// Morph203 hardfork timestamp.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub morph203_time: Option<u64>,
@@ -152,8 +155,8 @@ mod tests {
     fn test_extract_morph_hardfork_info() {
         let genesis_info = r#"
         {
-          "bernoulliTime": 1000,
-          "curieTime": 2000,
+          "bernoulliBlock": 0,
+          "curieBlock": 100,
           "morph203Time": 3000,
           "viridianTime": 4000,
           "emeraldTime": 5000
@@ -166,8 +169,8 @@ mod tests {
         assert_eq!(
             hardfork_info,
             MorphHardforkInfo {
-                bernoulli_time: Some(1000),
-                curie_time: Some(2000),
+                bernoulli_block: Some(0),
+                curie_block: Some(100),
                 morph203_time: Some(3000),
                 viridian_time: Some(4000),
                 emerald_time: Some(5000),

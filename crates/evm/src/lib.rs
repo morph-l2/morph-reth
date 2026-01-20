@@ -98,7 +98,7 @@ mod tests {
     use morph_chainspec::hardfork::{MorphHardfork, MorphHardforks};
     use serde_json::json;
 
-    /// Helper function to create a test genesis with Morph hardforks at timestamp 0
+    /// Helper function to create a test genesis with Morph hardforks at genesis
     fn create_test_genesis() -> alloy_genesis::Genesis {
         let genesis_json = json!({
             "config": {
@@ -118,8 +118,8 @@ mod tests {
                 "terminalTotalDifficultyPassed": true,
                 "shanghaiTime": 0,
                 "cancunTime": 0,
-                "bernoulliTime": 0,
-                "curieTime": 0,
+                "bernoulliBlock": 0,
+                "curieBlock": 0,
                 "morph203Time": 0,
                 "viridianTime": 0
             },
@@ -136,17 +136,14 @@ mod tests {
         let evm_config = MorphEvmConfig::new_with_default_factory(chainspec);
 
         // Should be able to query Morph hardforks through the chainspec
-        assert!(evm_config.chain_spec().is_bernoulli_active_at_timestamp(0));
-        assert!(
-            evm_config
-                .chain_spec()
-                .is_bernoulli_active_at_timestamp(1000)
-        );
+        // Note: Bernoulli and Curie use block-based activation
+        assert!(evm_config.chain_spec().is_bernoulli_active_at_block(0));
+        assert!(evm_config.chain_spec().is_bernoulli_active_at_block(1000));
 
         // Should be able to query activation condition
         let activation = evm_config
             .chain_spec()
             .morph_fork_activation(MorphHardfork::Bernoulli);
-        assert_eq!(activation, reth_chainspec::ForkCondition::Timestamp(0));
+        assert_eq!(activation, reth_chainspec::ForkCondition::Block(0));
     }
 }

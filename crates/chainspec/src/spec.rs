@@ -97,7 +97,6 @@ impl MorphChainSpec {
         Self { inner, info }
     }
 
-    /// Converts the given [`Genesis`] into a [`MorphChainSpec`].
     /// Returns whether the fee vault is enabled.
     pub fn is_fee_vault_enabled(&self) -> bool {
         self.info.morph_chain_info.is_fee_vault_enabled()
@@ -140,15 +139,24 @@ impl From<Genesis> for MorphChainSpec {
         let mut base_spec = ChainSpec::from_genesis(genesis);
 
         // Add Morph hardforks
-        let morph_forks = vec![
-            (MorphHardfork::Bernoulli, hardfork_info.bernoulli_time),
-            (MorphHardfork::Curie, hardfork_info.curie_time),
+        // Note: Bernoulli and Curie use block-based activation,
+        // while Morph203, Viridian, and Emerald use timestamp-based activation.
+        let block_forks = vec![
+            (MorphHardfork::Bernoulli, hardfork_info.bernoulli_block),
+            (MorphHardfork::Curie, hardfork_info.curie_block),
+        ]
+        .into_iter()
+        .filter_map(|(fork, block)| block.map(|b| (fork, ForkCondition::Block(b))));
+
+        let time_forks = vec![
             (MorphHardfork::Morph203, hardfork_info.morph203_time),
             (MorphHardfork::Viridian, hardfork_info.viridian_time),
             (MorphHardfork::Emerald, hardfork_info.emerald_time),
         ]
         .into_iter()
-        .filter_map(|(fork, time)| time.map(|time| (fork, ForkCondition::Timestamp(time))));
+        .filter_map(|(fork, time)| time.map(|t| (fork, ForkCondition::Timestamp(t))));
+
+        let morph_forks = block_forks.chain(time_forks);
 
         base_spec.hardforks.extend(morph_forks);
 
@@ -268,7 +276,7 @@ mod tests {
     use crate::hardfork::MorphHardforks;
     use serde_json::json;
 
-    /// Helper function to create a test genesis with Morph hardforks at timestamp 0
+    /// Helper function to create a test genesis with Morph hardforks at genesis
     fn create_test_genesis() -> Genesis {
         let genesis_json = json!({
             "config": {
@@ -288,8 +296,8 @@ mod tests {
                 "terminalTotalDifficultyPassed": true,
                 "shanghaiTime": 0,
                 "cancunTime": 0,
-                "bernoulliTime": 0,
-                "curieTime": 0,
+                "bernoulliBlock": 0,
+                "curieBlock": 0,
                 "morph203Time": 0,
                 "viridianTime": 0,
                 "emeraldTime": 0
@@ -303,8 +311,10 @@ mod tests {
     fn test_morph_chainspec_has_morph_hardforks() {
         let chainspec = MorphChainSpec::from(create_test_genesis());
 
-        // Bernoulli should be active at genesis (timestamp 0)
-        assert!(chainspec.is_bernoulli_active_at_timestamp(0));
+        // Block-based hardforks should be active at block 0
+        assert!(chainspec.is_bernoulli_active_at_block(0));
+        assert!(chainspec.is_curie_active_at_block(0));
+        // Timestamp-based hardforks should be active at timestamp 0
         assert!(chainspec.is_emerald_active_at_timestamp(0));
     }
 
@@ -314,11 +324,11 @@ mod tests {
 
         // Should be able to query Morph hardfork activation through trait
         let activation = chainspec.morph_fork_activation(MorphHardfork::Bernoulli);
-        assert_eq!(activation, ForkCondition::Timestamp(0));
+        assert_eq!(activation, ForkCondition::Block(0));
 
         // Should be able to use convenience method through trait
-        assert!(chainspec.is_bernoulli_active_at_timestamp(0));
-        assert!(chainspec.is_bernoulli_active_at_timestamp(1000));
+        assert!(chainspec.is_bernoulli_active_at_block(0));
+        assert!(chainspec.is_bernoulli_active_at_block(1000));
     }
 
     #[test]
@@ -327,7 +337,7 @@ mod tests {
 
         // Morph hardforks should be queryable from inner.hardforks via Hardforks trait
         let activation = chainspec.fork(MorphHardfork::Bernoulli);
-        assert_eq!(activation, ForkCondition::Timestamp(0));
+        assert_eq!(activation, ForkCondition::Block(0));
 
         // Verify Bernoulli appears in forks iterator
         let has_bernoulli = chainspec
@@ -359,8 +369,8 @@ mod tests {
                 "terminalTotalDifficultyPassed": true,
                 "shanghaiTime": 0,
                 "cancunTime": 0,
-                "bernoulliTime": 1000,
-                "curieTime": 2000,
+                "bernoulliBlock": 100,
+                "curieBlock": 200,
                 "morph203Time": 3000,
                 "viridianTime": 4000,
                 "emeraldTime": 5000
@@ -372,23 +382,23 @@ mod tests {
             serde_json::from_value(genesis_json).expect("genesis should be valid");
         let chainspec = MorphChainSpec::from(genesis);
 
-        // Test Bernoulli activation
+        // Test Bernoulli activation (block-based)
         let activation = chainspec.fork(MorphHardfork::Bernoulli);
-        assert_eq!(activation, ForkCondition::Timestamp(1000));
+        assert_eq!(activation, ForkCondition::Block(100));
 
-        assert!(!chainspec.is_bernoulli_active_at_timestamp(0));
-        assert!(chainspec.is_bernoulli_active_at_timestamp(1000));
-        assert!(chainspec.is_bernoulli_active_at_timestamp(2000));
+        assert!(!chainspec.is_bernoulli_active_at_block(0));
+        assert!(chainspec.is_bernoulli_active_at_block(100));
+        assert!(chainspec.is_bernoulli_active_at_block(200));
 
-        // Test Curie activation
+        // Test Curie activation (block-based)
         let activation = chainspec.fork(MorphHardfork::Curie);
-        assert_eq!(activation, ForkCondition::Timestamp(2000));
+        assert_eq!(activation, ForkCondition::Block(200));
 
-        assert!(!chainspec.is_curie_active_at_timestamp(0));
-        assert!(!chainspec.is_curie_active_at_timestamp(1000));
-        assert!(chainspec.is_curie_active_at_timestamp(2000));
+        assert!(!chainspec.is_curie_active_at_block(0));
+        assert!(!chainspec.is_curie_active_at_block(100));
+        assert!(chainspec.is_curie_active_at_block(200));
 
-        // Test Emerald activation
+        // Test Emerald activation (timestamp-based)
         let activation = chainspec.fork(MorphHardfork::Emerald);
         assert_eq!(activation, ForkCondition::Timestamp(5000));
 
@@ -416,8 +426,8 @@ mod tests {
                 "terminalTotalDifficultyPassed": true,
                 "shanghaiTime": 0,
                 "cancunTime": 0,
-                "bernoulliTime": 1000,
-                "curieTime": 2000,
+                "bernoulliBlock": 100,
+                "curieBlock": 200,
                 "morph203Time": 3000,
                 "viridianTime": 4000,
                 "emeraldTime": 5000
@@ -429,26 +439,26 @@ mod tests {
             serde_json::from_value(genesis_json).expect("genesis should be valid");
         let chainspec = MorphChainSpec::from(genesis);
 
-        // Before Bernoulli activation - should return Bernoulli (baseline)
-        assert_eq!(chainspec.morph_hardfork_at(0), MorphHardfork::Bernoulli);
+        // Before Bernoulli activation (block 0, timestamp 0) - should return Bernoulli (baseline)
+        assert_eq!(chainspec.morph_hardfork_at(0, 0), MorphHardfork::Bernoulli);
 
-        // At Bernoulli time
-        assert_eq!(chainspec.morph_hardfork_at(1000), MorphHardfork::Bernoulli);
+        // At Bernoulli block (block 100, timestamp 0)
+        assert_eq!(chainspec.morph_hardfork_at(100, 0), MorphHardfork::Bernoulli);
 
-        // At Curie time
-        assert_eq!(chainspec.morph_hardfork_at(2000), MorphHardfork::Curie);
+        // At Curie block (block 200, timestamp 0)
+        assert_eq!(chainspec.morph_hardfork_at(200, 0), MorphHardfork::Curie);
 
-        // At Morph203 time
-        assert_eq!(chainspec.morph_hardfork_at(3000), MorphHardfork::Morph203);
+        // At Morph203 time (block 300, timestamp 3000)
+        assert_eq!(chainspec.morph_hardfork_at(300, 3000), MorphHardfork::Morph203);
 
-        // At Viridian time
-        assert_eq!(chainspec.morph_hardfork_at(4000), MorphHardfork::Viridian);
+        // At Viridian time (block 400, timestamp 4000)
+        assert_eq!(chainspec.morph_hardfork_at(400, 4000), MorphHardfork::Viridian);
 
-        // At Emerald time
-        assert_eq!(chainspec.morph_hardfork_at(5000), MorphHardfork::Emerald);
+        // At Emerald time (block 500, timestamp 5000)
+        assert_eq!(chainspec.morph_hardfork_at(500, 5000), MorphHardfork::Emerald);
 
-        // After Emerald
-        assert_eq!(chainspec.morph_hardfork_at(6000), MorphHardfork::Emerald);
+        // After Emerald (block 600, timestamp 6000)
+        assert_eq!(chainspec.morph_hardfork_at(600, 6000), MorphHardfork::Emerald);
     }
 
     #[test]
@@ -456,8 +466,8 @@ mod tests {
         let genesis_json = json!({
             "config": {
                 "chainId": 1337,
-                "bernoulliTime": 0,
-                "curieTime": 0,
+                "bernoulliBlock": 0,
+                "curieBlock": 0,
                 "morph203Time": 0,
                 "viridianTime": 0,
                 "emeraldTime": 0,
@@ -472,9 +482,10 @@ mod tests {
 
         let chainspec = MorphChainSpec::from(genesis);
 
-        // All hardforks should be active at genesis
-        assert!(chainspec.is_bernoulli_active_at_timestamp(0));
-        assert!(chainspec.is_curie_active_at_timestamp(0));
+        // Block-based hardforks should be active at block 0
+        assert!(chainspec.is_bernoulli_active_at_block(0));
+        assert!(chainspec.is_curie_active_at_block(0));
+        // Timestamp-based hardforks should be active at timestamp 0
         assert!(chainspec.is_morph203_active_at_timestamp(0));
         assert!(chainspec.is_viridian_active_at_timestamp(0));
         assert!(chainspec.is_emerald_active_at_timestamp(0));
@@ -498,8 +509,8 @@ mod tests {
                 "istanbulBlock": 0,
                 "berlinBlock": 0,
                 "londonBlock": 0,
-                "bernoulliTime": 0,
-                "curieTime": 0,
+                "bernoulliBlock": 0,
+                "curieBlock": 0,
                 "morph": {
                     "feeVaultAddress": "0x530000000000000000000000000000000000000a",
                     "maxTxPayloadBytesPerBlock": 122880
