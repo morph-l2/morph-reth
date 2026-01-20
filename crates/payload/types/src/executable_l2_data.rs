@@ -1,6 +1,4 @@
 //! ExecutableL2Data type definition.
-//!
-//! This type is compatible with go-ethereum's ExecutableL2Data struct.
 
 use alloy_primitives::{Address, B256, Bytes};
 use serde::{Deserialize, Serialize};
@@ -8,7 +6,6 @@ use serde::{Deserialize, Serialize};
 /// L2 block data used for AssembleL2Block/ValidateL2Block/NewL2Block.
 ///
 /// This struct contains all the data needed to construct and validate an L2 block.
-/// It is designed to be compatible with go-ethereum's ExecutableL2Data type.
 ///
 /// # Fields
 ///

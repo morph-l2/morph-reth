@@ -1,4 +1,34 @@
-//! Morph revm specific implementations.
+//! Morph-specific revm implementations.
+//!
+//! This crate provides low-level EVM execution logic for Morph L2, including
+//! custom transaction validation, fee handling, and L1 data fee calculation.
+//!
+//! # Main Components
+//!
+//! - [`MorphEvm`]: The main EVM type with Morph-specific handler
+//! - [`handler::MorphEvmHandler`]: Custom handler implementing fee deduction and reimbursement
+//! - [`L1BlockInfo`]: L1 gas price oracle data for L1 data fee calculation
+//! - [`TokenFeeInfo`]: Token registry data for AltFee transaction support
+//!
+//! # Fee Handling
+//!
+//! Morph L2 has three types of fees:
+//!
+//! 1. **L2 Execution Fee**: Standard gas fee for EVM execution
+//! 2. **L1 Data Fee**: Fee for posting transaction data to L1 (calculated from L1 gas price)
+//! 3. **AltFee Token Fee**: Optional ERC20 token payment instead of ETH
+//!
+//! # L1 Messages
+//!
+//! L1 message transactions (type `0x7E`) are special:
+//! - No signature validation required
+//! - No fee deduction (paid on L1)
+//! - Sender is recovered from the transaction itself
+//!
+//! # Error Types
+//!
+//! - [`MorphHaltReason`]: EVM halt reasons (extends revm's `HaltReason`)
+//! - [`MorphInvalidTransaction`]: Invalid transaction errors
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg))]

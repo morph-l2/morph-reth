@@ -1,0 +1,37 @@
+[package]
+name = "morph-consensus"
+description = "Morph L2 consensus validation"
+
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Morph
+morph-chainspec.workspace = true
+morph-primitives = { workspace = true, features = ["reth-codec"] }
+
+# Reth
+reth-consensus.workspace = true
+reth-consensus-common.workspace = true
+reth-primitives-traits.workspace = true
+
+# Alloy
+alloy-consensus.workspace = true
+alloy-evm.workspace = true
+alloy-primitives.workspace = true
+alloy-rlp.workspace = true
+
+# Utils
+thiserror.workspace = true
+
+[dev-dependencies]
+alloy-genesis.workspace = true
+alloy-primitives = { workspace = true, features = ["rand"] }
+serde_json.workspace = true
+
