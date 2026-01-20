@@ -4,9 +4,10 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod assemble;
+#[cfg(feature = "reth-codec")]
+mod config;
 #[cfg(feature = "engine")]
 mod engine;
-use alloy_consensus::BlockHeader as _;
 pub use assemble::MorphBlockAssembler;
 mod block;
 mod context;
@@ -15,22 +16,17 @@ pub use context::{MorphBlockExecutionCtx, MorphNextBlockEnvAttributes};
 mod error;
 pub use error::MorphEvmError;
 pub mod evm;
-use std::{borrow::Cow, sync::Arc};
+use std::sync::Arc;
 
+use crate::{block::MorphBlockExecutor, evm::MorphEvm};
 use alloy_evm::{
-    self, Database, EvmEnv,
+    self, Database,
     block::{BlockExecutorFactory, BlockExecutorFor},
-    eth::{EthBlockExecutionCtx, NextEvmEnvAttributes},
     revm::{Inspector, database::State},
 };
 pub use evm::MorphEvmFactory;
-use morph_primitives::{Block, MorphHeader, MorphPrimitives, MorphReceipt, MorphTxEnvelope};
-use reth_chainspec::EthChainSpec;
-use reth_evm::{self, ConfigureEvm, EvmEnvFor};
-use reth_primitives_traits::{SealedBlock, SealedHeader};
-
-use crate::{block::MorphBlockExecutor, evm::MorphEvm};
-use morph_chainspec::{MorphChainSpec, hardfork::MorphHardforks};
+use morph_chainspec::MorphChainSpec;
+use morph_primitives::{MorphReceipt, MorphTxEnvelope};
 use morph_revm::evm::MorphContext;
 use reth_evm_ethereum::EthEvmConfig;
 
@@ -95,100 +91,7 @@ impl BlockExecutorFactory for MorphEvmConfig {
     }
 }
 
-impl ConfigureEvm for MorphEvmConfig {
-    type Primitives = MorphPrimitives;
-    type Error = MorphEvmError;
-    type NextBlockEnvCtx = MorphNextBlockEnvAttributes;
-    type BlockExecutorFactory = Self;
-    type BlockAssembler = MorphBlockAssembler;
-
-    fn block_executor_factory(&self) -> &Self::BlockExecutorFactory {
-        self
-    }
-
-    fn block_assembler(&self) -> &Self::BlockAssembler {
-        &self.block_assembler
-    }
-
-    fn evm_env(&self, header: &MorphHeader) -> Result<EvmEnvFor<Self>, Self::Error> {
-        let EvmEnv { cfg_env, block_env } = EvmEnv::for_eth_block(
-            header,
-            self.chain_spec(),
-            self.chain_spec().chain().id(),
-            self.chain_spec()
-                .blob_params_at_timestamp(header.timestamp()),
-        );
-
-        let spec = self.chain_spec().morph_hardfork_at(header.timestamp());
-
-        Ok(EvmEnv {
-            cfg_env: cfg_env.with_spec(spec),
-            block_env: MorphBlockEnv { inner: block_env },
-        })
-    }
-
-    fn next_evm_env(
-        &self,
-        parent: &MorphHeader,
-        attributes: &Self::NextBlockEnvCtx,
-    ) -> Result<EvmEnvFor<Self>, Self::Error> {
-        let EvmEnv { cfg_env, block_env } = EvmEnv::for_eth_next_block(
-            parent,
-            NextEvmEnvAttributes {
-                timestamp: attributes.timestamp,
-                suggested_fee_recipient: attributes.suggested_fee_recipient,
-                prev_randao: attributes.prev_randao,
-                gas_limit: attributes.gas_limit,
-            },
-            self.chain_spec()
-                .next_block_base_fee(parent, attributes.timestamp)
-                .unwrap_or_default(),
-            self.chain_spec(),
-            self.chain_spec().chain().id(),
-            self.chain_spec()
-                .blob_params_at_timestamp(attributes.timestamp),
-        );
-
-        let spec = self.chain_spec().morph_hardfork_at(attributes.timestamp);
-
-        Ok(EvmEnv {
-            cfg_env: cfg_env.with_spec(spec),
-            block_env: MorphBlockEnv { inner: block_env },
-        })
-    }
-
-    fn context_for_block<'a>(
-        &self,
-        block: &'a SealedBlock<Block>,
-    ) -> Result<MorphBlockExecutionCtx<'a>, Self::Error> {
-        Ok(MorphBlockExecutionCtx {
-            inner: EthBlockExecutionCtx {
-                parent_hash: block.header().parent_hash(),
-                parent_beacon_block_root: block.header().parent_beacon_block_root(),
-                ommers: &[],
-                withdrawals: block.body().withdrawals.as_ref().map(Cow::Borrowed),
-                extra_data: block.extra_data().clone(),
-            },
-        })
-    }
-
-    fn context_for_next_block(
-        &self,
-        parent: &SealedHeader<MorphHeader>,
-        attributes: Self::NextBlockEnvCtx,
-    ) -> Result<MorphBlockExecutionCtx<'_>, Self::Error> {
-        Ok(MorphBlockExecutionCtx {
-            inner: EthBlockExecutionCtx {
-                parent_hash: parent.hash(),
-                parent_beacon_block_root: attributes.parent_beacon_block_root,
-                ommers: &[],
-                withdrawals: attributes.inner.withdrawals.map(Cow::Owned),
-                extra_data: attributes.inner.extra_data,
-            },
-        })
-    }
-}
-
+#[cfg(feature = "reth-codec")]
 #[cfg(test)]
 mod tests {
     use super::*;

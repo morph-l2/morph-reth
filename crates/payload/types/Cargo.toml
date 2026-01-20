@@ -13,7 +13,7 @@ workspace = true
 
 [dependencies]
 # Morph
-morph-primitives = { workspace = true, features = ["serde"] }
+morph-primitives = { workspace = true, features = ["serde", "reth-codec"] }
 
 # Reth
 reth-engine-primitives.workspace = true
