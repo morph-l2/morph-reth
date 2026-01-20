@@ -28,7 +28,7 @@ serde.workspace = true
 serde_json.workspace = true
 
 [features]
-default = ["serde", "cli"]
+default = ["serde"]
 serde = [
     "alloy-eips/serde",
     "alloy-hardforks/serde",
