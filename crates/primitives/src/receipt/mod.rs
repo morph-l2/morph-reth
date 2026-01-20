@@ -412,10 +412,22 @@ impl InMemorySize for MorphReceipt {
     }
 }
 
-/// Calculates the root hash of a list of receipts.
-pub fn calculate_receipt_root(receipts: &[MorphReceipt]) -> B256 {
+/// Calculates the receipt root for a header.
+///
+/// This function computes the Merkle root of receipts using the standard encoding
+/// that includes the bloom filter, which is required for consensus validation.
+///
+/// NOTE: Prefer `alloy_consensus::proofs::calculate_receipt_root` if you have
+/// log blooms already memoized (e.g., from bloom validation).
+///
+/// # Example
+///
+/// ```ignore
+/// let receipts_root = calculate_receipt_root_no_memo(&receipts);
+/// ```
+pub fn calculate_receipt_root_no_memo(receipts: &[MorphReceipt]) -> B256 {
     alloy_consensus::proofs::ordered_trie_root_with_encoder(receipts, |r, buf| {
-        r.encode_2718(buf);
+        r.with_bloom_ref().encode_2718(buf)
     })
 }
 
