@@ -14,9 +14,8 @@ pub static MORPH_MAINNET: LazyLock<Arc<MorphChainSpec>> = LazyLock::new(|| {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        MORPH_FEE_VAULT_ADDRESS_MAINNET, MORPH_MAINNET_CHAIN_ID, hardfork::MorphHardforks,
-    };
+    use crate::{MORPH_MAINNET_CHAIN_ID, hardfork::MorphHardforks};
+    use alloy_primitives::address;
 
     #[test]
     fn test_morph_mainnet_chain_id() {
@@ -26,9 +25,10 @@ mod tests {
     #[test]
     fn test_morph_mainnet_fee_vault() {
         assert!(MORPH_MAINNET.is_fee_vault_enabled());
+        // Fee vault address is parsed from genesis JSON
         assert_eq!(
             MORPH_MAINNET.fee_vault_address(),
-            Some(MORPH_FEE_VAULT_ADDRESS_MAINNET)
+            Some(address!("530000000000000000000000000000000000000a"))
         );
     }
 

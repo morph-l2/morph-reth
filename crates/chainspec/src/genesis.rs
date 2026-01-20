@@ -1,9 +1,5 @@
 //! Morph types for genesis data.
 
-use crate::{
-    MORPH_FEE_VAULT_ADDRESS_HOODI, MORPH_FEE_VAULT_ADDRESS_MAINNET,
-    constants::MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK,
-};
 use alloy_primitives::Address;
 use alloy_serde::OtherFields;
 use serde::{Deserialize, Serialize, de::Error as _};
@@ -31,8 +27,7 @@ impl TryFrom<&OtherFields> for MorphGenesisInfo {
 
     fn try_from(others: &OtherFields) -> Result<Self, Self::Error> {
         let hard_fork_info = MorphHardforkInfo::try_from(others).ok();
-        let morph_chain_info =
-            MorphChainConfig::try_from(others).unwrap_or_else(|_| MorphChainConfig::mainnet());
+        let morph_chain_info = MorphChainConfig::try_from(others)?;
 
         Ok(Self {
             hard_fork_info,
@@ -82,7 +77,7 @@ impl TryFrom<&OtherFields> for MorphHardforkInfo {
 }
 
 /// The configuration for the Morph chain.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MorphChainConfig {
     /// The address of the L2 transaction fee vault.
@@ -93,32 +88,10 @@ pub struct MorphChainConfig {
     pub max_tx_payload_bytes_per_block: Option<usize>,
 }
 
-impl Default for MorphChainConfig {
-    fn default() -> Self {
-        Self::mainnet()
-    }
-}
-
 impl MorphChainConfig {
     /// Extracts the morph config by looking for the `morph` key in genesis.
     pub fn extract_from(others: &OtherFields) -> Option<Self> {
         Self::try_from(others).ok()
-    }
-
-    /// Returns the MorphChainConfig for Morph Mainnet.
-    pub const fn mainnet() -> Self {
-        Self {
-            fee_vault_address: Some(MORPH_FEE_VAULT_ADDRESS_MAINNET),
-            max_tx_payload_bytes_per_block: Some(MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK),
-        }
-    }
-
-    /// Returns the MorphChainConfig for Morph Hoodi (testnet).
-    pub const fn hoodi() -> Self {
-        Self {
-            fee_vault_address: Some(MORPH_FEE_VAULT_ADDRESS_HOODI),
-            max_tx_payload_bytes_per_block: Some(MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK),
-        }
     }
 
     /// Returns whether the fee vault is enabled.
@@ -203,22 +176,12 @@ mod tests {
     }
 
     #[test]
-    fn test_mainnet_config() {
-        let config = MorphChainConfig::mainnet();
-        assert!(config.is_fee_vault_enabled());
-        assert_eq!(
-            config.max_tx_payload_bytes_per_block,
-            Some(MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK)
-        );
-    }
-
-    #[test]
-    fn test_hoodi_config() {
-        let config = MorphChainConfig::hoodi();
-        assert!(config.is_fee_vault_enabled());
-        assert_eq!(
-            config.max_tx_payload_bytes_per_block,
-            Some(MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK)
-        );
+    fn test_default_config() {
+        let config = MorphChainConfig::default();
+        assert!(!config.is_fee_vault_enabled());
+        assert_eq!(config.fee_vault_address, None);
+        assert_eq!(config.max_tx_payload_bytes_per_block, None);
+        // Without max size limit, any size is valid
+        assert!(config.is_valid_block_size(usize::MAX));
     }
 }

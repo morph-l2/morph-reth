@@ -549,7 +549,8 @@ mod tests {
                 "curieBlock": 0,
                 "morph203Time": 0,
                 "viridianTime": 0,
-                "emeraldTime": 0
+                "emeraldTime": 0,
+                "morph": {}
             },
             "alloc": {}
         });

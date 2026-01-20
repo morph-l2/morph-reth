@@ -14,7 +14,8 @@ pub static MORPH_HOODI: LazyLock<Arc<MorphChainSpec>> = LazyLock::new(|| {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{MORPH_FEE_VAULT_ADDRESS_HOODI, MORPH_HOODI_CHAIN_ID, hardfork::MorphHardforks};
+    use crate::{MORPH_HOODI_CHAIN_ID, hardfork::MorphHardforks};
+    use alloy_primitives::address;
 
     #[test]
     fn test_morph_hoodi_chain_id() {
@@ -24,9 +25,10 @@ mod tests {
     #[test]
     fn test_morph_hoodi_fee_vault() {
         assert!(MORPH_HOODI.is_fee_vault_enabled());
+        // Fee vault address is parsed from genesis JSON
         assert_eq!(
             MORPH_HOODI.fee_vault_address(),
-            Some(MORPH_FEE_VAULT_ADDRESS_HOODI)
+            Some(address!("29107CB79Ef8f69fE1587F77e283d47E84c5202f"))
         );
     }
 

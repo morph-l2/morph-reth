@@ -2,7 +2,7 @@
 
 use crate::{
     MORPH_BASE_FEE,
-    genesis::{MorphChainConfig, MorphGenesisInfo, MorphHardforkInfo},
+    genesis::{MorphChainConfig, MorphGenesisInfo},
     hardfork::{MorphHardfork, MorphHardforks},
 };
 use alloy_chains::Chain;
@@ -128,10 +128,7 @@ impl From<ChainSpec> for MorphChainSpec {
 impl From<Genesis> for MorphChainSpec {
     fn from(genesis: Genesis) -> Self {
         let chain_info = MorphGenesisInfo::extract_from(&genesis.config.extra_fields)
-            .unwrap_or_else(|| MorphGenesisInfo {
-                hard_fork_info: MorphHardforkInfo::extract_from(&genesis.config.extra_fields),
-                morph_chain_info: MorphChainConfig::mainnet(),
-            });
+            .expect("failed to extract morph genesis info");
 
         let hardfork_info = chain_info.hard_fork_info.clone().unwrap_or_default();
 
@@ -274,6 +271,7 @@ impl MorphHardforks for MorphChainSpec {
 mod tests {
     use super::*;
     use crate::hardfork::MorphHardforks;
+    use alloy_primitives::address;
     use serde_json::json;
 
     /// Helper function to create a test genesis with Morph hardforks at genesis
@@ -300,7 +298,10 @@ mod tests {
                 "curieBlock": 0,
                 "morph203Time": 0,
                 "viridianTime": 0,
-                "emeraldTime": 0
+                "emeraldTime": 0,
+                "morph": {
+                    "feeVaultAddress": "0x530000000000000000000000000000000000000a"
+                }
             },
             "alloc": {}
         });
@@ -373,7 +374,8 @@ mod tests {
                 "curieBlock": 200,
                 "morph203Time": 3000,
                 "viridianTime": 4000,
-                "emeraldTime": 5000
+                "emeraldTime": 5000,
+                "morph": {}
             },
             "alloc": {}
         });
@@ -430,7 +432,8 @@ mod tests {
                 "curieBlock": 200,
                 "morph203Time": 3000,
                 "viridianTime": 4000,
-                "emeraldTime": 5000
+                "emeraldTime": 5000,
+                "morph": {}
             },
             "alloc": {}
         });
@@ -549,7 +552,51 @@ mod tests {
         let chainspec = MorphChainSpec::from(genesis);
 
         let config = chainspec.chain_config();
-        // Default config is mainnet (has fee vault)
+        // Test genesis includes morph config with fee vault address
         assert!(config.is_fee_vault_enabled());
+    }
+
+    #[test]
+    fn test_chain_config_with_fee_vault() {
+        let genesis_json = json!({
+            "config": {
+                "chainId": 1337,
+                "homesteadBlock": 0,
+                "eip150Block": 0,
+                "eip155Block": 0,
+                "eip158Block": 0,
+                "byzantiumBlock": 0,
+                "constantinopleBlock": 0,
+                "petersburgBlock": 0,
+                "istanbulBlock": 0,
+                "berlinBlock": 0,
+                "londonBlock": 0,
+                "mergeNetsplitBlock": 0,
+                "terminalTotalDifficulty": 0,
+                "terminalTotalDifficultyPassed": true,
+                "shanghaiTime": 0,
+                "cancunTime": 0,
+                "bernoulliBlock": 0,
+                "curieBlock": 0,
+                "morph203Time": 0,
+                "viridianTime": 0,
+                "emeraldTime": 0,
+                "morph": {
+                    "feeVaultAddress": "0x530000000000000000000000000000000000000a",
+                    "maxTxPayloadBytesPerBlock": 122880
+                }
+            },
+            "alloc": {}
+        });
+        let genesis: Genesis =
+            serde_json::from_value(genesis_json).expect("genesis should be valid");
+        let chainspec = MorphChainSpec::from(genesis);
+
+        let config = chainspec.chain_config();
+        assert!(config.is_fee_vault_enabled());
+        assert_eq!(
+            config.fee_vault_address,
+            Some(address!("530000000000000000000000000000000000000a"))
+        );
     }
 }
