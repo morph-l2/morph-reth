@@ -29,10 +29,8 @@ pub const L1_TX_TYPE_ID: u8 = 0x7E;
 #[cfg_attr(feature = "reth-codec", derive(reth_codecs::Compact))]
 pub struct TxL1Msg {
     /// The queue index of the message in the L1 contract queue.
+    #[cfg_attr(feature = "serde", serde(with = "alloy_serde::quantity"))]
     pub queue_index: u64,
-
-    /// The 32-byte hash of the transaction.
-    pub tx_hash: B256,
 
     /// The 160-bit address of the message call's sender.
     pub from: Address,
@@ -78,11 +76,6 @@ impl TxL1Msg {
         self.from
     }
 
-    /// Returns the transaction hash.
-    pub const fn hash(&self) -> B256 {
-        self.tx_hash
-    }
-
     /// Validates the transaction according to the spec rules.
     ///
     /// L1 message transactions have minimal validation requirements.
@@ -96,7 +89,6 @@ impl TxL1Msg {
     /// This accounts for all fields in the struct.
     pub fn size(&self) -> usize {
         mem::size_of::<u64>() + // queue_index
-        mem::size_of::<B256>() + // tx_hash
         mem::size_of::<Address>() + // from
         mem::size_of::<u64>() + // nonce
         mem::size_of::<u128>() + // gas_limit
@@ -130,10 +122,10 @@ impl TxL1Msg {
         self.from.encode(out);
     }
 
+    /// Decode the transaction fields (without the RLP header).
     pub fn decode_fields(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
         Ok(Self {
             queue_index: Decodable::decode(buf)?,
-            tx_hash: Decodable::decode(buf)?,
             nonce: Decodable::decode(buf)?,
             gas_limit: Decodable::decode(buf)?,
             to: Decodable::decode(buf)?,
@@ -295,12 +287,8 @@ impl Decodable for TxL1Msg {
             return Err(alloy_rlp::Error::UnexpectedLength);
         }
 
-        // For L1 messages, the hash is typically computed externally
-        let tx_hash = B256::ZERO;
-
         Ok(Self {
             queue_index,
-            tx_hash,
             from,
             nonce,
             gas_limit,
@@ -373,7 +361,6 @@ mod tests {
     fn test_l1_transaction_trait_methods() {
         let tx = TxL1Msg {
             queue_index: 0,
-            tx_hash: B256::ZERO,
             from: address!("0000000000000000000000000000000000000001"),
             nonce: 0,
             gas_limit: 21_000,
@@ -437,7 +424,6 @@ mod tests {
     fn test_l1_transaction_signature_hash() {
         let tx = TxL1Msg {
             queue_index: 0,
-            tx_hash: B256::ZERO,
             from: address!("0000000000000000000000000000000000000001"),
             nonce: 1,
             gas_limit: 21_000,
@@ -454,7 +440,6 @@ mod tests {
     fn test_l1_transaction_rlp_roundtrip() {
         let tx = TxL1Msg {
             queue_index: 5,
-            tx_hash: B256::ZERO,
             from: address!("0000000000000000000000000000000000000001"),
             nonce: 42,
             gas_limit: 21_000,
@@ -483,7 +468,6 @@ mod tests {
     fn test_l1_transaction_create() {
         let tx = TxL1Msg {
             queue_index: 0,
-            tx_hash: B256::ZERO,
             from: address!("0000000000000000000000000000000000000001"),
             nonce: 0,
             gas_limit: 100_000,
@@ -506,7 +490,6 @@ mod tests {
     fn test_l1_transaction_encode_2718() {
         let tx = TxL1Msg {
             queue_index: 0,
-            tx_hash: B256::ZERO,
             from: address!("0000000000000000000000000000000000000001"),
             nonce: 1,
             gas_limit: 21_000,
@@ -532,7 +515,6 @@ mod tests {
     fn test_l1_transaction_decode_rejects_malformed_rlp() {
         let tx = TxL1Msg {
             queue_index: 0,
-            tx_hash: B256::ZERO,
             from: address!("0000000000000000000000000000000000000001"),
             nonce: 42,
             gas_limit: 21_000,
@@ -564,7 +546,6 @@ mod tests {
     fn test_l1_transaction_size() {
         let tx = TxL1Msg {
             queue_index: 0,
-            tx_hash: B256::ZERO,
             from: Address::ZERO,
             nonce: 0,
             gas_limit: 0,
@@ -575,7 +556,6 @@ mod tests {
 
         // Calculate expected size manually
         let expected_size = mem::size_of::<u64>() + // queue_index
-            mem::size_of::<B256>() + // tx_hash
             mem::size_of::<Address>() + // from
             mem::size_of::<u64>() + // nonce
             mem::size_of::<u128>() + // gas_limit
@@ -589,7 +569,6 @@ mod tests {
     fn test_l1_transaction_fields_len() {
         let tx = TxL1Msg {
             queue_index: 0,
-            tx_hash: B256::ZERO,
             from: address!("0000000000000000000000000000000000000001"),
             nonce: 1,
             gas_limit: 21_000,
@@ -610,7 +589,6 @@ mod tests {
     fn test_l1_transaction_encode_fields() {
         let tx = TxL1Msg {
             queue_index: 0,
-            tx_hash: B256::ZERO,
             from: address!("0000000000000000000000000000000000000001"),
             nonce: 1,
             gas_limit: 21_000,

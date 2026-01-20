@@ -504,8 +504,13 @@ mod compact {
                 logs: logs.into_owned(),
             };
 
+            // L1Msg uses plain Receipt, others use MorphTransactionReceipt
+            if tx_type == MorphTxType::L1Msg {
+                return Self::L1Msg(inner);
+            }
+
             let morph_receipt = MorphTransactionReceipt {
-                inner: inner.clone(),
+                inner,
                 l1_fee,
                 fee_token_id: fee_token_id.map(|id| id as u16),
                 fee_rate,
@@ -518,7 +523,7 @@ mod compact {
                 MorphTxType::Eip2930 => Self::Eip2930(morph_receipt),
                 MorphTxType::Eip1559 => Self::Eip1559(morph_receipt),
                 MorphTxType::Eip7702 => Self::Eip7702(morph_receipt),
-                MorphTxType::L1Msg => Self::L1Msg(inner),
+                MorphTxType::L1Msg => unreachable!("L1Msg handled above"),
                 MorphTxType::AltFee => Self::AltFee(morph_receipt),
             }
         }

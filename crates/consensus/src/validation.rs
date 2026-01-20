@@ -324,7 +324,9 @@ fn validate_l1_messages(txs: &[&MorphTxEnvelope]) -> Result<(), ConsensusError> 
     for tx in txs {
         // Check queue index is strictly sequential
         if tx.is_l1_msg() {
-            let tx_queue_index = tx.queue_index().expect("is_l1_msg");
+            let tx_queue_index = tx.queue_index().ok_or_else(|| {
+                ConsensusError::Other(MorphConsensusError::MalformedL1Message.to_string())
+            })?;
             if tx_queue_index != queue_index {
                 return Err(ConsensusError::Other(
                     MorphConsensusError::L1MessagesNotInOrder {
@@ -441,7 +443,6 @@ mod tests {
     fn create_l1_msg_tx(queue_index: u64) -> MorphTxEnvelope {
         let tx = TxL1Msg {
             queue_index,
-            tx_hash: B256::ZERO,
             from: Address::ZERO,
             nonce: queue_index, // nonce is used as queue index for L1 messages
             gas_limit: 21000,

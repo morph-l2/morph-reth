@@ -33,6 +33,7 @@ serde_json.workspace = true
 [features]
 default = ["serde"]
 serde = [
+    "alloy-consensus/serde",
     "alloy-eips/serde",
     "alloy-hardforks/serde",
     "alloy-primitives/serde",
