@@ -158,7 +158,7 @@ impl Transaction for TxL1Msg {
     }
 
     fn nonce(&self) -> u64 {
-        0
+        self.nonce
     }
 
     fn gas_limit(&self) -> u64 {

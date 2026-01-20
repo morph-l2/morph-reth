@@ -1,7 +1,6 @@
 //! Morph EVM Handler implementation.
 
 use alloy_primitives::{Address, Bytes, U256};
-use morph_primitives::L1_TX_TYPE_ID;
 use revm::{
     ExecuteEvm,
     context::{
@@ -96,8 +95,20 @@ where
         &self,
         evm: &mut Self::Evm,
     ) -> Result<(), Self::Error> {
-        // L1 message transactions skip all validation - everything is handled on L1 side
-        if evm.ctx_ref().tx().is_l1_msg() {
+        let (_, tx, cfg, journal, _, _) = evm.ctx().all_mut();
+        // System transaction - skip all validation
+        if cfg.disable_fee_charge {
+            return Ok(());
+        }
+        // L1 message - skip fee validation
+        if tx.is_l1_msg() {
+            // Load caller's account
+            let mut caller = journal.load_account_with_code_mut(tx.caller())?.data;
+
+            // Bump nonce for calls (CREATE nonce is bumped in make_create_frame)
+            if tx.kind().is_call() {
+                caller.bump_nonce();
+            }
             return Ok(());
         }
 
@@ -117,15 +128,17 @@ where
         evm: &mut Self::Evm,
         exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
     ) -> Result<(), Self::Error> {
-        // For L1 message transactions, no reimbursement is needed
-        if evm.ctx_ref().tx().is_l1_msg() {
+        let (_, tx, cfg, _, _, _) = evm.ctx().all_mut();
+
+        // For L1 message transactions & system transactions, no reimbursement is needed
+        if tx.is_l1_msg() || cfg.disable_fee_charge {
             return Ok(());
         }
 
         // Check if transaction is AltFeeTx (tx_type 0x7F) which uses token fee
-        if evm.ctx_ref().tx().is_alt_fee_tx() {
+        if tx.is_alt_fee_tx() {
             // Get fee_token_id directly from MorphTxEnv
-            let token_id = evm.ctx_ref().tx().fee_token_id.unwrap_or_default();
+            let token_id = tx.fee_token_id.unwrap_or_default();
             return self.reimburse_caller_token_fee(evm, exec_result.gas(), token_id);
         }
 
@@ -140,31 +153,31 @@ where
         evm: &mut Self::Evm,
         exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
     ) -> Result<(), Self::Error> {
-        // L1 message transactions skip all validation - everything is handled on L1 side
-        if evm.ctx_ref().tx().is_l1_msg() {
+        let (block, tx, cfg, journal, _, _) = evm.ctx().all_mut();
+        // System transaction - skip all reward
+        if cfg.disable_fee_charge {
             return Ok(());
         }
+        // L1 message transactions skip all reward.
         // AltFeeTx rewards are already applied when gasFee is deducted.
-        if evm.ctx_ref().tx().is_alt_fee_tx() {
+        if tx.is_l1_msg() || tx.is_alt_fee_tx() {
             return Ok(());
         }
 
-        let beneficiary = evm.ctx_ref().block().beneficiary();
+        let beneficiary = block.beneficiary();
 
-        let basefee = evm.ctx_ref().block().basefee() as u128;
-        let effective_gas_price = evm.ctx_ref().tx().effective_gas_price(basefee);
+        let basefee = block.basefee() as u128;
+        let effective_gas_price = tx.effective_gas_price(basefee);
 
         // Get the current hardfork for L1 fee calculation
-        let hardfork = evm.ctx_ref().cfg().spec();
+        let hardfork = cfg.spec();
 
         // Fetch L1 block info from the L1 Gas Price Oracle contract
-        let l1_block_info = L1BlockInfo::try_fetch(evm.ctx_mut().db_mut(), hardfork)?;
+        let l1_block_info = L1BlockInfo::try_fetch(journal.db_mut(), hardfork)?;
 
         // Get RLP-encoded transaction bytes for L1 fee calculation
         // This represents the full transaction data posted to L1 for data availability
-        let rlp_bytes = evm
-            .ctx_ref()
-            .tx()
+        let rlp_bytes = tx
             .rlp_bytes
             .as_ref()
             .map(|b| b.as_ref())
@@ -172,9 +185,6 @@ where
 
         // Calculate L1 data fee based on full RLP-encoded transaction
         let l1_data_fee = l1_block_info.calculate_tx_l1_cost(rlp_bytes, hardfork);
-
-        // Get mutable access to journal components
-        let journal = evm.ctx().journal_mut();
 
         let gas_used = exec_result.gas().used();
 
@@ -190,8 +200,8 @@ where
 
     #[inline]
     fn validate_env(&self, evm: &mut Self::Evm) -> Result<(), Self::Error> {
-        // For L1 message transactions, skip certain validations
-        if evm.ctx_ref().tx().is_l1_msg() {
+        // For L1 message transactions & System transaction, skip certain validations
+        if evm.ctx_ref().tx().is_l1_msg() || evm.ctx_ref().cfg().disable_fee_charge {
             // L1 messages have zero gas price, so skip gas price validation
             return Ok(());
         }
@@ -460,7 +470,6 @@ where
             }
         } else {
             // Transfer with evm call.
-            let tx_origin = evm.tx.clone();
             transfer_erc20_with_evm(
                 evm,
                 token_fee_info.caller,
@@ -468,8 +477,6 @@ where
                 token_fee_info.token_address,
                 token_amount_required,
             )?;
-            // restore the original transaction
-            evm.tx = tx_origin;
         }
 
         let (_, tx, cfg, journal, _, _) = evm.ctx().all_mut();
@@ -542,14 +549,14 @@ fn transfer_erc20_with_evm<DB, I>(
 where
     DB: alloy_evm::Database,
 {
-    let calldata = build_transfer_calldata(to, token_amount);
+    let tx_origin = evm.tx.clone();
 
+    let calldata = build_transfer_calldata(to, token_amount);
     let tx_env = revm::context::TxEnv {
         caller,
         gas_limit: TRANSFER_GAS_LIMIT,
         kind: token_address.into(),
         data: calldata,
-        tx_type: L1_TX_TYPE_ID, // Mark as L1 message to skip gas validation
         ..Default::default()
     };
 
@@ -558,23 +565,30 @@ where
         rlp_bytes: None,
         ..Default::default()
     };
-    match evm.transact_one(tx) {
+
+    evm.cfg.disable_fee_charge = true; // Disable fee charge for system call
+    let res = match evm.transact_one(tx) {
         Ok(result) => {
-            if !result.is_success() {
-                return Err(MorphInvalidTransaction::TokenTransferFailed {
+            if result.is_success() {
+                Ok(())
+            } else {
+                Err(MorphInvalidTransaction::TokenTransferFailed {
                     reason: format!("{result:?}"),
                 }
-                .into());
+                .into())
             }
         }
-        Err(e) => {
-            return Err(MorphInvalidTransaction::TokenTransferFailed {
-                reason: format!("Error: {e:?}"),
-            }
-            .into());
+        Err(e) => Err(MorphInvalidTransaction::TokenTransferFailed {
+            reason: format!("Error: {e:?}"),
         }
+        .into()),
     };
-    Ok(())
+
+    // restore the original transaction
+    evm.cfg.disable_fee_charge = false;
+    evm.tx = tx_origin;
+
+    res
 }
 
 /// Build the calldata for ERC20 transfer(address,amount) call.

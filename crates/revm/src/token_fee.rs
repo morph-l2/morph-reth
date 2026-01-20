@@ -269,6 +269,7 @@ where
     let morph_tx = crate::MorphTxEnv::new(tx);
 
     // Execute using transact_one
+    evm.cfg.disable_fee_charge = true; // Disable fee charge for system call
     match evm.transact_one(morph_tx) {
         Ok(result) => {
             if result.is_success() {
