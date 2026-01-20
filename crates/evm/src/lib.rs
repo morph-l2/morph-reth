@@ -1,4 +1,38 @@
 //! Morph EVM implementation.
+//!
+//! This crate provides the EVM configuration and block execution logic for Morph L2.
+//!
+//! # Main Components
+//!
+//! - [`MorphEvmConfig`]: Main EVM configuration that implements `BlockExecutorFactory`
+//! - [`MorphEvmFactory`]: Factory for creating Morph EVM instances
+//! - [`MorphBlockAssembler`]: Block assembly logic for payload building
+//! - [`MorphBlockExecutionCtx`]: Execution context for block processing
+//!
+//! # Architecture
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────┐
+//! │                      MorphEvmConfig                             │
+//! │  ┌─────────────────────┐  ┌─────────────────────────────────┐  │
+//! │  │   EthEvmConfig      │  │    MorphBlockAssembler          │  │
+//! │  │  (inner config)     │  │  (block building)               │  │
+//! │  └─────────────────────┘  └─────────────────────────────────┘  │
+//! │                 │                                               │
+//! │                 ▼                                               │
+//! │  ┌─────────────────────────────────────────────────────────┐   │
+//! │  │              MorphBlockExecutor                         │   │
+//! │  │   - Executes transactions                               │   │
+//! │  │   - Handles L1 messages                                 │   │
+//! │  │   - Calculates L1 data fee                              │   │
+//! │  └─────────────────────────────────────────────────────────┘   │
+//! └─────────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! # Features
+//!
+//! - `reth-codec`: Enable `ConfigureEvm` implementation for reth integration
+//! - `engine`: Enable engine API types
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
