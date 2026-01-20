@@ -3643,7 +3643,6 @@ name = "morph-chainspec"
 version = "0.7.5"
 dependencies = [
  "alloy-chains",
- "alloy-consensus",
  "alloy-eips",
  "alloy-evm",
  "alloy-genesis",
@@ -3652,6 +3651,7 @@ dependencies = [
  "alloy-serde",
  "auto_impl",
  "eyre",
+ "morph-primitives",
  "reth-chainspec",
  "reth-cli",
  "reth-network-peers",
@@ -3740,7 +3740,6 @@ dependencies = [
  "alloy-serde",
  "morph-primitives",
  "rand 0.8.5",
- "reth-engine-primitives",
  "reth-payload-builder",
  "reth-payload-primitives",
  "reth-primitives-traits",
@@ -3766,6 +3765,7 @@ dependencies = [
  "reth-primitives-traits",
  "reth-zstd-compressors",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

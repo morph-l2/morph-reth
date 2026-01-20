@@ -1,5 +1,6 @@
 use crate::{
-    MorphBlockExecutionCtx, evm::MorphEvm,
+    MorphBlockExecutionCtx,
+    evm::MorphEvm,
     system_contracts::{
         BLOB_ENABLED, GPO_IS_BLOB_ENABLED_SLOT, L1_GAS_PRICE_ORACLE_ADDRESS,
         L1_GAS_PRICE_ORACLE_INIT_STORAGE,
@@ -18,10 +19,7 @@ use morph_chainspec::MorphChainSpec;
 use morph_primitives::{MorphReceipt, MorphTransactionReceipt, MorphTxEnvelope, MorphTxType};
 use morph_revm::{MorphHaltReason, evm::MorphContext};
 use reth_revm::{Inspector, State, context::result::ResultAndState};
-use revm::{
-    Database as RevmDatabase,
-    database::states::StorageSlot,
-};
+use revm::{Database as RevmDatabase, database::states::StorageSlot};
 
 /// Builder for [`MorphReceipt`].
 #[derive(Debug, Clone, Copy, Default)]

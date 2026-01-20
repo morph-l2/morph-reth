@@ -1,30 +1,30 @@
 //! Morph payload builder implementation.
 
-use crate::{config::PayloadBuildingBreaker, MorphBuilderConfig, MorphPayloadBuilderError};
+use crate::{MorphBuilderConfig, MorphPayloadBuilderError, config::PayloadBuildingBreaker};
 use alloy_consensus::{BlockHeader, Transaction, Typed2718};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{Bytes, U256};
 use alloy_rlp::Encodable;
 use morph_chainspec::MorphChainSpec;
 use morph_evm::{
-    system_contracts::read_withdraw_trie_root, MorphEvmConfig, MorphNextBlockEnvAttributes,
+    MorphEvmConfig, MorphNextBlockEnvAttributes, system_contracts::read_withdraw_trie_root,
 };
 use morph_payload_types::{ExecutableL2Data, MorphBuiltPayload, MorphPayloadBuilderAttributes};
 use morph_primitives::{MorphHeader, MorphTxEnvelope};
 use reth_basic_payload_builder::{
-    is_better_payload, BuildArguments, BuildOutcome, BuildOutcomeKind, MissingPayloadBehaviour,
-    PayloadBuilder, PayloadConfig,
+    BuildArguments, BuildOutcome, BuildOutcomeKind, MissingPayloadBehaviour, PayloadBuilder,
+    PayloadConfig, is_better_payload,
 };
 use reth_chainspec::ChainSpecProvider;
 use reth_evm::{
+    ConfigureEvm, Database, Evm, NextBlockEnvAttributes,
     block::{BlockExecutionError, BlockValidationError},
     execute::{BlockBuilder, BlockBuilderOutcome},
-    ConfigureEvm, Database, Evm, NextBlockEnvAttributes,
 };
 use reth_payload_builder::PayloadId;
 use reth_payload_primitives::{PayloadBuilderAttributes, PayloadBuilderError};
 use reth_payload_util::{BestPayloadTransactions, NoopPayloadTransactions, PayloadTransactions};
-use reth_primitives_traits::SealedHeader;
+use reth_primitives_traits::{RecoveredBlock, SealedHeader};
 use reth_revm::{database::StateProviderDatabase, db::State};
 use reth_storage_api::{StateProvider, StateProviderFactory};
 use reth_transaction_pool::{BestTransactionsAttributes, PoolTransaction, TransactionPool};
@@ -492,13 +492,13 @@ struct ExecutionInfo {
 }
 
 impl ExecutionInfo {
-    /// Creates a new [`ExecutionInfo`].
-    const fn new() -> Self {
+    /// Creates a new [`ExecutionInfo`] with the initial next L1 message index from parent.
+    const fn new(next_l1_message_index: u64) -> Self {
         Self {
             cumulative_gas_used: 0,
             cumulative_da_bytes_used: 0,
             total_fees: U256::ZERO,
-            next_l1_message_index: 0,
+            next_l1_message_index,
         }
     }
 
@@ -538,7 +538,7 @@ where
         target: "payload_builder",
         id = %ctx.payload_id(),
         parent_hash = ?ctx.parent().hash(),
-        parent_number = ctx.parent().number,
+        parent_number = ctx.parent().number(),
         "building new payload"
     );
 
@@ -553,7 +553,7 @@ where
             timestamp: attributes.inner.timestamp,
             suggested_fee_recipient: attributes.inner.suggested_fee_recipient,
             prev_randao: attributes.inner.prev_randao,
-            gas_limit: ctx.parent().gas_limit,
+            gas_limit: ctx.parent().gas_limit(),
             withdrawals: Some(attributes.inner.withdrawals.clone()),
             parent_beacon_block_root: attributes.inner.parent_beacon_block_root,
             extra_data: Default::default(),
@@ -572,7 +572,8 @@ where
         PayloadBuilderError::Internal(err.into())
     })?;
 
-    let mut info = ExecutionInfo::new();
+    // Initialize next_l1_message_index from parent header
+    let mut info = ExecutionInfo::new(ctx.parent().next_l1_msg_index);
     let base_fee = builder.evm().block().basefee();
     let block_gas_limit = builder.evm().block().gas_limit();
 
@@ -585,7 +586,13 @@ where
     // 3. Execute pool transactions (best transactions from mempool)
     let best_txs = best(ctx.best_transaction_attributes(base_fee));
     if ctx
-        .execute_pool_transactions(&mut builder, &mut info, &mut executed_txs, best_txs, &breaker)?
+        .execute_pool_transactions(
+            &mut builder,
+            &mut info,
+            &mut executed_txs,
+            best_txs,
+            &breaker,
+        )?
         .is_some()
     {
         // Check if it was a cancellation or just breaker triggered
@@ -618,10 +625,22 @@ where
     // 6. Finish building the block
     let BlockBuilderOutcome {
         execution_result,
-        block,
+        mut block,
         ..
     } = builder.finish(state_provider)?;
 
+    // 7. Update MorphHeader with next_l1_msg_index.
+    // Since hash_slow() only hashes the inner header, we can update the
+    // MorphHeader's L2-specific fields without changing the block hash.
+    let (mut morph_block, senders) = block.split();
+    morph_block = morph_block.map_header(|mut header: MorphHeader| {
+        header.next_l1_msg_index = info.next_l1_message_index;
+        // batch_hash remains B256::ZERO - it will be set by the batch submitter
+        header
+    });
+    block = RecoveredBlock::new_unhashed(morph_block, senders);
+
+    // Get the sealed block from the recovered block
     let sealed_block = Arc::new(block.sealed_block().clone());
     let header = sealed_block.header();
 

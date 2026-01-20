@@ -6,11 +6,11 @@ use crate::{
     hardfork::{MorphHardfork, MorphHardforks},
 };
 use alloy_chains::Chain;
-use alloy_consensus::Header;
 use alloy_eips::eip7840::BlobParams;
 use alloy_evm::eth::spec::EthExecutorSpec;
 use alloy_genesis::Genesis;
 use alloy_primitives::{Address, B256, U256};
+use morph_primitives::MorphHeader;
 use reth_chainspec::{
     BaseFeeParams, ChainSpec, DepositContract, DisplayHardforks, EthChainSpec, EthereumHardfork,
     EthereumHardforks, ForkCondition, ForkFilter, ForkId, Hardfork, Hardforks, Head,
@@ -86,14 +86,14 @@ impl ChainConfig for MorphChainSpec {
 /// Morph chain spec type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MorphChainSpec {
-    /// [`ChainSpec`].
-    pub inner: ChainSpec<Header>,
+    /// [`ChainSpec`] with MorphHeader.
+    pub inner: ChainSpec<MorphHeader>,
     pub info: MorphGenesisInfo,
 }
 
 impl MorphChainSpec {
     /// Create a new [`MorphChainSpec`] with the given inner spec and config.
-    pub fn new(inner: ChainSpec<Header>, info: MorphGenesisInfo) -> Self {
+    pub fn new(inner: ChainSpec<MorphHeader>, info: MorphGenesisInfo) -> Self {
         Self { inner, info }
     }
 
@@ -151,8 +151,11 @@ impl From<Genesis> for MorphChainSpec {
 
         base_spec.hardforks.extend(timestamp_forks);
 
+        // Convert ChainSpec<Header> to ChainSpec<MorphHeader> using map_header
+        let morph_spec: ChainSpec<MorphHeader> = base_spec.map_header(MorphHeader::from);
+
         Self {
-            inner: base_spec,
+            inner: morph_spec,
             info: chain_info,
         }
     }
@@ -185,7 +188,7 @@ impl Hardforks for MorphChainSpec {
 }
 
 impl EthChainSpec for MorphChainSpec {
-    type Header = Header;
+    type Header = MorphHeader;
 
     fn chain(&self) -> Chain {
         self.inner.chain()
@@ -238,7 +241,7 @@ impl EthChainSpec for MorphChainSpec {
         self.inner.get_final_paris_total_difficulty()
     }
 
-    fn next_block_base_fee(&self, _parent: &Header, _target_timestamp: u64) -> Option<u64> {
+    fn next_block_base_fee(&self, _parent: &MorphHeader, _target_timestamp: u64) -> Option<u64> {
         Some(MORPH_BASE_FEE)
     }
 }

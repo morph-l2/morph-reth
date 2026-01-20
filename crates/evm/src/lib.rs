@@ -4,8 +4,6 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod assemble;
-#[cfg(feature = "engine")]
-mod engine;
 use alloy_consensus::BlockHeader as _;
 pub use assemble::MorphBlockAssembler;
 mod block;

@@ -39,4 +39,3 @@ alloy-genesis.workspace = true
 [features]
 default = ["rpc"]
 rpc = ["dep:reth-rpc-eth-api", "morph-revm/rpc"]
-engine = []

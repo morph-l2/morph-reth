@@ -1,7 +1,7 @@
 //! Morph payload attributes types.
 
-use alloy_eips::eip4895::{Withdrawal, Withdrawals};
 use alloy_eips::eip2718::Decodable2718;
+use alloy_eips::eip4895::{Withdrawal, Withdrawals};
 use alloy_primitives::{Address, B256, Bytes};
 use alloy_rpc_types_engine::{PayloadAttributes, PayloadId};
 use morph_primitives::MorphTxEnvelope;
@@ -145,11 +145,7 @@ impl MorphPayloadBuilderAttributes {
 /// Compute payload ID from parent hash and attributes.
 ///
 /// Uses SHA-256 hashing with the version byte as the first byte of the result.
-fn payload_id_morph(
-    parent: &B256,
-    attributes: &MorphPayloadAttributes,
-    version: u8,
-) -> PayloadId {
+fn payload_id_morph(parent: &B256, attributes: &MorphPayloadAttributes, version: u8) -> PayloadId {
     let mut hasher = Sha256::new();
 
     // Hash parent

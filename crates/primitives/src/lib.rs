@@ -16,13 +16,12 @@ use reth_ethereum_primitives as _;
 #[cfg(feature = "reth-codec")]
 use reth_zstd_compressors as _;
 
+pub mod header;
 pub mod receipt;
 pub mod transaction;
 
-// Re-export standard Ethereum types
-pub use alloy_consensus::Header;
-/// Header alias for backwards compatibility.
-pub type MorphHeader = Header;
+// Re-export header type
+pub use header::MorphHeader;
 
 use reth_primitives_traits::NodePrimitives;
 

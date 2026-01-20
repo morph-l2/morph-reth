@@ -1,4 +1,6 @@
-use alloy_consensus::{Sealed, Signed, TransactionEnvelope, TxEip1559, TxEip2930, TxEip7702, TxLegacy};
+use alloy_consensus::{
+    Sealed, Signed, TransactionEnvelope, TxEip1559, TxEip2930, TxEip7702, TxLegacy,
+};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{B256, Bytes};
 use alloy_rlp::BytesMut;

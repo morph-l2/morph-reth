@@ -9,7 +9,10 @@ use alloy_consensus::{
     SignableTransaction, Transaction,
     transaction::{RlpEcdsaDecodableTx, RlpEcdsaEncodableTx},
 };
-use alloy_eips::{Typed2718, eip2718::{Decodable2718, Eip2718Error, Eip2718Result, Encodable2718}};
+use alloy_eips::{
+    Typed2718,
+    eip2718::{Decodable2718, Eip2718Error, Eip2718Result, Encodable2718},
+};
 use alloy_primitives::{Address, B256, Bytes, ChainId, Signature, TxKind, U256, keccak256};
 use alloy_rlp::{BufMut, Decodable, Encodable, Header};
 use core::mem;
@@ -37,7 +40,10 @@ pub struct TxL1Msg {
     pub queue_index: u64,
 
     /// The gas limit for the transaction. Gas is paid for when message is sent from the L1.
-    #[cfg_attr(feature = "serde", serde(with = "alloy_serde::quantity", rename = "gas"))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(with = "alloy_serde::quantity", rename = "gas")
+    )]
     pub gas_limit: u64,
 
     /// The destination address for the transaction.
@@ -91,12 +97,12 @@ impl TxL1Msg {
     /// Field order matches go-ethereum: queue_index, gas_limit, to, value, input, sender
     #[doc(hidden)]
     pub fn fields_len(&self) -> usize {
-        self.queue_index.length() +
-        self.gas_limit.length() +
-        self.to.length() +
-        self.value.length() +
-        self.input.0.length() +
-        self.sender.length()
+        self.queue_index.length()
+            + self.gas_limit.length()
+            + self.to.length()
+            + self.value.length()
+            + self.input.0.length()
+            + self.sender.length()
     }
 
     /// Encode the transaction fields (without the RLP header).
@@ -527,7 +533,7 @@ mod tests {
             mem::size_of::<Address>() + // to
             mem::size_of::<U256>() + // value
             mem::size_of::<Address>(); // sender
-            // Note: input is empty so contributes 0 bytes
+        // Note: input is empty so contributes 0 bytes
 
         assert_eq!(tx.size(), expected_size);
     }

@@ -57,7 +57,11 @@ impl MorphBuilderConfig {
         time_limit: Duration,
         max_da_block_size: Option<u64>,
     ) -> Self {
-        Self { gas_limit, time_limit, max_da_block_size }
+        Self {
+            gas_limit,
+            time_limit,
+            max_da_block_size,
+        }
     }
 
     /// Sets the gas limit.
@@ -192,11 +196,8 @@ mod tests {
 
     #[test]
     fn test_breaker_should_break_on_time_limit() {
-        let breaker = PayloadBuildingBreaker::new(
-            Duration::from_millis(100),
-            30_000_000,
-            Some(128 * 1024),
-        );
+        let breaker =
+            PayloadBuildingBreaker::new(Duration::from_millis(100), 30_000_000, Some(128 * 1024));
 
         // Should not break immediately
         assert!(!breaker.should_break(0, 0));

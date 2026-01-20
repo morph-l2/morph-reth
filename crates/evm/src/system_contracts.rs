@@ -21,8 +21,7 @@ pub const L1_GAS_PRICE_ORACLE_ADDRESS: Address =
 ///
 /// Manages the L1-to-L2 message queue and stores the withdraw trie root.
 /// See: <https://github.com/morph-l2/morph/blob/main/contracts/contracts/L2/predeploys/L2MessageQueue.sol>
-pub const L2_MESSAGE_QUEUE_ADDRESS: Address =
-    address!("5300000000000000000000000000000000000001");
+pub const L2_MESSAGE_QUEUE_ADDRESS: Address = address!("5300000000000000000000000000000000000001");
 
 // =============================================================================
 // L2 Message Queue Storage Slots
@@ -50,16 +49,17 @@ pub const L2_MESSAGE_QUEUE_WITHDRAW_TRIE_ROOT_SLOT: U256 = U256::from_limbs([33,
 /// which stores the Merkle root for L2→L1 withdrawal messages.
 ///
 pub fn read_withdraw_trie_root<DB: revm::Database>(db: &mut DB) -> Result<B256, DB::Error> {
-    let value = db.storage(L2_MESSAGE_QUEUE_ADDRESS, L2_MESSAGE_QUEUE_WITHDRAW_TRIE_ROOT_SLOT)?;
+    let value = db.storage(
+        L2_MESSAGE_QUEUE_ADDRESS,
+        L2_MESSAGE_QUEUE_WITHDRAW_TRIE_ROOT_SLOT,
+    )?;
     Ok(B256::from(value))
 }
 
 /// Morph Fee Vault contract address.
 ///
 /// Collects transaction fees.
-pub const MORPH_FEE_VAULT_ADDRESS: Address =
-    address!("530000000000000000000000000000000000000a");
-
+pub const MORPH_FEE_VAULT_ADDRESS: Address = address!("530000000000000000000000000000000000000a");
 
 /// Morph Token Registry contract address.
 pub const MORPH_TOKEN_REGISTRY_ADDRESS: Address =

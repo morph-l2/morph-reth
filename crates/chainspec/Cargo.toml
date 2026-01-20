@@ -12,12 +12,13 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+morph-primitives.workspace = true
+
 reth-cli = { workspace = true, optional = true }
 reth-chainspec.workspace = true
 reth-network-peers.workspace = true
 
 alloy-chains.workspace = true
-alloy-consensus.workspace = true
 alloy-evm.workspace = true
 alloy-genesis.workspace = true
 alloy-primitives.workspace = true
