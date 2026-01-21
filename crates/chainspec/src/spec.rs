@@ -129,7 +129,7 @@ impl From<ChainSpec> for MorphChainSpec {
 impl From<Genesis> for MorphChainSpec {
     fn from(genesis: Genesis) -> Self {
         let chain_info = MorphGenesisInfo::extract_from(&genesis.config.extra_fields)
-            .unwrap_or_default();
+            .expect("failed to extract morph genesis info");
 
         let hardfork_info = chain_info.hard_fork_info.clone().unwrap_or_default();
 
