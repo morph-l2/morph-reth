@@ -138,7 +138,7 @@ impl From<Genesis> for MorphChainSpec {
 
         // Add Morph hardforks
         // Note: Bernoulli and Curie use block-based activation,
-        // while Morph203, Viridian, and Emerald use timestamp-based activation.
+        // while Morph203, Viridian, Emerald, and MPTFork use timestamp-based activation.
         let block_forks = vec![
             (MorphHardfork::Bernoulli, hardfork_info.bernoulli_block),
             (MorphHardfork::Curie, hardfork_info.curie_block),

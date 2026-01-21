@@ -20,7 +20,7 @@
 //!
 //! - [`Block`]: Morph block type alias
 //! - [`BlockBody`]: Morph block body type alias
-//! - [`MorphHeader`]: Header type alias (same as Ethereum)
+//! - [`MorphHeader`]: Morph header type alias
 //!
 //! # Node Primitives
 //!

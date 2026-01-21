@@ -604,10 +604,10 @@ where
     // Create breaker for early exit from pool transaction execution
     let breaker = ctx.builder_config.breaker(block_gas_limit);
 
-    // 2. Execute sequencer transactions (L1 messages and forced transactions)
+    // Execute sequencer transactions (L1 messages and forced transactions)
     let mut executed_txs = ctx.execute_sequencer_transactions(&mut builder, &mut info)?;
 
-    // 3. Execute pool transactions (best transactions from mempool)
+    // Execute pool transactions (best transactions from mempool)
     let best_txs = best(ctx.best_transaction_attributes(base_fee));
     if ctx
         .execute_pool_transactions(
@@ -634,14 +634,14 @@ where
         );
     }
 
-    // 4. Check if this payload is better than the previous one
+    // Check if this payload is better than the previous one
     if !ctx.is_better_payload(info.total_fees) {
         return Ok(BuildOutcomeKind::Aborted {
             fees: info.total_fees,
         });
     }
 
-    // 5. Read withdraw_trie_root from L2MessageQueue contract storage
+    // Read withdraw_trie_root from L2MessageQueue contract storage
     // This must be done before finish() consumes the builder
     let withdraw_trie_root = read_withdraw_trie_root(builder.evm_mut().db_mut())
         .map_err(|err| PayloadBuilderError::other(MorphPayloadBuilderError::Database(err)))?;
@@ -653,7 +653,7 @@ where
         ..
     } = builder.finish(state_provider)?;
 
-    // 7. Update MorphHeader with next_l1_msg_index.
+    // Update MorphHeader with next_l1_msg_index.
     // Since hash_slow() only hashes the inner header, we can update the
     // MorphHeader's L2-specific fields without changing the block hash.
     let (mut morph_block, senders) = block.split();
@@ -675,7 +675,7 @@ where
         "sealed built block"
     );
 
-    // 6. Build ExecutableL2Data from the sealed block
+    // Build ExecutableL2Data from the sealed block
     let mut logs_bloom_bytes = Vec::new();
     header.logs_bloom().encode(&mut logs_bloom_bytes);
 
