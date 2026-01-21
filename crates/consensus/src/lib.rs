@@ -18,7 +18,6 @@
 //!
 //! # Example
 //!
-//! ```ignore
 //! use morph_consensus::MorphConsensus;
 //! use std::sync::Arc;
 //!

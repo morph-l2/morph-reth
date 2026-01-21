@@ -1,9 +1,38 @@
 //! Morph L2 consensus validation.
 //!
-//! This module provides consensus validation for Morph L2 blocks, including:
-//! - Header validation
-//! - Body validation (L1 messages ordering)
-//! - Block pre/post execution validation
+//! This module provides consensus validation for Morph L2 blocks, implementing
+//! reth's `Consensus`, `HeaderValidator`, and `FullConsensus` traits.
+//!
+//! # Validation Rules
+//!
+//! ## Header Validation
+//!
+//! - Extra data must be empty (Morph L2 specific)
+//! - Nonce must be 0 (post-merge)
+//! - Ommers hash must be empty (post-merge)
+//! - Difficulty must be 0 (post-merge)
+//! - Coinbase must be zero when FeeVault is enabled
+//! - Timestamp cannot be in the future
+//! - Gas limit must be within bounds
+//! - Base fee must be set after Curie hardfork
+//!
+//! ## L1 Message Rules
+//!
+//! - All L1 messages must be at the beginning of the block
+//! - L1 messages must have strictly sequential `queue_index`
+//! - No gaps allowed in the queue index sequence
+//!
+//! ## Block Body Validation
+//!
+//! - No uncle blocks allowed
+//! - Withdrawals must be empty
+//! - Transaction root must be valid
+//!
+//! ## Post-Execution Validation
+//!
+//! - Gas used must match cumulative gas from receipts
+//! - Receipts root must be valid
+//! - Logs bloom must be valid
 //!
 use crate::MorphConsensusError;
 use alloy_consensus::{BlockHeader as _, EMPTY_OMMER_ROOT_HASH, TxReceipt};
@@ -68,6 +97,19 @@ impl MorphConsensus {
 // ============================================================================
 
 impl HeaderValidator<MorphHeader> for MorphConsensus {
+    /// Validates a block header according to Morph L2 consensus rules.
+    ///
+    /// # Validation Steps
+    ///
+    /// 1. **Extra Data**: Must be empty (Morph L2 specific)
+    /// 2. **Nonce**: Must be 0 (post-merge Ethereum)
+    /// 3. **Ommers Hash**: Must be empty ommer root hash (post-merge)
+    /// 4. **Difficulty**: Must be 0 (post-merge)
+    /// 5. **Coinbase**: Must be zero address if FeeVault is enabled
+    /// 6. **Timestamp**: Must not be in the future
+    /// 7. **Gas Limit**: Must be <= MAX_GAS_LIMIT
+    /// 8. **Gas Used**: Must be <= gas limit
+    /// 9. **Base Fee**: Must be set after Curie hardfork and <= 10 Gwei
     fn validate_header(&self, header: &SealedHeader<MorphHeader>) -> Result<(), ConsensusError> {
         // Extra data must be empty (Morph L2 specific - stricter than max length)
         if !header.extra_data().is_empty() {
@@ -140,6 +182,14 @@ impl HeaderValidator<MorphHeader> for MorphConsensus {
         Ok(())
     }
 
+    /// Validates a block header against its parent header.
+    ///
+    /// # Validation Steps
+    ///
+    /// 1. **Parent Hash**: Header's parent_hash must match parent's hash
+    /// 2. **Block Number**: Header's number must be parent's number + 1
+    /// 3. **Timestamp**: Header's timestamp must be >= parent's timestamp
+    /// 4. **Gas Limit**: Change must be within 1/1024 of parent's limit
     fn validate_header_against_parent(
         &self,
         header: &SealedHeader<MorphHeader>,
@@ -151,7 +201,7 @@ impl HeaderValidator<MorphHeader> for MorphConsensus {
         // Validate timestamp against parent
         validate_against_parent_timestamp(header.header(), parent.header())?;
 
-        // Validate gas limit change (before Curie only)
+        // Validate gas limit change
         validate_against_parent_gas_limit(header.header(), parent.header())?;
 
         Ok(())
@@ -165,6 +215,9 @@ impl HeaderValidator<MorphHeader> for MorphConsensus {
 impl Consensus<Block> for MorphConsensus {
     type Error = ConsensusError;
 
+    /// Validates the block body against the header.
+    ///
+    /// Checks that the body's computed transaction root matches the header's.
     fn validate_body_against_header(
         &self,
         body: &BlockBody,
@@ -173,6 +226,15 @@ impl Consensus<Block> for MorphConsensus {
         validate_body_against_header(body, header.header())
     }
 
+    /// Validates the block before execution.
+    ///
+    /// # Validation Steps
+    ///
+    /// 1. **No Uncle Blocks**: Morph L2 doesn't support uncle blocks
+    /// 2. **Ommers Hash**: Must be the empty ommer root hash
+    /// 3. **Transaction Root**: Must be valid
+    /// 4. **Withdrawals**: Must be empty (Morph L2 doesn't support withdrawals)
+    /// 5. **L1 Messages**: Must be ordered correctly (sequential queue indices, L1 before L2)
     fn validate_block_pre_execution(&self, block: &SealedBlock<Block>) -> Result<(), Self::Error> {
         // Check no uncles allowed (Morph L2 has no uncle blocks)
         let ommers_len = block.body().ommers().map(|o| o.len()).unwrap_or_default();
@@ -216,6 +278,18 @@ impl Consensus<Block> for MorphConsensus {
 // ============================================================================
 
 impl FullConsensus<morph_primitives::MorphPrimitives> for MorphConsensus {
+    /// Validates the block after execution.
+    ///
+    /// This is called after all transactions have been executed and compares
+    /// the execution results against the block header.
+    ///
+    /// # Validation Steps
+    ///
+    /// 1. **Gas Used**: The cumulative gas used from the last receipt must match
+    ///    the header's `gas_used` field.
+    /// 2. **Receipts Root**: The computed receipts root must match the header's.
+    /// 3. **Logs Bloom**: The combined bloom filter of all receipts must match
+    ///    the header's `logs_bloom` field.
     fn validate_block_post_execution(
         &self,
         block: &RecoveredBlock<Block>,
@@ -247,7 +321,16 @@ impl FullConsensus<morph_primitives::MorphPrimitives> for MorphConsensus {
     }
 }
 
-//
+/// Validates that the header's timestamp is not before the parent's timestamp.
+///
+/// # Errors
+///
+/// Returns [`ConsensusError::TimestampIsInPast`] if the header's timestamp
+/// is less than the parent's timestamp.
+///
+/// # Note
+///
+/// Equal timestamps are allowed - only strictly less than is rejected.
 #[inline]
 fn validate_against_parent_timestamp<H: BlockHeader>(
     header: &H,
@@ -264,7 +347,16 @@ fn validate_against_parent_timestamp<H: BlockHeader>(
 
 /// Validates gas limit change against parent.
 ///
-/// - Gas limit change must be within bounds (parent / GAS_LIMIT_BOUND_DIVISOR)
+/// The gas limit change between consecutive blocks must not exceed
+/// `parent_gas_limit / GAS_LIMIT_BOUND_DIVISOR` (1/1024 of parent's limit).
+///
+/// Additionally, the gas limit must be at least [`MINIMUM_GAS_LIMIT`] (5000).
+///
+/// # Errors
+///
+/// - [`ConsensusError::GasLimitInvalidIncrease`] if gas limit increased too much
+/// - [`ConsensusError::GasLimitInvalidDecrease`] if gas limit decreased too much
+/// - [`ConsensusError::GasLimitInvalidMinimum`] if gas limit is below minimum
 #[inline]
 fn validate_against_parent_gas_limit<H: BlockHeader>(
     header: &H,
@@ -301,8 +393,35 @@ fn validate_against_parent_gas_limit<H: BlockHeader>(
 
 /// Validates L1 message ordering in a block's transactions.
 ///
-/// - All L1 messages must be at the beginning of the block
-/// - L1 messages must have strictly sequential queue indices
+/// L1 messages are special transactions that originate from L1 (deposits, etc.).
+/// They must follow strict ordering rules to ensure deterministic block execution.
+///
+/// # Rules
+///
+/// 1. **Position**: All L1 messages must appear at the beginning of the block.
+///    Once a regular (L2) transaction appears, no more L1 messages are allowed.
+///
+/// 2. **Sequential Queue Index**: L1 messages must have strictly sequential
+///    `queue_index` values. If the first L1 message has `queue_index = N`,
+///    the next must have `queue_index = N+1`, and so on.
+///
+/// # Errors
+///
+/// - [`MorphConsensusError::MalformedL1Message`] if an L1 message is missing its queue_index
+/// - [`MorphConsensusError::L1MessagesNotInOrder`] if queue indices are not sequential
+/// - [`MorphConsensusError::InvalidL1MessageOrder`] if L1 message appears after L2 transaction
+///
+/// # Example (Valid)
+///
+/// ```text
+/// [L1Msg(queue=0), L1Msg(queue=1), L1Msg(queue=2), RegularTx, RegularTx]
+/// ```
+///
+/// # Example (Invalid - L1 after L2)
+///
+/// ```text
+/// [L1Msg(queue=0), RegularTx, L1Msg(queue=1)]  // ❌ L1 after L2
+/// ```
 #[inline]
 fn validate_l1_messages(txs: &[&MorphTxEnvelope]) -> Result<(), ConsensusError> {
     // Find the starting queue index from the first L1 message

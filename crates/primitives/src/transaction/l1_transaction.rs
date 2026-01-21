@@ -37,6 +37,7 @@ pub const L1_TX_TYPE_ID: u8 = 0x7E;
 #[cfg_attr(feature = "reth-codec", derive(reth_codecs::Compact))]
 pub struct TxL1Msg {
     /// The queue index of the message in the L1 contract queue.
+    #[cfg_attr(feature = "serde", serde(with = "alloy_serde::quantity"))]
     pub queue_index: u64,
 
     /// The gas limit for the transaction. Gas is paid for when message is sent from the L1.

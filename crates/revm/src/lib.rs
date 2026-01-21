@@ -55,6 +55,25 @@ mod tx;
 pub use block::MorphBlockEnv;
 pub use error::{MorphHaltReason, MorphInvalidTransaction};
 pub use evm::MorphEvm;
-pub use l1block::{L1_GAS_PRICE_ORACLE_ADDRESS, L1BlockInfo};
+pub use l1block::{
+    CURIE_L1_GAS_PRICE_ORACLE_STORAGE,
+    GPO_BLOB_SCALAR_SLOT,
+    GPO_COMMIT_SCALAR_SLOT,
+    GPO_IS_CURIE_SLOT,
+    GPO_L1_BASE_FEE_SLOT,
+    GPO_L1_BLOB_BASE_FEE_SLOT,
+    GPO_OVERHEAD_SLOT,
+    // Storage slots
+    GPO_OWNER_SLOT,
+    GPO_SCALAR_SLOT,
+    GPO_WHITELIST_SLOT,
+    INITIAL_BLOB_SCALAR,
+    INITIAL_COMMIT_SCALAR,
+    // Curie initial values
+    INITIAL_L1_BLOB_BASE_FEE,
+    IS_CURIE,
+    L1_GAS_PRICE_ORACLE_ADDRESS,
+    L1BlockInfo,
+};
 pub use token_fee::{L2_TOKEN_REGISTRY_ADDRESS, TokenFeeInfo, get_erc20_balance_with_evm};
 pub use tx::{MorphTxEnv, MorphTxExt};

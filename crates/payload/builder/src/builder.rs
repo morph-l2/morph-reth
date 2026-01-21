@@ -3,12 +3,10 @@
 use crate::{MorphBuilderConfig, MorphPayloadBuilderError, config::PayloadBuildingBreaker};
 use alloy_consensus::{BlockHeader, Transaction, Typed2718};
 use alloy_eips::eip2718::Encodable2718;
-use alloy_primitives::{Bytes, U256};
+use alloy_primitives::{Address, B256, Bytes, U256, address};
 use alloy_rlp::Encodable;
 use morph_chainspec::MorphChainSpec;
-use morph_evm::{
-    MorphEvmConfig, MorphNextBlockEnvAttributes, system_contracts::read_withdraw_trie_root,
-};
+use morph_evm::{MorphEvmConfig, MorphNextBlockEnvAttributes};
 use morph_payload_types::{ExecutableL2Data, MorphBuiltPayload, MorphPayloadBuilderAttributes};
 use morph_primitives::{MorphHeader, MorphTxEnvelope};
 use reth_basic_payload_builder::{
@@ -30,6 +28,32 @@ use reth_storage_api::{StateProvider, StateProviderFactory};
 use reth_transaction_pool::{BestTransactionsAttributes, PoolTransaction, TransactionPool};
 use revm::context_interface::Block as RevmBlock;
 use std::sync::Arc;
+
+// =============================================================================
+// L2 Message Queue Constants
+// =============================================================================
+
+/// L2 Message Queue contract address.
+///
+/// Manages the L1-to-L2 message queue and stores the withdraw trie root.
+const L2_MESSAGE_QUEUE_ADDRESS: Address = address!("5300000000000000000000000000000000000001");
+
+/// Storage slot for the withdraw trie root (`messageRoot`) in L2MessageQueue contract.
+/// This is slot 33, which stores the Merkle root for L2→L1 messages.
+const L2_MESSAGE_QUEUE_WITHDRAW_TRIE_ROOT_SLOT: U256 = U256::from_limbs([33, 0, 0, 0]);
+
+/// Reads the withdraw trie root from the L2MessageQueue contract storage.
+fn read_withdraw_trie_root<DB: revm::Database>(db: &mut DB) -> Result<B256, DB::Error> {
+    let value = db.storage(
+        L2_MESSAGE_QUEUE_ADDRESS,
+        L2_MESSAGE_QUEUE_WITHDRAW_TRIE_ROOT_SLOT,
+    )?;
+    Ok(B256::from(value))
+}
+
+// =============================================================================
+// Payload Transactions
+// =============================================================================
 
 /// A type that returns the [`PayloadTransactions`] that should be included in the pool.
 pub trait MorphPayloadTransactions<Transaction>: Clone + Send + Sync + Unpin + 'static {

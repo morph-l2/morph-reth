@@ -412,10 +412,26 @@ impl InMemorySize for MorphReceipt {
     }
 }
 
-/// Calculates the root hash of a list of receipts.
-pub fn calculate_receipt_root(receipts: &[MorphReceipt]) -> B256 {
+/// Calculates the receipt root for a header.
+///
+/// This function computes the Merkle root of receipts using the standard encoding
+/// that includes the bloom filter, which is required for consensus validation.
+///
+/// NOTE: Prefer `alloy_consensus::proofs::calculate_receipt_root` if you have
+/// log blooms already memoized (e.g., from bloom validation).
+///
+/// # Example
+///
+/// ```
+/// use morph_primitives::receipt::{MorphReceipt, calculate_receipt_root_no_memo};
+/// use alloy_consensus::Receipt;
+///
+/// let receipts: Vec<MorphReceipt> = vec![];
+/// let receipts_root = calculate_receipt_root_no_memo(&receipts);
+/// ```
+pub fn calculate_receipt_root_no_memo(receipts: &[MorphReceipt]) -> B256 {
     alloy_consensus::proofs::ordered_trie_root_with_encoder(receipts, |r, buf| {
-        r.encode_2718(buf);
+        r.with_bloom_ref().encode_2718(buf)
     })
 }
 
@@ -504,8 +520,13 @@ mod compact {
                 logs: logs.into_owned(),
             };
 
+            // L1Msg uses plain Receipt, others use MorphTransactionReceipt
+            if tx_type == MorphTxType::L1Msg {
+                return Self::L1Msg(inner);
+            }
+
             let morph_receipt = MorphTransactionReceipt {
-                inner: inner.clone(),
+                inner,
                 l1_fee,
                 fee_token_id: fee_token_id.map(|id| id as u16),
                 fee_rate,
@@ -518,7 +539,7 @@ mod compact {
                 MorphTxType::Eip2930 => Self::Eip2930(morph_receipt),
                 MorphTxType::Eip1559 => Self::Eip1559(morph_receipt),
                 MorphTxType::Eip7702 => Self::Eip7702(morph_receipt),
-                MorphTxType::L1Msg => Self::L1Msg(inner),
+                MorphTxType::L1Msg => unreachable!("L1Msg handled above"),
                 MorphTxType::AltFee => Self::AltFee(morph_receipt),
             }
         }

@@ -1,6 +1,33 @@
 //! Morph primitive types
 //!
-//! Re-exports standard Ethereum types for use in the Morph EVM.
+//! This crate provides core data types for Morph L2, including custom transaction
+//! types, receipt types, and type aliases for blocks and headers.
+//!
+//! # Transaction Types
+//!
+//! Morph L2 extends Ethereum's transaction types with:
+//!
+//! - [`TxL1Msg`]: L1 message transactions (type `0x7E`) - deposits from L1
+//! - [`TxAltFee`]: Alternative fee transactions (type `0x7F`) - pay gas with ERC20 tokens
+//! - [`MorphTxEnvelope`]: Transaction envelope containing all supported transaction types
+//!
+//! # Receipt Types
+//!
+//! - [`MorphReceipt`]: Receipt enum for all transaction types
+//! - [`MorphTransactionReceipt`]: Extended receipt with L1 fee and AltFee fields
+//!
+//! # Block Types
+//!
+//! - [`Block`]: Morph block type alias
+//! - [`BlockBody`]: Morph block body type alias
+//! - [`MorphHeader`]: Header type alias (same as Ethereum)
+//!
+//! # Node Primitives
+//!
+//! [`MorphPrimitives`] implements reth's `NodePrimitives` trait, providing
+//! all the type bindings needed for a Morph node.
+//!
+//! Note: `NodePrimitives` implementation requires the `reth-codec` feature.
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg), allow(unexpected_cfgs))]
@@ -23,8 +50,6 @@ pub mod transaction;
 // Re-export header type
 pub use header::MorphHeader;
 
-use reth_primitives_traits::NodePrimitives;
-
 /// Morph block.
 pub type Block = alloy_consensus::Block<MorphTxEnvelope, MorphHeader>;
 
@@ -44,7 +69,8 @@ pub use transaction::{
 #[non_exhaustive]
 pub struct MorphPrimitives;
 
-impl NodePrimitives for MorphPrimitives {
+#[cfg(feature = "reth-codec")]
+impl reth_primitives_traits::NodePrimitives for MorphPrimitives {
     type Block = Block;
     type BlockHeader = MorphHeader;
     type BlockBody = BlockBody;

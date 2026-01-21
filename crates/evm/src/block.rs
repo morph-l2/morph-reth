@@ -1,11 +1,4 @@
-use crate::{
-    MorphBlockExecutionCtx,
-    evm::MorphEvm,
-    system_contracts::{
-        BLOB_ENABLED, GPO_IS_BLOB_ENABLED_SLOT, L1_GAS_PRICE_ORACLE_ADDRESS,
-        L1_GAS_PRICE_ORACLE_INIT_STORAGE,
-    },
-};
+use crate::{MorphBlockExecutionCtx, evm::MorphEvm};
 use alloy_consensus::Receipt;
 use alloy_evm::{
     Database, Evm,
@@ -15,9 +8,12 @@ use alloy_evm::{
         receipt_builder::{ReceiptBuilder, ReceiptBuilderCtx},
     },
 };
-use morph_chainspec::MorphChainSpec;
+use morph_chainspec::{MorphChainSpec, MorphHardfork, MorphHardforks};
 use morph_primitives::{MorphReceipt, MorphTransactionReceipt, MorphTxEnvelope, MorphTxType};
-use morph_revm::{MorphHaltReason, evm::MorphContext};
+use morph_revm::{
+    CURIE_L1_GAS_PRICE_ORACLE_STORAGE, L1_GAS_PRICE_ORACLE_ADDRESS, MorphHaltReason,
+    evm::MorphContext,
+};
 use reth_revm::{Inspector, State, context::result::ResultAndState};
 use revm::{Database as RevmDatabase, database::states::StorageSlot};
 
@@ -69,9 +65,6 @@ pub(crate) struct MorphBlockExecutor<'a, DB: Database, I> {
         &'a MorphChainSpec,
         MorphReceiptBuilder,
     >,
-    /// Reference to the chain spec for hardfork checks.
-    #[allow(dead_code)]
-    chain_spec: &'a MorphChainSpec,
 }
 
 impl<'a, DB, I> MorphBlockExecutor<'a, DB, I>
@@ -91,7 +84,6 @@ where
                 chain_spec,
                 MorphReceiptBuilder::default(),
             ),
-            chain_spec,
         }
     }
 }
@@ -117,10 +109,18 @@ where
             .load_cache_account(L1_GAS_PRICE_ORACLE_ADDRESS)
             .map_err(BlockExecutionError::other)?;
 
-        // 3. Initialize L1 gas price oracle storage (idempotent - only applies if not already done)
-        if let Err(err) = init_l1_gas_price_oracle_storage(self.inner.evm_mut().db_mut()) {
+        // 3. Apply Curie hardfork at the transition block
+        // Only executes once at the exact block where Curie activates
+        let block_number = self.inner.evm.block().number.saturating_to();
+        if self
+            .inner
+            .spec
+            .morph_fork_activation(MorphHardfork::Curie)
+            .transitions_at_block(block_number)
+            && let Err(err) = apply_curie_hard_fork(self.inner.evm_mut().db_mut())
+        {
             return Err(BlockExecutionError::msg(format!(
-                "error occurred at L1 gas price oracle initialization: {err:?}"
+                "error occurred at Curie fork: {err:?}"
             )));
         }
 
@@ -161,34 +161,23 @@ where
     }
 }
 
-/// Initializes L1 gas price oracle storage slots for blob-based L1 fee calculations.
+/// Applies the Morph Curie hard fork to the state.
 ///
 /// Updates L1GasPriceOracle storage slots:
-/// - Sets `isBlobEnabled` slot to 1 (true)
 /// - Sets `l1BlobBaseFee` slot to 1
 /// - Sets `commitScalar` slot to initial value
 /// - Sets `blobScalar` slot to initial value
+/// - Sets `isCurie` slot to 1 (true)
 ///
-/// This function is idempotent - if already applied (isBlobEnabled == 1), it's a no-op.
-fn init_l1_gas_price_oracle_storage<DB: RevmDatabase>(
-    state: &mut State<DB>,
-) -> Result<(), DB::Error> {
-    // No-op if already applied (check isBlobEnabled slot).
-    // This makes the function idempotent so we can call it on every block.
-    if state
-        .database
-        .storage(L1_GAS_PRICE_ORACLE_ADDRESS, GPO_IS_BLOB_ENABLED_SLOT)?
-        == BLOB_ENABLED
-    {
-        return Ok(());
-    }
-
-    tracing::info!(target: "morph::evm", "Initializing L1 gas price oracle storage slots");
+/// This function should only be called once at the Curie transition block.
+/// Reference: `consensus/misc/curie.go` in morph go-ethereum
+fn apply_curie_hard_fork<DB: RevmDatabase>(state: &mut State<DB>) -> Result<(), DB::Error> {
+    tracing::info!(target: "morph::evm", "Applying Curie hard fork");
 
     let oracle = state.load_cache_account(L1_GAS_PRICE_ORACLE_ADDRESS)?;
 
     // Create storage updates
-    let new_storage = L1_GAS_PRICE_ORACLE_INIT_STORAGE
+    let new_storage = CURIE_L1_GAS_PRICE_ORACLE_STORAGE
         .into_iter()
         .map(|(slot, present_value)| {
             (
