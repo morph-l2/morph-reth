@@ -61,11 +61,18 @@ pub struct MorphEvm<DB: Database, I = NoOpInspector> {
 
 impl<DB: Database> MorphEvm<DB> {
     /// Create a new [`MorphEvm`] instance.
+    ///
+    /// Note: This overrides EIP-7825 tx gas limit cap (OSAKA's 30M limit) with
+    /// the block gas limit. Morph uses block gas limit as the tx gas limit cap.
     pub fn new(db: DB, input: EvmEnv<MorphHardfork, MorphBlockEnv>) -> Self {
+        // Use block gas limit as tx gas limit cap instead of OSAKA's 30M limit
+        let mut cfg_env = input.cfg_env;
+        cfg_env.tx_gas_limit_cap = Some(input.block_env.gas_limit);
+
         let ctx = Context::mainnet()
             .with_db(db)
             .with_block(input.block_env)
-            .with_cfg(input.cfg_env)
+            .with_cfg(cfg_env)
             .with_tx(Default::default());
 
         Self {
