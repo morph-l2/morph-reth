@@ -1,6 +1,5 @@
 use alloy_evm::{
     Database, Evm, EvmEnv, EvmFactory,
-    precompiles::PrecompilesMap,
     revm::{
         Context, ExecuteEvm, InspectEvm, Inspector, SystemCallEvm,
         context::result::{EVMError, ResultAndState},
@@ -9,7 +8,7 @@ use alloy_evm::{
 };
 use alloy_primitives::{Address, Bytes, Log};
 use morph_chainspec::hardfork::MorphHardfork;
-use morph_revm::{MorphHaltReason, MorphInvalidTransaction, MorphTxEnv, evm::MorphContext};
+use morph_revm::{MorphHaltReason, MorphInvalidTransaction, MorphPrecompiles, MorphTxEnv, evm::MorphContext};
 use reth_revm::MainContext;
 use std::ops::{Deref, DerefMut};
 
@@ -28,7 +27,7 @@ impl EvmFactory for MorphEvmFactory {
     type HaltReason = MorphHaltReason;
     type Spec = MorphHardfork;
     type BlockEnv = MorphBlockEnv;
-    type Precompiles = PrecompilesMap;
+    type Precompiles = MorphPrecompiles;
 
     fn create_evm<DB: Database>(
         &self,
@@ -142,7 +141,7 @@ where
     type HaltReason = MorphHaltReason;
     type Spec = MorphHardfork;
     type BlockEnv = MorphBlockEnv;
-    type Precompiles = PrecompilesMap;
+    type Precompiles = MorphPrecompiles;
     type Inspector = I;
 
     fn block(&self) -> &Self::BlockEnv {
