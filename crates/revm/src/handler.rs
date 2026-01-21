@@ -2,7 +2,7 @@
 
 use alloy_primitives::{Address, Bytes, U256};
 use revm::{
-    ExecuteEvm,
+    SystemCallEvm,
     context::{
         Cfg, ContextTr, JournalTr, Transaction,
         result::{EVMError, ExecutionResult, InvalidTransaction},
@@ -14,7 +14,7 @@ use revm::{
 };
 
 use crate::{
-    MorphEvm, MorphInvalidTransaction, MorphTxEnv,
+    MorphEvm, MorphInvalidTransaction,
     error::MorphHaltReason,
     evm::MorphContext,
     l1block::L1BlockInfo,
@@ -535,9 +535,6 @@ where
     Ok((from_storage_slot, to_storage_slot))
 }
 
-/// Gas limit for ERC20 transfer calls.
-const TRANSFER_GAS_LIMIT: u64 = 200000;
-
 /// Transfers ERC20 tokens by executing a `transfer(address,uint256)` call via the EVM.
 fn transfer_erc20_with_evm<DB, I>(
     evm: &mut MorphEvm<DB, I>,
@@ -552,22 +549,7 @@ where
     let tx_origin = evm.tx.clone();
 
     let calldata = build_transfer_calldata(to, token_amount);
-    let tx_env = revm::context::TxEnv {
-        caller,
-        gas_limit: TRANSFER_GAS_LIMIT,
-        kind: token_address.into(),
-        data: calldata,
-        ..Default::default()
-    };
-
-    let tx = MorphTxEnv {
-        inner: tx_env,
-        rlp_bytes: None,
-        ..Default::default()
-    };
-
-    evm.cfg.disable_fee_charge = true; // Disable fee charge for system call
-    let res = match evm.transact_one(tx) {
+    let res = match evm.system_call_one_with_caller(caller, token_address, calldata) {
         Ok(result) => {
             if result.is_success() {
                 Ok(())
@@ -585,7 +567,6 @@ where
     };
 
     // restore the original transaction
-    evm.cfg.disable_fee_charge = false;
     evm.tx = tx_origin;
 
     res

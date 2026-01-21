@@ -163,7 +163,8 @@ impl alloy_consensus::transaction::SignerRecoverable for MorphTxEnvelope {
             Self::Eip7702(tx) => {
                 alloy_consensus::transaction::SignerRecoverable::recover_signer(tx)
             }
-            Self::L1Msg(tx) => alloy_consensus::transaction::SignerRecoverable::recover_signer(tx),
+            // L1 msg does not have a signature. Directly return the `from` address.
+            Self::L1Msg(tx) => Ok(tx.tx().from),
             Self::AltFee(tx) => alloy_consensus::transaction::SignerRecoverable::recover_signer(tx),
         }
     }

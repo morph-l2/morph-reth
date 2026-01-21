@@ -102,7 +102,6 @@ impl TxL1Msg {
     pub fn fields_len(&self) -> usize {
         let mut len = 0;
         len += self.queue_index.length();
-        len += self.nonce.length();
         len += self.gas_limit.length();
         len += self.to.length();
         len += self.value.length();
@@ -114,7 +113,6 @@ impl TxL1Msg {
     /// Encode the transaction fields (without the RLP header).
     pub fn encode_fields(&self, out: &mut dyn BufMut) {
         self.queue_index.encode(out);
-        self.nonce.encode(out);
         self.gas_limit.encode(out);
         self.to.encode(out);
         self.value.encode(out);
