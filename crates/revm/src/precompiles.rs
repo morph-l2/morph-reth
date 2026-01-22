@@ -224,10 +224,10 @@ pub fn emerald() -> &'static Precompiles {
         let osaka = Precompiles::osaka();
         for addr in osaka.addresses() {
             // Skip precompiles we already have
-            if !precompiles.contains(addr) {
-                if let Some(precompile) = osaka.get(addr) {
-                    precompiles.extend([precompile.clone()]);
-                }
+            if !precompiles.contains(addr)
+                && let Some(precompile) = osaka.get(addr)
+            {
+                precompiles.extend([precompile.clone()]);
             }
         }
 
