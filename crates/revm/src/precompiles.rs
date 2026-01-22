@@ -108,11 +108,11 @@ impl MorphPrecompiles {
             // Bernoulli and Curie share the same precompile set
             // Go implementation has no PrecompiledContractsCurie
             MorphHardfork::Bernoulli | MorphHardfork::Curie => bernoulli(),
-            // Morph203: enables blake2f
+            // Morph203: enables blake2f and ripemd160
             MorphHardfork::Morph203 => morph203(),
-            // Viridian: adds P256verify (RIP-7212)
+            // Viridian: same as Morph203
             MorphHardfork::Viridian => viridian(),
-            // Emerald: adds BLS12-381, all precompiles enabled
+            // Emerald: adds Osaka precompiles (P256verify, BLS12-381, etc)
             MorphHardfork::Emerald | _ => emerald(),
         };
 
@@ -368,7 +368,7 @@ mod tests {
         // Viridian is the same as Morph203
         assert_eq!(viridian_count, morph203_count);
 
-        // Emerald should have more than Viridian (adds P256verify + BLS12-381)
+        // Emerald should have more than Viridian (adds Osaka precompiles)
         assert!(emerald_count > viridian_count);
     }
 
@@ -397,7 +397,7 @@ mod tests {
         assert!(viridian_p.contains(&addresses::BLAKE2F));
         assert!(!viridian_p.contains(&addresses::P256_VERIFY));
 
-        // Emerald: all precompiles enabled including P256verify and BLS12-381
+        // Emerald: all precompiles enabled including Osaka precompiles (P256verify, BLS12-381, etc)
         assert!(emerald_p.contains(&addresses::RIPEMD160));
         assert!(emerald_p.contains(&addresses::P256_VERIFY));
     }
