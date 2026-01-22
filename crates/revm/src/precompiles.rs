@@ -37,9 +37,8 @@ use std::string::String;
 
 /// Standard precompile addresses
 pub mod addresses {
-    use revm::precompile::u64_to_address;
-
     use super::Address;
+    use revm::precompile::u64_to_address;
 
     /// ecrecover precompile address (0x01)
     pub const ECRECOVER: Address = u64_to_address(0x01);
