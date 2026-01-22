@@ -30,7 +30,7 @@ use revm::{
     handler::{EthPrecompiles, PrecompileProvider},
     interpreter::{CallInputs, InterpreterResult},
     precompile::Precompiles,
-    primitives::{hardfork::SpecId, OnceLock},
+    primitives::{OnceLock, hardfork::SpecId},
 };
 use std::boxed::Box;
 use std::string::String;
