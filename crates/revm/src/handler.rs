@@ -324,7 +324,7 @@ where
         }
 
         // Fetch token fee info from Token Registry
-        let spec = evm.ctx_ref().cfg().spec;
+        let spec = evm.ctx_ref().cfg().spec();
         let token_fee_info =
             TokenFeeInfo::try_fetch(evm.ctx_mut().db_mut(), token_id, caller, spec)?
                 .ok_or(MorphInvalidTransaction::TokenNotRegistered(token_id))?;
