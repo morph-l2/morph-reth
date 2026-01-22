@@ -40,28 +40,28 @@ pub mod addresses {
     use super::Address;
     use revm::precompile::u64_to_address;
 
-    /// ecrecover precompile address (0x01)
-    pub const ECRECOVER: Address = u64_to_address(0x01);
-    /// sha256 precompile address (0x02)
-    pub const SHA256: Address = u64_to_address(0x02);
-    /// ripemd160 precompile address (0x03)
-    pub const RIPEMD160: Address = u64_to_address(0x03);
-    /// identity/datacopy precompile address (0x04)
-    pub const IDENTITY: Address = u64_to_address(0x04);
-    /// modexp precompile address (0x05)
-    pub const MODEXP: Address = u64_to_address(0x05);
-    /// bn256Add precompile address (0x06)
-    pub const BN256_ADD: Address = u64_to_address(0x06);
-    /// bn256ScalarMul precompile address (0x07)
-    pub const BN256_MUL: Address = u64_to_address(0x07);
-    /// bn256Pairing precompile address (0x08)
-    pub const BN256_PAIRING: Address = u64_to_address(0x08);
-    /// blake2f precompile address (0x09)
-    pub const BLAKE2F: Address = u64_to_address(0x09);
-    /// point evaluation precompile address (0x0a) - EIP-4844
-    pub const POINT_EVALUATION: Address = u64_to_address(0x0a);
-    /// P256verify precompile address (0x100) - RIP-7212
-    pub const P256_VERIFY: Address = u64_to_address(0x100);
+    /// ecrecover precompile address (1)
+    pub const ECRECOVER: Address = u64_to_address(1);
+    /// sha256 precompile address (2)
+    pub const SHA256: Address = u64_to_address(2);
+    /// ripemd160 precompile address (3)
+    pub const RIPEMD160: Address = u64_to_address(3);
+    /// identity/datacopy precompile address (4)
+    pub const IDENTITY: Address = u64_to_address(4);
+    /// modexp precompile address (5)
+    pub const MODEXP: Address = u64_to_address(5);
+    /// bn256Add precompile address (6)
+    pub const BN256_ADD: Address = u64_to_address(6);
+    /// bn256ScalarMul precompile address (7)
+    pub const BN256_MUL: Address = u64_to_address(7);
+    /// bn256Pairing precompile address (8)
+    pub const BN256_PAIRING: Address = u64_to_address(8);
+    /// blake2f precompile address (9)
+    pub const BLAKE2F: Address = u64_to_address(9);
+    /// point evaluation precompile address (10) - EIP-4844
+    pub const POINT_EVALUATION: Address = u64_to_address(10);
+    /// P256verify precompile address (256) - RIP-7212
+    pub const P256_VERIFY: Address = u64_to_address(256);
 }
 
 /// Morph precompile provider.
