@@ -6,11 +6,11 @@ use revm::{
     Context, Inspector,
     context::{CfgEnv, ContextError, Evm, FrameStack},
     handler::{
-        EthFrame, EthPrecompiles, EvmTr, FrameInitOrResult, FrameTr, ItemOrResult,
-        instructions::EthInstructions,
+        EthFrame, EvmTr, FrameInitOrResult, FrameTr, ItemOrResult, instructions::EthInstructions,
     },
     inspector::InspectorEvmTr,
     interpreter::interpreter::EthInterpreter,
+    precompile::{PrecompileSpecId, Precompiles},
 };
 
 /// The Morph EVM context type.
@@ -37,8 +37,9 @@ pub struct MorphEvm<DB: Database, I> {
 impl<DB: Database, I> MorphEvm<DB, I> {
     /// Create a new Morph EVM.
     pub fn new(ctx: MorphContext<DB>, inspector: I) -> Self {
-        let precompiles = PrecompilesMap::from_static(EthPrecompiles::default().precompiles);
-
+        let precompiles = PrecompilesMap::from_static(Precompiles::new(
+            PrecompileSpecId::from_spec_id(ctx.cfg.spec.into()),
+        ));
         Self::new_inner(Evm {
             ctx,
             inspector,
