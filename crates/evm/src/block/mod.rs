@@ -19,7 +19,7 @@ use alloy_evm::{
 use curie::apply_curie_hard_fork;
 use morph_chainspec::{MorphChainSpec, MorphHardfork, MorphHardforks};
 use morph_primitives::{MorphReceipt, MorphTxEnvelope};
-use morph_revm::{MorphHaltReason, L1_GAS_PRICE_ORACLE_ADDRESS, evm::MorphContext};
+use morph_revm::{L1_GAS_PRICE_ORACLE_ADDRESS, MorphHaltReason, evm::MorphContext};
 use reth_revm::{Inspector, State, context::result::ResultAndState};
 
 /// Block executor for Morph. Wraps an inner [`EthBlockExecutor`].
@@ -83,12 +83,11 @@ where
             .spec
             .morph_fork_activation(MorphHardfork::Curie)
             .transitions_at_block(block_number)
+            && let Err(err) = apply_curie_hard_fork(self.inner.evm_mut().db_mut())
         {
-            if let Err(err) = apply_curie_hard_fork(self.inner.evm_mut().db_mut()) {
-                return Err(BlockExecutionError::msg(format!(
-                    "error occurred at Curie fork: {err:?}"
-                )));
-            }
+            return Err(BlockExecutionError::msg(format!(
+                "error occurred at Curie fork: {err:?}"
+            )));
         }
 
         Ok(())
@@ -127,4 +126,3 @@ where
         self.inner.evm()
     }
 }
-

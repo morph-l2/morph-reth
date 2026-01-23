@@ -70,15 +70,15 @@ pub(crate) fn apply_curie_hard_fork<DB: Database>(state: &mut State<DB>) -> Resu
 mod tests {
     use super::*;
     use morph_revm::{
-        GPO_BLOB_SCALAR_SLOT, GPO_COMMIT_SCALAR_SLOT, GPO_IS_CURIE_SLOT,
-        GPO_L1_BLOB_BASE_FEE_SLOT, GPO_L1_BASE_FEE_SLOT, GPO_OVERHEAD_SLOT,
-        GPO_OWNER_SLOT, GPO_SCALAR_SLOT, GPO_WHITELIST_SLOT,
-        INITIAL_BLOB_SCALAR, INITIAL_COMMIT_SCALAR, INITIAL_L1_BLOB_BASE_FEE, IS_CURIE,
+        GPO_BLOB_SCALAR_SLOT, GPO_COMMIT_SCALAR_SLOT, GPO_IS_CURIE_SLOT, GPO_L1_BASE_FEE_SLOT,
+        GPO_L1_BLOB_BASE_FEE_SLOT, GPO_OVERHEAD_SLOT, GPO_OWNER_SLOT, GPO_SCALAR_SLOT,
+        GPO_WHITELIST_SLOT, INITIAL_BLOB_SCALAR, INITIAL_COMMIT_SCALAR, INITIAL_L1_BLOB_BASE_FEE,
+        IS_CURIE,
     };
     use revm::{
         database::{
             EmptyDB, State,
-            states::{bundle_state::BundleRetention, plain_account::PlainStorage, StorageSlot},
+            states::{StorageSlot, bundle_state::BundleRetention, plain_account::PlainStorage},
         },
         primitives::U256,
         state::AccountInfo,
@@ -97,16 +97,16 @@ mod tests {
         // oracle pre fork state
         let oracle_pre_fork = AccountInfo::default();
         let oracle_storage_pre_fork = PlainStorage::from_iter([
-            (GPO_OWNER_SLOT, U256::from(0x15f50e5eu64)),  // placeholder owner
+            (GPO_OWNER_SLOT, U256::from(0x15f50e5eu64)), // placeholder owner
             (GPO_L1_BASE_FEE_SLOT, U256::from(0x15f50e5eu64)),
             (GPO_OVERHEAD_SLOT, U256::from(0x38u64)),
             (GPO_SCALAR_SLOT, U256::from(0x3e95ba80u64)),
-            (GPO_WHITELIST_SLOT, U256::from(0x53u64)),  // placeholder whitelist
+            (GPO_WHITELIST_SLOT, U256::from(0x53u64)), // placeholder whitelist
         ]);
         state.insert_account_with_storage(
             L1_GAS_PRICE_ORACLE_ADDRESS,
-            oracle_pre_fork.clone(),
-            oracle_storage_pre_fork.clone(),
+            oracle_pre_fork,
+            oracle_storage_pre_fork,
         );
 
         // apply curie fork
@@ -117,8 +117,15 @@ mod tests {
         let bundle = state.take_bundle();
 
         // check oracle contract contains storage changeset
-        let oracle = bundle.state.get(&L1_GAS_PRICE_ORACLE_ADDRESS).unwrap().clone();
-        let mut storage = oracle.storage.into_iter().collect::<Vec<(U256, StorageSlot)>>();
+        let oracle = bundle
+            .state
+            .get(&L1_GAS_PRICE_ORACLE_ADDRESS)
+            .unwrap()
+            .clone();
+        let mut storage = oracle
+            .storage
+            .into_iter()
+            .collect::<Vec<(U256, StorageSlot)>>();
         storage.sort_by(|(a, _), (b, _)| a.cmp(b));
 
         let expected_storage = [
@@ -130,8 +137,13 @@ mod tests {
 
         for (got, expected) in storage.into_iter().zip(expected_storage) {
             assert_eq!(got.0, expected.0);
-            assert_eq!(got.1, StorageSlot { present_value: expected.1, ..Default::default() });
+            assert_eq!(
+                got.1,
+                StorageSlot {
+                    present_value: expected.1,
+                    ..Default::default()
+                }
+            );
         }
     }
 }
-

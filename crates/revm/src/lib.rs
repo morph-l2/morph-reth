@@ -56,7 +56,6 @@ mod tx;
 pub use block::MorphBlockEnv;
 pub use error::{MorphHaltReason, MorphInvalidTransaction};
 pub use evm::MorphEvm;
-pub use precompiles::MorphPrecompiles;
 pub use l1block::{
     CURIE_L1_GAS_PRICE_ORACLE_STORAGE,
     GPO_BLOB_SCALAR_SLOT,
@@ -77,5 +76,6 @@ pub use l1block::{
     L1_GAS_PRICE_ORACLE_ADDRESS,
     L1BlockInfo,
 };
+pub use precompiles::MorphPrecompiles;
 pub use token_fee::{L2_TOKEN_REGISTRY_ADDRESS, TokenFeeInfo, get_erc20_balance_with_evm};
 pub use tx::{MorphTxEnv, MorphTxExt};
