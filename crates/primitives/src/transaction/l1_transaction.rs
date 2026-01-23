@@ -71,11 +71,6 @@ impl TxL1Msg {
         L1_TX_TYPE_ID
     }
 
-    /// Returns an empty signature for the [`TxL1Msg`], which don't include a signature.
-    pub const fn signature() -> Signature {
-        Signature::new(U256::ZERO, U256::ZERO, false)
-    }
-
     /// Validates the transaction according to the spec rules.
     ///
     /// L1 message transactions have minimal validation requirements.
@@ -575,14 +570,5 @@ mod tests {
         // Should have encoded fields
         assert!(!buf.is_empty());
         assert_eq!(buf.len(), tx.fields_len());
-    }
-
-    #[test]
-    fn test_l1_transaction_signature() {
-        // L1 messages should return an empty signature
-        let sig = TxL1Msg::signature();
-        assert_eq!(sig.r(), U256::ZERO);
-        assert_eq!(sig.s(), U256::ZERO);
-        assert!(!sig.v());
     }
 }
