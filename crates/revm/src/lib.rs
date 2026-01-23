@@ -49,6 +49,7 @@ pub mod evm;
 pub mod exec;
 pub mod handler;
 pub mod l1block;
+pub mod precompiles;
 pub mod token_fee;
 mod tx;
 
