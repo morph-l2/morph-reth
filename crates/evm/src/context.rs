@@ -1,5 +1,7 @@
 use alloy_evm::eth::EthBlockExecutionCtx;
 use reth_evm::NextBlockEnvAttributes;
+#[cfg(feature = "rpc")]
+use reth_primitives_traits::SealedHeader;
 
 /// Execution context for Morph block.
 #[derive(Debug, Clone, derive_more::Deref)]
@@ -21,7 +23,7 @@ pub struct MorphNextBlockEnvAttributes {
 impl reth_rpc_eth_api::helpers::pending_block::BuildPendingEnv<morph_primitives::MorphHeader>
     for MorphNextBlockEnvAttributes
 {
-    fn build_pending_env(parent: &crate::SealedHeader<morph_primitives::MorphHeader>) -> Self {
+    fn build_pending_env(parent: &SealedHeader<morph_primitives::MorphHeader>) -> Self {
         Self {
             inner: NextBlockEnvAttributes::build_pending_env(parent),
         }

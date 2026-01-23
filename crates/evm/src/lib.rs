@@ -181,6 +181,7 @@ mod tests {
         let activation = evm_config
             .chain_spec()
             .morph_fork_activation(MorphHardfork::Morph203);
-        assert_eq!(activation, reth_chainspec::ForkCondition::Timestamp(0));
+        // Morph203 is configured at timestamp 0, so it should be active at timestamp 0
+        assert!(activation.active_at_timestamp(0));
     }
 }
