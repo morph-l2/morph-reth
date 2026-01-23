@@ -1,11 +1,33 @@
-//! L1 Block Info for Morph L2 fee calculation.
+//! L1 Block Info and Gas Price Oracle constants for Morph L2.
 //!
-//! This module provides the infrastructure for calculating L1 data fees on Morph L2.
-//! The fee parameters are read from the L1 Gas Price Oracle contract deployed on L2.
+//! This module provides:
+//! - [`L1BlockInfo`]: L1 gas price oracle data for L1 data fee calculation
+//! - Gas Price Oracle contract address and storage slot constants
+//!
+//! # Storage Layout
+//!
+//! The L1 Gas Price Oracle contract has the following storage layout:
+//!
+//! | Name          | Type    | Slot | Description                    |
+//! |---------------|---------|------|--------------------------------|
+//! | owner         | address | 0    | Contract owner                 |
+//! | l1BaseFee     | uint256 | 1    | L1 base fee                    |
+//! | overhead      | uint256 | 2    | L1 overhead gas                |
+//! | scalar        | uint256 | 3    | L1 fee scalar                  |
+//! | whitelist     | address | 4    | Whitelist contract             |
+//! | __deprecated0 | uint256 | 5    | Deprecated                     |
+//! | l1BlobBaseFee | uint256 | 6    | L1 blob base fee (Curie+)      |
+//! | commitScalar  | uint256 | 7    | Commit scalar (Curie+)         |
+//! | blobScalar    | uint256 | 8    | Blob scalar (Curie+)           |
+//! | isCurie       | bool    | 9    | Curie hardfork flag            |
 
 use alloy_primitives::{Address, U256, address};
 use morph_chainspec::hardfork::MorphHardfork;
 use revm::Database;
+
+// =============================================================================
+// Gas Price Oracle Constants
+// =============================================================================
 
 /// Gas cost for zero bytes in calldata.
 const ZERO_BYTE_COST: u64 = 4;
@@ -17,22 +39,87 @@ const TX_L1_COMMIT_EXTRA_COST: U256 = U256::from_limbs([64u64, 0, 0, 0]);
 /// Precision factor for L1 fee calculation (1e9).
 const TX_L1_FEE_PRECISION: U256 = U256::from_limbs([1_000_000_000u64, 0, 0, 0]);
 
+// =============================================================================
+// L1 Gas Price Oracle Address
+// =============================================================================
+
 /// L1 Gas Price Oracle contract address on Morph L2.
+///
+/// This contract stores L1 gas prices used for calculating L1 data fees.
+/// Reference: `rollup/rcfg/config.go` in go-ethereum
 pub const L1_GAS_PRICE_ORACLE_ADDRESS: Address =
     address!("530000000000000000000000000000000000000F");
 
-/// Storage slot for L1 base fee.
-const L1_BASE_FEE_SLOT: U256 = U256::from_limbs([1u64, 0, 0, 0]);
-/// Storage slot for L1 overhead.
-const L1_OVERHEAD_SLOT: U256 = U256::from_limbs([2u64, 0, 0, 0]);
-/// Storage slot for L1 scalar.
-const L1_SCALAR_SLOT: U256 = U256::from_limbs([3u64, 0, 0, 0]);
-/// Storage slot for L1 blob base fee (Curie+).
-const L1_BLOB_BASE_FEE_SLOT: U256 = U256::from_limbs([6u64, 0, 0, 0]);
-/// Storage slot for L1 commit scalar (Curie+).
-const L1_COMMIT_SCALAR_SLOT: U256 = U256::from_limbs([7u64, 0, 0, 0]);
-/// Storage slot for L1 blob scalar (Curie+).
-const L1_BLOB_SCALAR_SLOT: U256 = U256::from_limbs([8u64, 0, 0, 0]);
+// =============================================================================
+// L1 Gas Price Oracle Storage Slots
+// =============================================================================
+
+/// Storage slot for `owner` in the `L1GasPriceOracle` contract.
+pub const GPO_OWNER_SLOT: U256 = U256::from_limbs([0, 0, 0, 0]);
+
+/// Storage slot for `l1BaseFee` in the `L1GasPriceOracle` contract.
+pub const GPO_L1_BASE_FEE_SLOT: U256 = U256::from_limbs([1, 0, 0, 0]);
+
+/// Storage slot for `overhead` in the `L1GasPriceOracle` contract.
+pub const GPO_OVERHEAD_SLOT: U256 = U256::from_limbs([2, 0, 0, 0]);
+
+/// Storage slot for `scalar` in the `L1GasPriceOracle` contract.
+pub const GPO_SCALAR_SLOT: U256 = U256::from_limbs([3, 0, 0, 0]);
+
+/// Storage slot for `whitelist` in the `L1GasPriceOracle` contract.
+pub const GPO_WHITELIST_SLOT: U256 = U256::from_limbs([4, 0, 0, 0]);
+
+/// Storage slot for `l1BlobBaseFee` in the `L1GasPriceOracle` contract.
+/// Added in the Curie hardfork.
+pub const GPO_L1_BLOB_BASE_FEE_SLOT: U256 = U256::from_limbs([6, 0, 0, 0]);
+
+/// Storage slot for `commitScalar` in the `L1GasPriceOracle` contract.
+/// Added in the Curie hardfork.
+pub const GPO_COMMIT_SCALAR_SLOT: U256 = U256::from_limbs([7, 0, 0, 0]);
+
+/// Storage slot for `blobScalar` in the `L1GasPriceOracle` contract.
+/// Added in the Curie hardfork.
+pub const GPO_BLOB_SCALAR_SLOT: U256 = U256::from_limbs([8, 0, 0, 0]);
+
+/// Storage slot for `isCurie` in the `L1GasPriceOracle` contract.
+/// Added in the Curie hardfork. Set to 1 (true) after Curie activation.
+pub const GPO_IS_CURIE_SLOT: U256 = U256::from_limbs([9, 0, 0, 0]);
+
+// =============================================================================
+// L1 Gas Price Oracle Initial Values (for Curie hardfork)
+// =============================================================================
+
+/// The initial blob base fee used by the oracle contract at Curie activation.
+pub const INITIAL_L1_BLOB_BASE_FEE: U256 = U256::from_limbs([1, 0, 0, 0]);
+
+/// The initial commit scalar used by the oracle contract at Curie activation.
+/// Reference: `rcfg.InitialCommitScalar` in go-ethereum (230759955285)
+pub const INITIAL_COMMIT_SCALAR: U256 = U256::from_limbs([230759955285, 0, 0, 0]);
+
+/// The initial blob scalar used by the oracle contract at Curie activation.
+/// Reference: `rcfg.InitialBlobScalar` in go-ethereum (417565260)
+pub const INITIAL_BLOB_SCALAR: U256 = U256::from_limbs([417565260, 0, 0, 0]);
+
+/// Curie hardfork flag value (1 = true).
+pub const IS_CURIE: U256 = U256::from_limbs([1, 0, 0, 0]);
+
+/// Storage updates for L1 gas price oracle Curie hardfork initialization.
+///
+/// These storage slots are initialized when the Curie hardfork activates:
+/// - l1BlobBaseFee = 1
+/// - commitScalar = InitialCommitScalar
+/// - blobScalar = InitialBlobScalar
+/// - isCurie = 1 (true)
+pub const CURIE_L1_GAS_PRICE_ORACLE_STORAGE: [(U256, U256); 4] = [
+    (GPO_L1_BLOB_BASE_FEE_SLOT, INITIAL_L1_BLOB_BASE_FEE),
+    (GPO_COMMIT_SCALAR_SLOT, INITIAL_COMMIT_SCALAR),
+    (GPO_BLOB_SCALAR_SLOT, INITIAL_BLOB_SCALAR),
+    (GPO_IS_CURIE_SLOT, IS_CURIE),
+];
+
+// =============================================================================
+// L1 Block Info
+// =============================================================================
 
 /// L1 block info for fee calculation.
 ///
@@ -65,9 +152,9 @@ impl L1BlockInfo {
         db: &mut DB,
         hardfork: MorphHardfork,
     ) -> Result<Self, DB::Error> {
-        let l1_base_fee = db.storage(L1_GAS_PRICE_ORACLE_ADDRESS, L1_BASE_FEE_SLOT)?;
-        let l1_fee_overhead = db.storage(L1_GAS_PRICE_ORACLE_ADDRESS, L1_OVERHEAD_SLOT)?;
-        let l1_base_fee_scalar = db.storage(L1_GAS_PRICE_ORACLE_ADDRESS, L1_SCALAR_SLOT)?;
+        let l1_base_fee = db.storage(L1_GAS_PRICE_ORACLE_ADDRESS, GPO_L1_BASE_FEE_SLOT)?;
+        let l1_fee_overhead = db.storage(L1_GAS_PRICE_ORACLE_ADDRESS, GPO_OVERHEAD_SLOT)?;
+        let l1_base_fee_scalar = db.storage(L1_GAS_PRICE_ORACLE_ADDRESS, GPO_SCALAR_SLOT)?;
 
         if !hardfork.is_curie() {
             Ok(Self {
@@ -78,10 +165,10 @@ impl L1BlockInfo {
             })
         } else {
             let l1_blob_base_fee =
-                db.storage(L1_GAS_PRICE_ORACLE_ADDRESS, L1_BLOB_BASE_FEE_SLOT)?;
+                db.storage(L1_GAS_PRICE_ORACLE_ADDRESS, GPO_L1_BLOB_BASE_FEE_SLOT)?;
             let l1_commit_scalar =
-                db.storage(L1_GAS_PRICE_ORACLE_ADDRESS, L1_COMMIT_SCALAR_SLOT)?;
-            let l1_blob_scalar = db.storage(L1_GAS_PRICE_ORACLE_ADDRESS, L1_BLOB_SCALAR_SLOT)?;
+                db.storage(L1_GAS_PRICE_ORACLE_ADDRESS, GPO_COMMIT_SCALAR_SLOT)?;
+            let l1_blob_scalar = db.storage(L1_GAS_PRICE_ORACLE_ADDRESS, GPO_BLOB_SCALAR_SLOT)?;
 
             // calldata component of commit fees (calldata gas + execution)
             let calldata_gas = l1_commit_scalar.saturating_mul(l1_base_fee);

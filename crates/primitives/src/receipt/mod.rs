@@ -422,7 +422,11 @@ impl InMemorySize for MorphReceipt {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```
+/// use morph_primitives::receipt::{MorphReceipt, calculate_receipt_root_no_memo};
+/// use alloy_consensus::Receipt;
+///
+/// let receipts: Vec<MorphReceipt> = vec![];
 /// let receipts_root = calculate_receipt_root_no_memo(&receipts);
 /// ```
 pub fn calculate_receipt_root_no_memo(receipts: &[MorphReceipt]) -> B256 {

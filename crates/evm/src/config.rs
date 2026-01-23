@@ -39,7 +39,9 @@ impl ConfigureEvm for MorphEvmConfig {
                 .blob_params_at_timestamp(header.timestamp()),
         );
 
-        let spec = self.chain_spec().morph_hardfork_at(header.timestamp());
+        let spec = self
+            .chain_spec()
+            .morph_hardfork_at(header.number(), header.timestamp());
 
         Ok(EvmEnv {
             cfg_env: cfg_env.with_spec(spec),
@@ -69,7 +71,10 @@ impl ConfigureEvm for MorphEvmConfig {
                 .blob_params_at_timestamp(attributes.timestamp),
         );
 
-        let spec = self.chain_spec().morph_hardfork_at(attributes.timestamp);
+        // Next block number is parent + 1
+        let spec = self
+            .chain_spec()
+            .morph_hardfork_at(parent.number() + 1, attributes.timestamp);
 
         Ok(EvmEnv {
             cfg_env: cfg_env.with_spec(spec),

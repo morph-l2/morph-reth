@@ -1,4 +1,4 @@
-//! Morph primitive types.
+//! Morph primitive types
 //!
 //! This crate provides core data types for Morph L2, including custom transaction
 //! types, receipt types, and type aliases for blocks and headers.
@@ -20,7 +20,7 @@
 //!
 //! - [`Block`]: Morph block type alias
 //! - [`BlockBody`]: Morph block body type alias
-//! - [`MorphHeader`]: Header type alias (same as Ethereum)
+//! - [`MorphHeader`]: Morph header type alias
 //!
 //! # Node Primitives
 //!
@@ -43,15 +43,12 @@ use reth_ethereum_primitives as _;
 #[cfg(feature = "reth-codec")]
 use reth_zstd_compressors as _;
 
+pub mod header;
 pub mod receipt;
 pub mod transaction;
 
-// Re-export standard Ethereum types
-pub use alloy_consensus::Header;
-/// Header alias for backwards compatibility.
-pub type MorphHeader = Header;
-
-use reth_primitives_traits::NodePrimitives;
+// Re-export header type
+pub use header::MorphHeader;
 
 /// Morph block.
 pub type Block = alloy_consensus::Block<MorphTxEnvelope, MorphHeader>;
@@ -60,9 +57,7 @@ pub type Block = alloy_consensus::Block<MorphTxEnvelope, MorphHeader>;
 pub type BlockBody = alloy_consensus::BlockBody<MorphTxEnvelope, MorphHeader>;
 
 // Re-export receipt types
-pub use receipt::{
-    MorphReceipt, MorphReceiptWithBloom, MorphTransactionReceipt, calculate_receipt_root_no_memo,
-};
+pub use receipt::{MorphReceipt, MorphReceiptWithBloom, MorphTransactionReceipt};
 
 // Re-export transaction types
 pub use transaction::{
@@ -75,7 +70,7 @@ pub use transaction::{
 pub struct MorphPrimitives;
 
 #[cfg(feature = "reth-codec")]
-impl NodePrimitives for MorphPrimitives {
+impl reth_primitives_traits::NodePrimitives for MorphPrimitives {
     type Block = Block;
     type BlockHeader = MorphHeader;
     type BlockBody = BlockBody;

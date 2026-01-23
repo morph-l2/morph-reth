@@ -1,59 +1,30 @@
+//! Block execution for Morph L2.
+//!
+//! This module provides block execution functionality for Morph, including:
+//! - [`MorphBlockExecutor`]: The main block executor
+//! - [`MorphReceiptBuilder`]: Receipt construction for transactions
+//! - Hardfork application logic (Curie, etc.)
+
+pub(crate) mod curie;
+mod receipt;
+
+pub(crate) use receipt::MorphReceiptBuilder;
+
 use crate::{MorphBlockExecutionCtx, evm::MorphEvm};
-use alloy_consensus::Receipt;
 use alloy_evm::{
     Database, Evm,
     block::{BlockExecutionError, BlockExecutionResult, BlockExecutor, ExecutableTx, OnStateHook},
-    eth::{
-        EthBlockExecutor,
-        receipt_builder::{ReceiptBuilder, ReceiptBuilderCtx},
-    },
+    eth::EthBlockExecutor,
 };
-use morph_chainspec::MorphChainSpec;
-use morph_primitives::{MorphReceipt, MorphTransactionReceipt, MorphTxEnvelope, MorphTxType};
-use morph_revm::{MorphHaltReason, evm::MorphContext};
+use curie::apply_curie_hard_fork;
+use morph_chainspec::{MorphChainSpec, MorphHardfork, MorphHardforks};
+use morph_primitives::{MorphReceipt, MorphTxEnvelope};
+use morph_revm::{L1_GAS_PRICE_ORACLE_ADDRESS, MorphHaltReason, evm::MorphContext};
 use reth_revm::{Inspector, State, context::result::ResultAndState};
-
-/// Builder for [`MorphReceipt`].
-#[derive(Debug, Clone, Copy, Default)]
-#[non_exhaustive]
-pub(crate) struct MorphReceiptBuilder;
-
-impl ReceiptBuilder for MorphReceiptBuilder {
-    type Transaction = MorphTxEnvelope;
-    type Receipt = MorphReceipt;
-
-    fn build_receipt<E: Evm>(
-        &self,
-        ctx: ReceiptBuilderCtx<'_, Self::Transaction, E>,
-    ) -> Self::Receipt {
-        let ReceiptBuilderCtx {
-            tx,
-            result,
-            cumulative_gas_used,
-            ..
-        } = ctx;
-
-        let inner = Receipt {
-            status: result.is_success().into(),
-            cumulative_gas_used,
-            logs: result.into_logs(),
-        };
-
-        // Create the appropriate receipt variant based on transaction type
-        // TODO: Add L1 fee calculation from execution context
-        match tx.tx_type() {
-            MorphTxType::Legacy => MorphReceipt::Legacy(MorphTransactionReceipt::new(inner)),
-            MorphTxType::Eip2930 => MorphReceipt::Eip2930(MorphTransactionReceipt::new(inner)),
-            MorphTxType::Eip1559 => MorphReceipt::Eip1559(MorphTransactionReceipt::new(inner)),
-            MorphTxType::Eip7702 => MorphReceipt::Eip7702(MorphTransactionReceipt::new(inner)),
-            MorphTxType::L1Msg => MorphReceipt::L1Msg(inner),
-            MorphTxType::AltFee => MorphReceipt::AltFee(MorphTransactionReceipt::new(inner)),
-        }
-    }
-}
 
 /// Block executor for Morph. Wraps an inner [`EthBlockExecutor`].
 pub(crate) struct MorphBlockExecutor<'a, DB: Database, I> {
+    /// Inner Ethereum block executor.
     pub(crate) inner: EthBlockExecutor<
         'a,
         MorphEvm<&'a mut State<DB>, I>,
@@ -93,7 +64,33 @@ where
     type Evm = MorphEvm<&'a mut State<DB>, I>;
 
     fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
-        self.inner.apply_pre_execution_changes()
+        // 1. Apply base Ethereum pre-execution changes (state clear flag, EIP-2935, EIP-4788)
+        self.inner.apply_pre_execution_changes()?;
+
+        // 2. Load L1 gas oracle contract into cache for Curie hardfork upgrade
+        let _ = self
+            .inner
+            .evm_mut()
+            .db_mut()
+            .load_cache_account(L1_GAS_PRICE_ORACLE_ADDRESS)
+            .map_err(BlockExecutionError::other)?;
+
+        // 3. Apply Curie hardfork at the transition block
+        // Only executes once at the exact block where Curie activates
+        let block_number = self.inner.evm.block().number.saturating_to();
+        if self
+            .inner
+            .spec
+            .morph_fork_activation(MorphHardfork::Curie)
+            .transitions_at_block(block_number)
+            && let Err(err) = apply_curie_hard_fork(self.inner.evm_mut().db_mut())
+        {
+            return Err(BlockExecutionError::msg(format!(
+                "error occurred at Curie fork: {err:?}"
+            )));
+        }
+
+        Ok(())
     }
 
     fn execute_transaction_without_commit(

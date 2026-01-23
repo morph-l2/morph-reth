@@ -87,11 +87,11 @@ impl BuiltPayload for MorphBuiltPayload {
 mod tests {
     use super::*;
     use alloy_consensus::Header;
-    use morph_primitives::BlockBody;
+    use morph_primitives::{BlockBody, MorphHeader};
     use reth_primitives_traits::Block as _;
 
     fn create_test_block() -> SealedBlock<Block> {
-        let header = Header::default();
+        let header: MorphHeader = Header::default().into();
         let body = BlockBody::default();
         let block = Block::new(header, body);
         block.seal_slow()

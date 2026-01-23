@@ -37,11 +37,10 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-mod assemble;
 #[cfg(feature = "reth-codec")]
 mod config;
-#[cfg(feature = "engine")]
-mod engine;
+
+mod assemble;
 pub use assemble::MorphBlockAssembler;
 mod block;
 mod context;
@@ -52,15 +51,16 @@ pub use error::MorphEvmError;
 pub mod evm;
 use std::sync::Arc;
 
-use crate::{block::MorphBlockExecutor, evm::MorphEvm};
 use alloy_evm::{
-    self, Database,
+    Database,
     block::{BlockExecutorFactory, BlockExecutorFor},
     revm::{Inspector, database::State},
 };
 pub use evm::MorphEvmFactory;
-use morph_chainspec::MorphChainSpec;
 use morph_primitives::{MorphReceipt, MorphTxEnvelope};
+
+use crate::{block::MorphBlockExecutor, evm::MorphEvm};
+use morph_chainspec::MorphChainSpec;
 use morph_revm::evm::MorphContext;
 use reth_evm_ethereum::EthEvmConfig;
 
@@ -125,14 +125,13 @@ impl BlockExecutorFactory for MorphEvmConfig {
     }
 }
 
-#[cfg(feature = "reth-codec")]
 #[cfg(test)]
 mod tests {
     use super::*;
     use morph_chainspec::hardfork::{MorphHardfork, MorphHardforks};
     use serde_json::json;
 
-    /// Helper function to create a test genesis with Morph hardforks at genesis
+    /// Helper function to create a test genesis with Morph hardforks at timestamp 0
     fn create_test_genesis() -> alloy_genesis::Genesis {
         let genesis_json = json!({
             "config": {
@@ -155,7 +154,8 @@ mod tests {
                 "bernoulliBlock": 0,
                 "curieBlock": 0,
                 "morph203Time": 0,
-                "viridianTime": 0
+                "viridianTime": 0,
+                "morph": {}
             },
             "alloc": {}
         });
@@ -164,20 +164,24 @@ mod tests {
 
     #[test]
     fn test_evm_config_can_query_morph_hardforks() {
-        // Create a test chainspec with Bernoulli at genesis
+        // Create a test chainspec with Morph203 at genesis
         let chainspec = Arc::new(morph_chainspec::MorphChainSpec::from(create_test_genesis()));
 
         let evm_config = MorphEvmConfig::new_with_default_factory(chainspec);
 
         // Should be able to query Morph hardforks through the chainspec
-        // Note: Bernoulli and Curie use block-based activation
-        assert!(evm_config.chain_spec().is_bernoulli_active_at_block(0));
-        assert!(evm_config.chain_spec().is_bernoulli_active_at_block(1000));
+        assert!(evm_config.chain_spec().is_morph203_active_at_timestamp(0));
+        assert!(
+            evm_config
+                .chain_spec()
+                .is_morph203_active_at_timestamp(1000)
+        );
 
         // Should be able to query activation condition
         let activation = evm_config
             .chain_spec()
-            .morph_fork_activation(MorphHardfork::Bernoulli);
-        assert_eq!(activation, reth_chainspec::ForkCondition::Block(0));
+            .morph_fork_activation(MorphHardfork::Morph203);
+        // Morph203 is configured at timestamp 0, so it should be active at timestamp 0
+        assert!(activation.active_at_timestamp(0));
     }
 }

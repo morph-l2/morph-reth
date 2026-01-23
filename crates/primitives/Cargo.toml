@@ -32,6 +32,7 @@ modular-bitfield = { version = "0.11.2", optional = true }
 
 
 [dev-dependencies]
+serde_json.workspace = true
 
 [features]
 default = ["serde", "reth"]
@@ -41,6 +42,8 @@ serde = [
     "alloy-primitives/serde",
     "alloy-eips/serde",
     "alloy-consensus/serde",
+    "reth-primitives-traits/serde",
+    "reth-ethereum-primitives?/serde",
 ]
 reth = [
 	"dep:reth-ethereum-primitives",

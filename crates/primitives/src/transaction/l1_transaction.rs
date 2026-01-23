@@ -9,7 +9,10 @@ use alloy_consensus::{
     SignableTransaction, Transaction,
     transaction::{RlpEcdsaDecodableTx, RlpEcdsaEncodableTx},
 };
-use alloy_eips::{Typed2718, eip2718::Encodable2718};
+use alloy_eips::{
+    Typed2718,
+    eip2718::{Decodable2718, Eip2718Error, Eip2718Result, Encodable2718},
+};
 use alloy_primitives::{Address, B256, Bytes, ChainId, Signature, TxKind, U256, keccak256};
 use alloy_rlp::{BufMut, Decodable, Encodable, Header};
 use core::mem;
@@ -22,6 +25,11 @@ pub const L1_TX_TYPE_ID: u8 = 0x7E;
 /// This transaction type represents L1 message transactions that are processed on L2,
 /// typically including deposit transactions or L1-originated messages.
 ///
+/// The signature of the L1 message is already verified on the L1 and as such doesn't contain
+/// a signature field. Gas for the transaction execution is already paid for on the L1.
+///
+/// Note: Contract creation is NOT allowed via L1 message transactions.
+///
 /// Reference: <https://github.com/morph-l2/morph/blob/main/prover/crates/primitives/src/types/tx.rs#L32-L59>
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -32,34 +40,26 @@ pub struct TxL1Msg {
     #[cfg_attr(feature = "serde", serde(with = "alloy_serde::quantity"))]
     pub queue_index: u64,
 
-    /// The 160-bit address of the message call's sender.
-    pub from: Address,
+    /// The gas limit for the transaction. Gas is paid for when message is sent from the L1.
+    #[cfg_attr(
+        feature = "serde",
+        serde(with = "alloy_serde::quantity", rename = "gas")
+    )]
+    pub gas_limit: u64,
 
-    /// A scalar value equal to the number of transactions sent by the sender.
-    #[cfg_attr(feature = "serde", serde(with = "alloy_serde::quantity"))]
-    pub nonce: u64,
-
-    /// A scalar value equal to the maximum amount of gas that should be used
-    /// in executing this transaction. This is paid up-front, before any
-    /// computation is done and may not be increased later.
-    #[cfg_attr(feature = "serde", serde(with = "alloy_serde::quantity"))]
-    pub gas_limit: u128,
-
-    /// The 160-bit address of the message call's recipient or, for a contract
-    /// creation transaction, empty.
-    pub to: TxKind,
+    /// The destination address for the transaction.
+    /// Contract creation is NOT allowed via L1 message transactions.
+    pub to: Address,
 
     /// A scalar value equal to the number of Wei to be transferred to the
-    /// message call's recipient or, in the case of contract creation, as an
-    /// endowment to the newly created account.
+    /// message call's recipient.
     pub value: U256,
 
-    /// Input has two uses depending if transaction is Create or Call (if `to`
-    /// field is None or Some).
-    /// - init: An unlimited size byte array specifying the EVM-code for the
-    ///   account initialisation procedure CREATE.
-    /// - data: An unlimited size byte array specifying the input data of the
-    ///   message call.
+    /// The L1 sender of the transaction.
+    pub sender: Address,
+
+    /// The input data of the message call.
+    /// Note: This field must be last for reth-codec Compact derive.
     #[cfg_attr(feature = "serde", serde(default, alias = "data"))]
     pub input: Bytes,
 }
@@ -71,11 +71,6 @@ impl TxL1Msg {
         L1_TX_TYPE_ID
     }
 
-    /// Returns the sender address.
-    pub const fn sender(&self) -> Address {
-        self.from
-    }
-
     /// Validates the transaction according to the spec rules.
     ///
     /// L1 message transactions have minimal validation requirements.
@@ -85,60 +80,55 @@ impl TxL1Msg {
     }
 
     /// Calculate the in-memory size of this transaction.
-    ///
-    /// This accounts for all fields in the struct.
     pub fn size(&self) -> usize {
         mem::size_of::<u64>() + // queue_index
-        mem::size_of::<Address>() + // from
-        mem::size_of::<u64>() + // nonce
-        mem::size_of::<u128>() + // gas_limit
-        mem::size_of::<TxKind>() + // to
+        mem::size_of::<u64>() + // gas_limit
+        mem::size_of::<Address>() + // to
         mem::size_of::<U256>() + // value
-        self.input.len() // input (dynamic size)
+        self.input.len() + // input (dynamic size)
+        mem::size_of::<Address>() // sender
     }
 
     /// Outputs the length of the transaction's fields.
+    /// Field order matches go-ethereum: queue_index, gas_limit, to, value, input, sender
     #[doc(hidden)]
     pub fn fields_len(&self) -> usize {
-        let mut len = 0;
-        len += self.queue_index.length();
-        len += self.nonce.length();
-        len += self.gas_limit.length();
-        len += self.to.length();
-        len += self.value.length();
-        len += self.input.0.length();
-        len += self.from.length();
-        len
+        self.queue_index.length()
+            + self.gas_limit.length()
+            + self.to.length()
+            + self.value.length()
+            + self.input.0.length()
+            + self.sender.length()
     }
 
     /// Encode the transaction fields (without the RLP header).
+    /// Field order matches go-ethereum: queue_index, gas_limit, to, value, input, sender
     pub fn encode_fields(&self, out: &mut dyn BufMut) {
         self.queue_index.encode(out);
-        self.nonce.encode(out);
         self.gas_limit.encode(out);
         self.to.encode(out);
         self.value.encode(out);
         self.input.0.encode(out);
-        self.from.encode(out);
+        self.sender.encode(out);
     }
 
-    /// Decode the transaction fields (without the RLP header).
+    /// Decode the transaction fields from RLP bytes.
+    /// Field order matches go-ethereum: queue_index, gas_limit, to, value, input, sender
     pub fn decode_fields(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
         Ok(Self {
             queue_index: Decodable::decode(buf)?,
-            nonce: Decodable::decode(buf)?,
             gas_limit: Decodable::decode(buf)?,
             to: Decodable::decode(buf)?,
             value: Decodable::decode(buf)?,
             input: Decodable::decode(buf)?,
-            from: Decodable::decode(buf)?,
+            sender: Decodable::decode(buf)?,
         })
     }
 
-    /// Computes the hash used for the transaction.
+    /// Computes the transaction hash.
     ///
-    /// For L1 messages, this computes the keccak256 hash of the RLP encoding.
-    pub fn signature_hash(&self) -> B256 {
+    /// For L1 messages, this computes the keccak256 hash of the EIP-2718 encoding.
+    pub fn tx_hash(&self) -> B256 {
         let mut buf = Vec::with_capacity(self.encode_2718_len());
         self.encode_2718(&mut buf);
         keccak256(&buf)
@@ -157,15 +147,17 @@ impl Transaction for TxL1Msg {
     }
 
     fn nonce(&self) -> u64 {
+        // L1 messages always have nonce 0
         0
     }
 
     fn gas_limit(&self) -> u64 {
-        self.gas_limit as u64
+        self.gas_limit
     }
 
     fn gas_price(&self) -> Option<u128> {
-        Some(0)
+        // L1 messages have no gas price - gas is paid on L1
+        None
     }
 
     fn max_fee_per_gas(&self) -> u128 {
@@ -193,11 +185,13 @@ impl Transaction for TxL1Msg {
     }
 
     fn kind(&self) -> TxKind {
-        self.to
+        // L1 messages are always calls, never contract creations
+        TxKind::Call(self.to)
     }
 
     fn is_create(&self) -> bool {
-        self.to.is_create()
+        // Contract creation is NOT allowed via L1 message transactions
+        false
     }
 
     fn value(&self) -> U256 {
@@ -275,27 +269,13 @@ impl Decodable for TxL1Msg {
             return Err(alloy_rlp::Error::InputTooShort);
         }
 
-        let queue_index = Decodable::decode(buf)?;
-        let nonce = Decodable::decode(buf)?;
-        let gas_limit = Decodable::decode(buf)?;
-        let to = Decodable::decode(buf)?;
-        let value = Decodable::decode(buf)?;
-        let input = Decodable::decode(buf)?;
-        let from = Decodable::decode(buf)?;
+        let this = Self::decode_fields(buf)?;
 
         if buf.len() + header.payload_length != remaining {
             return Err(alloy_rlp::Error::UnexpectedLength);
         }
 
-        Ok(Self {
-            queue_index,
-            from,
-            nonce,
-            gas_limit,
-            to,
-            value,
-            input,
-        })
+        Ok(this)
     }
 }
 
@@ -325,9 +305,28 @@ impl Encodable2718 for TxL1Msg {
     }
 }
 
+impl Decodable2718 for TxL1Msg {
+    fn typed_decode(ty: u8, buf: &mut &[u8]) -> Eip2718Result<Self> {
+        if ty != L1_TX_TYPE_ID {
+            return Err(Eip2718Error::UnexpectedType(ty));
+        }
+        Self::decode(buf).map_err(Into::into)
+    }
+
+    fn fallback_decode(buf: &mut &[u8]) -> Eip2718Result<Self> {
+        Self::decode(buf).map_err(Into::into)
+    }
+}
+
 impl reth_primitives_traits::InMemorySize for TxL1Msg {
     fn size(&self) -> usize {
         Self::size(self)
+    }
+}
+
+impl alloy_consensus::Sealable for TxL1Msg {
+    fn hash_slow(&self) -> B256 {
+        self.tx_hash()
     }
 }
 
@@ -339,10 +338,11 @@ mod tests {
     #[test]
     fn test_l1_transaction_default() {
         let tx = TxL1Msg::default();
-        assert_eq!(tx.nonce, 0);
+        assert_eq!(tx.queue_index, 0);
         assert_eq!(tx.gas_limit, 0);
         assert_eq!(tx.value, U256::ZERO);
-        assert_eq!(tx.from, Address::ZERO);
+        assert_eq!(tx.sender, Address::ZERO);
+        assert_eq!(tx.to, Address::ZERO);
     }
 
     #[test]
@@ -361,26 +361,25 @@ mod tests {
     fn test_l1_transaction_trait_methods() {
         let tx = TxL1Msg {
             queue_index: 0,
-            from: address!("0000000000000000000000000000000000000001"),
-            nonce: 0,
             gas_limit: 21_000,
-            to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
+            to: address!("0000000000000000000000000000000000000002"),
             value: U256::from(100u64),
             input: Bytes::from(vec![1, 2, 3, 4]),
+            sender: address!("0000000000000000000000000000000000000001"),
         };
 
         // Test Transaction trait methods
         assert_eq!(tx.chain_id(), None);
-        assert_eq!(Transaction::nonce(&tx), 0); // nonce is set to 0 in this test case
+        assert_eq!(Transaction::nonce(&tx), 0); // L1 messages always have nonce 0
         assert_eq!(Transaction::gas_limit(&tx), 21_000);
-        assert_eq!(tx.gas_price(), Some(0));
+        assert_eq!(tx.gas_price(), None); // L1 messages have no gas price
         assert_eq!(tx.max_fee_per_gas(), 0);
         assert_eq!(tx.max_priority_fee_per_gas(), None);
         assert_eq!(tx.max_fee_per_blob_gas(), None);
         assert_eq!(tx.priority_fee_or_price(), 0);
         assert_eq!(tx.effective_gas_price(Some(100)), 0);
         assert!(!tx.is_dynamic_fee());
-        assert!(!tx.is_create());
+        assert!(!tx.is_create()); // L1 messages can never create contracts
         assert_eq!(
             tx.kind(),
             TxKind::Call(address!("0000000000000000000000000000000000000002"))
@@ -394,45 +393,42 @@ mod tests {
     }
 
     #[test]
-    fn test_l1_transaction_is_create() {
-        let create_tx = TxL1Msg {
-            to: TxKind::Create,
-            ..Default::default()
-        };
-        assert!(create_tx.is_create());
+    fn test_l1_transaction_is_never_create() {
+        // L1 messages should never be contract creation
+        let tx = TxL1Msg::default();
+        assert!(!tx.is_create());
 
-        let call_tx = TxL1Msg {
-            to: TxKind::Call(address!("0000000000000000000000000000000000000001")),
+        let tx_with_address = TxL1Msg {
+            to: address!("0000000000000000000000000000000000000001"),
             ..Default::default()
         };
-        assert!(!call_tx.is_create());
+        assert!(!tx_with_address.is_create());
     }
 
     #[test]
     fn test_l1_transaction_sender() {
         let tx = TxL1Msg {
-            from: address!("0000000000000000000000000000000000000001"),
+            sender: address!("0000000000000000000000000000000000000001"),
             ..Default::default()
         };
         assert_eq!(
-            tx.sender(),
+            tx.sender,
             address!("0000000000000000000000000000000000000001")
         );
     }
 
     #[test]
-    fn test_l1_transaction_signature_hash() {
+    fn test_l1_transaction_tx_hash() {
         let tx = TxL1Msg {
             queue_index: 0,
-            from: address!("0000000000000000000000000000000000000001"),
-            nonce: 1,
             gas_limit: 21_000,
-            to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
+            to: address!("0000000000000000000000000000000000000002"),
             value: U256::from(100u64),
             input: Bytes::new(),
+            sender: address!("0000000000000000000000000000000000000001"),
         };
 
-        let hash = tx.signature_hash();
+        let hash = tx.tx_hash();
         assert_ne!(hash, B256::ZERO);
     }
 
@@ -440,12 +436,11 @@ mod tests {
     fn test_l1_transaction_rlp_roundtrip() {
         let tx = TxL1Msg {
             queue_index: 5,
-            from: address!("0000000000000000000000000000000000000001"),
-            nonce: 42,
             gas_limit: 21_000,
-            to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
-            value: U256::from(1_000_000_000_000_000_000u128),
+            to: address!("0000000000000000000000000000000000000002"),
+            value: U256::from(1_000_000_000_000_000_000u64),
             input: Bytes::from(vec![0x12, 0x34]),
+            sender: address!("0000000000000000000000000000000000000001"),
         };
 
         // Encode
@@ -456,46 +451,22 @@ mod tests {
         let decoded = TxL1Msg::decode(&mut buf.as_slice()).expect("Should decode");
 
         assert_eq!(tx.queue_index, decoded.queue_index);
-        assert_eq!(tx.from, decoded.from);
-        assert_eq!(tx.nonce, decoded.nonce);
         assert_eq!(tx.gas_limit, decoded.gas_limit);
         assert_eq!(tx.to, decoded.to);
         assert_eq!(tx.value, decoded.value);
         assert_eq!(tx.input, decoded.input);
-    }
-
-    #[test]
-    fn test_l1_transaction_create() {
-        let tx = TxL1Msg {
-            queue_index: 0,
-            from: address!("0000000000000000000000000000000000000001"),
-            nonce: 0,
-            gas_limit: 100_000,
-            to: TxKind::Create,
-            value: U256::ZERO,
-            input: Bytes::from(vec![0x60, 0x80, 0x60, 0x40]),
-        };
-
-        // Encode
-        let mut buf = Vec::new();
-        tx.encode(&mut buf);
-
-        // Decode
-        let decoded = TxL1Msg::decode(&mut buf.as_slice()).expect("Should decode");
-
-        assert_eq!(decoded.to, TxKind::Create);
+        assert_eq!(tx.sender, decoded.sender);
     }
 
     #[test]
     fn test_l1_transaction_encode_2718() {
         let tx = TxL1Msg {
             queue_index: 0,
-            from: address!("0000000000000000000000000000000000000001"),
-            nonce: 1,
             gas_limit: 21_000,
-            to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
+            to: address!("0000000000000000000000000000000000000002"),
             value: U256::from(100u64),
             input: Bytes::new(),
+            sender: address!("0000000000000000000000000000000000000001"),
         };
 
         let mut buf = Vec::new();
@@ -515,12 +486,11 @@ mod tests {
     fn test_l1_transaction_decode_rejects_malformed_rlp() {
         let tx = TxL1Msg {
             queue_index: 0,
-            from: address!("0000000000000000000000000000000000000001"),
-            nonce: 42,
             gas_limit: 21_000,
-            to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
-            value: U256::from(1_000_000_000_000_000_000u128),
+            to: address!("0000000000000000000000000000000000000002"),
+            value: U256::from(1_000_000_000_000_000_000u64),
             input: Bytes::from(vec![0x12, 0x34]),
+            sender: address!("0000000000000000000000000000000000000001"),
         };
 
         // Encode the transaction
@@ -546,21 +516,20 @@ mod tests {
     fn test_l1_transaction_size() {
         let tx = TxL1Msg {
             queue_index: 0,
-            from: Address::ZERO,
-            nonce: 0,
             gas_limit: 0,
-            to: TxKind::Create,
+            to: Address::ZERO,
             value: U256::ZERO,
             input: Bytes::new(),
+            sender: Address::ZERO,
         };
 
         // Calculate expected size manually
         let expected_size = mem::size_of::<u64>() + // queue_index
-            mem::size_of::<Address>() + // from
-            mem::size_of::<u64>() + // nonce
-            mem::size_of::<u128>() + // gas_limit
-            mem::size_of::<TxKind>() + // to
-            mem::size_of::<U256>(); // value (empty input)
+            mem::size_of::<u64>() + // gas_limit
+            mem::size_of::<Address>() + // to
+            mem::size_of::<U256>() + // value
+            mem::size_of::<Address>(); // sender
+        // Note: input is empty so contributes 0 bytes
 
         assert_eq!(tx.size(), expected_size);
     }
@@ -569,12 +538,11 @@ mod tests {
     fn test_l1_transaction_fields_len() {
         let tx = TxL1Msg {
             queue_index: 0,
-            from: address!("0000000000000000000000000000000000000001"),
-            nonce: 1,
             gas_limit: 21_000,
-            to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
+            to: address!("0000000000000000000000000000000000000002"),
             value: U256::from(100u64),
             input: Bytes::from(vec![1, 2, 3, 4]),
+            sender: address!("0000000000000000000000000000000000000001"),
         };
 
         let fields_len = tx.fields_len();
@@ -589,12 +557,11 @@ mod tests {
     fn test_l1_transaction_encode_fields() {
         let tx = TxL1Msg {
             queue_index: 0,
-            from: address!("0000000000000000000000000000000000000001"),
-            nonce: 1,
             gas_limit: 21_000,
-            to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
+            to: address!("0000000000000000000000000000000000000002"),
             value: U256::from(100u64),
             input: Bytes::new(),
+            sender: address!("0000000000000000000000000000000000000001"),
         };
 
         let mut buf = Vec::new();

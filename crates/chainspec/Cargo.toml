@@ -12,6 +12,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+morph-primitives.workspace = true
+
 reth-cli = { workspace = true, optional = true }
 reth-chainspec.workspace = true
 reth-network-peers.workspace = true
