@@ -164,6 +164,14 @@ impl From<Genesis> for MorphChainSpec {
     }
 }
 
+impl MorphChainSpec {
+    pub fn set_hardfork(&mut self, hardfork: MorphHardfork, time: u64) {
+        self.inner
+            .hardforks
+            .insert(hardfork, ForkCondition::Timestamp(time));
+    }
+}
+
 // =============================================================================
 // Trait Implementations
 // =============================================================================
