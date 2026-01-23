@@ -334,8 +334,10 @@ where
         }
 
         // Fetch token fee info from Token Registry
-        let token_fee_info = TokenFeeInfo::try_fetch(evm.ctx_mut().db_mut(), token_id, caller)?
-            .ok_or(MorphInvalidTransaction::TokenNotRegistered(token_id))?;
+        let spec = evm.ctx_ref().cfg().spec();
+        let token_fee_info =
+            TokenFeeInfo::try_fetch(evm.ctx_mut().db_mut(), token_id, caller, spec)?
+                .ok_or(MorphInvalidTransaction::TokenNotRegistered(token_id))?;
 
         // Check if token is active
         if !token_fee_info.is_active {
@@ -390,18 +392,18 @@ where
         let caller_addr = tx.caller();
         // Get coinbase address
         let beneficiary = block.beneficiary();
+        // Get the current hardfork for L1 fee calculation
+        let hardfork = cfg.spec();
 
         // Fetch token fee info from Token Registry
-        let token_fee_info = TokenFeeInfo::try_fetch(journal.db_mut(), token_id, caller_addr)?
-            .ok_or(MorphInvalidTransaction::TokenNotRegistered(token_id))?;
+        let token_fee_info =
+            TokenFeeInfo::try_fetch(journal.db_mut(), token_id, caller_addr, hardfork)?
+                .ok_or(MorphInvalidTransaction::TokenNotRegistered(token_id))?;
 
         // Check if token is active
         if !token_fee_info.is_active {
             return Err(MorphInvalidTransaction::TokenNotActive(token_id).into());
         }
-
-        // Get the current hardfork for L1 fee calculation
-        let hardfork = cfg.spec();
 
         // Fetch L1 block info from the L1 Gas Price Oracle contract
         let l1_block_info = L1BlockInfo::try_fetch(journal.db_mut(), hardfork)?;

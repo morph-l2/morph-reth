@@ -59,6 +59,7 @@ impl TokenFeeInfo {
         db: &mut DB,
         token_id: u16,
         caller: Address,
+        spec: MorphHardfork,
     ) -> Result<Option<Self>, DB::Error> {
         // Get the base slot for this token_id in tokenRegistry mapping
         let mut token_id_bytes = [0u8; 32];
@@ -116,7 +117,7 @@ impl TokenFeeInfo {
 
         // Get caller's token balance
         let caller_token_balance =
-            get_erc20_balance(db, token_address, caller, token_balance_slot)?;
+            get_erc20_balance(db, token_address, caller, token_balance_slot, spec)?;
 
         let token_fee = Self {
             token_address,
@@ -207,6 +208,7 @@ pub fn get_erc20_balance<DB: Database>(
     token: Address,
     account: Address,
     token_balance_slot: Option<U256>,
+    spec: MorphHardfork,
 ) -> Result<U256, DB::Error> {
     // If balance slot is provided, read directly from storage
     if let Some(slot) = token_balance_slot {
@@ -222,10 +224,7 @@ pub fn get_erc20_balance<DB: Database>(
         // - `NoOpInspector` satisfies the `Inspector` bound without adding side effects.
         let db: &mut dyn Database<Error = DB::Error> = db;
 
-        let mut evm = MorphEvm::new(
-            MorphContext::new(db, MorphHardfork::Curie),
-            NoOpInspector {},
-        );
+        let mut evm = MorphEvm::new(MorphContext::new(db, spec), NoOpInspector {});
 
         match get_erc20_balance_with_evm(&mut evm, token, account) {
             Ok(balance) => Ok(balance),

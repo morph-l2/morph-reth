@@ -1,5 +1,5 @@
-use crate::{MorphBlockEnv, MorphTxEnv};
-use alloy_evm::{Database, precompiles::PrecompilesMap};
+use crate::{MorphBlockEnv, MorphTxEnv, precompiles::MorphPrecompiles};
+use alloy_evm::Database;
 use alloy_primitives::Log;
 use morph_chainspec::hardfork::MorphHardfork;
 use revm::{
@@ -10,7 +10,6 @@ use revm::{
     },
     inspector::InspectorEvmTr,
     interpreter::interpreter::EthInterpreter,
-    precompile::{PrecompileSpecId, Precompiles},
 };
 
 /// The Morph EVM context type.
@@ -27,7 +26,7 @@ pub struct MorphEvm<DB: Database, I> {
         MorphContext<DB>,
         I,
         EthInstructions<EthInterpreter, MorphContext<DB>>,
-        PrecompilesMap,
+        MorphPrecompiles,
         EthFrame<EthInterpreter>,
     >,
     /// Preserved logs from the last transaction
@@ -36,10 +35,14 @@ pub struct MorphEvm<DB: Database, I> {
 
 impl<DB: Database, I> MorphEvm<DB, I> {
     /// Create a new Morph EVM.
+    ///
+    /// The precompiles are automatically selected based on the hardfork spec
+    /// configured in the context's cfg.
     pub fn new(ctx: MorphContext<DB>, inspector: I) -> Self {
-        let precompiles = PrecompilesMap::from_static(Precompiles::new(
-            PrecompileSpecId::from_spec_id(ctx.cfg.spec.into()),
-        ));
+        // Get the current hardfork spec from context and create matching precompiles
+        let spec = ctx.cfg.spec;
+        let precompiles = MorphPrecompiles::new_with_spec(spec);
+
         Self::new_inner(Evm {
             ctx,
             inspector,
@@ -57,7 +60,7 @@ impl<DB: Database, I> MorphEvm<DB, I> {
             MorphContext<DB>,
             I,
             EthInstructions<EthInterpreter, MorphContext<DB>>,
-            PrecompilesMap,
+            MorphPrecompiles,
             EthFrame<EthInterpreter>,
         >,
     ) -> Self {
@@ -75,7 +78,7 @@ impl<DB: Database, I> MorphEvm<DB, I> {
     }
 
     /// Consumes self and returns a new Evm type with given Precompiles.
-    pub fn with_precompiles(self, precompiles: PrecompilesMap) -> Self {
+    pub fn with_precompiles(self, precompiles: MorphPrecompiles) -> Self {
         Self::new_inner(self.inner.with_precompiles(precompiles))
     }
 
@@ -97,7 +100,7 @@ where
 {
     type Context = MorphContext<DB>;
     type Instructions = EthInstructions<EthInterpreter, MorphContext<DB>>;
-    type Precompiles = PrecompilesMap;
+    type Precompiles = MorphPrecompiles;
     type Frame = EthFrame<EthInterpreter>;
 
     fn all(
