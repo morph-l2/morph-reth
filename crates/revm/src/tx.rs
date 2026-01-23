@@ -89,11 +89,11 @@ impl MorphTxEnv {
         // Extract fee_token_id for AltFeeTx (type 0x7F)
         let fee_token_info = if tx_type == ALT_FEE_TX_TYPE_ID {
             (
-                extract_fee_token_id_from_rlp(&rlp_bytes),
-                extract_fee_limit_from_rlp(&rlp_bytes),
+                Some(extract_fee_token_id_from_rlp(&rlp_bytes)),
+                Some(extract_fee_limit_from_rlp(&rlp_bytes)),
             )
         } else {
-            (0, U256::default())
+            (None, None)
         };
 
         // Build TxEnv from the transaction
@@ -131,10 +131,14 @@ impl MorphTxEnv {
         };
 
         // Use builder pattern to set Morph-specific fields
-        Self::new(inner)
-            .with_rlp_bytes(rlp_bytes)
-            .with_fee_token_id(fee_token_info.0)
-            .with_fee_limit(fee_token_info.1)
+        let mut env = Self::new(inner).with_rlp_bytes(rlp_bytes);
+        if let Some(fee_token_id) = fee_token_info.0 {
+            env = env.with_fee_token_id(fee_token_id);
+        };
+        if let Some(fee_limit) = fee_token_info.1 {
+            env = env.with_fee_limit(fee_limit);
+        };
+        env
     }
 }
 

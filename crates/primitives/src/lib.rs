@@ -51,6 +51,7 @@ pub use alloy_consensus::Header;
 /// Header alias for backwards compatibility.
 pub type MorphHeader = Header;
 
+#[cfg(feature = "reth-codec")]
 use reth_primitives_traits::NodePrimitives;
 
 /// Morph block.
