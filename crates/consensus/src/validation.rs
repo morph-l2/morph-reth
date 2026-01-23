@@ -38,8 +38,8 @@ use crate::MorphConsensusError;
 use alloy_consensus::{BlockHeader as _, EMPTY_OMMER_ROOT_HASH, TxReceipt};
 use alloy_evm::block::BlockExecutionResult;
 use alloy_primitives::{B256, Bloom};
-use morph_chainspec::{MorphChainSpec, hardfork::MorphHardforks};
-use morph_primitives::{Block, BlockBody, MorphReceipt, MorphTxEnvelope};
+use morph_chainspec::MorphChainSpec;
+use morph_primitives::{Block, BlockBody, MorphHeader, MorphReceipt, MorphTxEnvelope};
 use reth_consensus::{Consensus, ConsensusError, FullConsensus, HeaderValidator};
 use reth_consensus_common::validation::{
     validate_against_parent_hash_number, validate_body_against_header,
@@ -96,7 +96,7 @@ impl MorphConsensus {
 // HeaderValidator Implementation
 // ============================================================================
 
-impl HeaderValidator<alloy_consensus::Header> for MorphConsensus {
+impl HeaderValidator<MorphHeader> for MorphConsensus {
     /// Validates a block header according to Morph L2 consensus rules.
     ///
     /// # Validation Steps
@@ -110,10 +110,7 @@ impl HeaderValidator<alloy_consensus::Header> for MorphConsensus {
     /// 7. **Gas Limit**: Must be <= MAX_GAS_LIMIT
     /// 8. **Gas Used**: Must be <= gas limit
     /// 9. **Base Fee**: Must be set after Curie hardfork and <= 10 Gwei
-    fn validate_header(
-        &self,
-        header: &SealedHeader<alloy_consensus::Header>,
-    ) -> Result<(), ConsensusError> {
+    fn validate_header(&self, header: &SealedHeader<MorphHeader>) -> Result<(), ConsensusError> {
         // Extra data must be empty (Morph L2 specific - stricter than max length)
         if !header.extra_data().is_empty() {
             return Err(ConsensusError::ExtraDataExceedsMax {
@@ -173,17 +170,14 @@ impl HeaderValidator<alloy_consensus::Header> for MorphConsensus {
             });
         }
 
-        // Validate the EIP1559 fee is set if the header is after Curie
-        // Note: Curie uses block-based activation
-        if self.chain_spec.is_curie_active_at_block(header.number()) {
-            let base_fee = header
-                .base_fee_per_gas()
-                .ok_or(ConsensusError::BaseFeeMissing)?;
-            if base_fee > MORPH_MAXIMUM_BASE_FEE {
-                return Err(ConsensusError::Other(
-                    MorphConsensusError::BaseFeeOverLimit(base_fee).to_string(),
-                ));
-            }
+        // Validate base fee (always required, EIP-1559 is always active)
+        let base_fee = header
+            .base_fee_per_gas()
+            .ok_or(ConsensusError::BaseFeeMissing)?;
+        if base_fee > MORPH_MAXIMUM_BASE_FEE {
+            return Err(ConsensusError::Other(
+                MorphConsensusError::BaseFeeOverLimit(base_fee).to_string(),
+            ));
         }
         Ok(())
     }
@@ -198,8 +192,8 @@ impl HeaderValidator<alloy_consensus::Header> for MorphConsensus {
     /// 4. **Gas Limit**: Change must be within 1/1024 of parent's limit
     fn validate_header_against_parent(
         &self,
-        header: &SealedHeader<alloy_consensus::Header>,
-        parent: &SealedHeader<alloy_consensus::Header>,
+        header: &SealedHeader<MorphHeader>,
+        parent: &SealedHeader<MorphHeader>,
     ) -> Result<(), ConsensusError> {
         // Validate parent hash and block number
         validate_against_parent_hash_number(header.header(), parent)?;
@@ -227,7 +221,7 @@ impl Consensus<Block> for MorphConsensus {
     fn validate_body_against_header(
         &self,
         body: &BlockBody,
-        header: &SealedHeader<alloy_consensus::Header>,
+        header: &SealedHeader<MorphHeader>,
     ) -> Result<(), Self::Error> {
         validate_body_against_header(body, header.header())
     }
@@ -528,7 +522,7 @@ mod tests {
     use super::*;
     use alloy_consensus::{Header, Signed};
     use alloy_genesis::Genesis;
-    use alloy_primitives::{Address, B64, B256, Bytes, Signature, TxKind, U256};
+    use alloy_primitives::{Address, B64, B256, Bytes, Signature, U256};
     use morph_primitives::transaction::TxL1Msg;
 
     fn create_test_chainspec() -> Arc<MorphChainSpec> {
@@ -560,17 +554,17 @@ mod tests {
     }
 
     fn create_l1_msg_tx(queue_index: u64) -> MorphTxEnvelope {
+        use alloy_consensus::Sealed;
         let tx = TxL1Msg {
             queue_index,
-            from: Address::ZERO,
-            nonce: queue_index, // nonce is used as queue index for L1 messages
             gas_limit: 21000,
-            to: TxKind::Call(Address::ZERO),
+            to: Address::ZERO,
             value: U256::ZERO,
             input: Bytes::default(),
+            sender: Address::ZERO,
         };
-        let sig = Signature::new(U256::ZERO, U256::ZERO, false);
-        MorphTxEnvelope::L1Msg(Signed::new_unchecked(tx, sig, B256::ZERO))
+        // L1 messages have no signature - use Sealed instead of Signed
+        MorphTxEnvelope::L1Msg(Sealed::new(tx))
     }
 
     fn create_regular_tx() -> MorphTxEnvelope {
@@ -578,6 +572,11 @@ mod tests {
         let tx = TxLegacy::default();
         let sig = Signature::new(U256::ZERO, U256::ZERO, false);
         MorphTxEnvelope::Legacy(Signed::new_unchecked(tx, sig, B256::ZERO))
+    }
+
+    /// Create a MorphHeader from a standard Header
+    fn create_morph_header(inner: Header) -> MorphHeader {
+        inner.into()
     }
 
     #[test]
@@ -613,12 +612,12 @@ mod tests {
     fn test_validate_header_extra_data_not_empty() {
         let chain_spec = create_test_chainspec();
         let consensus = MorphConsensus::new(chain_spec);
-        let header = Header {
+        let header = create_morph_header(Header {
             extra_data: Bytes::from([1, 2, 3].as_slice()),
             nonce: B64::ZERO,
             ommers_hash: EMPTY_OMMER_ROOT_HASH,
             ..Default::default()
-        };
+        });
         let sealed = SealedHeader::seal_slow(header);
         let result = consensus.validate_header(&sealed);
         assert!(matches!(
@@ -631,12 +630,12 @@ mod tests {
     fn test_validate_header_invalid_difficulty() {
         let chain_spec = create_test_chainspec();
         let consensus = MorphConsensus::new(chain_spec);
-        let header = Header {
+        let header = create_morph_header(Header {
             difficulty: U256::from(1),
             ommers_hash: EMPTY_OMMER_ROOT_HASH,
             nonce: B64::ZERO,
             ..Default::default()
-        };
+        });
         let sealed = SealedHeader::seal_slow(header);
         let result = consensus.validate_header(&sealed);
         assert!(matches!(
@@ -649,11 +648,11 @@ mod tests {
     fn test_validate_header_invalid_nonce() {
         let chain_spec = create_test_chainspec();
         let consensus = MorphConsensus::new(chain_spec);
-        let header = Header {
+        let header = create_morph_header(Header {
             nonce: B64::from(1u64),
             ommers_hash: EMPTY_OMMER_ROOT_HASH,
             ..Default::default()
-        };
+        });
         let sealed = SealedHeader::seal_slow(header);
         let result = consensus.validate_header(&sealed);
         assert!(matches!(
@@ -666,11 +665,11 @@ mod tests {
     fn test_validate_header_invalid_ommers() {
         let chain_spec = create_test_chainspec();
         let consensus = MorphConsensus::new(chain_spec);
-        let header = Header {
+        let header = create_morph_header(Header {
             nonce: B64::ZERO,
             ommers_hash: B256::ZERO, // not EMPTY_OMMER_ROOT_HASH
             ..Default::default()
-        };
+        });
         let sealed = SealedHeader::seal_slow(header);
         let result = consensus.validate_header(&sealed);
         assert!(matches!(
@@ -683,13 +682,13 @@ mod tests {
     fn test_validate_header_gas_used_exceeds_limit() {
         let chain_spec = create_test_chainspec();
         let consensus = MorphConsensus::new(chain_spec);
-        let header = Header {
+        let header = create_morph_header(Header {
             nonce: B64::ZERO,
             ommers_hash: EMPTY_OMMER_ROOT_HASH,
             gas_limit: 1000,
             gas_used: 2000, // exceeds gas_limit
             ..Default::default()
-        };
+        });
         let sealed = SealedHeader::seal_slow(header);
         let result = consensus.validate_header(&sealed);
         assert!(matches!(
@@ -707,7 +706,7 @@ mod tests {
             .duration_since(std::time::SystemTime::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let header = Header {
+        let header = create_morph_header(Header {
             nonce: B64::ZERO,
             ommers_hash: EMPTY_OMMER_ROOT_HASH,
             gas_limit: 30_000_000,
@@ -715,7 +714,7 @@ mod tests {
             timestamp: now - 10,               // 10 seconds ago
             base_fee_per_gas: Some(1_000_000), // 0.001 Gwei (after Curie)
             ..Default::default()
-        };
+        });
         let sealed = SealedHeader::seal_slow(header);
         let result = consensus.validate_header(&sealed);
         assert!(result.is_ok());
@@ -826,14 +825,14 @@ mod tests {
             .as_secs()
             + 3600; // 1 hour in the future
 
-        let header = Header {
+        let header = create_morph_header(Header {
             nonce: B64::ZERO,
             ommers_hash: EMPTY_OMMER_ROOT_HASH,
             gas_limit: 30_000_000,
             timestamp: future_ts,
             base_fee_per_gas: Some(1_000_000),
             ..Default::default()
-        };
+        });
         let sealed = SealedHeader::seal_slow(header);
         let result = consensus.validate_header(&sealed);
         assert!(matches!(
@@ -851,14 +850,14 @@ mod tests {
             .unwrap()
             .as_secs();
 
-        let header = Header {
+        let header = create_morph_header(Header {
             nonce: B64::ZERO,
             ommers_hash: EMPTY_OMMER_ROOT_HASH,
             gas_limit: MAX_GAS_LIMIT + 1, // Exceeds max
             timestamp: now - 10,
             base_fee_per_gas: Some(1_000_000),
             ..Default::default()
-        };
+        });
         let sealed = SealedHeader::seal_slow(header);
         let result = consensus.validate_header(&sealed);
         assert!(matches!(
@@ -876,14 +875,14 @@ mod tests {
             .unwrap()
             .as_secs();
 
-        let header = Header {
+        let header = create_morph_header(Header {
             nonce: B64::ZERO,
             ommers_hash: EMPTY_OMMER_ROOT_HASH,
             gas_limit: 30_000_000,
             timestamp: now - 10,
             base_fee_per_gas: Some(MORPH_MAXIMUM_BASE_FEE + 1), // Over limit
             ..Default::default()
-        };
+        });
         let sealed = SealedHeader::seal_slow(header);
         let result = consensus.validate_header(&sealed);
         assert!(result.is_err());
@@ -892,7 +891,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_header_base_fee_missing_after_curie() {
+    fn test_validate_header_base_fee_missing() {
         let chain_spec = create_test_chainspec();
         let consensus = MorphConsensus::new(chain_spec);
         let now = std::time::SystemTime::now()
@@ -900,14 +899,14 @@ mod tests {
             .unwrap()
             .as_secs();
 
-        let header = Header {
+        let header = create_morph_header(Header {
             nonce: B64::ZERO,
             ommers_hash: EMPTY_OMMER_ROOT_HASH,
             gas_limit: 30_000_000,
             timestamp: now - 10,
-            base_fee_per_gas: None, // Missing after Curie
+            base_fee_per_gas: None, // Missing (required)
             ..Default::default()
-        };
+        });
         let sealed = SealedHeader::seal_slow(header);
         let result = consensus.validate_header(&sealed);
         assert!(matches!(result, Err(ConsensusError::BaseFeeMissing)));
@@ -922,14 +921,14 @@ mod tests {
             .unwrap()
             .as_secs();
 
-        let header = Header {
+        let header = create_morph_header(Header {
             nonce: B64::ZERO,
             ommers_hash: EMPTY_OMMER_ROOT_HASH,
             gas_limit: 30_000_000,
             timestamp: now - 10,
             base_fee_per_gas: Some(MORPH_MAXIMUM_BASE_FEE), // Exactly at max (valid)
             ..Default::default()
-        };
+        });
         let sealed = SealedHeader::seal_slow(header);
         let result = consensus.validate_header(&sealed);
         assert!(result.is_ok());
@@ -939,8 +938,8 @@ mod tests {
     // Header Against Parent Validation Tests
     // ========================================================================
 
-    fn create_valid_header(timestamp: u64, gas_limit: u64, number: u64) -> Header {
-        Header {
+    fn create_valid_morph_header(timestamp: u64, gas_limit: u64, number: u64) -> MorphHeader {
+        create_morph_header(Header {
             nonce: B64::ZERO,
             ommers_hash: EMPTY_OMMER_ROOT_HASH,
             gas_limit,
@@ -948,7 +947,7 @@ mod tests {
             number,
             base_fee_per_gas: Some(1_000_000),
             ..Default::default()
-        }
+        })
     }
 
     #[test]
@@ -956,11 +955,11 @@ mod tests {
         let chain_spec = create_test_chainspec();
         let consensus = MorphConsensus::new(chain_spec);
 
-        let parent = create_valid_header(1000, 30_000_000, 100);
+        let parent = create_valid_morph_header(1000, 30_000_000, 100);
         let parent_sealed = SealedHeader::seal_slow(parent);
 
-        let mut child = create_valid_header(1001, 30_000_000, 101);
-        child.parent_hash = parent_sealed.hash();
+        let mut child = create_valid_morph_header(1001, 30_000_000, 101);
+        child.inner.parent_hash = parent_sealed.hash();
         let child_sealed = SealedHeader::seal_slow(child);
 
         let result = consensus.validate_header_against_parent(&child_sealed, &parent_sealed);
@@ -972,11 +971,11 @@ mod tests {
         let chain_spec = create_test_chainspec();
         let consensus = MorphConsensus::new(chain_spec);
 
-        let parent = create_valid_header(1000, 30_000_000, 100);
+        let parent = create_valid_morph_header(1000, 30_000_000, 100);
         let parent_sealed = SealedHeader::seal_slow(parent);
 
-        let mut child = create_valid_header(999, 30_000_000, 101); // timestamp < parent
-        child.parent_hash = parent_sealed.hash();
+        let mut child = create_valid_morph_header(999, 30_000_000, 101); // timestamp < parent
+        child.inner.parent_hash = parent_sealed.hash();
         let child_sealed = SealedHeader::seal_slow(child);
 
         let result = consensus.validate_header_against_parent(&child_sealed, &parent_sealed);
@@ -991,11 +990,11 @@ mod tests {
         let chain_spec = create_test_chainspec();
         let consensus = MorphConsensus::new(chain_spec);
 
-        let parent = create_valid_header(1000, 30_000_000, 100);
+        let parent = create_valid_morph_header(1000, 30_000_000, 100);
         let parent_sealed = SealedHeader::seal_slow(parent);
 
-        let mut child = create_valid_header(1000, 30_000_000, 101); // timestamp == parent (valid)
-        child.parent_hash = parent_sealed.hash();
+        let mut child = create_valid_morph_header(1000, 30_000_000, 101); // timestamp == parent (valid)
+        child.inner.parent_hash = parent_sealed.hash();
         let child_sealed = SealedHeader::seal_slow(child);
 
         let result = consensus.validate_header_against_parent(&child_sealed, &parent_sealed);
@@ -1011,12 +1010,12 @@ mod tests {
         let parent_gas_limit = 30_000_000u64;
         let max_increase = parent_gas_limit / GAS_LIMIT_BOUND_DIVISOR;
 
-        let parent = create_valid_header(1000, parent_gas_limit, 100);
+        let parent = create_valid_morph_header(1000, parent_gas_limit, 100);
         let parent_sealed = SealedHeader::seal_slow(parent);
 
         // Increase by more than allowed
-        let mut child = create_valid_header(1001, parent_gas_limit + max_increase + 1, 101);
-        child.parent_hash = parent_sealed.hash();
+        let mut child = create_valid_morph_header(1001, parent_gas_limit + max_increase + 1, 101);
+        child.inner.parent_hash = parent_sealed.hash();
         let child_sealed = SealedHeader::seal_slow(child);
 
         let result = consensus.validate_header_against_parent(&child_sealed, &parent_sealed);
@@ -1034,12 +1033,12 @@ mod tests {
         let parent_gas_limit = 30_000_000u64;
         let max_decrease = parent_gas_limit / GAS_LIMIT_BOUND_DIVISOR;
 
-        let parent = create_valid_header(1000, parent_gas_limit, 100);
+        let parent = create_valid_morph_header(1000, parent_gas_limit, 100);
         let parent_sealed = SealedHeader::seal_slow(parent);
 
         // Decrease by more than allowed
-        let mut child = create_valid_header(1001, parent_gas_limit - max_decrease - 1, 101);
-        child.parent_hash = parent_sealed.hash();
+        let mut child = create_valid_morph_header(1001, parent_gas_limit - max_decrease - 1, 101);
+        child.inner.parent_hash = parent_sealed.hash();
         let child_sealed = SealedHeader::seal_slow(child);
 
         let result = consensus.validate_header_against_parent(&child_sealed, &parent_sealed);
@@ -1057,12 +1056,12 @@ mod tests {
         let parent_gas_limit = 30_000_000u64;
         let max_change = parent_gas_limit / GAS_LIMIT_BOUND_DIVISOR;
 
-        let parent = create_valid_header(1000, parent_gas_limit, 100);
+        let parent = create_valid_morph_header(1000, parent_gas_limit, 100);
         let parent_sealed = SealedHeader::seal_slow(parent);
 
         // Increase by exactly the allowed amount (valid)
-        let mut child = create_valid_header(1001, parent_gas_limit + max_change, 101);
-        child.parent_hash = parent_sealed.hash();
+        let mut child = create_valid_morph_header(1001, parent_gas_limit + max_change, 101);
+        child.inner.parent_hash = parent_sealed.hash();
         let child_sealed = SealedHeader::seal_slow(child);
 
         let result = consensus.validate_header_against_parent(&child_sealed, &parent_sealed);
@@ -1077,11 +1076,11 @@ mod tests {
         // Use a parent gas limit that allows decreasing to below minimum within bounds
         // Parent = MINIMUM_GAS_LIMIT, so max decrease = MINIMUM_GAS_LIMIT / 1024 = 4
         // Child = MINIMUM_GAS_LIMIT - 1 = 4999, change = 1 which is < 4 (within bounds)
-        let parent = create_valid_header(1000, MINIMUM_GAS_LIMIT, 100);
+        let parent = create_valid_morph_header(1000, MINIMUM_GAS_LIMIT, 100);
         let parent_sealed = SealedHeader::seal_slow(parent);
 
-        let mut child = create_valid_header(1001, MINIMUM_GAS_LIMIT - 1, 101);
-        child.parent_hash = parent_sealed.hash();
+        let mut child = create_valid_morph_header(1001, MINIMUM_GAS_LIMIT - 1, 101);
+        child.inner.parent_hash = parent_sealed.hash();
         let child_sealed = SealedHeader::seal_slow(child);
 
         let result = consensus.validate_header_against_parent(&child_sealed, &parent_sealed);
@@ -1096,11 +1095,11 @@ mod tests {
         let chain_spec = create_test_chainspec();
         let consensus = MorphConsensus::new(chain_spec);
 
-        let parent = create_valid_header(1000, 30_000_000, 100);
+        let parent = create_valid_morph_header(1000, 30_000_000, 100);
         let parent_sealed = SealedHeader::seal_slow(parent);
 
-        let mut child = create_valid_header(1001, 30_000_000, 101);
-        child.parent_hash = B256::random(); // Wrong parent hash
+        let mut child = create_valid_morph_header(1001, 30_000_000, 101);
+        child.inner.parent_hash = B256::random(); // Wrong parent hash
         let child_sealed = SealedHeader::seal_slow(child);
 
         let result = consensus.validate_header_against_parent(&child_sealed, &parent_sealed);
@@ -1112,11 +1111,11 @@ mod tests {
         let chain_spec = create_test_chainspec();
         let consensus = MorphConsensus::new(chain_spec);
 
-        let parent = create_valid_header(1000, 30_000_000, 100);
+        let parent = create_valid_morph_header(1000, 30_000_000, 100);
         let parent_sealed = SealedHeader::seal_slow(parent);
 
-        let mut child = create_valid_header(1001, 30_000_000, 102); // Should be 101
-        child.parent_hash = parent_sealed.hash();
+        let mut child = create_valid_morph_header(1001, 30_000_000, 102); // Should be 101
+        child.inner.parent_hash = parent_sealed.hash();
         let child_sealed = SealedHeader::seal_slow(child);
 
         let result = consensus.validate_header_against_parent(&child_sealed, &parent_sealed);
@@ -1169,7 +1168,21 @@ mod tests {
 
     // ========================================================================
     // Gas Limit Validation Helper Tests
+    // These use Header directly since the generic helper functions work
+    // on any type implementing BlockHeader trait.
     // ========================================================================
+
+    fn create_valid_header(timestamp: u64, gas_limit: u64, number: u64) -> Header {
+        Header {
+            nonce: B64::ZERO,
+            ommers_hash: EMPTY_OMMER_ROOT_HASH,
+            gas_limit,
+            timestamp,
+            number,
+            base_fee_per_gas: Some(1_000_000),
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn test_validate_against_parent_gas_limit_no_change() {

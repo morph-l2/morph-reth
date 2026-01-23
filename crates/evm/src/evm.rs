@@ -1,5 +1,6 @@
 use alloy_evm::{
     Database, Evm, EvmEnv, EvmFactory,
+    precompiles::PrecompilesMap,
     revm::{
         Context, ExecuteEvm, InspectEvm, Inspector, SystemCallEvm,
         context::result::{EVMError, ResultAndState},
@@ -29,7 +30,7 @@ impl EvmFactory for MorphEvmFactory {
     type HaltReason = MorphHaltReason;
     type Spec = MorphHardfork;
     type BlockEnv = MorphBlockEnv;
-    type Precompiles = MorphPrecompiles;
+    type Precompiles = PrecompilesMap;
 
     fn create_evm<DB: Database>(
         &self,
@@ -57,20 +58,28 @@ impl EvmFactory for MorphEvmFactory {
 #[expect(missing_debug_implementations)]
 pub struct MorphEvm<DB: Database, I = NoOpInspector> {
     inner: morph_revm::MorphEvm<DB, I>,
+    /// Precompiles wrapped as PrecompilesMap for reth compatibility
+    precompiles_map: PrecompilesMap,
     inspect: bool,
 }
 
 impl<DB: Database> MorphEvm<DB> {
     /// Create a new [`MorphEvm`] instance.
     pub fn new(db: DB, input: EvmEnv<MorphHardfork, MorphBlockEnv>) -> Self {
+        let spec = input.cfg_env.spec;
         let ctx = Context::mainnet()
             .with_db(db)
             .with_block(input.block_env)
             .with_cfg(input.cfg_env)
             .with_tx(Default::default());
 
+        // Create precompiles for the hardfork and wrap in PrecompilesMap
+        let morph_precompiles = MorphPrecompiles::new_with_spec(spec);
+        let precompiles_map = PrecompilesMap::from_static(morph_precompiles.precompiles());
+
         Self {
             inner: morph_revm::MorphEvm::new(ctx, NoOpInspector {}),
+            precompiles_map,
             inspect: false,
         }
     }
@@ -91,6 +100,7 @@ impl<DB: Database, I> MorphEvm<DB, I> {
     pub fn with_inspector<OINSP>(self, inspector: OINSP) -> MorphEvm<DB, OINSP> {
         MorphEvm {
             inner: self.inner.with_inspector(inspector),
+            precompiles_map: self.precompiles_map,
             inspect: true,
         }
     }
@@ -143,7 +153,7 @@ where
     type HaltReason = MorphHaltReason;
     type Spec = MorphHardfork;
     type BlockEnv = MorphBlockEnv;
-    type Precompiles = MorphPrecompiles;
+    type Precompiles = PrecompilesMap;
     type Inspector = I;
 
     fn block(&self) -> &Self::BlockEnv {
@@ -193,7 +203,7 @@ where
         (
             &self.inner.inner.ctx.journaled_state.database,
             &self.inner.inner.inspector,
-            &self.inner.inner.precompiles,
+            &self.precompiles_map,
         )
     }
 
@@ -201,7 +211,7 @@ where
         (
             &mut self.inner.inner.ctx.journaled_state.database,
             &mut self.inner.inner.inspector,
-            &mut self.inner.inner.precompiles,
+            &mut self.precompiles_map,
         )
     }
 }

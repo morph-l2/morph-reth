@@ -6,11 +6,11 @@ use crate::{
     hardfork::{MorphHardfork, MorphHardforks},
 };
 use alloy_chains::Chain;
-use alloy_consensus::Header;
 use alloy_eips::eip7840::BlobParams;
 use alloy_evm::eth::spec::EthExecutorSpec;
 use alloy_genesis::Genesis;
 use alloy_primitives::{Address, B256, U256};
+use morph_primitives::MorphHeader;
 use reth_chainspec::{
     BaseFeeParams, ChainSpec, DepositContract, DisplayHardforks, EthChainSpec, EthereumHardfork,
     EthereumHardforks, ForkCondition, ForkFilter, ForkId, Hardfork, Hardforks, Head,
@@ -87,13 +87,14 @@ impl ChainConfig for MorphChainSpec {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MorphChainSpec {
     /// [`ChainSpec`].
-    pub inner: ChainSpec<Header>,
+    pub inner: ChainSpec<MorphHeader>,
+    /// Morph-specific genesis info.
     pub info: MorphGenesisInfo,
 }
 
 impl MorphChainSpec {
     /// Create a new [`MorphChainSpec`] with the given inner spec and config.
-    pub fn new(inner: ChainSpec<Header>, info: MorphGenesisInfo) -> Self {
+    pub fn new(inner: ChainSpec<MorphHeader>, info: MorphGenesisInfo) -> Self {
         Self { inner, info }
     }
 
@@ -137,7 +138,7 @@ impl From<Genesis> for MorphChainSpec {
 
         // Add Morph hardforks
         // Note: Bernoulli and Curie use block-based activation,
-        // while Morph203, Viridian, and Emerald use timestamp-based activation.
+        // while Morph203, Viridian, Emerald, and MPTFork use timestamp-based activation.
         let block_forks = vec![
             (MorphHardfork::Bernoulli, hardfork_info.bernoulli_block),
             (MorphHardfork::Curie, hardfork_info.curie_block),
@@ -149,6 +150,7 @@ impl From<Genesis> for MorphChainSpec {
             (MorphHardfork::Morph203, hardfork_info.morph203_time),
             (MorphHardfork::Viridian, hardfork_info.viridian_time),
             (MorphHardfork::Emerald, hardfork_info.emerald_time),
+            (MorphHardfork::MPTFork, hardfork_info.mpt_fork_time),
         ]
         .into_iter()
         .filter_map(|(fork, time)| time.map(|t| (fork, ForkCondition::Timestamp(t))));
@@ -158,7 +160,7 @@ impl From<Genesis> for MorphChainSpec {
         base_spec.hardforks.extend(morph_forks);
 
         Self {
-            inner: base_spec,
+            inner: base_spec.map_header(MorphHeader::from),
             info: chain_info,
         }
     }
@@ -199,7 +201,7 @@ impl Hardforks for MorphChainSpec {
 }
 
 impl EthChainSpec for MorphChainSpec {
-    type Header = Header;
+    type Header = MorphHeader;
 
     fn chain(&self) -> Chain {
         self.inner.chain()
@@ -252,7 +254,7 @@ impl EthChainSpec for MorphChainSpec {
         self.inner.get_final_paris_total_difficulty()
     }
 
-    fn next_block_base_fee(&self, _parent: &Header, _target_timestamp: u64) -> Option<u64> {
+    fn next_block_base_fee(&self, _parent: &MorphHeader, _target_timestamp: u64) -> Option<u64> {
         Some(MORPH_BASE_FEE)
     }
 }

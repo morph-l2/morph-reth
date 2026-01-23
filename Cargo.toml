@@ -49,6 +49,7 @@ morph-primitives = { path = "crates/primitives", default-features = false, featu
 morph-revm = { path = "crates/revm", default-features = false }
 
 reth-basic-payload-builder = { git = "https://github.com/paradigmxyz/reth", rev = "64909d3" }
+reth-chain-state = { git = "https://github.com/paradigmxyz/reth", rev = "64909d3" }
 reth-chainspec = { git = "https://github.com/paradigmxyz/reth", rev = "64909d3" }
 reth-cli = { git = "https://github.com/paradigmxyz/reth", rev = "64909d3" }
 reth-cli-commands = { git = "https://github.com/paradigmxyz/reth", rev = "64909d3" }
@@ -72,6 +73,7 @@ reth-ethereum-engine-primitives = { git = "https://github.com/paradigmxyz/reth",
 reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth", rev = "64909d3", default-features = false }
 reth-evm = { git = "https://github.com/paradigmxyz/reth", rev = "64909d3" }
 reth-evm-ethereum = { git = "https://github.com/paradigmxyz/reth", rev = "64909d3" }
+reth-execution-types = { git = "https://github.com/paradigmxyz/reth", rev = "64909d3" }
 reth-metrics = { git = "https://github.com/paradigmxyz/reth", rev = "64909d3" }
 reth-network-peers = { git = "https://github.com/paradigmxyz/reth", rev = "64909d3" }
 reth-node-api = { git = "https://github.com/paradigmxyz/reth", rev = "64909d3" }
@@ -81,6 +83,7 @@ reth-node-ethereum = { git = "https://github.com/paradigmxyz/reth", rev = "64909
 reth-node-metrics = { git = "https://github.com/paradigmxyz/reth", rev = "64909d3" }
 reth-payload-builder = { git = "https://github.com/paradigmxyz/reth", rev = "64909d3" }
 reth-payload-primitives = { git = "https://github.com/paradigmxyz/reth", rev = "64909d3" }
+reth-payload-util = { git = "https://github.com/paradigmxyz/reth", rev = "64909d3" }
 reth-primitives-traits = { git = "https://github.com/paradigmxyz/reth", rev = "64909d3", default-features = false }
 reth-provider = { git = "https://github.com/paradigmxyz/reth", rev = "64909d3" }
 reth-rpc = { git = "https://github.com/paradigmxyz/reth", rev = "64909d3" }

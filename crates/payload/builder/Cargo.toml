@@ -12,10 +12,38 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-# Dependencies will be added when implementing the builder
+# Morph
+morph-chainspec.workspace = true
+morph-evm = { workspace = true, features = ["reth-codec"] }
+morph-payload-types.workspace = true
+morph-primitives.workspace = true
+
+# Reth
+reth-basic-payload-builder.workspace = true
+reth-chainspec.workspace = true
+reth-evm.workspace = true
+reth-payload-builder.workspace = true
+reth-payload-primitives.workspace = true
+reth-payload-util.workspace = true
+reth-primitives-traits.workspace = true
+reth-revm.workspace = true
+reth-storage-api.workspace = true
+reth-transaction-pool.workspace = true
+
+# Alloy
+alloy-consensus.workspace = true
+alloy-eips.workspace = true
+alloy-primitives.workspace = true
+alloy-rlp.workspace = true
+
+# Revm
+revm.workspace = true
+
+# Utils
+tracing.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 
 [features]
 default = []
-

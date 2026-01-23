@@ -20,24 +20,32 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```
 //! use morph_chainspec::{MorphChainSpec, MORPH_MAINNET};
 //! use morph_chainspec::hardfork::MorphHardforks;
 //!
 //! // Use predefined mainnet spec
 //! let mainnet = MORPH_MAINNET.clone();
 //! assert!(mainnet.is_bernoulli_active_at_block(0));
+//! ```
 //!
-//! // Or create from genesis JSON
-//! let genesis: Genesis = serde_json::from_str(genesis_json)?;
+//! Create from genesis JSON:
+//!
+//! ```no_run
+//! use alloy_genesis::Genesis;
+//! use morph_chainspec::MorphChainSpec;
+//!
+//! let genesis_json = std::fs::read_to_string("genesis.json").unwrap();
+//! let genesis: Genesis = serde_json::from_str(&genesis_json).unwrap();
 //! let chain_spec = MorphChainSpec::from(genesis);
 //! ```
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-// Used only in tests, but declared here to silence unused_crate_dependencies warning
-use serde_json as _;
+// Used only for feature propagation (alloy-consensus/serde), but declared here
+// to silence the unused_crate_dependencies warning.
+use alloy_consensus as _;
 
 pub mod constants;
 pub mod genesis;
@@ -51,6 +59,9 @@ pub use constants::*;
 
 // Re-export genesis types
 pub use genesis::{MorphChainConfig, MorphGenesisInfo, MorphHardforkInfo};
+
+// Re-export hardfork types
+pub use hardfork::{MorphHardfork, MorphHardforks};
 
 pub use morph::MORPH_MAINNET;
 pub use morph_hoodi::MORPH_HOODI;
