@@ -9,7 +9,7 @@ use revm::{
         EthFrame, EvmTr, FrameInitOrResult, FrameTr, ItemOrResult, instructions::EthInstructions,
     },
     inspector::InspectorEvmTr,
-    interpreter::interpreter::EthInterpreter,
+    interpreter::{Instruction, interpreter::EthInterpreter},
 };
 
 /// The Morph EVM context type.
@@ -42,11 +42,17 @@ impl<DB: Database, I> MorphEvm<DB, I> {
         // Get the current hardfork spec from context and create matching precompiles
         let spec = ctx.cfg.spec;
         let precompiles = MorphPrecompiles::new_with_spec(spec);
-
+        let mut instructions = EthInstructions::new_mainnet();
+        // SELFDESTRUCT is disabled in Morph
+        instructions.insert_instruction(0xff, Instruction::unknown());
+        // BLOBHASH is disabled in Morph
+        instructions.insert_instruction(0x49, Instruction::unknown());
+        // BLOBBASEFEE is disabled in Morph
+        instructions.insert_instruction(0x4a, Instruction::unknown());
         Self::new_inner(Evm {
             ctx,
             inspector,
-            instruction: EthInstructions::new_mainnet(),
+            instruction: instructions,
             precompiles,
             frame_stack: FrameStack::new(),
         })

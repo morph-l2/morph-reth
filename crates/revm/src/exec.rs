@@ -20,7 +20,7 @@ use revm::{
 };
 
 /// Total gas system transactions are allowed to use.
-const SYSTEM_CALL_GAS_LIMIT: u64 = 250_000_000;
+const SYSTEM_CALL_GAS_LIMIT: u64 = 200_000;
 
 impl<DB, I> ExecuteEvm for MorphEvm<DB, I>
 where
