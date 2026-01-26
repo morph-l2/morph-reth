@@ -8,7 +8,7 @@ use alloy_eips::eip2930::AccessList;
 use alloy_eips::eip7702::RecoveredAuthority;
 use alloy_primitives::{Address, B256, Bytes, TxKind, U256};
 use alloy_rlp::Decodable;
-use morph_primitives::{MORPH_TX_TYPE_ID, L1_TX_TYPE_ID, MorphTxEnvelope, TxMorph};
+use morph_primitives::{L1_TX_TYPE_ID, MORPH_TX_TYPE_ID, MorphTxEnvelope, TxMorph};
 use reth_evm::{FromRecoveredTx, FromTxWithEncoded, ToTxEnv, TransactionEnv};
 use revm::context::{Transaction, TxEnv};
 use revm::context_interface::transaction::{

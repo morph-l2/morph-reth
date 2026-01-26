@@ -803,4 +803,3 @@ mod tests {
         assert_ne!(hash, B256::ZERO);
     }
 }
-

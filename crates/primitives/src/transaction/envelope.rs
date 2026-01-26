@@ -185,8 +185,8 @@ impl reth_primitives_traits::SignedTransaction for MorphTxEnvelope {}
 
 #[cfg(feature = "reth-codec")]
 mod codec {
-    use crate::MORPH_TX_TYPE_ID;
     use crate::L1_TX_TYPE_ID;
+    use crate::MORPH_TX_TYPE_ID;
     use crate::TxL1Msg;
     use crate::TxMorph;
 
