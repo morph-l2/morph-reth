@@ -1,7 +1,7 @@
 //! Morph receipt types.
 //!
 //! This module provides:
-//! - [`MorphTransactionReceipt`]: Receipt with L1 fee and AltFee fields
+//! - [`MorphTransactionReceipt`]: Receipt with L1 fee and Morph transaction fields
 //! - [`MorphReceipt`]: Typed receipt enum for different transaction types
 
 #[allow(clippy::module_inception)]
@@ -22,7 +22,7 @@ use reth_primitives_traits::InMemorySize;
 ///
 /// This enum wraps different receipt types based on the transaction type.
 /// For L1 messages, it uses a standard receipt without L1 fee.
-/// For other transactions, it uses [`MorphTransactionReceipt`] with L1 fee and optional AltFee fields.
+/// For other transactions, it uses [`MorphTransactionReceipt`] with L1 fee and optional Morph transaction fields.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum MorphReceipt {
@@ -36,8 +36,8 @@ pub enum MorphReceipt {
     Eip7702(MorphTransactionReceipt),
     /// L1 message receipt (no L1 fee since it's pre-paid on L1)
     L1Msg(Receipt),
-    /// AltFee receipt
-    AltFee(MorphTransactionReceipt),
+    /// Morph transaction receipt
+    Morph(MorphTransactionReceipt),
 }
 
 impl Default for MorphReceipt {
@@ -55,7 +55,7 @@ impl MorphReceipt {
             Self::Eip1559(_) => MorphTxType::Eip1559,
             Self::Eip7702(_) => MorphTxType::Eip7702,
             Self::L1Msg(_) => MorphTxType::L1Msg,
-            Self::AltFee(_) => MorphTxType::AltFee,
+            Self::Morph(_) => MorphTxType::Morph,
         }
     }
 
@@ -66,7 +66,7 @@ impl MorphReceipt {
             | Self::Eip2930(receipt)
             | Self::Eip1559(receipt)
             | Self::Eip7702(receipt)
-            | Self::AltFee(receipt) => &receipt.inner,
+            | Self::Morph(receipt) => &receipt.inner,
             Self::L1Msg(receipt) => receipt,
         }
     }
@@ -78,7 +78,7 @@ impl MorphReceipt {
             | Self::Eip2930(r)
             | Self::Eip1559(r)
             | Self::Eip7702(r)
-            | Self::AltFee(r) => r.l1_fee,
+            | Self::Morph(r) => r.l1_fee,
             Self::L1Msg(_) => None,
         }
     }
@@ -95,7 +95,7 @@ impl MorphReceipt {
             | Self::Eip2930(r)
             | Self::Eip1559(r)
             | Self::Eip7702(r)
-            | Self::AltFee(r) => r.rlp_encoded_fields_length_with_bloom(bloom),
+            | Self::Morph(r) => r.rlp_encoded_fields_length_with_bloom(bloom),
             Self::L1Msg(r) => r.rlp_encoded_fields_length_with_bloom(bloom),
         }
     }
@@ -107,7 +107,7 @@ impl MorphReceipt {
             | Self::Eip2930(r)
             | Self::Eip1559(r)
             | Self::Eip7702(r)
-            | Self::AltFee(r) => r.rlp_encode_fields_with_bloom(bloom, out),
+            | Self::Morph(r) => r.rlp_encode_fields_with_bloom(bloom, out),
             Self::L1Msg(r) => r.rlp_encode_fields_with_bloom(bloom, out),
         }
     }
@@ -140,7 +140,7 @@ impl MorphReceipt {
             | Self::Eip2930(r)
             | Self::Eip1559(r)
             | Self::Eip7702(r)
-            | Self::AltFee(r) => {
+            | Self::Morph(r) => {
                 r.inner.status.length()
                     + r.inner.cumulative_gas_used.length()
                     + r.inner.logs.length()
@@ -159,7 +159,7 @@ impl MorphReceipt {
             | Self::Eip2930(r)
             | Self::Eip1559(r)
             | Self::Eip7702(r)
-            | Self::AltFee(r) => {
+            | Self::Morph(r) => {
                 r.inner.status.encode(out);
                 r.inner.cumulative_gas_used.encode(out);
                 r.inner.logs.encode(out);
@@ -206,7 +206,7 @@ impl MorphReceipt {
             MorphTxType::Eip1559 => Ok(Self::Eip1559(MorphTransactionReceipt::new(inner))),
             MorphTxType::Eip7702 => Ok(Self::Eip7702(MorphTransactionReceipt::new(inner))),
             MorphTxType::L1Msg => Ok(Self::L1Msg(inner)),
-            MorphTxType::AltFee => Ok(Self::AltFee(MorphTransactionReceipt::new(inner))),
+            MorphTxType::Morph => Ok(Self::Morph(MorphTransactionReceipt::new(inner))),
         }
     }
 
@@ -228,7 +228,7 @@ impl MorphReceipt {
             MorphTxType::Eip1559 => Self::Eip1559(MorphTransactionReceipt::new(inner)),
             MorphTxType::Eip7702 => Self::Eip7702(MorphTransactionReceipt::new(inner)),
             MorphTxType::L1Msg => Self::L1Msg(inner),
-            MorphTxType::AltFee => Self::AltFee(MorphTransactionReceipt::new(inner)),
+            MorphTxType::Morph => Self::Morph(MorphTransactionReceipt::new(inner)),
         };
 
         Ok(ReceiptWithBloom {
@@ -476,7 +476,7 @@ mod compact {
                 | MorphReceipt::Eip2930(r)
                 | MorphReceipt::Eip1559(r)
                 | MorphReceipt::Eip7702(r)
-                | MorphReceipt::AltFee(r) => (
+                | MorphReceipt::Morph(r) => (
                     r.l1_fee,
                     r.fee_token_id.map(u64::from),
                     r.fee_rate,
@@ -540,7 +540,7 @@ mod compact {
                 MorphTxType::Eip1559 => Self::Eip1559(morph_receipt),
                 MorphTxType::Eip7702 => Self::Eip7702(morph_receipt),
                 MorphTxType::L1Msg => unreachable!("L1Msg handled above"),
-                MorphTxType::AltFee => Self::AltFee(morph_receipt),
+                MorphTxType::Morph => Self::Morph(morph_receipt),
             }
         }
     }
@@ -615,15 +615,15 @@ mod tests {
         })
     }
 
-    /// Creates an AltFee receipt for testing.
-    fn create_alt_fee_receipt() -> MorphReceipt {
+    /// Creates a Morph transaction receipt for testing.
+    fn create_morph_receipt() -> MorphReceipt {
         let inner = Receipt {
             status: false.into(),
             cumulative_gas_used: 50000,
             logs: vec![],
         };
 
-        MorphReceipt::AltFee(MorphTransactionReceipt::with_alt_fee(
+        MorphReceipt::Morph(MorphTransactionReceipt::with_morph_tx(
             inner,
             U256::from(2000),   // l1_fee
             1,                  // fee_token_id
@@ -641,8 +641,8 @@ mod tests {
         let l1_msg = MorphReceipt::L1Msg(Receipt::default());
         assert_eq!(l1_msg.tx_type(), MorphTxType::L1Msg);
 
-        let alt_fee = MorphReceipt::AltFee(MorphTransactionReceipt::default());
-        assert_eq!(alt_fee.tx_type(), MorphTxType::AltFee);
+        let morph = MorphReceipt::Morph(MorphTransactionReceipt::default());
+        assert_eq!(morph.tx_type(), MorphTxType::Morph);
     }
 
     #[test]
@@ -762,23 +762,23 @@ mod tests {
         assert!(decoded.is_l1_message());
     }
 
-    /// Tests that EIP-2718 encoding and decoding roundtrips correctly for AltFee receipt.
+    /// Tests that EIP-2718 encoding and decoding roundtrips correctly for Morph receipt.
     #[test]
-    fn test_alt_fee_receipt_encode_2718_roundtrip() {
-        let original = create_alt_fee_receipt();
+    fn test_morph_receipt_encode_2718_roundtrip() {
+        let original = create_morph_receipt();
 
         // Encode
         let mut encoded = Vec::new();
         original.encode_2718(&mut encoded);
 
         // Verify type byte
-        assert_eq!(encoded[0], MorphTxType::AltFee as u8);
+        assert_eq!(encoded[0], MorphTxType::Morph as u8);
 
         // Decode
         let decoded = MorphReceipt::decode_2718(&mut encoded.as_slice()).unwrap();
 
         // Verify fields
-        assert_eq!(decoded.tx_type(), MorphTxType::AltFee);
+        assert_eq!(decoded.tx_type(), MorphTxType::Morph);
         assert_eq!(decoded.status(), original.status());
         assert_eq!(
             decoded.cumulative_gas_used(),
@@ -887,7 +887,7 @@ mod tests {
             (MorphTxType::Legacy, create_legacy_receipt()),
             (MorphTxType::Eip1559, create_test_receipt()),
             (MorphTxType::L1Msg, create_l1_msg_receipt()),
-            (MorphTxType::AltFee, create_alt_fee_receipt()),
+            (MorphTxType::Morph, create_morph_receipt()),
         ];
 
         for (expected_type, original) in receipts {

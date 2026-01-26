@@ -1,6 +1,6 @@
-//! Altfee Transaction type for Morph L2.
+//! Morph Transaction type for Morph L2.
 //!
-//! This module defines the TxAltFee type which represents transactions that
+//! This module defines the TxMorph type which represents transactions that
 //! use ERC20 tokens for gas payment instead of native ETH.
 //!
 //! Reference: <https://github.com/morph-l2/morph/blob/main/prover/crates/primitives/src/types/tx_alt_fee.rs>
@@ -16,10 +16,10 @@ use alloy_primitives::{B256, Bytes, ChainId, Signature, TxKind, U256, keccak256}
 use alloy_rlp::{BufMut, Decodable, Encodable, Header};
 use core::mem;
 
-/// Altfee Transaction type ID (0x7F).
-pub const ALT_FEE_TX_TYPE_ID: u8 = 0x7F;
+/// Morph Transaction type ID (0x7F).
+pub const MORPH_TX_TYPE_ID: u8 = 0x7F;
 
-/// Altfee Transaction for Morph L2.
+/// Morph Transaction for Morph L2.
 ///
 /// This transaction type allows users to pay gas fees using ERC20 tokens
 /// instead of native ETH. It extends EIP-1559 style transactions with
@@ -29,7 +29,7 @@ pub const ALT_FEE_TX_TYPE_ID: u8 = 0x7F;
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
-pub struct TxAltFee {
+pub struct TxMorph {
     /// EIP-155: Simple replay attack protection.
     #[cfg_attr(feature = "serde", serde(with = "alloy_serde::quantity"))]
     pub chain_id: ChainId,
@@ -92,11 +92,11 @@ pub struct TxAltFee {
     pub fee_token_id: u16,
 }
 
-impl TxAltFee {
+impl TxMorph {
     /// Get the transaction type.
     #[doc(alias = "transaction_type")]
     pub const fn tx_type() -> u8 {
-        ALT_FEE_TX_TYPE_ID
+        MORPH_TX_TYPE_ID
     }
 
     /// Returns the effective gas price for the given `base_fee`.
@@ -213,13 +213,13 @@ impl TxAltFee {
     }
 }
 
-impl Typed2718 for TxAltFee {
+impl Typed2718 for TxMorph {
     fn ty(&self) -> u8 {
-        ALT_FEE_TX_TYPE_ID
+        MORPH_TX_TYPE_ID
     }
 }
 
-impl Transaction for TxAltFee {
+impl Transaction for TxMorph {
     fn chain_id(&self) -> Option<ChainId> {
         Some(self.chain_id)
     }
@@ -289,7 +289,7 @@ impl Transaction for TxAltFee {
     }
 }
 
-impl RlpEcdsaEncodableTx for TxAltFee {
+impl RlpEcdsaEncodableTx for TxMorph {
     fn rlp_encoded_fields_length(&self) -> usize {
         self.fields_len()
     }
@@ -299,7 +299,7 @@ impl RlpEcdsaEncodableTx for TxAltFee {
     }
 }
 
-impl RlpEcdsaDecodableTx for TxAltFee {
+impl RlpEcdsaDecodableTx for TxMorph {
     const DEFAULT_TX_TYPE: u8 = { Self::tx_type() };
 
     /// Decodes the inner [TxEip1559] fields from RLP bytes.
@@ -308,7 +308,7 @@ impl RlpEcdsaDecodableTx for TxAltFee {
     }
 }
 
-impl SignableTransaction<Signature> for TxAltFee {
+impl SignableTransaction<Signature> for TxMorph {
     fn set_chain_id(&mut self, chain_id: ChainId) {
         self.chain_id = chain_id;
     }
@@ -323,7 +323,7 @@ impl SignableTransaction<Signature> for TxAltFee {
     }
 }
 
-impl Encodable for TxAltFee {
+impl Encodable for TxMorph {
     fn encode(&self, out: &mut dyn BufMut) {
         self.rlp_encode(out);
     }
@@ -333,7 +333,7 @@ impl Encodable for TxAltFee {
     }
 }
 
-impl Decodable for TxAltFee {
+impl Decodable for TxMorph {
     fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
         let header = Header::decode(buf)?;
         if !header.list {
@@ -349,9 +349,9 @@ impl Decodable for TxAltFee {
     }
 }
 
-impl Encodable2718 for TxAltFee {
+impl Encodable2718 for TxMorph {
     fn type_flag(&self) -> Option<u8> {
-        Some(ALT_FEE_TX_TYPE_ID)
+        Some(MORPH_TX_TYPE_ID)
     }
 
     fn encode_2718_len(&self) -> usize {
@@ -365,7 +365,7 @@ impl Encodable2718 for TxAltFee {
     }
 
     fn encode_2718(&self, out: &mut dyn BufMut) {
-        ALT_FEE_TX_TYPE_ID.encode(out);
+        MORPH_TX_TYPE_ID.encode(out);
         let header = Header {
             list: true,
             payload_length: self.fields_len(),
@@ -375,14 +375,14 @@ impl Encodable2718 for TxAltFee {
     }
 }
 
-impl reth_primitives_traits::InMemorySize for TxAltFee {
+impl reth_primitives_traits::InMemorySize for TxMorph {
     fn size(&self) -> usize {
         Self::size(self)
     }
 }
 
 #[cfg(feature = "reth-codec")]
-impl reth_codecs::Compact for TxAltFee {
+impl reth_codecs::Compact for TxMorph {
     fn to_compact<B>(&self, buf: &mut B) -> usize
     where
         B: BufMut + AsMut<[u8]>,
@@ -434,8 +434,8 @@ impl reth_codecs::Compact for TxAltFee {
     }
 }
 
-/// Extension trait for [`TxAltFee`] to access token fee fields.
-pub trait TxAltFeeExt {
+/// Extension trait for [`TxMorph`] to access token fee fields.
+pub trait TxMorphExt {
     /// Returns the token ID used for fee payment.
     fn fee_token_id(&self) -> u16;
 
@@ -448,7 +448,7 @@ pub trait TxAltFeeExt {
     }
 }
 
-impl TxAltFeeExt for TxAltFee {
+impl TxMorphExt for TxMorph {
     fn fee_token_id(&self) -> u16 {
         self.fee_token_id
     }
@@ -464,8 +464,8 @@ mod tests {
     use alloy_primitives::address;
 
     #[test]
-    fn test_tx_alt_fee_default() {
-        let tx = TxAltFee::default();
+    fn test_morph_transaction_default() {
+        let tx = TxMorph::default();
         assert_eq!(tx.chain_id, 0);
         assert_eq!(tx.nonce, 0);
         assert_eq!(tx.gas_limit, 0);
@@ -477,21 +477,21 @@ mod tests {
     }
 
     #[test]
-    fn test_tx_alt_fee_tx_type() {
-        assert_eq!(TxAltFee::tx_type(), ALT_FEE_TX_TYPE_ID);
-        assert_eq!(TxAltFee::tx_type(), 0x7F);
+    fn test_morph_transaction_tx_type() {
+        assert_eq!(TxMorph::tx_type(), MORPH_TX_TYPE_ID);
+        assert_eq!(TxMorph::tx_type(), 0x7F);
     }
 
     #[test]
-    fn test_tx_alt_fee_validate() {
-        let valid_tx = TxAltFee {
+    fn test_morph_transaction_validate() {
+        let valid_tx = TxMorph {
             max_fee_per_gas: 100,
             max_priority_fee_per_gas: 50,
             ..Default::default()
         };
         assert!(valid_tx.validate().is_ok());
 
-        let invalid_tx = TxAltFee {
+        let invalid_tx = TxMorph {
             max_fee_per_gas: 50,
             max_priority_fee_per_gas: 100,
             ..Default::default()
@@ -500,8 +500,8 @@ mod tests {
     }
 
     #[test]
-    fn test_tx_alt_fee_effective_gas_price() {
-        let tx = TxAltFee {
+    fn test_morph_transaction_effective_gas_price() {
+        let tx = TxMorph {
             max_fee_per_gas: 100,
             max_priority_fee_per_gas: 20,
             ..Default::default()
@@ -518,8 +518,8 @@ mod tests {
     }
 
     #[test]
-    fn test_tx_alt_fee_trait_methods() {
-        let tx = TxAltFee {
+    fn test_morph_transaction_trait_methods() {
+        let tx = TxMorph {
             chain_id: 1,
             nonce: 42,
             gas_limit: 21_000,
@@ -550,26 +550,26 @@ mod tests {
         );
         assert_eq!(Transaction::value(&tx), U256::from(100u64));
         assert_eq!(Transaction::input(&tx), &Bytes::from(vec![1, 2, 3, 4]));
-        assert_eq!(Typed2718::ty(&tx), ALT_FEE_TX_TYPE_ID);
+        assert_eq!(Typed2718::ty(&tx), MORPH_TX_TYPE_ID);
         assert!(tx.access_list().is_some());
         assert!(tx.blob_versioned_hashes().is_none());
         assert!(tx.authorization_list().is_none());
 
-        // Test TxAltFeeExt trait methods
+        // Test TxMorphExt trait methods
         assert_eq!(tx.fee_token_id(), 1);
         assert_eq!(tx.fee_limit(), U256::from(1000u64));
         assert!(tx.uses_token_fee());
     }
 
     #[test]
-    fn test_tx_alt_fee_is_create() {
-        let create_tx = TxAltFee {
+    fn test_morph_transaction_is_create() {
+        let create_tx = TxMorph {
             to: TxKind::Create,
             ..Default::default()
         };
         assert!(create_tx.is_create());
 
-        let call_tx = TxAltFee {
+        let call_tx = TxMorph {
             to: TxKind::Call(address!("0000000000000000000000000000000000000001")),
             ..Default::default()
         };
@@ -577,8 +577,8 @@ mod tests {
     }
 
     #[test]
-    fn test_tx_alt_fee_rlp_roundtrip() {
-        let tx = TxAltFee {
+    fn test_morph_transaction_rlp_roundtrip() {
+        let tx = TxMorph {
             chain_id: 1,
             nonce: 42,
             gas_limit: 21_000,
@@ -597,7 +597,7 @@ mod tests {
         tx.encode(&mut buf);
 
         // Decode
-        let decoded = TxAltFee::decode(&mut buf.as_slice()).expect("Should decode");
+        let decoded = TxMorph::decode(&mut buf.as_slice()).expect("Should decode");
 
         assert_eq!(tx.chain_id, decoded.chain_id);
         assert_eq!(tx.nonce, decoded.nonce);
@@ -615,8 +615,8 @@ mod tests {
     }
 
     #[test]
-    fn test_tx_alt_fee_create() {
-        let tx = TxAltFee {
+    fn test_morph_transaction_create() {
+        let tx = TxMorph {
             chain_id: 1,
             nonce: 0,
             gas_limit: 100_000,
@@ -635,14 +635,14 @@ mod tests {
         tx.encode(&mut buf);
 
         // Decode
-        let decoded = TxAltFee::decode(&mut buf.as_slice()).expect("Should decode");
+        let decoded = TxMorph::decode(&mut buf.as_slice()).expect("Should decode");
 
         assert_eq!(decoded.to, TxKind::Create);
     }
 
     #[test]
-    fn test_tx_alt_fee_encode_2718() {
-        let tx = TxAltFee {
+    fn test_morph_transaction_encode_2718() {
+        let tx = TxMorph {
             chain_id: 1,
             nonce: 1,
             gas_limit: 21_000,
@@ -660,18 +660,18 @@ mod tests {
         tx.encode_2718(&mut buf);
 
         // First byte should be the type ID
-        assert_eq!(buf[0], ALT_FEE_TX_TYPE_ID);
+        assert_eq!(buf[0], MORPH_TX_TYPE_ID);
 
         // Verify type_flag
-        assert_eq!(tx.type_flag(), Some(ALT_FEE_TX_TYPE_ID));
+        assert_eq!(tx.type_flag(), Some(MORPH_TX_TYPE_ID));
 
         // Verify length consistency
         assert_eq!(buf.len(), tx.encode_2718_len());
     }
 
     #[test]
-    fn test_tx_alt_fee_decode_rejects_malformed_rlp() {
-        let tx = TxAltFee {
+    fn test_morph_transaction_decode_rejects_malformed_rlp() {
+        let tx = TxMorph {
             chain_id: 1,
             nonce: 42,
             gas_limit: 21_000,
@@ -693,7 +693,7 @@ mod tests {
         let original_len = buf.len();
         buf.truncate(original_len - 5);
 
-        let result = TxAltFee::decode(&mut buf.as_slice());
+        let result = TxMorph::decode(&mut buf.as_slice());
         assert!(
             result.is_err(),
             "Decoding should fail when data is truncated"
@@ -701,8 +701,8 @@ mod tests {
     }
 
     #[test]
-    fn test_tx_alt_fee_size() {
-        let tx = TxAltFee {
+    fn test_morph_transaction_size() {
+        let tx = TxMorph {
             chain_id: 1,
             nonce: 0,
             gas_limit: 21_000,
@@ -721,8 +721,8 @@ mod tests {
     }
 
     #[test]
-    fn test_tx_alt_fee_fields_len() {
-        let tx = TxAltFee {
+    fn test_morph_transaction_fields_len() {
+        let tx = TxMorph {
             chain_id: 1,
             nonce: 1,
             gas_limit: 21_000,
@@ -745,8 +745,8 @@ mod tests {
     }
 
     #[test]
-    fn test_tx_alt_fee_encode_fields() {
-        let tx = TxAltFee {
+    fn test_morph_transaction_encode_fields() {
+        let tx = TxMorph {
             chain_id: 1,
             nonce: 1,
             gas_limit: 21_000,
@@ -769,14 +769,14 @@ mod tests {
     }
 
     #[test]
-    fn test_tx_alt_fee_uses_token_fee() {
-        let tx_with_token = TxAltFee {
+    fn test_morph_transaction_uses_token_fee() {
+        let tx_with_token = TxMorph {
             fee_token_id: 1,
             ..Default::default()
         };
         assert!(tx_with_token.uses_token_fee());
 
-        let tx_without_token = TxAltFee {
+        let tx_without_token = TxMorph {
             fee_token_id: 0,
             ..Default::default()
         };
@@ -784,8 +784,8 @@ mod tests {
     }
 
     #[test]
-    fn test_tx_alt_fee_signature_hash() {
-        let tx = TxAltFee {
+    fn test_morph_transaction_signature_hash() {
+        let tx = TxMorph {
             chain_id: 1,
             nonce: 1,
             gas_limit: 21_000,
@@ -803,3 +803,4 @@ mod tests {
         assert_ne!(hash, B256::ZERO);
     }
 }
+

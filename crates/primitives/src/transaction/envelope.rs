@@ -5,7 +5,7 @@ use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{B256, Bytes};
 use alloy_rlp::BytesMut;
 
-use crate::{TxAltFee, TxL1Msg};
+use crate::{TxL1Msg, TxMorph};
 
 #[derive(Debug, Clone, TransactionEnvelope)]
 #[envelope(tx_type_name = MorphTxType)]
@@ -30,9 +30,9 @@ pub enum MorphTxEnvelope {
     #[envelope(ty = 0x7e)]
     L1Msg(Sealed<TxL1Msg>),
 
-    /// Alt Fee Transaction
+    /// Morph Transaction
     #[envelope(ty = 0x7f)]
-    AltFee(Signed<TxAltFee>),
+    Morph(Signed<TxMorph>),
 }
 
 impl MorphTxEnvelope {
@@ -44,7 +44,7 @@ impl MorphTxEnvelope {
             Self::Eip1559(_) => MorphTxType::Eip1559,
             Self::Eip7702(_) => MorphTxType::Eip7702,
             Self::L1Msg(_) => MorphTxType::L1Msg,
-            Self::AltFee(_) => MorphTxType::AltFee,
+            Self::Morph(_) => MorphTxType::Morph,
         }
     }
 
@@ -68,7 +68,7 @@ impl MorphTxEnvelope {
             | Self::Eip2930(_)
             | Self::Eip1559(_)
             | Self::Eip7702(_)
-            | Self::AltFee(_) => None,
+            | Self::Morph(_) => None,
             Self::L1Msg(tx) => Some(tx.queue_index),
         }
     }
@@ -83,7 +83,7 @@ impl MorphTxEnvelope {
             Self::Eip1559(tx) => tx.encode_2718(&mut bytes),
             Self::Eip7702(tx) => tx.encode_2718(&mut bytes),
             Self::L1Msg(tx) => tx.encode_2718(&mut bytes),
-            Self::AltFee(tx) => tx.encode_2718(&mut bytes),
+            Self::Morph(tx) => tx.encode_2718(&mut bytes),
         }
         Bytes(bytes.freeze())
     }
@@ -97,7 +97,7 @@ impl reth_primitives_traits::InMemorySize for MorphTxEnvelope {
             Self::Eip1559(tx) => tx.size(),
             Self::Eip7702(tx) => tx.size(),
             Self::L1Msg(tx) => tx.size(),
-            Self::AltFee(tx) => tx.size(),
+            Self::Morph(tx) => tx.size(),
         }
     }
 }
@@ -130,7 +130,7 @@ impl alloy_consensus::transaction::TxHashRef for MorphTxEnvelope {
             Self::Eip1559(tx) => tx.hash(),
             Self::Eip7702(tx) => tx.hash(),
             Self::L1Msg(tx) => tx.hash_ref(),
-            Self::AltFee(tx) => tx.hash(),
+            Self::Morph(tx) => tx.hash(),
         }
     }
 }
@@ -152,7 +152,7 @@ impl alloy_consensus::transaction::SignerRecoverable for MorphTxEnvelope {
             }
             // L1 messages have no signature - the sender is stored in the transaction itself
             Self::L1Msg(tx) => Ok(tx.sender),
-            Self::AltFee(tx) => alloy_consensus::transaction::SignerRecoverable::recover_signer(tx),
+            Self::Morph(tx) => alloy_consensus::transaction::SignerRecoverable::recover_signer(tx),
         }
     }
 
@@ -174,7 +174,7 @@ impl alloy_consensus::transaction::SignerRecoverable for MorphTxEnvelope {
             }
             // L1 messages have no signature - the sender is stored in the transaction itself
             Self::L1Msg(tx) => Ok(tx.sender),
-            Self::AltFee(tx) => {
+            Self::Morph(tx) => {
                 alloy_consensus::transaction::SignerRecoverable::recover_signer_unchecked(tx)
             }
         }
@@ -185,10 +185,10 @@ impl reth_primitives_traits::SignedTransaction for MorphTxEnvelope {}
 
 #[cfg(feature = "reth-codec")]
 mod codec {
-    use crate::ALT_FEE_TX_TYPE_ID;
+    use crate::MORPH_TX_TYPE_ID;
     use crate::L1_TX_TYPE_ID;
-    use crate::TxAltFee;
     use crate::TxL1Msg;
+    use crate::TxMorph;
 
     use super::*;
     use alloy_eips::eip2718::EIP7702_TX_TYPE_ID;
@@ -243,10 +243,10 @@ mod codec {
                     let tx = Sealed::new(tx);
                     (Self::L1Msg(tx), buf)
                 }
-                MorphTxType::AltFee => {
-                    let (tx, buf) = TxAltFee::from_compact(buf, buf.len());
+                MorphTxType::Morph => {
+                    let (tx, buf) = TxMorph::from_compact(buf, buf.len());
                     let tx = Signed::new_unhashed(tx, signature);
-                    (Self::AltFee(tx), buf)
+                    (Self::Morph(tx), buf)
                 }
             }
         }
@@ -260,7 +260,7 @@ mod codec {
                 Self::Eip1559(tx) => tx.tx().to_compact(buf),
                 Self::Eip7702(tx) => tx.tx().to_compact(buf),
                 Self::L1Msg(tx) => tx.to_compact(buf),
-                Self::AltFee(tx) => tx.tx().to_compact(buf),
+                Self::Morph(tx) => tx.tx().to_compact(buf),
             };
         }
     }
@@ -280,7 +280,7 @@ mod codec {
                 Self::Eip1559(tx) => tx.signature(),
                 Self::Eip7702(tx) => tx.signature(),
                 Self::L1Msg(_) => &L1_MSG_SIGNATURE,
-                Self::AltFee(tx) => tx.signature(),
+                Self::Morph(tx) => tx.signature(),
             }
         }
 
@@ -306,8 +306,8 @@ mod codec {
                     buf.put_u8(L1_TX_TYPE_ID);
                     COMPACT_EXTENDED_IDENTIFIER_FLAG
                 }
-                Self::AltFee => {
-                    buf.put_u8(ALT_FEE_TX_TYPE_ID);
+                Self::Morph => {
+                    buf.put_u8(MORPH_TX_TYPE_ID);
                     COMPACT_EXTENDED_IDENTIFIER_FLAG
                 }
             }
@@ -328,7 +328,7 @@ mod codec {
                         match extended_identifier {
                             EIP7702_TX_TYPE_ID => Self::Eip7702,
                             crate::transaction::L1_TX_TYPE_ID => Self::L1Msg,
-                            crate::transaction::ALT_FEE_TX_TYPE_ID => Self::AltFee,
+                            crate::transaction::MORPH_TX_TYPE_ID => Self::Morph,
                             _ => panic!("Unsupported TxType identifier: {extended_identifier}"),
                         }
                     }
