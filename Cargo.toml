@@ -10,6 +10,7 @@ resolver = "3"
 members = [
     "crates/chainspec",
     "crates/consensus",
+    "crates/engine-api",
     "crates/evm",
     "crates/payload/builder",
     "crates/payload/types",
@@ -39,6 +40,7 @@ all = "warn"
 [workspace.dependencies]
 morph-chainspec = { path = "crates/chainspec", default-features = false }
 morph-consensus = { path = "crates/consensus", default-features = false }
+morph-engine-api = { path = "crates/engine-api", default-features = false }
 morph-evm = { path = "crates/evm", default-features = false }
 morph-payload-builder = { path = "crates/payload/builder", default-features = false }
 morph-payload-types = { path = "crates/payload/types", default-features = false }
