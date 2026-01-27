@@ -6,13 +6,10 @@
 //! Reference: <https://github.com/morph-l2/revm/blob/release/v42/crates/revm/src/morph/token_fee.rs>
 
 use alloy_evm::Database;
-use alloy_primitives::{Address, Bytes, TxKind, U256, address, keccak256};
+use alloy_primitives::{Address, Bytes, U256, address, keccak256};
 use morph_chainspec::hardfork::MorphHardfork;
-use morph_primitives::L1_TX_TYPE_ID;
-use revm::{
-    ExecuteEvm, Inspector, context::TxEnv, context_interface::result::EVMError,
-    inspector::NoOpInspector,
-};
+use revm::SystemCallEvm;
+use revm::{Inspector, context_interface::result::EVMError, inspector::NoOpInspector};
 
 use crate::evm::MorphContext;
 use crate::{MorphEvm, MorphInvalidTransaction};
@@ -193,9 +190,6 @@ fn load_mapping_value<DB: Database>(
     Ok(storage_value)
 }
 
-/// Gas limit for ERC20 balance query calls.
-const BALANCE_OF_GAS_LIMIT: u64 = 200000;
-
 /// Get ERC20 token balance for an account (storage-only version).
 ///
 /// First tries to read directly from storage if the balance slot is known.
@@ -253,23 +247,22 @@ where
     let calldata = build_balance_of_calldata(account);
 
     // Create a minimal transaction environment for the call
-    let tx = TxEnv {
-        caller: Address::ZERO,
-        gas_limit: BALANCE_OF_GAS_LIMIT,
-        kind: TxKind::Call(token),
-        value: U256::ZERO,
-        data: calldata,
-        nonce: 0,
-        tx_type: L1_TX_TYPE_ID, // Mark as L1 message to skip gas validation
-        ..Default::default()
-    };
+    // let tx = TxEnv {
+    //     caller: Address::ZERO,
+    //     gas_limit: BALANCE_OF_GAS_LIMIT,
+    //     kind: TxKind::Call(token),
+    //     value: U256::ZERO,
+    //     data: calldata,
+    //     nonce: 0,
+    //     ..Default::default()
+    // };
 
-    // Convert to MorphTxEnv
-    let morph_tx = crate::MorphTxEnv::new(tx);
+    // // Convert to MorphTxEnv
+    // let morph_tx = crate::MorphTxEnv::new(tx);
 
     // Execute using transact_one
     evm.cfg.disable_fee_charge = true; // Disable fee charge for system call
-    match evm.transact_one(morph_tx) {
+    match evm.system_call_one(token, calldata) {
         Ok(result) => {
             if result.is_success() {
                 // Parse the returned balance (32 bytes)

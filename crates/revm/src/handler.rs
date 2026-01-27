@@ -2,7 +2,7 @@
 
 use alloy_primitives::{Address, Bytes, U256};
 use revm::{
-    SystemCallEvm,
+    ExecuteEvm, SystemCallEvm,
     context::{
         Cfg, ContextTr, JournalTr, Transaction,
         result::{EVMError, ExecutionResult, InvalidTransaction},
@@ -479,6 +479,17 @@ where
                 token_fee_info.token_address,
                 token_amount_required,
             )?;
+
+            // State changs should be marked cold to avoid warm access in the main tx execution.
+            let mut state = evm.finalize();
+            state.iter_mut().for_each(|(_, acc)| {
+                acc.mark_cold();
+                acc.unmark_touch();
+                acc.storage
+                    .iter_mut()
+                    .for_each(|(_, slot)| slot.mark_cold());
+            });
+            evm.ctx_mut().journal_mut().state.extend(state);
         }
 
         let (_, tx, cfg, journal, _, _) = evm.ctx().all_mut();
