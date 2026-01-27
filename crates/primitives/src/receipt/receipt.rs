@@ -2,20 +2,20 @@
 //!
 //! This module defines the Morph-specific receipt types that include:
 //! - L1 data fee for rollup transactions
-//! - AltFee fields for alternative fee token transactions
+//! - Morph transaction fields for alternative fee token transactions
 
 use alloy_consensus::{Eip658Value, Receipt, ReceiptWithBloom, TxReceipt};
 use alloy_primitives::{Bloom, Log, U256};
 use alloy_rlp::{BufMut, Decodable, Encodable, Header};
 
-/// Morph transaction receipt with L1 fee and AltFee fields.
+/// Morph transaction receipt with L1 fee and Morph transaction fields.
 ///
 /// This receipt extends the standard Ethereum receipt with:
 /// - `l1_fee`: The L1 data fee charged for posting transaction data to L1
-/// - `fee_token_id`: The ERC20 token ID used for fee payment (AltFee)
+/// - `fee_token_id`: The ERC20 token ID used for fee payment (TxMorph)
 /// - `fee_rate`: The exchange rate for the fee token
 /// - `token_scale`: The scale factor for the token
-/// - `fee_limit`: The fee limit for AltFee transactions
+/// - `fee_limit`: The fee limit for TxMorph
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
@@ -32,8 +32,8 @@ pub struct MorphTransactionReceipt<T = Log> {
     )]
     pub l1_fee: Option<U256>,
 
-    /// The ERC20 token ID used for fee payment (AltFee feature).
-    /// Only present for AltFee transactions.
+    /// The ERC20 token ID used for fee payment (TxMorph feature).
+    /// Only present for TxMorph.
     #[cfg_attr(
         feature = "serde",
         serde(default, skip_serializing_if = "Option::is_none")
@@ -41,7 +41,7 @@ pub struct MorphTransactionReceipt<T = Log> {
     pub fee_token_id: Option<u16>,
 
     /// The exchange rate for the fee token.
-    /// Only present for AltFee transactions.
+    /// Only present for TxMorph.
     #[cfg_attr(
         feature = "serde",
         serde(default, skip_serializing_if = "Option::is_none")
@@ -49,15 +49,15 @@ pub struct MorphTransactionReceipt<T = Log> {
     pub fee_rate: Option<U256>,
 
     /// The scale factor for the token.
-    /// Only present for AltFee transactions.
+    /// Only present for TxMorph.
     #[cfg_attr(
         feature = "serde",
         serde(default, skip_serializing_if = "Option::is_none")
     )]
     pub token_scale: Option<U256>,
 
-    /// The fee limit for the AltFee transaction.
-    /// Only present for AltFee transactions.
+    /// The fee limit for the TxMorph.
+    /// Only present for TxMorph.
     #[cfg_attr(
         feature = "serde",
         serde(default, skip_serializing_if = "Option::is_none")
@@ -90,8 +90,8 @@ impl<T> MorphTransactionReceipt<T> {
         }
     }
 
-    /// Creates a new receipt with AltFee fields.
-    pub const fn with_alt_fee(
+    /// Creates a new receipt with TxMorph fields.
+    pub const fn with_morph_tx(
         inner: Receipt<T>,
         l1_fee: U256,
         fee_token_id: u16,
@@ -109,8 +109,8 @@ impl<T> MorphTransactionReceipt<T> {
         }
     }
 
-    /// Returns true if this receipt is for an AltFee transaction.
-    pub const fn is_alt_fee(&self) -> bool {
+    /// Returns true if this receipt is for a TxMorph.
+    pub const fn is_morph_tx(&self) -> bool {
         self.fee_token_id.is_some()
     }
 
@@ -136,7 +136,7 @@ impl MorphTransactionReceipt {
 impl<T: Encodable> MorphTransactionReceipt<T> {
     /// Returns length of RLP-encoded receipt fields with the given [`Bloom`] without an RLP header.
     ///
-    /// Note: L1 fee and AltFee fields are NOT included in the RLP encoding for consensus,
+    /// Note: L1 fee and TxMorph fields are NOT included in the RLP encoding for consensus,
     /// matching go-ethereum's behavior.
     pub fn rlp_encoded_fields_length_with_bloom(&self, bloom: &Bloom) -> usize {
         self.inner.rlp_encoded_fields_length_with_bloom(bloom)
@@ -144,7 +144,7 @@ impl<T: Encodable> MorphTransactionReceipt<T> {
 
     /// RLP-encodes receipt fields with the given [`Bloom`] without an RLP header.
     ///
-    /// Note: L1 fee and AltFee fields are NOT included in the RLP encoding for consensus,
+    /// Note: L1 fee and TxMorph fields are NOT included in the RLP encoding for consensus,
     /// matching go-ethereum's behavior.
     pub fn rlp_encode_fields_with_bloom(&self, bloom: &Bloom, out: &mut dyn BufMut) {
         self.inner.rlp_encode_fields_with_bloom(bloom, out);
@@ -251,7 +251,7 @@ mod tests {
         assert_eq!(receipt.cumulative_gas_used(), 21000);
         assert!(receipt.l1_fee.is_none());
         assert!(receipt.fee_token_id.is_none());
-        assert!(!receipt.is_alt_fee());
+        assert!(!receipt.is_morph_tx());
     }
 
     #[test]
@@ -266,11 +266,11 @@ mod tests {
 
         assert_eq!(receipt.l1_fee, Some(l1_fee));
         assert_eq!(receipt.l1_fee_or_zero(), l1_fee);
-        assert!(!receipt.is_alt_fee());
+        assert!(!receipt.is_morph_tx());
     }
 
     #[test]
-    fn test_morph_receipt_with_alt_fee() {
+    fn test_morph_receipt_with_morph_tx() {
         let inner: Receipt<Log> = Receipt {
             status: true.into(),
             cumulative_gas_used: 21000,
@@ -282,7 +282,7 @@ mod tests {
         let token_scale = U256::from(18);
         let fee_limit = U256::from(5000000);
 
-        let receipt = MorphTransactionReceipt::with_alt_fee(
+        let receipt = MorphTransactionReceipt::with_morph_tx(
             inner,
             l1_fee,
             fee_token_id,
@@ -291,7 +291,7 @@ mod tests {
             fee_limit,
         );
 
-        assert!(receipt.is_alt_fee());
+        assert!(receipt.is_morph_tx());
         assert_eq!(receipt.fee_token_id, Some(fee_token_id));
         assert_eq!(receipt.fee_rate, Some(fee_rate));
         assert_eq!(receipt.token_scale, Some(token_scale));

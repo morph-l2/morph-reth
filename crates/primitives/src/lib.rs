@@ -8,13 +8,13 @@
 //! Morph L2 extends Ethereum's transaction types with:
 //!
 //! - [`TxL1Msg`]: L1 message transactions (type `0x7E`) - deposits from L1
-//! - [`TxAltFee`]: Alternative fee transactions (type `0x7F`) - pay gas with ERC20 tokens
+//! - [`TxMorph`]: Morph transactions (type `0x7F`) - pay gas with ERC20 tokens
 //! - [`MorphTxEnvelope`]: Transaction envelope containing all supported transaction types
 //!
 //! # Receipt Types
 //!
 //! - [`MorphReceipt`]: Receipt enum for all transaction types
-//! - [`MorphTransactionReceipt`]: Extended receipt with L1 fee and AltFee fields
+//! - [`MorphTransactionReceipt`]: Extended receipt with L1 fee and Morph transaction fields
 //!
 //! # Block Types
 //!
@@ -61,7 +61,7 @@ pub use receipt::{MorphReceipt, MorphReceiptWithBloom, MorphTransactionReceipt};
 
 // Re-export transaction types
 pub use transaction::{
-    ALT_FEE_TX_TYPE_ID, L1_TX_TYPE_ID, MorphTxEnvelope, MorphTxType, TxAltFee, TxAltFeeExt, TxL1Msg,
+    L1_TX_TYPE_ID, MORPH_TX_TYPE_ID, MorphTxEnvelope, MorphTxType, TxL1Msg, TxMorph, TxMorphExt,
 };
 
 /// A [`NodePrimitives`] implementation for Morph.

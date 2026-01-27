@@ -8,7 +8,7 @@
 //! - [`MorphEvm`]: The main EVM type with Morph-specific handler
 //! - [`handler::MorphEvmHandler`]: Custom handler implementing fee deduction and reimbursement
 //! - [`L1BlockInfo`]: L1 gas price oracle data for L1 data fee calculation
-//! - [`TokenFeeInfo`]: Token registry data for AltFee transaction support
+//! - [`TokenFeeInfo`]: Token registry data for Morph transaction fee support
 //!
 //! # Fee Handling
 //!
@@ -16,7 +16,7 @@
 //!
 //! 1. **L2 Execution Fee**: Standard gas fee for EVM execution
 //! 2. **L1 Data Fee**: Fee for posting transaction data to L1 (calculated from L1 gas price)
-//! 3. **AltFee Token Fee**: Optional ERC20 token payment instead of ETH
+//! 3. **Morph Token Fee**: Optional ERC20 token payment instead of ETH
 //!
 //! # L1 Messages
 //!

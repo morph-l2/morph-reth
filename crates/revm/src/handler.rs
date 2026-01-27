@@ -112,8 +112,8 @@ where
             return Ok(());
         }
 
-        // Check if transaction is AltFeeTx (tx_type 0x7F) which uses token fee
-        if evm.ctx_ref().tx().is_alt_fee_tx() {
+        // Check if transaction is MorphTransaction (tx_type 0x7F) which uses token fee
+        if evm.ctx_ref().tx().is_morph_tx() {
             // Get fee_token_id directly from MorphTxEnv
             let token_id = evm.ctx_ref().tx().fee_token_id.unwrap_or_default();
             return self.validate_and_deduct_token_fee(evm, token_id);
@@ -135,8 +135,8 @@ where
             return Ok(());
         }
 
-        // Check if transaction is AltFeeTx (tx_type 0x7F) which uses token fee
-        if tx.is_alt_fee_tx() {
+        // Check if transaction is MorphTransaction (tx_type 0x7F) which uses token fee
+        if tx.is_morph_tx() {
             // Get fee_token_id directly from MorphTxEnv
             let token_id = tx.fee_token_id.unwrap_or_default();
             return self.reimburse_caller_token_fee(evm, exec_result.gas(), token_id);
@@ -159,8 +159,8 @@ where
             return Ok(());
         }
         // L1 message transactions skip all reward.
-        // AltFeeTx rewards are already applied when gasFee is deducted.
-        if tx.is_l1_msg() || tx.is_alt_fee_tx() {
+        // MorphTransaction rewards are already applied when gasFee is deducted.
+        if tx.is_l1_msg() || tx.is_morph_tx() {
             return Ok(());
         }
 

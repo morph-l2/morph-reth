@@ -46,7 +46,7 @@ impl ReceiptBuilder for MorphReceiptBuilder {
             MorphTxType::Eip1559 => MorphReceipt::Eip1559(MorphTransactionReceipt::new(inner)),
             MorphTxType::Eip7702 => MorphReceipt::Eip7702(MorphTransactionReceipt::new(inner)),
             MorphTxType::L1Msg => MorphReceipt::L1Msg(inner),
-            MorphTxType::AltFee => MorphReceipt::AltFee(MorphTransactionReceipt::new(inner)),
+            MorphTxType::Morph => MorphReceipt::Morph(MorphTransactionReceipt::new(inner)),
         }
     }
 }
