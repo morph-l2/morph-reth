@@ -98,6 +98,7 @@ impl MorphHardfork {
 }
 
 /// Trait for querying Morph-specific hardfork activations.
+#[auto_impl::auto_impl(&, Arc)]
 pub trait MorphHardforks: EthereumHardforks {
     /// Retrieves activation condition for a Morph-specific hardfork
     fn morph_fork_activation(&self, fork: MorphHardfork) -> ForkCondition;
@@ -159,25 +160,6 @@ pub trait MorphHardforks: EthereumHardforks {
             // Default to Bernoulli (baseline)
             MorphHardfork::Bernoulli
         }
-    }
-}
-
-// Blanket implementations for Arc and reference types
-impl<T> MorphHardforks for std::sync::Arc<T>
-where
-    T: MorphHardforks,
-{
-    fn morph_fork_activation(&self, fork: MorphHardfork) -> ForkCondition {
-        T::morph_fork_activation(self, fork)
-    }
-}
-
-impl<T> MorphHardforks for &T
-where
-    T: MorphHardforks,
-{
-    fn morph_fork_activation(&self, fork: MorphHardfork) -> ForkCondition {
-        T::morph_fork_activation(*self, fork)
     }
 }
 
