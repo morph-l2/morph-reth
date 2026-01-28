@@ -159,6 +159,17 @@ impl From<Genesis> for MorphChainSpec {
 
         base_spec.hardforks.extend(morph_forks);
 
+        // Add EthereumHardfork::Prague at Emerald activation time.
+        // This enables EIP-7702 support in the transaction pool validator,
+        // which checks `is_prague_active_at_timestamp()`.
+        // Note: genesis.json doesn't need pragueTime - we derive it from emeraldTime.
+        if let Some(emerald_time) = hardfork_info.emerald_time {
+            base_spec.hardforks.insert(
+                EthereumHardfork::Prague,
+                ForkCondition::Timestamp(emerald_time),
+            );
+        }
+
         Self {
             inner: base_spec.map_header(MorphHeader::from),
             info: chain_info,
@@ -564,6 +575,95 @@ mod tests {
         let config = chainspec.chain_config();
         // Test genesis includes morph config with fee vault address
         assert!(config.is_fee_vault_enabled());
+    }
+
+    #[test]
+    fn test_prague_activated_with_emerald() {
+        // Prague should be activated at the same time as Emerald
+        // This enables EIP-7702 in the transaction pool validator
+        let genesis_json = json!({
+            "config": {
+                "chainId": 1337,
+                "homesteadBlock": 0,
+                "eip150Block": 0,
+                "eip155Block": 0,
+                "eip158Block": 0,
+                "byzantiumBlock": 0,
+                "constantinopleBlock": 0,
+                "petersburgBlock": 0,
+                "istanbulBlock": 0,
+                "berlinBlock": 0,
+                "londonBlock": 0,
+                "mergeNetsplitBlock": 0,
+                "terminalTotalDifficulty": 0,
+                "terminalTotalDifficultyPassed": true,
+                "shanghaiTime": 0,
+                "cancunTime": 0,
+                "bernoulliBlock": 0,
+                "curieBlock": 0,
+                "morph203Time": 1000,
+                "viridianTime": 2000,
+                "emeraldTime": 3000,
+                "morph": {}
+            },
+            "alloc": {}
+        });
+
+        let genesis: Genesis =
+            serde_json::from_value(genesis_json).expect("genesis should be valid");
+        let chainspec = MorphChainSpec::from(genesis);
+
+        // Prague should not be active before Emerald
+        assert!(!chainspec.is_prague_active_at_timestamp(2999));
+
+        // Prague should be active at Emerald time
+        assert!(chainspec.is_prague_active_at_timestamp(3000));
+
+        // Prague should remain active after Emerald
+        assert!(chainspec.is_prague_active_at_timestamp(5000));
+
+        // Verify the fork condition is set correctly
+        let prague_activation = chainspec.ethereum_fork_activation(EthereumHardfork::Prague);
+        assert_eq!(prague_activation, ForkCondition::Timestamp(3000));
+    }
+
+    #[test]
+    fn test_prague_not_activated_without_emerald() {
+        // If Emerald is not configured, Prague should not be activated
+        let genesis_json = json!({
+            "config": {
+                "chainId": 1337,
+                "homesteadBlock": 0,
+                "eip150Block": 0,
+                "eip155Block": 0,
+                "eip158Block": 0,
+                "byzantiumBlock": 0,
+                "constantinopleBlock": 0,
+                "petersburgBlock": 0,
+                "istanbulBlock": 0,
+                "berlinBlock": 0,
+                "londonBlock": 0,
+                "mergeNetsplitBlock": 0,
+                "terminalTotalDifficulty": 0,
+                "terminalTotalDifficultyPassed": true,
+                "shanghaiTime": 0,
+                "cancunTime": 0,
+                "bernoulliBlock": 0,
+                "curieBlock": 0,
+                "morph203Time": 1000,
+                "viridianTime": 2000,
+                "morph": {}
+            },
+            "alloc": {}
+        });
+
+        let genesis: Genesis =
+            serde_json::from_value(genesis_json).expect("genesis should be valid");
+        let chainspec = MorphChainSpec::from(genesis);
+
+        // Prague should not be active since Emerald is not configured
+        assert!(!chainspec.is_prague_active_at_timestamp(0));
+        assert!(!chainspec.is_prague_active_at_timestamp(5000));
     }
 
     #[test]
