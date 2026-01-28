@@ -4,8 +4,8 @@
 //! the MPTFork hardfork rules.
 //!
 //! **Important**: Morph skips state root validation before the MPTFork hardfork,
-//! similar to how Scroll skips it before Euclid. Before MPTFork, Morph uses
-//! ZK-trie, and state root verification happens in the ZK proof instead.
+//! before MPTFork, Morph uses ZK-trie, and state root verification happens in the
+//! ZK proof instead.
 
 use morph_chainspec::{MorphChainSpec, MorphHardforks};
 use std::sync::Arc;
