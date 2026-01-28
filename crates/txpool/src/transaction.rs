@@ -54,9 +54,9 @@ impl MorphPooledTransaction {
         self.inner.transaction().queue_index()
     }
 
-    /// Returns true if this is an AltFee transaction.
-    pub fn is_alt_fee(&self) -> bool {
-        self.inner.transaction().tx_type() == MorphTxType::AltFee
+    /// Returns true if this is a Morph transaction.
+    pub fn is_morph_tx(&self) -> bool {
+        self.inner.transaction().tx_type() == MorphTxType::Morph
     }
 }
 

@@ -162,6 +162,25 @@ pub trait MorphHardforks: EthereumHardforks {
     }
 }
 
+// Blanket implementations for Arc and reference types
+impl<T> MorphHardforks for std::sync::Arc<T>
+where
+    T: MorphHardforks,
+{
+    fn morph_fork_activation(&self, fork: MorphHardfork) -> ForkCondition {
+        T::morph_fork_activation(self, fork)
+    }
+}
+
+impl<T> MorphHardforks for &T
+where
+    T: MorphHardforks,
+{
+    fn morph_fork_activation(&self, fork: MorphHardfork) -> ForkCondition {
+        T::morph_fork_activation(*self, fork)
+    }
+}
+
 impl From<MorphHardfork> for SpecId {
     fn from(value: MorphHardfork) -> Self {
         match value {

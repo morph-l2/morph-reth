@@ -4053,9 +4053,11 @@ version = "0.7.5"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
+ "alloy-evm",
  "alloy-primitives",
  "c-kzg",
  "derive_more",
+ "futures",
  "morph-chainspec",
  "morph-primitives",
  "morph-revm",
