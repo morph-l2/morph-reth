@@ -37,7 +37,6 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-#[cfg(feature = "serde-bincode-compat")]
 mod config;
 
 mod assemble;

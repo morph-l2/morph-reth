@@ -38,7 +38,7 @@ rand.workspace = true
 alloy-primitives = { workspace = true, features = ["rand"] }
 
 [features]
-default = ["serde"]
+default = []
 serde = [
     "morph-primitives/serde",
     "alloy-consensus/serde",
