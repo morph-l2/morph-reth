@@ -245,23 +245,6 @@ where
 {
     // Fallback: Execute EVM call to balanceOf(address)
     let calldata = build_balance_of_calldata(account);
-
-    // Create a minimal transaction environment for the call
-    // let tx = TxEnv {
-    //     caller: Address::ZERO,
-    //     gas_limit: BALANCE_OF_GAS_LIMIT,
-    //     kind: TxKind::Call(token),
-    //     value: U256::ZERO,
-    //     data: calldata,
-    //     nonce: 0,
-    //     ..Default::default()
-    // };
-
-    // // Convert to MorphTxEnv
-    // let morph_tx = crate::MorphTxEnv::new(tx);
-
-    // Execute using transact_one
-    evm.cfg.disable_fee_charge = true; // Disable fee charge for system call
     match evm.system_call_one(token, calldata) {
         Ok(result) => {
             if result.is_success() {
