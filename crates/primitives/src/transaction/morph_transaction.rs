@@ -16,11 +16,6 @@ use alloy_primitives::{B256, Bytes, ChainId, Signature, TxKind, U256, keccak256}
 use alloy_rlp::{BufMut, Decodable, Encodable, Header};
 use core::mem;
 
-#[cfg(not(feature = "std"))]
-extern crate alloc;
-#[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
-
 /// Morph Transaction type ID (0x7F).
 pub const MORPH_TX_TYPE_ID: u8 = 0x7F;
 

@@ -34,18 +34,7 @@ alloy-serde = { workspace = true, optional = true }
 serde_json.workspace = true
 
 [features]
-default = ["std"]
-std = [
-    "serde?/std",
-    "alloy-consensus/std",
-    "alloy-eips/std",
-    "alloy-primitives/std",
-    "alloy-rlp/std",
-    "bytes?/std",
-    "reth-primitives-traits/std",
-    "reth-zstd-compressors?/std",
-    "reth-codecs?/std",
-]
+default = ["serde"]
 serde = [
     "dep:serde",
     "dep:alloy-serde",
@@ -53,8 +42,9 @@ serde = [
     "alloy-eips/serde",
     "alloy-primitives/serde",
     "reth-primitives-traits/serde",
-    "reth-codecs?/serde",
+    "reth-ethereum-primitives?/serde",
 ]
+
 serde-bincode-compat = [
     "serde",
     "alloy-consensus/serde-bincode-compat",
@@ -65,12 +55,13 @@ serde-bincode-compat = [
     "reth-ethereum-primitives/serde-bincode-compat",
 ]
 reth-codec = [
-    "std",
     "serde",
-    "dep:bytes",
     "dep:reth-codecs",
     "dep:reth-db-api",
     "dep:modular-bitfield",
     "dep:reth-zstd-compressors",
+    "reth-ethereum-primitives/reth-codec",
     "reth-codecs/alloy",
+	"dep:bytes",
+    "reth-primitives-traits/reth-codec",
 ]

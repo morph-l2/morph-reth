@@ -29,8 +29,6 @@
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg), allow(unexpected_cfgs))]
-#![cfg_attr(not(feature = "std"), no_std)]
-
 
 #[cfg(feature = "serde-bincode-compat")]
 use reth_ethereum_primitives as _;

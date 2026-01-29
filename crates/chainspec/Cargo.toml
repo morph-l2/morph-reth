@@ -33,23 +33,11 @@ serde.workspace = true
 serde_json.workspace = true
 
 [features]
-default = ["std"]
-std = [
-    "alloy-chains/std",
-    "alloy-consensus/std",
-    "alloy-eips/std",
-    "alloy-evm/std",
-    "alloy-genesis/std",
-    "alloy-primitives/std",
-    "morph-primitives/std",
-    "reth-chainspec/std",
-    "serde/std",
-]
+default = ["serde"]
 serde = [
     "alloy-consensus/serde",
     "alloy-eips/serde",
     "alloy-hardforks/serde",
     "alloy-primitives/serde",
-    "morph-primitives/serde",
 ]
 cli = ["dep:reth-cli", "dep:eyre"]
