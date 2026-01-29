@@ -12,6 +12,7 @@ members = [
     "crates/consensus",
     "crates/engine-api",
     "crates/evm",
+    "crates/node",
     "crates/payload/builder",
     "crates/payload/types",
     "crates/primitives",
@@ -43,12 +44,10 @@ morph-chainspec = { path = "crates/chainspec", default-features = false }
 morph-consensus = { path = "crates/consensus", default-features = false }
 morph-engine-api = { path = "crates/engine-api", default-features = false }
 morph-evm = { path = "crates/evm", default-features = false }
+morph-node = { path = "crates/node"}
 morph-payload-builder = { path = "crates/payload/builder", default-features = false }
 morph-payload-types = { path = "crates/payload/types", default-features = false }
-morph-primitives = { path = "crates/primitives", default-features = false, features = [
-  "serde",
-  "reth",
-] }
+morph-primitives = { path = "crates/primitives", default-features = false }
 morph-revm = { path = "crates/revm", default-features = false }
 morph-txpool = { path = "crates/txpool", default-features = false }
 

@@ -12,50 +12,65 @@ workspace = true
 
 [dependencies]
 # Reth
-reth-db-api = { workspace = true, optional = true }
-reth-ethereum-primitives = { workspace = true, optional = true }
 reth-primitives-traits.workspace = true
 reth-codecs = { workspace = true, optional = true }
+reth-db-api = { workspace = true, optional = true }
 reth-zstd-compressors = { workspace = true, optional = true }
+reth-ethereum-primitives = { workspace = true, optional = true }
 
 # Alloy
 alloy-consensus.workspace = true
 alloy-eips.workspace = true
 alloy-primitives.workspace = true
 alloy-rlp.workspace = true
-alloy-serde = { workspace = true, optional = true }
 
-# Utils
-bytes.workspace = true
-serde = { workspace = true, features = ["derive"], optional = true }
+# Codec
+bytes = { workspace = true, optional = true }
 modular-bitfield = { version = "0.11.2", optional = true }
-
+serde = { workspace = true, features = ["derive"], optional = true }
+alloy-serde = { workspace = true, optional = true }
 
 [dev-dependencies]
 serde_json.workspace = true
 
 [features]
-default = ["serde", "reth"]
+default = ["std"]
+std = [
+    "serde?/std",
+    "alloy-consensus/std",
+    "alloy-eips/std",
+    "alloy-primitives/std",
+    "alloy-rlp/std",
+    "bytes?/std",
+    "reth-primitives-traits/std",
+    "reth-zstd-compressors?/std",
+    "reth-codecs?/std",
+]
 serde = [
     "dep:serde",
     "dep:alloy-serde",
-    "alloy-primitives/serde",
-    "alloy-eips/serde",
     "alloy-consensus/serde",
+    "alloy-eips/serde",
+    "alloy-primitives/serde",
     "reth-primitives-traits/serde",
-    "reth-ethereum-primitives?/serde",
+    "reth-codecs?/serde",
 ]
-reth = [
-	"dep:reth-ethereum-primitives",
+serde-bincode-compat = [
+    "serde",
+    "alloy-consensus/serde-bincode-compat",
+    "alloy-eips/serde-bincode-compat",
+    "reth-primitives-traits/serde-bincode-compat",
+    "dep:reth-ethereum-primitives",
+    "reth-ethereum-primitives/serde",
+    "reth-ethereum-primitives/serde-bincode-compat",
 ]
 reth-codec = [
-	"reth",
-	"serde",
-	"dep:reth-codecs",
-	"dep:reth-db-api",
-	"dep:modular-bitfield",
-	"dep:reth-zstd-compressors",
-	"reth-ethereum-primitives/reth-codec",
-	"reth-codecs/alloy",
-	"reth-primitives-traits/reth-codec",
+    "std",
+    "serde",
+    "dep:bytes",
+    "dep:reth-codecs",
+    "dep:reth-db-api",
+    "dep:modular-bitfield",
+    "dep:reth-zstd-compressors",
+    "reth-codecs/alloy",
 ]

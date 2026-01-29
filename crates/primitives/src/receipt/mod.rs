@@ -412,6 +412,9 @@ impl InMemorySize for MorphReceipt {
     }
 }
 
+#[cfg(feature = "serde-bincode-compat")]
+impl reth_primitives_traits::serde_bincode_compat::RlpBincode for MorphReceipt {}
+
 /// Calculates the receipt root for a header.
 ///
 /// This function computes the Merkle root of receipts using the standard encoding
