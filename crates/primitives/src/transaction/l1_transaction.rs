@@ -17,6 +17,11 @@ use alloy_primitives::{Address, B256, Bytes, ChainId, Signature, TxKind, U256, k
 use alloy_rlp::{BufMut, Decodable, Encodable, Header};
 use core::mem;
 
+#[cfg(not(feature = "std"))]
+extern crate alloc;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+
 /// L1 Message Transaction type ID (0x7E).
 pub const L1_TX_TYPE_ID: u8 = 0x7E;
 

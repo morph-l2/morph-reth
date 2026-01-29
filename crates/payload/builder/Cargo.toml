@@ -14,9 +14,9 @@ workspace = true
 [dependencies]
 # Morph
 morph-chainspec.workspace = true
-morph-evm = { workspace = true, features = ["reth-codec"] }
+morph-evm = { workspace = true, features = ["serde-bincode-compat"] }
 morph-payload-types.workspace = true
-morph-primitives.workspace = true
+morph-primitives = { workspace = true, features = ["serde-bincode-compat", "reth-codec"] }
 
 # Reth
 reth-basic-payload-builder.workspace = true

@@ -13,7 +13,7 @@ workspace = true
 
 [dependencies]
 # Morph
-morph-primitives = { workspace = true, features = ["serde", "reth-codec"] }
+morph-primitives = { workspace = true, features = ["serde-bincode-compat"] }
 
 # Reth
 reth-payload-builder.workspace = true
@@ -29,7 +29,7 @@ alloy-rpc-types-engine = { workspace = true, features = ["serde"] }
 alloy-serde.workspace = true
 
 # Utils
-serde = { workspace = true, features = ["derive"] }
+serde = { workspace = true, features = ["derive"], optional = true }
 sha2.workspace = true
 
 [dev-dependencies]
@@ -38,4 +38,12 @@ rand.workspace = true
 alloy-primitives = { workspace = true, features = ["rand"] }
 
 [features]
-default = []
+default = ["serde"]
+serde = [
+    "morph-primitives/serde",
+    "alloy-consensus/serde",
+    "alloy-eips/serde",
+    "alloy-primitives/serde",
+    "alloy-rpc-types-engine/serde",
+    "dep:serde",
+]
