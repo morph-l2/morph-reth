@@ -98,6 +98,7 @@ impl MorphHardfork {
 }
 
 /// Trait for querying Morph-specific hardfork activations.
+#[auto_impl::auto_impl(&, Arc)]
 pub trait MorphHardforks: EthereumHardforks {
     /// Retrieves activation condition for a Morph-specific hardfork
     fn morph_fork_activation(&self, fork: MorphHardfork) -> ForkCondition;
