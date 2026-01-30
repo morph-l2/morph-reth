@@ -2,7 +2,7 @@
 
 use alloy_primitives::{Address, Bytes, U256};
 use revm::{
-    SystemCallEvm,
+    ExecuteEvm, SystemCallEvm,
     context::{
         Cfg, ContextTr, JournalTr, Transaction,
         result::{EVMError, ExecutionResult, InvalidTransaction},
@@ -95,11 +95,8 @@ where
         &self,
         evm: &mut Self::Evm,
     ) -> Result<(), Self::Error> {
-        let (_, tx, cfg, journal, _, _) = evm.ctx().all_mut();
-        // System transaction - skip all validation
-        if cfg.disable_fee_charge {
-            return Ok(());
-        }
+        let (_, tx, _, journal, _, _) = evm.ctx().all_mut();
+
         // L1 message - skip fee validation
         if tx.is_l1_msg() {
             // Load caller's account
@@ -128,10 +125,10 @@ where
         evm: &mut Self::Evm,
         exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
     ) -> Result<(), Self::Error> {
-        let (_, tx, cfg, _, _, _) = evm.ctx().all_mut();
+        let (_, tx, _, _, _, _) = evm.ctx().all_mut();
 
         // For L1 message transactions & system transactions, no reimbursement is needed
-        if tx.is_l1_msg() || cfg.disable_fee_charge {
+        if tx.is_l1_msg() {
             return Ok(());
         }
 
@@ -154,10 +151,7 @@ where
         exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
     ) -> Result<(), Self::Error> {
         let (block, tx, cfg, journal, _, _) = evm.ctx().all_mut();
-        // System transaction - skip all reward
-        if cfg.disable_fee_charge {
-            return Ok(());
-        }
+
         // L1 message transactions skip all reward.
         // MorphTransaction rewards are already applied when gasFee is deducted.
         if tx.is_l1_msg() || tx.is_morph_tx() {
@@ -200,8 +194,8 @@ where
 
     #[inline]
     fn validate_env(&self, evm: &mut Self::Evm) -> Result<(), Self::Error> {
-        // For L1 message transactions & System transaction, skip certain validations
-        if evm.ctx_ref().tx().is_l1_msg() || evm.ctx_ref().cfg().disable_fee_charge {
+        // For L1 message transactions
+        if evm.ctx_ref().tx().is_l1_msg() {
             // L1 messages have zero gas price, so skip gas price validation
             return Ok(());
         }
@@ -479,6 +473,16 @@ where
                 token_fee_info.token_address,
                 token_amount_required,
             )?;
+
+            // State changs should be marked cold to avoid warm access in the main tx execution.
+            let mut state = evm.finalize();
+            state.iter_mut().for_each(|(_, acc)| {
+                acc.mark_cold();
+                acc.storage
+                    .iter_mut()
+                    .for_each(|(_, slot)| slot.mark_cold());
+            });
+            evm.ctx_mut().journal_mut().state.extend(state);
         }
 
         let (_, tx, cfg, journal, _, _) = evm.ctx().all_mut();
