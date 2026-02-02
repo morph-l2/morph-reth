@@ -1,19 +1,19 @@
 //! Morph Engine Validator utilities.
 //!
 //! This module provides utilities for state root validation according to
-//! the MPT fork rules.
+//! the MPTFork hardfork rules.
 //!
-//! **Important**: Morph skips state root validation before the MPT fork,
-//! because state root verification happens in the ZK proof instead (using ZK-trie).
-//! After MPT fork, state root validation is performed in the node (using MPT).
+//! **Important**: Morph skips state root validation before the MPTFork hardfork,
+//! before MPTFork, Morph uses ZK-trie, and state root verification happens in the
+//! ZK proof instead.
 
 use morph_chainspec::{MorphChainSpec, MorphHardforks};
 use std::sync::Arc;
 
 /// Determines if state root validation should be performed for a given timestamp.
 ///
-/// Before the MPT fork, state root validation is skipped because Morph
-/// uses ZK-trie before MPT fork, and the state root verification happens in the
+/// Before the MPTFork hardfork, state root validation is skipped because Morph
+/// uses ZK-trie before MPTFork, and the state root verification happens in the
 /// ZK proof instead.
 ///
 /// # Arguments
@@ -98,7 +98,7 @@ mod tests {
 
     #[test]
     fn test_should_validate_state_root_no_mpt_fork() {
-        // If MPT fork is not set, should always skip validation (return false, using ZK-trie)
+        // If MPTFork is not set, should always return false
         let chain_spec = create_test_chainspec(None);
 
         assert!(!should_validate_state_root(&chain_spec, 0));

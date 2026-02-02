@@ -62,6 +62,27 @@ impl MorphTxEnvelope {
         self.tx_type() == MorphTxType::L1Msg
     }
 
+    /// Returns `true` if this is a MorphTx (0x7F) transaction.
+    pub fn is_morph_tx(&self) -> bool {
+        self.tx_type() == MorphTxType::Morph
+    }
+
+    /// Returns the fee token ID for MorphTx, or `None` for other transaction types.
+    pub fn fee_token_id(&self) -> Option<u16> {
+        match self {
+            Self::Morph(tx) => Some(tx.tx().fee_token_id),
+            _ => None,
+        }
+    }
+
+    /// Returns the fee limit for MorphTx, or `None` for other transaction types.
+    pub fn fee_limit(&self) -> Option<alloy_primitives::U256> {
+        match self {
+            Self::Morph(tx) => Some(tx.tx().fee_limit),
+            _ => None,
+        }
+    }
+
     pub fn queue_index(&self) -> Option<u64> {
         match self {
             Self::Legacy(_)

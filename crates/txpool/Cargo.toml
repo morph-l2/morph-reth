@@ -1,0 +1,42 @@
+[package]
+name = "morph-txpool"
+description = "Morph L2 transaction pool"
+
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Morph
+morph-chainspec.workspace = true
+morph-primitives = { workspace = true, features = ["reth-codec"] }
+morph-revm.workspace = true
+
+# Reth
+reth-chainspec.workspace = true
+reth-primitives-traits.workspace = true
+reth-provider.workspace = true
+reth-revm.workspace = true
+reth-storage-api.workspace = true
+reth-transaction-pool.workspace = true
+
+# Alloy
+alloy-consensus.workspace = true
+alloy-eips.workspace = true
+alloy-evm.workspace = true
+alloy-primitives.workspace = true
+
+# Misc
+c-kzg = "2.1.5"
+derive_more.workspace = true
+futures.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+reth-provider = { workspace = true, features = ["test-utils"] }

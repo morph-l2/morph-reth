@@ -16,6 +16,7 @@ members = [
     "crates/payload/types",
     "crates/primitives",
     "crates/revm",
+    "crates/txpool",
 ]
 
 [workspace.lints]
@@ -49,6 +50,7 @@ morph-primitives = { path = "crates/primitives", default-features = false, featu
   "reth",
 ] }
 morph-revm = { path = "crates/revm", default-features = false }
+morph-txpool = { path = "crates/txpool", default-features = false }
 
 reth-basic-payload-builder = { git = "https://github.com/paradigmxyz/reth", rev = "64909d3" }
 reth-chain-state = { git = "https://github.com/paradigmxyz/reth", rev = "64909d3" }
