@@ -1069,7 +1069,7 @@ mod tests {
             fee_token_id: 1,
             fee_limit: U256::from(1000u64),
             reference: Some(reference),
-            memo: Some(memo.clone()),
+            memo: Some(memo),
         };
 
         // Encode
