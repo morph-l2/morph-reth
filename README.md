@@ -7,7 +7,7 @@ Morph Reth is the next-generation execution client for [Morph](https://www.morph
 ### Key Features
 
 - **L1 Message Support**: Seamless bridging of assets and messages from Ethereum L1 to Morph L2
-- **Morph Transaction**: EVM+ transaction enabling alternative token fees, reference key indexing, and memo attachment
+- **Morph Transaction**: Morph EVM+ transaction enabling alternative token fees, reference key indexing, and memo attachment
 - **Morph Hardforks**: Full support for Morph's upgrade schedule (Bernoulli, Curie, Morph203, Viridian, Emerald)
 
 ## Architecture
@@ -90,7 +90,7 @@ Morph supports the following transaction types:
 | EIP-1559 | `0x02` | Dynamic fee transactions |
 | EIP-7702 | `0x04` | Account abstraction transactions |
 | L1 Message | `0x7e` | L1-to-L2 deposit messages |
-| Morph Transaction | `0x7f` | EVM+ transaction with enhanced features |
+| Morph Transaction | `0x7f` | Morph EVM+ transaction with enhanced features |
 
 ### L1 Messages
 
