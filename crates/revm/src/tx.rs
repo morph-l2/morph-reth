@@ -167,10 +167,10 @@ impl MorphTxEnv {
             if let Some(reference) = info.reference {
                 env = env.with_reference(reference);
             }
-            if let Some(memo) = info.memo {
-                if !memo.is_empty() {
-                    env = env.with_memo(memo);
-                }
+            if let Some(memo) = info.memo
+                && !memo.is_empty()
+            {
+                env = env.with_memo(memo);
             }
         }
         env
@@ -415,7 +415,7 @@ impl MorphTxExt for MorphTxEnv {
 
     #[inline]
     fn uses_token_fee(&self) -> bool {
-        self.fee_token_id.map_or(false, |id| id > 0)
+        self.fee_token_id.is_some_and(|id| id > 0)
     }
 
     #[inline]

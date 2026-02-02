@@ -149,6 +149,7 @@ impl<T> MorphTransactionReceipt<T> {
     }
 
     /// Creates a new receipt with all TxMorph fields including version, reference, and memo.
+    #[allow(clippy::too_many_arguments)]
     pub const fn with_morph_tx_full(
         inner: Receipt<T>,
         l1_fee: U256,

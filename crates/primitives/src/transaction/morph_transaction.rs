@@ -160,10 +160,10 @@ impl TxMorph {
             return Err("max priority fee per gas exceeds max fee per gas");
         }
         // Validate memo length
-        if let Some(memo) = &self.memo {
-            if memo.len() > MAX_MEMO_LENGTH {
-                return Err("memo exceeds maximum length of 64 bytes");
-            }
+        if let Some(memo) = &self.memo
+            && memo.len() > MAX_MEMO_LENGTH
+        {
+            return Err("memo exceeds maximum length of 64 bytes");
         }
         // Validate version-specific rules
         self.validate_version()
