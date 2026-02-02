@@ -6,9 +6,8 @@ Morph Reth is the next-generation execution client for [Morph](https://www.morph
 
 ### Key Features
 
-- **L1 Message Support**: Native handling of L1-to-L2 deposit messages with queue index validation
-- **Alt Fee Tokens**: Support for paying transaction fees in alternative ERC-20 tokens
-- **Custom Receipt Types**: Extended receipt format with L1 fee tracking
+- **L1 Message Support**: Seamless bridging of assets and messages from Ethereum L1 to Morph L2
+- **Morph Transaction**: EVM+ transaction enabling alternative token fees, reference key indexing, and memo attachment
 - **Morph Hardforks**: Full support for Morph's upgrade schedule (Bernoulli, Curie, Morph203, Viridian, Emerald)
 
 ## Architecture
@@ -91,7 +90,7 @@ Morph supports the following transaction types:
 | EIP-1559 | `0x02` | Dynamic fee transactions |
 | EIP-7702 | `0x04` | Account abstraction transactions |
 | L1 Message | `0x7e` | L1-to-L2 deposit messages |
-| Alt Fee | `0x7f` | Alternative fee token transactions |
+| Morph Transaction | `0x7f` | EVM+ transaction with enhanced features |
 
 ### L1 Messages
 
@@ -101,6 +100,16 @@ L1 messages are special deposit transactions that originate from Ethereum L1:
 - Must have strictly sequential `queue_index` values
 - Gas is prepaid on L1, so no L2 gas fee is charged
 - Cannot be sent via the mempool (sequencer only)
+
+### Morph Transaction
+
+Morph Transaction (`0x7f`) is Morph's EVM+ transaction type, extending standard EVM transactions for better user experience and enterprise integration:
+
+| Feature | Description |
+|---------|-------------|
+| **Alternative Fee Tokens** | Pay gas in stablecoins (USDT, USDC) or other ERC-20 tokens — no ETH required |
+| **Transaction Reference** | Tag transactions with a 32-byte key for order tracking and payment reconciliation |
+| **Memo Field** | Attach notes or invoice numbers (up to 64 bytes) for auditing and record-keeping |
 
 ### Hardforks
 
