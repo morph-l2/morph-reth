@@ -12,10 +12,15 @@ use alloy_rlp::{BufMut, Decodable, Encodable, Header};
 ///
 /// This receipt extends the standard Ethereum receipt with:
 /// - `l1_fee`: The L1 data fee charged for posting transaction data to L1
+/// - `version`: The version of the Morph transaction format
 /// - `fee_token_id`: The ERC20 token ID used for fee payment (TxMorph)
 /// - `fee_rate`: The exchange rate for the fee token
 /// - `token_scale`: The scale factor for the token
 /// - `fee_limit`: The fee limit for TxMorph
+/// - `reference`: The reference key for the transaction
+/// - `memo`: The memo field for arbitrary data
+///
+/// Reference: <https://github.com/morph-l2/go-ethereum/pull/282>
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
@@ -31,6 +36,14 @@ pub struct MorphTransactionReceipt<T = Log> {
         serde(default, skip_serializing_if = "Option::is_none")
     )]
     pub l1_fee: Option<U256>,
+
+    /// The version of the Morph transaction format.
+    /// Only present for TxMorph.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub version: Option<u8>,
 
     /// The ERC20 token ID used for fee payment (TxMorph feature).
     /// Only present for TxMorph.
@@ -63,6 +76,23 @@ pub struct MorphTransactionReceipt<T = Log> {
         serde(default, skip_serializing_if = "Option::is_none")
     )]
     pub fee_limit: Option<U256>,
+
+    /// Reference key for the transaction.
+    /// Used for indexing and looking up transactions by external systems.
+    /// Only present for TxMorph.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub reference: Option<alloy_primitives::B256>,
+
+    /// Memo field for arbitrary data.
+    /// Only present for TxMorph.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub memo: Option<alloy_primitives::Bytes>,
 }
 
 impl<T> MorphTransactionReceipt<T> {
@@ -71,10 +101,13 @@ impl<T> MorphTransactionReceipt<T> {
         Self {
             inner,
             l1_fee: None,
+            version: None,
             fee_token_id: None,
             fee_rate: None,
             token_scale: None,
             fee_limit: None,
+            reference: None,
+            memo: None,
         }
     }
 
@@ -83,14 +116,17 @@ impl<T> MorphTransactionReceipt<T> {
         Self {
             inner,
             l1_fee: Some(l1_fee),
+            version: None,
             fee_token_id: None,
             fee_rate: None,
             token_scale: None,
             fee_limit: None,
+            reference: None,
+            memo: None,
         }
     }
 
-    /// Creates a new receipt with TxMorph fields.
+    /// Creates a new receipt with TxMorph fields (legacy version without reference/memo).
     pub const fn with_morph_tx(
         inner: Receipt<T>,
         l1_fee: U256,
@@ -102,21 +138,59 @@ impl<T> MorphTransactionReceipt<T> {
         Self {
             inner,
             l1_fee: Some(l1_fee),
+            version: None,
             fee_token_id: Some(fee_token_id),
             fee_rate: Some(fee_rate),
             token_scale: Some(token_scale),
             fee_limit: Some(fee_limit),
+            reference: None,
+            memo: None,
+        }
+    }
+
+    /// Creates a new receipt with all TxMorph fields including version, reference, and memo.
+    pub const fn with_morph_tx_full(
+        inner: Receipt<T>,
+        l1_fee: U256,
+        version: u8,
+        fee_token_id: u16,
+        fee_rate: U256,
+        token_scale: U256,
+        fee_limit: U256,
+        reference: Option<alloy_primitives::B256>,
+        memo: Option<alloy_primitives::Bytes>,
+    ) -> Self {
+        Self {
+            inner,
+            l1_fee: Some(l1_fee),
+            version: Some(version),
+            fee_token_id: Some(fee_token_id),
+            fee_rate: Some(fee_rate),
+            token_scale: Some(token_scale),
+            fee_limit: Some(fee_limit),
+            reference,
+            memo,
         }
     }
 
     /// Returns true if this receipt is for a TxMorph.
     pub const fn is_morph_tx(&self) -> bool {
-        self.fee_token_id.is_some()
+        self.fee_token_id.is_some() || self.version.is_some() || self.reference.is_some()
+    }
+
+    /// Returns true if this receipt has a reference.
+    pub const fn has_reference(&self) -> bool {
+        self.reference.is_some()
     }
 
     /// Returns the L1 fee, defaulting to zero if not set.
     pub fn l1_fee_or_zero(&self) -> U256 {
         self.l1_fee.unwrap_or(U256::ZERO)
+    }
+
+    /// Returns the version, defaulting to 0 if not set.
+    pub fn version_or_zero(&self) -> u8 {
+        self.version.unwrap_or(0)
     }
 }
 
