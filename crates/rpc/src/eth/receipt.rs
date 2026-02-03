@@ -7,7 +7,10 @@ use alloy_primitives::{U64, U256};
 use alloy_rpc_types_eth::Log;
 use morph_primitives::{MorphReceipt, MorphReceiptEnvelope};
 use reth_primitives_traits::NodePrimitives;
-use reth_rpc_convert::{RpcConvert, transaction::{ConvertReceiptInput, ReceiptConverter}};
+use reth_rpc_convert::{
+    RpcConvert,
+    transaction::{ConvertReceiptInput, ReceiptConverter},
+};
 use reth_rpc_eth_api::helpers::LoadReceipt;
 use reth_rpc_eth_types::{EthApiError, receipt::build_receipt};
 use std::fmt::Debug;
@@ -47,7 +50,8 @@ impl MorphReceiptBuilder {
     where
         N: NodePrimitives<Receipt = MorphReceipt>,
     {
-        let (l1_fee, fee_token_id, fee_rate, token_scale, fee_limit) = morph_fee_fields(&input.receipt);
+        let (l1_fee, fee_token_id, fee_rate, token_scale, fee_limit) =
+            morph_fee_fields(&input.receipt);
 
         let core_receipt = build_receipt(input, None, |receipt, next_log_index, meta| {
             let map_logs = |receipt: Receipt| {

@@ -204,9 +204,7 @@ fn build_morph_tx_from_env<Spec>(
 ) -> Result<TxMorph, EthApiError> {
     let fee_token_id = u16::try_from(fee_token_id.to::<u64>())
         .map_err(|_| EthApiError::InvalidParams("invalid token".to_string()))?;
-    let chain_id = tx_env
-        .chain_id()
-        .unwrap_or(evm_env.cfg_env.chain_id);
+    let chain_id = tx_env.chain_id().unwrap_or(evm_env.cfg_env.chain_id);
     let input = tx_env.input().clone();
     let to = tx_env.kind();
     let max_fee_per_gas = tx_env.max_fee_per_gas();

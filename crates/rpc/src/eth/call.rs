@@ -29,7 +29,8 @@ impl<N, Rpc> EstimateCall for MorphEthApi<N, Rpc>
 where
     N: MorphNodeCore,
     N::Provider: ChainSpecProvider<ChainSpec = MorphChainSpec>,
-    Rpc: reth_rpc_convert::RpcConvert<Primitives = N::Primitives, Error = EthApiError, Evm = N::Evm>,
+    Rpc:
+        reth_rpc_convert::RpcConvert<Primitives = N::Primitives, Error = EthApiError, Evm = N::Evm>,
     MorphEthApiError: reth_rpc_eth_types::error::FromEvmError<N::Evm>,
 {
 }
@@ -196,7 +197,6 @@ where
         Ok(eth_allowance.min(token_allowance))
     }
 }
-
 
 fn caller_gas_allowance_with_eth(
     balance: U256,

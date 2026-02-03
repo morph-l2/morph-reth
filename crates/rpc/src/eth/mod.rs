@@ -1,7 +1,7 @@
 //! Morph `eth_` RPC wiring and conversions.
 
-use crate::eth::receipt::MorphReceiptConverter;
 use crate::MorphEthApiError;
+use crate::eth::receipt::MorphReceiptConverter;
 use crate::types::{MorphRpcReceipt, MorphRpcTransaction, MorphTransactionRequest};
 use alloy_rpc_types_eth::Header as RpcHeader;
 use eyre::Result;
