@@ -1,12 +1,15 @@
 //! Morph receipt conversion for `eth_` RPC responses.
 
+use crate::eth::{MorphEthApi, MorphNodeCore};
 use crate::types::receipt::MorphRpcReceipt;
-use alloy_consensus::{Receipt, Transaction, TxReceipt};
-use alloy_primitives::{Address, TxKind, U64, U256};
-use alloy_rpc_types_eth::{Log, TransactionReceipt};
+use alloy_consensus::{Receipt, TxReceipt};
+use alloy_primitives::{U64, U256};
+use alloy_rpc_types_eth::Log;
 use morph_primitives::{MorphReceipt, MorphReceiptEnvelope};
 use reth_primitives_traits::NodePrimitives;
-use reth_rpc_convert::transaction::{ConvertReceiptInput, ReceiptConverter};
+use reth_rpc_convert::{RpcConvert, transaction::{ConvertReceiptInput, ReceiptConverter}};
+use reth_rpc_eth_api::helpers::LoadReceipt;
+use reth_rpc_eth_types::{EthApiError, receipt::build_receipt};
 use std::fmt::Debug;
 
 /// Converter for Morph receipts.
@@ -44,74 +47,47 @@ impl MorphReceiptBuilder {
     where
         N: NodePrimitives<Receipt = MorphReceipt>,
     {
-        let ConvertReceiptInput {
-            tx,
-            meta,
-            receipt,
-            gas_used,
-            next_log_index,
-        } = input;
+        let (l1_fee, fee_token_id, fee_rate, token_scale, fee_limit) = morph_fee_fields(&input.receipt);
 
-        let from = tx.signer();
-        let (contract_address, to) = match tx.kind() {
-            TxKind::Create => (Some(from.create(tx.nonce())), None),
-            TxKind::Call(addr) => (None, Some(Address(*addr))),
-        };
+        let core_receipt = build_receipt(input, None, |receipt, next_log_index, meta| {
+            let map_logs = |receipt: Receipt| {
+                let Receipt {
+                    status,
+                    cumulative_gas_used,
+                    logs,
+                } = receipt;
+                let logs = Log::collect_for_receipt(next_log_index, meta, logs);
+                Receipt {
+                    status,
+                    cumulative_gas_used,
+                    logs,
+                }
+            };
 
-        let (l1_fee, fee_token_id, fee_rate, token_scale, fee_limit) = morph_fee_fields(&receipt);
-
-        let map_logs = |receipt: Receipt| {
-            let Receipt {
-                status,
-                cumulative_gas_used,
-                logs,
-            } = receipt;
-            let logs = Log::collect_for_receipt(next_log_index, meta, logs);
-            Receipt {
-                status,
-                cumulative_gas_used,
-                logs,
+            match receipt {
+                MorphReceipt::Legacy(receipt) => {
+                    MorphReceiptEnvelope::Legacy(map_logs(receipt.inner).into_with_bloom())
+                }
+                MorphReceipt::Eip2930(receipt) => {
+                    MorphReceiptEnvelope::Eip2930(map_logs(receipt.inner).into_with_bloom())
+                }
+                MorphReceipt::Eip1559(receipt) => {
+                    MorphReceiptEnvelope::Eip1559(map_logs(receipt.inner).into_with_bloom())
+                }
+                MorphReceipt::Eip7702(receipt) => {
+                    MorphReceiptEnvelope::Eip7702(map_logs(receipt.inner).into_with_bloom())
+                }
+                MorphReceipt::L1Msg(receipt) => {
+                    MorphReceiptEnvelope::L1Message(map_logs(receipt).into_with_bloom())
+                }
+                MorphReceipt::Morph(receipt) => {
+                    MorphReceiptEnvelope::Morph(map_logs(receipt.inner).into_with_bloom())
+                }
             }
-        };
-
-        let receipt_envelope = match receipt {
-            MorphReceipt::Legacy(receipt) => {
-                MorphReceiptEnvelope::Legacy(map_logs(receipt.inner).into_with_bloom())
-            }
-            MorphReceipt::Eip2930(receipt) => {
-                MorphReceiptEnvelope::Eip2930(map_logs(receipt.inner).into_with_bloom())
-            }
-            MorphReceipt::Eip1559(receipt) => {
-                MorphReceiptEnvelope::Eip1559(map_logs(receipt.inner).into_with_bloom())
-            }
-            MorphReceipt::Eip7702(receipt) => {
-                MorphReceiptEnvelope::Eip7702(map_logs(receipt.inner).into_with_bloom())
-            }
-            MorphReceipt::L1Msg(receipt) => {
-                MorphReceiptEnvelope::L1Message(map_logs(receipt).into_with_bloom())
-            }
-            MorphReceipt::Morph(receipt) => {
-                MorphReceiptEnvelope::Morph(map_logs(receipt.inner).into_with_bloom())
-            }
-        };
-
-        let inner = TransactionReceipt {
-            inner: receipt_envelope,
-            transaction_hash: meta.tx_hash,
-            transaction_index: Some(meta.index),
-            block_hash: Some(meta.block_hash),
-            block_number: Some(meta.block_number),
-            gas_used,
-            effective_gas_price: tx.effective_gas_price(meta.base_fee),
-            blob_gas_used: None,
-            blob_gas_price: None,
-            from,
-            to,
-            contract_address,
-        };
+        });
 
         let receipt = MorphRpcReceipt {
-            inner,
+            inner: core_receipt,
             l1_fee,
             fee_rate,
             token_scale,
@@ -125,6 +101,13 @@ impl MorphReceiptBuilder {
     fn build(self) -> MorphRpcReceipt {
         self.receipt
     }
+}
+
+impl<N, Rpc> LoadReceipt for MorphEthApi<N, Rpc>
+where
+    N: MorphNodeCore,
+    Rpc: RpcConvert<Primitives = N::Primitives, Error = EthApiError, Evm = N::Evm>,
+{
 }
 
 fn morph_fee_fields(

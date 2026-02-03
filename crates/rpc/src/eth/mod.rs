@@ -18,7 +18,7 @@ use reth_rpc_eth_api::{
     EthApiTypes, RpcNodeCore, RpcNodeCoreExt,
     helpers::{
         EthApiSpec, EthBlocks, EthFees, EthState, EthTransactions, LoadBlock, LoadFee,
-        LoadPendingBlock, LoadReceipt, LoadState, LoadTransaction, SpawnBlocking, Trace,
+        LoadPendingBlock, LoadState, LoadTransaction, SpawnBlocking, Trace,
         pending_block::{BuildPendingEnv, PendingEnvBuilder},
     },
 };
@@ -295,13 +295,6 @@ where
 }
 
 impl<N, Rpc> LoadTransaction for MorphEthApi<N, Rpc>
-where
-    N: MorphNodeCore,
-    Rpc: RpcConvert<Primitives = N::Primitives, Error = EthApiError, Evm = N::Evm>,
-{
-}
-
-impl<N, Rpc> LoadReceipt for MorphEthApi<N, Rpc>
 where
     N: MorphNodeCore,
     Rpc: RpcConvert<Primitives = N::Primitives, Error = EthApiError, Evm = N::Evm>,
