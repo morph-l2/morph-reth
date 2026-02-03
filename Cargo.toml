@@ -13,6 +13,7 @@ members = [
     "crates/engine-api",
     "crates/evm",
     "crates/node",
+    "crates/rpc",
     "crates/payload/builder",
     "crates/payload/types",
     "crates/primitives",
@@ -48,6 +49,7 @@ morph-node = { path = "crates/node"}
 morph-payload-builder = { path = "crates/payload/builder", default-features = false }
 morph-payload-types = { path = "crates/payload/types", default-features = false }
 morph-primitives = { path = "crates/primitives", default-features = false }
+morph-rpc = { path = "crates/rpc" }
 morph-revm = { path = "crates/revm", default-features = false }
 morph-txpool = { path = "crates/txpool", default-features = false }
 
@@ -96,6 +98,7 @@ reth-rpc-eth-api = { git = "https://github.com/paradigmxyz/reth", rev = "64909d3
 reth-rpc-eth-types = { git = "https://github.com/paradigmxyz/reth", rev = "64909d3" }
 reth-rpc-server-types = { git = "https://github.com/paradigmxyz/reth", rev = "64909d3" }
 reth-storage-api = { git = "https://github.com/paradigmxyz/reth", rev = "64909d3" }
+reth-tasks = { git = "https://github.com/paradigmxyz/reth", rev = "64909d3" }
 reth-tracing = { git = "https://github.com/paradigmxyz/reth", rev = "64909d3" }
 reth-transaction-pool = { git = "https://github.com/paradigmxyz/reth", rev = "64909d3" }
 reth-zstd-compressors = { git = "https://github.com/paradigmxyz/reth", rev = "64909d3", default-features = false }

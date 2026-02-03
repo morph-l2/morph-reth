@@ -60,6 +60,7 @@ reth-codec = [
     "dep:reth-db-api",
     "dep:modular-bitfield",
     "dep:reth-zstd-compressors",
+    "dep:reth-ethereum-primitives",
     "reth-ethereum-primitives/reth-codec",
     "reth-codecs/alloy",
 	"dep:bytes",

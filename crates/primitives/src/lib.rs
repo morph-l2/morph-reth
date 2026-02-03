@@ -47,7 +47,7 @@ pub type Block = alloy_consensus::Block<MorphTxEnvelope, MorphHeader>;
 pub type BlockBody = alloy_consensus::BlockBody<MorphTxEnvelope, MorphHeader>;
 
 // Re-export receipt types
-pub use receipt::{MorphReceipt, MorphReceiptWithBloom, MorphTransactionReceipt};
+pub use receipt::{MorphReceipt, MorphReceiptEnvelope, MorphReceiptWithBloom, MorphTransactionReceipt};
 
 // Re-export transaction types
 pub use transaction::{

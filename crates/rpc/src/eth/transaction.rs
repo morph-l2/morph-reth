@@ -1,0 +1,258 @@
+//! Morph transaction conversion for `eth_` RPC responses.
+
+use crate::types::transaction::MorphRpcTransaction;
+use crate::MorphTransactionRequest;
+use alloy_consensus::{
+    transaction::Recovered,
+    EthereumTxEnvelope, SignableTransaction, Transaction, TxEip4844,
+};
+use alloy_eips::eip2718::Encodable2718;
+use alloy_network::TxSigner;
+use alloy_primitives::{Address, Bytes, Signature, TxKind, U256, U64};
+use alloy_rpc_types_eth::{AccessList, Transaction as RpcTransaction, TransactionInfo};
+use reth_rpc_convert::{
+    transaction::FromConsensusTx, SignTxRequestError, SignableTxRequest, TryIntoSimTx,
+    TryIntoTxEnv,
+};
+use reth_rpc_eth_types::EthApiError;
+use revm::context::Transaction as RevmTransaction;
+use std::convert::Infallible;
+
+use morph_primitives::{MorphTxEnvelope, TxMorph};
+use morph_revm::{MorphBlockEnv, MorphTxEnv};
+use reth_evm::EvmEnv;
+
+impl FromConsensusTx<MorphTxEnvelope> for MorphRpcTransaction {
+    type TxInfo = TransactionInfo;
+    type Err = Infallible;
+
+    fn from_consensus_tx(
+        tx: MorphTxEnvelope,
+        signer: Address,
+        tx_info: Self::TxInfo,
+    ) -> Result<Self, Self::Err> {
+        let (sender, queue_index) = match &tx {
+            MorphTxEnvelope::L1Msg(msg) => {
+                (Some(msg.sender), Some(U64::from(msg.queue_index)))
+            }
+            _ => (None, None),
+        };
+        let fee_token_id = tx.fee_token_id().map(U64::from);
+        let fee_limit = tx.fee_limit();
+
+        let effective_gas_price = tx_info.base_fee.map(|base_fee| {
+            tx.effective_tip_per_gas(base_fee)
+                .unwrap_or_default()
+                .saturating_add(base_fee as u128)
+        });
+
+        let inner = RpcTransaction {
+            inner: Recovered::new_unchecked(tx, signer),
+            block_hash: tx_info.block_hash,
+            block_number: tx_info.block_number,
+            transaction_index: tx_info.index,
+            effective_gas_price,
+        };
+
+        Ok(MorphRpcTransaction {
+            inner,
+            sender,
+            queue_index,
+            fee_token_id,
+            fee_limit,
+        })
+    }
+}
+
+impl TryIntoSimTx<MorphTxEnvelope> for MorphTransactionRequest {
+    fn try_into_sim_tx(
+        self,
+    ) -> Result<MorphTxEnvelope, alloy_consensus::error::ValueError<Self>> {
+        let tx_req = self.clone();
+        if let Some(fee_token_id) = tx_req.fee_token_id.filter(|id| id.to::<u64>() > 0) {
+            let morph_tx = build_morph_tx_from_request(
+                &tx_req.inner,
+                fee_token_id,
+                tx_req.fee_limit.unwrap_or_default(),
+            )
+            .map_err(|err| alloy_consensus::error::ValueError::new(tx_req, err))?;
+            let signature = Signature::from_bytes_and_parity(&[0u8; 64], false);
+            return Ok(MorphTxEnvelope::Morph(morph_tx.into_signed(signature)));
+        }
+
+        let inner = tx_req.inner.clone();
+        let envelope = inner.build_typed_simulate_transaction().map_err(|err| {
+            err.map(|inner| Self {
+                inner,
+                fee_token_id: tx_req.fee_token_id,
+                fee_limit: tx_req.fee_limit,
+            })
+        })?;
+        morph_envelope_from_ethereum(envelope).map_err(|err| {
+            alloy_consensus::error::ValueError::new(tx_req, err)
+        })
+    }
+}
+
+impl SignableTxRequest<MorphTxEnvelope> for MorphTransactionRequest {
+    async fn try_build_and_sign(
+        self,
+        signer: impl TxSigner<Signature> + Send,
+    ) -> Result<MorphTxEnvelope, SignTxRequestError> {
+        if let Some(fee_token_id) = self.fee_token_id.filter(|id| id.to::<u64>() > 0) {
+            let mut morph_tx = build_morph_tx_from_request(
+                &self.inner,
+                fee_token_id,
+                self.fee_limit.unwrap_or_default(),
+            )
+            .map_err(|_| SignTxRequestError::InvalidTransactionRequest)?;
+            let signature = signer.sign_transaction(&mut morph_tx).await?;
+            return Ok(MorphTxEnvelope::Morph(morph_tx.into_signed(signature)));
+        }
+
+        let mut tx = self
+            .inner
+            .build_typed_tx()
+            .map_err(|_| SignTxRequestError::InvalidTransactionRequest)?;
+        let signature = signer.sign_transaction(&mut tx).await?;
+        let signed_envelope: EthereumTxEnvelope<TxEip4844> =
+            EthereumTxEnvelope::new_unhashed(tx, signature).into();
+        morph_envelope_from_ethereum(signed_envelope)
+            .map_err(|_| SignTxRequestError::InvalidTransactionRequest)
+    }
+}
+
+impl TryIntoTxEnv<MorphTxEnv, MorphBlockEnv> for MorphTransactionRequest {
+    type Err = EthApiError;
+
+    fn try_into_tx_env<Spec>(
+        self,
+        evm_env: &EvmEnv<Spec, MorphBlockEnv>,
+    ) -> Result<MorphTxEnv, Self::Err> {
+        let fee_token_id = self.fee_token_id;
+        let fee_limit = self.fee_limit;
+        let access_list = self.inner.access_list.clone().unwrap_or_default();
+
+        let inner_tx_env = self
+            .inner
+            .clone()
+            .try_into_tx_env(evm_env)
+            .map_err(EthApiError::from)?;
+
+        let mut tx_env = MorphTxEnv::new(inner_tx_env);
+        tx_env.fee_token_id = match fee_token_id {
+            Some(id) => Some(
+                u16::try_from(id.to::<u64>())
+                    .map_err(|_| EthApiError::InvalidParams("invalid token".to_string()))?,
+            ),
+            None => None,
+        };
+        tx_env.fee_limit = fee_limit;
+        if tx_env.fee_token_id.unwrap_or_default() > 0 {
+            tx_env.inner.tx_type = morph_primitives::MORPH_TX_TYPE_ID;
+        }
+
+        let rlp_bytes = if tx_env.fee_token_id.unwrap_or_default() > 0 || tx_env.fee_limit.is_some()
+        {
+            let fee_token_id = U64::from(tx_env.fee_token_id.unwrap_or_default());
+            let fee_limit = tx_env.fee_limit.unwrap_or_default();
+            let morph_tx = build_morph_tx_from_env(
+                &tx_env,
+                fee_token_id,
+                fee_limit,
+                access_list,
+                evm_env,
+            )?;
+            encode_2718(morph_tx)
+        } else {
+            let envelope = self
+                .inner
+                .build_typed_simulate_transaction()
+                .map_err(|err| EthApiError::InvalidParams(err.to_string()))?;
+            encode_2718(envelope)
+        };
+
+        tx_env.rlp_bytes = Some(rlp_bytes);
+        Ok(tx_env)
+    }
+}
+
+fn morph_envelope_from_ethereum(
+    env: EthereumTxEnvelope<TxEip4844>,
+) -> Result<MorphTxEnvelope, &'static str> {
+    match env {
+        EthereumTxEnvelope::Legacy(tx) => Ok(MorphTxEnvelope::Legacy(tx)),
+        EthereumTxEnvelope::Eip2930(tx) => Ok(MorphTxEnvelope::Eip2930(tx)),
+        EthereumTxEnvelope::Eip1559(tx) => Ok(MorphTxEnvelope::Eip1559(tx)),
+        EthereumTxEnvelope::Eip7702(tx) => Ok(MorphTxEnvelope::Eip7702(tx)),
+        EthereumTxEnvelope::Eip4844(_) => Err("EIP-4844 transactions are not supported on Morph"),
+    }
+}
+
+
+fn build_morph_tx_from_request(
+    req: &alloy_rpc_types_eth::TransactionRequest,
+    fee_token_id: U64,
+    fee_limit: U256,
+) -> Result<TxMorph, &'static str> {
+    let chain_id = req.chain_id.ok_or("missing chain_id for morph transaction")?;
+    let fee_token_id =
+        u16::try_from(fee_token_id.to::<u64>()).map_err(|_| "invalid token")?;
+    let gas_limit = req.gas.unwrap_or_default() as u128;
+    let nonce = req.nonce.unwrap_or_default();
+    let max_fee_per_gas = req.max_fee_per_gas.or(req.gas_price).unwrap_or_default();
+    let max_priority_fee_per_gas = req.max_priority_fee_per_gas.unwrap_or_default();
+    let access_list: AccessList = req.access_list.clone().unwrap_or_default();
+    let input = req.input.clone().into_input().unwrap_or_default();
+    let to = req.to.unwrap_or(TxKind::Create);
+
+    Ok(TxMorph {
+        chain_id,
+        nonce,
+        gas_limit,
+        max_fee_per_gas,
+        max_priority_fee_per_gas,
+        to,
+        value: req.value.unwrap_or_default(),
+        access_list,
+        input,
+        fee_token_id,
+        fee_limit,
+    })
+}
+
+fn build_morph_tx_from_env<Spec>(
+    tx_env: &MorphTxEnv,
+    fee_token_id: U64,
+    fee_limit: U256,
+    access_list: AccessList,
+    evm_env: &EvmEnv<Spec, MorphBlockEnv>,
+) -> Result<TxMorph, EthApiError> {
+    let fee_token_id = u16::try_from(fee_token_id.to::<u64>())
+        .map_err(|_| EthApiError::InvalidParams("invalid token".to_string()))?;
+    let chain_id = tx_env.chain_id().unwrap_or_else(|| evm_env.cfg_env.chain_id);
+    let input = tx_env.input().clone();
+    let to = tx_env.kind();
+    let max_fee_per_gas = tx_env.max_fee_per_gas();
+    let max_priority_fee_per_gas = tx_env.max_priority_fee_per_gas().unwrap_or_default();
+
+    Ok(TxMorph {
+        chain_id,
+        nonce: tx_env.nonce(),
+        gas_limit: tx_env.gas_limit() as u128,
+        max_fee_per_gas,
+        max_priority_fee_per_gas,
+        to,
+        value: tx_env.value(),
+        access_list,
+        input,
+        fee_token_id,
+        fee_limit,
+    })
+}
+
+fn encode_2718<T: Encodable2718>(tx: T) -> Bytes {
+    let mut out = Vec::with_capacity(tx.encode_2718_len());
+    tx.encode_2718(&mut out);
+    Bytes::from(out)
+}
