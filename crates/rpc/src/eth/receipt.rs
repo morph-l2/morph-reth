@@ -2,7 +2,7 @@
 
 use crate::types::receipt::MorphRpcReceipt;
 use alloy_consensus::{Receipt, Transaction, TxReceipt};
-use alloy_primitives::{Address, TxKind, U256, U64};
+use alloy_primitives::{Address, TxKind, U64, U256};
 use alloy_rpc_types_eth::{Log, TransactionReceipt};
 use morph_primitives::{MorphReceipt, MorphReceiptEnvelope};
 use reth_primitives_traits::NodePrimitives;
@@ -44,7 +44,13 @@ impl MorphReceiptBuilder {
     where
         N: NodePrimitives<Receipt = MorphReceipt>,
     {
-        let ConvertReceiptInput { tx, meta, receipt, gas_used, next_log_index } = input;
+        let ConvertReceiptInput {
+            tx,
+            meta,
+            receipt,
+            gas_used,
+            next_log_index,
+        } = input;
 
         let from = tx.signer();
         let (contract_address, to) = match tx.kind() {
@@ -52,13 +58,20 @@ impl MorphReceiptBuilder {
             TxKind::Call(addr) => (None, Some(Address(*addr))),
         };
 
-        let (l1_fee, fee_token_id, fee_rate, token_scale, fee_limit) =
-            morph_fee_fields(&receipt);
+        let (l1_fee, fee_token_id, fee_rate, token_scale, fee_limit) = morph_fee_fields(&receipt);
 
         let map_logs = |receipt: Receipt| {
-            let Receipt { status, cumulative_gas_used, logs } = receipt;
+            let Receipt {
+                status,
+                cumulative_gas_used,
+                logs,
+            } = receipt;
             let logs = Log::collect_for_receipt(next_log_index, meta, logs);
-            Receipt { status, cumulative_gas_used, logs }
+            Receipt {
+                status,
+                cumulative_gas_used,
+                logs,
+            }
         };
 
         let receipt_envelope = match receipt {
@@ -132,4 +145,3 @@ fn morph_fee_fields(
         MorphReceipt::L1Msg(_) => (U256::ZERO, None, None, None, None),
     }
 }
-

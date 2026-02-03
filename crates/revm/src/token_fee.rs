@@ -9,7 +9,10 @@ use alloy_evm::Database;
 use alloy_primitives::{Address, Bytes, U256, address, keccak256};
 use morph_chainspec::hardfork::MorphHardfork;
 use revm::SystemCallEvm;
-use revm::{Database as RevmDatabase, Inspector, context_interface::result::EVMError, inspector::NoOpInspector};
+use revm::{
+    Database as RevmDatabase, Inspector, context_interface::result::EVMError,
+    inspector::NoOpInspector,
+};
 
 use crate::evm::MorphContext;
 use crate::{MorphEvm, MorphInvalidTransaction};
@@ -74,8 +77,13 @@ impl TokenFeeInfo {
             None => return Ok(None),
         };
 
-        let balance =
-            read_erc20_balance(db, entry.token_address, caller, entry.balance_slot, hardfork)?;
+        let balance = read_erc20_balance(
+            db,
+            entry.token_address,
+            caller,
+            entry.balance_slot,
+            hardfork,
+        )?;
 
         Ok(Some(Self {
             token_address: entry.token_address,

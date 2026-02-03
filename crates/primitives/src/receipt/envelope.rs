@@ -5,11 +5,11 @@ use std::vec::Vec;
 
 use alloy_consensus::{Eip658Value, Receipt, ReceiptWithBloom, TxReceipt};
 use alloy_eips::{
-    eip2718::{Decodable2718, Eip2718Error, Eip2718Result, Encodable2718},
     Typed2718,
+    eip2718::{Decodable2718, Eip2718Error, Eip2718Result, Encodable2718},
 };
-use alloy_primitives::{logs_bloom, Bloom, Log};
-use alloy_rlp::{length_of_length, BufMut, Decodable, Encodable};
+use alloy_primitives::{Bloom, Log, logs_bloom};
+use alloy_rlp::{BufMut, Decodable, Encodable, length_of_length};
 
 /// Receipt envelope, as defined in [EIP-2718], modified for Morph chains.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,9 +47,15 @@ impl MorphReceiptEnvelope<Log> {
     ) -> Self {
         let logs = logs.into_iter().cloned().collect::<Vec<_>>();
         let logs_bloom = logs_bloom(&logs);
-        let inner_receipt =
-            Receipt { status: Eip658Value::Eip658(status), cumulative_gas_used, logs };
-        let with_bloom = ReceiptWithBloom { receipt: inner_receipt, logs_bloom };
+        let inner_receipt = Receipt {
+            status: Eip658Value::Eip658(status),
+            cumulative_gas_used,
+            logs,
+        };
+        let with_bloom = ReceiptWithBloom {
+            receipt: inner_receipt,
+            logs_bloom,
+        };
         match tx_type {
             MorphTxType::Legacy => Self::Legacy(with_bloom),
             MorphTxType::Eip2930 => Self::Eip2930(with_bloom),
@@ -107,9 +113,7 @@ impl<T> MorphReceiptEnvelope<T> {
     }
 
     /// Returns the L1 message receipt if it is a deposit receipt.
-    pub const fn as_l1_message_receipt_with_bloom(
-        &self,
-    ) -> Option<&ReceiptWithBloom<Receipt<T>>> {
+    pub const fn as_l1_message_receipt_with_bloom(&self) -> Option<&ReceiptWithBloom<Receipt<T>>> {
         match self {
             Self::L1Message(t) => Some(t),
             _ => None,
@@ -260,10 +264,13 @@ impl Typed2718 for MorphReceiptEnvelope {
 
 impl Decodable2718 for MorphReceiptEnvelope {
     fn typed_decode(ty: u8, buf: &mut &[u8]) -> Eip2718Result<Self> {
-        match ty.try_into().map_err(|_| Eip2718Error::UnexpectedType(ty))? {
-            MorphTxType::Legacy => Err(
-                alloy_rlp::Error::Custom("type-0 eip2718 receipts are not supported").into(),
-            ),
+        match ty
+            .try_into()
+            .map_err(|_| Eip2718Error::UnexpectedType(ty))?
+        {
+            MorphTxType::Legacy => {
+                Err(alloy_rlp::Error::Custom("type-0 eip2718 receipts are not supported").into())
+            }
             MorphTxType::Eip2930 => Ok(Self::Eip2930(Decodable::decode(buf)?)),
             MorphTxType::Eip1559 => Ok(Self::Eip1559(Decodable::decode(buf)?)),
             MorphTxType::Eip7702 => Ok(Self::Eip7702(Decodable::decode(buf)?)),
@@ -289,7 +296,10 @@ impl From<crate::receipt::MorphReceipt> for MorphReceiptEnvelope<Log> {
         };
 
         let logs_bloom = logs_bloom(&inner.logs);
-        let with_bloom = ReceiptWithBloom { receipt: inner, logs_bloom };
+        let with_bloom = ReceiptWithBloom {
+            receipt: inner,
+            logs_bloom,
+        };
         match tx_type {
             MorphTxType::Legacy => Self::Legacy(with_bloom),
             MorphTxType::Eip2930 => Self::Eip2930(with_bloom),

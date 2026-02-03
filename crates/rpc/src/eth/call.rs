@@ -1,21 +1,31 @@
 //! Morph `eth_call` and `eth_estimateGas` overrides.
 
-use crate::error::ToMorphErr;
-use crate::eth::api::{MorphEthApi, MorphNodeCore};
 use crate::MorphEthApiError;
+use crate::error::ToMorphErr;
+use crate::eth::{MorphEthApi, MorphNodeCore};
 use alloy_primitives::U256;
 use morph_chainspec::{MorphChainSpec, MorphHardforks};
 use morph_revm::{L1BlockInfo, MorphTxExt, TokenFeeInfo};
 use reth_evm::{EvmEnvFor, TxEnvFor};
 use reth_provider::ChainSpecProvider;
 use reth_rpc_eth_api::{
-    helpers::{estimate::EstimateCall, Call, EthCall},
     EthApiTypes, RpcNodeCore,
+    helpers::{Call, EthCall, estimate::EstimateCall},
 };
 use reth_rpc_eth_types::EthApiError;
-use revm::{context::Transaction as RevmTransaction, Database};
+use revm::{Database, context::Transaction as RevmTransaction};
 
 impl<N, Rpc> EthCall for MorphEthApi<N, Rpc>
+where
+    N: MorphNodeCore,
+    N::Provider: ChainSpecProvider<ChainSpec = MorphChainSpec>,
+    Rpc:
+        reth_rpc_convert::RpcConvert<Primitives = N::Primitives, Error = EthApiError, Evm = N::Evm>,
+    MorphEthApiError: reth_rpc_eth_types::error::FromEvmError<N::Evm>,
+{
+}
+
+impl<N, Rpc> EstimateCall for MorphEthApi<N, Rpc>
 where
     N: MorphNodeCore,
     N::Provider: ChainSpecProvider<ChainSpec = MorphChainSpec>,
@@ -28,7 +38,8 @@ impl<N, Rpc> Call for MorphEthApi<N, Rpc>
 where
     N: MorphNodeCore,
     N::Provider: ChainSpecProvider<ChainSpec = MorphChainSpec>,
-    Rpc: reth_rpc_convert::RpcConvert<Primitives = N::Primitives, Error = EthApiError, Evm = N::Evm>,
+    Rpc:
+        reth_rpc_convert::RpcConvert<Primitives = N::Primitives, Error = EthApiError, Evm = N::Evm>,
     MorphEthApiError: reth_rpc_eth_types::error::FromEvmError<N::Evm>,
 {
     fn call_gas_limit(&self) -> u64 {
@@ -46,8 +57,8 @@ where
     fn caller_gas_allowance(
         &self,
         mut db: impl Database<Error: Into<EthApiError>>,
-        evm_env: &EvmEnvFor<<MorphEthApi<N, Rpc> as RpcNodeCore>::Evm>,
-        tx_env: &TxEnvFor<<MorphEthApi<N, Rpc> as RpcNodeCore>::Evm>,
+        evm_env: &EvmEnvFor<<Self as RpcNodeCore>::Evm>,
+        tx_env: &TxEnvFor<<Self as RpcNodeCore>::Evm>,
     ) -> Result<u64, <Self as EthApiTypes>::Error> {
         let caller = tx_env.caller();
         let balance = db
@@ -84,13 +95,14 @@ impl<N, Rpc> MorphEthApi<N, Rpc>
 where
     N: MorphNodeCore,
     N::Provider: ChainSpecProvider<ChainSpec = MorphChainSpec>,
-    Rpc: reth_rpc_convert::RpcConvert<Primitives = N::Primitives, Error = EthApiError, Evm = N::Evm>,
+    Rpc:
+        reth_rpc_convert::RpcConvert<Primitives = N::Primitives, Error = EthApiError, Evm = N::Evm>,
 {
     fn estimate_l1_fee<DB>(
         &self,
         db: &mut DB,
-        evm_env: &EvmEnvFor<<MorphEthApi<N, Rpc> as RpcNodeCore>::Evm>,
-        tx_env: &TxEnvFor<<MorphEthApi<N, Rpc> as RpcNodeCore>::Evm>,
+        evm_env: &EvmEnvFor<<Self as RpcNodeCore>::Evm>,
+        tx_env: &TxEnvFor<<Self as RpcNodeCore>::Evm>,
     ) -> Result<U256, EthApiError>
     where
         DB: Database,
@@ -122,6 +134,7 @@ where
     ///
     /// Uses storage-only reads. For tokens without a known `balance_slot`,
     /// skips the token balance limit (EVM handler will verify during execution).
+    #[allow(clippy::too_many_arguments)]
     fn caller_gas_allowance_with_token<DB>(
         &self,
         db: &mut DB,
@@ -184,14 +197,6 @@ where
     }
 }
 
-impl<N, Rpc> EstimateCall for MorphEthApi<N, Rpc>
-where
-    N: MorphNodeCore,
-    N::Provider: ChainSpecProvider<ChainSpec = MorphChainSpec>,
-    Rpc: reth_rpc_convert::RpcConvert<Primitives = N::Primitives, Error = EthApiError, Evm = N::Evm>,
-    MorphEthApiError: reth_rpc_eth_types::error::FromEvmError<N::Evm>,
-{
-}
 
 fn caller_gas_allowance_with_eth(
     balance: U256,

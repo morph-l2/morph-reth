@@ -1,18 +1,16 @@
 //! Morph transaction conversion for `eth_` RPC responses.
 
-use crate::types::transaction::MorphRpcTransaction;
 use crate::MorphTransactionRequest;
+use crate::types::transaction::MorphRpcTransaction;
 use alloy_consensus::{
-    transaction::Recovered,
-    EthereumTxEnvelope, SignableTransaction, Transaction, TxEip4844,
+    EthereumTxEnvelope, SignableTransaction, Transaction, TxEip4844, transaction::Recovered,
 };
 use alloy_eips::eip2718::Encodable2718;
 use alloy_network::TxSigner;
-use alloy_primitives::{Address, Bytes, Signature, TxKind, U256, U64};
+use alloy_primitives::{Address, Bytes, Signature, TxKind, U64, U256};
 use alloy_rpc_types_eth::{AccessList, Transaction as RpcTransaction, TransactionInfo};
 use reth_rpc_convert::{
-    transaction::FromConsensusTx, SignTxRequestError, SignableTxRequest, TryIntoSimTx,
-    TryIntoTxEnv,
+    SignTxRequestError, SignableTxRequest, TryIntoSimTx, TryIntoTxEnv, transaction::FromConsensusTx,
 };
 use reth_rpc_eth_types::EthApiError;
 use revm::context::Transaction as RevmTransaction;
@@ -32,9 +30,7 @@ impl FromConsensusTx<MorphTxEnvelope> for MorphRpcTransaction {
         tx_info: Self::TxInfo,
     ) -> Result<Self, Self::Err> {
         let (sender, queue_index) = match &tx {
-            MorphTxEnvelope::L1Msg(msg) => {
-                (Some(msg.sender), Some(U64::from(msg.queue_index)))
-            }
+            MorphTxEnvelope::L1Msg(msg) => (Some(msg.sender), Some(U64::from(msg.queue_index))),
             _ => (None, None),
         };
         let fee_token_id = tx.fee_token_id().map(U64::from);
@@ -54,7 +50,7 @@ impl FromConsensusTx<MorphTxEnvelope> for MorphRpcTransaction {
             effective_gas_price,
         };
 
-        Ok(MorphRpcTransaction {
+        Ok(Self {
             inner,
             sender,
             queue_index,
@@ -65,32 +61,28 @@ impl FromConsensusTx<MorphTxEnvelope> for MorphRpcTransaction {
 }
 
 impl TryIntoSimTx<MorphTxEnvelope> for MorphTransactionRequest {
-    fn try_into_sim_tx(
-        self,
-    ) -> Result<MorphTxEnvelope, alloy_consensus::error::ValueError<Self>> {
-        let tx_req = self.clone();
-        if let Some(fee_token_id) = tx_req.fee_token_id.filter(|id| id.to::<u64>() > 0) {
+    fn try_into_sim_tx(self) -> Result<MorphTxEnvelope, alloy_consensus::error::ValueError<Self>> {
+        if let Some(fee_token_id) = self.fee_token_id.filter(|id| id.to::<u64>() > 0) {
             let morph_tx = build_morph_tx_from_request(
-                &tx_req.inner,
+                &self.inner,
                 fee_token_id,
-                tx_req.fee_limit.unwrap_or_default(),
+                self.fee_limit.unwrap_or_default(),
             )
-            .map_err(|err| alloy_consensus::error::ValueError::new(tx_req, err))?;
+            .map_err(|err| alloy_consensus::error::ValueError::new(self, err))?;
             let signature = Signature::from_bytes_and_parity(&[0u8; 64], false);
             return Ok(MorphTxEnvelope::Morph(morph_tx.into_signed(signature)));
         }
 
-        let inner = tx_req.inner.clone();
+        let inner = self.inner.clone();
         let envelope = inner.build_typed_simulate_transaction().map_err(|err| {
             err.map(|inner| Self {
                 inner,
-                fee_token_id: tx_req.fee_token_id,
-                fee_limit: tx_req.fee_limit,
+                fee_token_id: self.fee_token_id,
+                fee_limit: self.fee_limit,
             })
         })?;
-        morph_envelope_from_ethereum(envelope).map_err(|err| {
-            alloy_consensus::error::ValueError::new(tx_req, err)
-        })
+        morph_envelope_from_ethereum(envelope)
+            .map_err(|err| alloy_consensus::error::ValueError::new(self, err))
     }
 }
 
@@ -156,13 +148,8 @@ impl TryIntoTxEnv<MorphTxEnv, MorphBlockEnv> for MorphTransactionRequest {
         {
             let fee_token_id = U64::from(tx_env.fee_token_id.unwrap_or_default());
             let fee_limit = tx_env.fee_limit.unwrap_or_default();
-            let morph_tx = build_morph_tx_from_env(
-                &tx_env,
-                fee_token_id,
-                fee_limit,
-                access_list,
-                evm_env,
-            )?;
+            let morph_tx =
+                build_morph_tx_from_env(&tx_env, fee_token_id, fee_limit, access_list, evm_env)?;
             encode_2718(morph_tx)
         } else {
             let envelope = self
@@ -189,15 +176,15 @@ fn morph_envelope_from_ethereum(
     }
 }
 
-
 fn build_morph_tx_from_request(
     req: &alloy_rpc_types_eth::TransactionRequest,
     fee_token_id: U64,
     fee_limit: U256,
 ) -> Result<TxMorph, &'static str> {
-    let chain_id = req.chain_id.ok_or("missing chain_id for morph transaction")?;
-    let fee_token_id =
-        u16::try_from(fee_token_id.to::<u64>()).map_err(|_| "invalid token")?;
+    let chain_id = req
+        .chain_id
+        .ok_or("missing chain_id for morph transaction")?;
+    let fee_token_id = u16::try_from(fee_token_id.to::<u64>()).map_err(|_| "invalid token")?;
     let gas_limit = req.gas.unwrap_or_default() as u128;
     let nonce = req.nonce.unwrap_or_default();
     let max_fee_per_gas = req.max_fee_per_gas.or(req.gas_price).unwrap_or_default();
@@ -230,7 +217,9 @@ fn build_morph_tx_from_env<Spec>(
 ) -> Result<TxMorph, EthApiError> {
     let fee_token_id = u16::try_from(fee_token_id.to::<u64>())
         .map_err(|_| EthApiError::InvalidParams("invalid token".to_string()))?;
-    let chain_id = tx_env.chain_id().unwrap_or_else(|| evm_env.cfg_env.chain_id);
+    let chain_id = tx_env
+        .chain_id()
+        .unwrap_or(evm_env.cfg_env.chain_id);
     let input = tx_env.input().clone();
     let to = tx_env.kind();
     let max_fee_per_gas = tx_env.max_fee_per_gas();

@@ -329,9 +329,8 @@ where
 
         // Fetch token fee info from Token Registry
         let spec = evm.ctx_ref().cfg().spec();
-        let token_fee_info =
-            TokenFeeInfo::fetch(evm.ctx_mut().db_mut(), token_id, caller, spec)?
-                .ok_or(MorphInvalidTransaction::TokenNotRegistered(token_id))?;
+        let token_fee_info = TokenFeeInfo::fetch(evm.ctx_mut().db_mut(), token_id, caller, spec)?
+            .ok_or(MorphInvalidTransaction::TokenNotRegistered(token_id))?;
 
         // Check if token is active
         if !token_fee_info.is_active {

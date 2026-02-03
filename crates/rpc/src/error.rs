@@ -7,8 +7,8 @@ use reth_evm::revm::context::result::EVMError;
 use reth_evm::{HaltReasonFor, InvalidTxError};
 use reth_rpc_convert::TransactionConversionError;
 use reth_rpc_eth_types::{
-    error::{api::FromEvmHalt, api::FromRevert, AsEthApiError},
     EthApiError,
+    error::{AsEthApiError, api::FromEvmHalt, api::FromRevert},
 };
 use std::convert::Infallible;
 use thiserror::Error;
@@ -153,7 +153,7 @@ impl From<MorphEthApiError> for jsonrpsee::types::ErrorObject<'static> {
 impl AsEthApiError for MorphEthApiError {
     fn as_err(&self) -> Option<&EthApiError> {
         match self {
-            MorphEthApiError::Eth(err) => Some(err),
+            Self::Eth(err) => Some(err),
             _ => None,
         }
     }
@@ -164,19 +164,19 @@ impl AsEthApiError for MorphEthApiError {
 
 impl FromEvmHalt<HaltReasonFor<MorphEvmConfig>> for MorphEthApiError {
     fn from_evm_halt(halt: HaltReasonFor<MorphEvmConfig>, gas_limit: u64) -> Self {
-        MorphEthApiError::Eth(EthApiError::from_evm_halt(halt, gas_limit))
+        Self::Eth(EthApiError::from_evm_halt(halt, gas_limit))
     }
 }
 
 impl FromRevert for MorphEthApiError {
     fn from_revert(output: alloy_primitives::Bytes) -> Self {
-        MorphEthApiError::Eth(EthApiError::from_revert(output))
+        Self::Eth(EthApiError::from_revert(output))
     }
 }
 
 impl From<ProviderError> for MorphEthApiError {
     fn from(err: ProviderError) -> Self {
-        MorphEthApiError::Eth(err.into())
+        Self::Eth(err.into())
     }
 }
 
@@ -186,13 +186,13 @@ where
     TxError: InvalidTxError,
 {
     fn from(err: EVMError<T, TxError>) -> Self {
-        MorphEthApiError::Eth(err.into())
+        Self::Eth(err.into())
     }
 }
 
 impl From<TransactionConversionError> for MorphEthApiError {
     fn from(err: TransactionConversionError) -> Self {
-        MorphEthApiError::Eth(err.into())
+        Self::Eth(err.into())
     }
 }
 
@@ -201,4 +201,3 @@ impl From<Infallible> for MorphEthApiError {
         match err {}
     }
 }
-

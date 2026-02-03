@@ -29,7 +29,11 @@ pub struct MorphTransactionRequest {
     pub inner: TransactionRequest,
 
     /// Token ID for fee payment (only for MorphTx type 0x7F).
-    #[serde(rename = "feeTokenID", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "feeTokenID",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub fee_token_id: Option<U64>,
 
     /// Maximum token amount willing to pay for fees (only for MorphTx type 0x7F).

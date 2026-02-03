@@ -15,14 +15,7 @@ use serde::{Deserialize, Serialize};
 /// - L1 message sender/queue index
 /// - Morph fee token fields
 #[derive(
-    Clone,
-    Debug,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    derive_more::Deref,
-    derive_more::DerefMut,
+    Clone, Debug, PartialEq, Eq, Serialize, Deserialize, derive_more::Deref, derive_more::DerefMut,
 )]
 #[serde(rename_all = "camelCase")]
 pub struct MorphRpcTransaction {
@@ -124,9 +117,7 @@ impl ConsensusTransaction for MorphRpcTransaction {
         self.inner.blob_versioned_hashes()
     }
 
-    fn authorization_list(
-        &self,
-    ) -> Option<&[alloy_eips::eip7702::SignedAuthorization]> {
+    fn authorization_list(&self) -> Option<&[alloy_eips::eip7702::SignedAuthorization]> {
         self.inner.authorization_list()
     }
 }

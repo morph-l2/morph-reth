@@ -4,9 +4,9 @@
 //! - [`MorphTransactionReceipt`]: Receipt with L1 fee and Morph transaction fields
 //! - [`MorphReceipt`]: Typed receipt enum for different transaction types
 
+mod envelope;
 #[allow(clippy::module_inception)]
 mod receipt;
-mod envelope;
 pub use envelope::MorphReceiptEnvelope;
 pub use receipt::{MorphReceiptWithBloom, MorphTransactionReceipt};
 
