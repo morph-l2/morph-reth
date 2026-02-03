@@ -14,17 +14,6 @@ use std::convert::Infallible;
 use thiserror::Error;
 
 /// Extension trait for converting `Result<T, E>` where `E: Into<EthApiError>` to `Result<T, MorphEthApiError>`.
-///
-/// This simplifies the common pattern of:
-/// ```ignore
-/// result
-///     .map_err(Into::<EthApiError>::into)
-///     .map_err(<MorphEthApiError as FromEthApiError>::from_eth_err)
-/// ```
-/// to just:
-/// ```ignore
-/// result.to_morph_err()
-/// ```
 pub trait ToMorphErr<T> {
     /// Convert the error to `MorphEthApiError`.
     fn to_morph_err(self) -> Result<T, MorphEthApiError>;

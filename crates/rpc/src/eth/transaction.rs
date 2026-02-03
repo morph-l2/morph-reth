@@ -69,7 +69,7 @@ impl TryIntoSimTx<MorphTxEnvelope> for MorphTransactionRequest {
                 self.fee_limit.unwrap_or_default(),
             )
             .map_err(|err| alloy_consensus::error::ValueError::new(self, err))?;
-            let signature = Signature::from_bytes_and_parity(&[0u8; 64], false);
+            let signature = Signature::new(Default::default(), Default::default(), false);
             return Ok(MorphTxEnvelope::Morph(morph_tx.into_signed(signature)));
         }
 
@@ -123,10 +123,10 @@ impl TryIntoTxEnv<MorphTxEnv, MorphBlockEnv> for MorphTransactionRequest {
     ) -> Result<MorphTxEnv, Self::Err> {
         let fee_token_id = self.fee_token_id;
         let fee_limit = self.fee_limit;
-        let access_list = self.inner.access_list.clone().unwrap_or_default();
+        let inner = self.inner;
+        let access_list = inner.access_list.clone().unwrap_or_default();
 
-        let inner_tx_env = self
-            .inner
+        let inner_tx_env = inner
             .clone()
             .try_into_tx_env(evm_env)
             .map_err(EthApiError::from)?;
@@ -144,20 +144,7 @@ impl TryIntoTxEnv<MorphTxEnv, MorphBlockEnv> for MorphTransactionRequest {
             tx_env.inner.tx_type = morph_primitives::MORPH_TX_TYPE_ID;
         }
 
-        let rlp_bytes = if tx_env.fee_token_id.unwrap_or_default() > 0 || tx_env.fee_limit.is_some()
-        {
-            let fee_token_id = U64::from(tx_env.fee_token_id.unwrap_or_default());
-            let fee_limit = tx_env.fee_limit.unwrap_or_default();
-            let morph_tx =
-                build_morph_tx_from_env(&tx_env, fee_token_id, fee_limit, access_list, evm_env)?;
-            encode_2718(morph_tx)
-        } else {
-            let envelope = self
-                .inner
-                .build_typed_simulate_transaction()
-                .map_err(|err| EthApiError::InvalidParams(err.to_string()))?;
-            encode_2718(envelope)
-        };
+        let rlp_bytes = encode_tx_for_l1_fee(&tx_env, access_list, evm_env, inner)?;
 
         tx_env.rlp_bytes = Some(rlp_bytes);
         Ok(tx_env)
@@ -238,6 +225,26 @@ fn build_morph_tx_from_env<Spec>(
         fee_token_id,
         fee_limit,
     })
+}
+
+fn encode_tx_for_l1_fee<Spec>(
+    tx_env: &MorphTxEnv,
+    access_list: AccessList,
+    evm_env: &EvmEnv<Spec, MorphBlockEnv>,
+    inner: alloy_rpc_types_eth::TransactionRequest,
+) -> Result<Bytes, EthApiError> {
+    if tx_env.fee_token_id.unwrap_or_default() > 0 || tx_env.fee_limit.is_some() {
+        let fee_token_id = U64::from(tx_env.fee_token_id.unwrap_or_default());
+        let fee_limit = tx_env.fee_limit.unwrap_or_default();
+        let morph_tx =
+            build_morph_tx_from_env(tx_env, fee_token_id, fee_limit, access_list, evm_env)?;
+        Ok(encode_2718(morph_tx))
+    } else {
+        let envelope = inner
+            .build_typed_simulate_transaction()
+            .map_err(|err| EthApiError::InvalidParams(err.to_string()))?;
+        Ok(encode_2718(envelope))
+    }
 }
 
 fn encode_2718<T: Encodable2718>(tx: T) -> Bytes {
