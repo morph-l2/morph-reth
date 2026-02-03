@@ -103,7 +103,7 @@ pub fn validate_morph_tx<DB: Database>(
     let total_eth_fee = gas_fee.saturating_add(input.l1_data_fee);
 
     // Convert ETH fee to token amount
-    let required_token_amount = token_info.calculate_token_amount(total_eth_fee);
+    let required_token_amount = token_info.eth_to_token_amount(total_eth_fee);
 
     // Check fee_limit >= required_token_amount
     if fee_limit < required_token_amount {

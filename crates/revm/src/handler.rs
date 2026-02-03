@@ -338,7 +338,7 @@ where
         }
 
         // Calculate token amount required for total fee
-        let token_amount_required = token_fee_info.calculate_token_amount(reimburse_eth);
+        let token_amount_required = token_fee_info.eth_to_token_amount(reimburse_eth);
 
         // Get mutable access to journal components
         let journal = evm.ctx().journal_mut();
@@ -421,7 +421,7 @@ where
         let total_eth_fee = l2_gas_fee.saturating_add(l1_data_fee);
 
         // Calculate token amount required for total fee
-        let token_amount_required = token_fee_info.calculate_token_amount(total_eth_fee);
+        let token_amount_required = token_fee_info.eth_to_token_amount(total_eth_fee);
 
         // Determine fee limit
         let mut fee_limit = tx.fee_limit.unwrap_or_default();

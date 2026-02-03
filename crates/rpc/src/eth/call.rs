@@ -183,7 +183,7 @@ where
             _ => token_fee_info.balance,
         };
 
-        let l1_fee_in_token = token_fee_info.calculate_token_amount(l1_fee);
+        let l1_fee_in_token = token_fee_info.eth_to_token_amount(l1_fee);
         if l1_fee_in_token >= limit {
             return Err(MorphEthApiError::InsufficientFundsForL1Fee);
         }
@@ -229,5 +229,12 @@ fn token_amount_to_eth(token_amount: U256, info: &TokenFeeInfo) -> Option<U256> 
     if info.price_ratio.is_zero() || info.scale.is_zero() {
         return None;
     }
-    Some(token_amount.saturating_mul(info.price_ratio) / info.scale)
+    let (eth_amount, remainder) = token_amount
+        .saturating_mul(info.price_ratio)
+        .div_rem(info.scale);
+    if remainder.is_zero() {
+        Some(eth_amount)
+    } else {
+        Some(eth_amount.saturating_add(U256::from(1)))
+    }
 }

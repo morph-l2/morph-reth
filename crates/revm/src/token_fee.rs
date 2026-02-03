@@ -128,8 +128,8 @@ impl TokenFeeInfo {
     /// Calculate the token amount required for a given ETH amount.
     ///
     /// Uses the price ratio and scale to convert ETH value to token amount.
-    pub fn calculate_token_amount(&self, eth_amount: U256) -> U256 {
-        if self.price_ratio.is_zero() {
+    pub fn eth_to_token_amount(&self, eth_amount: U256) -> U256 {
+        if self.price_ratio.is_zero() || self.scale.is_zero() {
             return U256::ZERO;
         }
 
@@ -147,7 +147,7 @@ impl TokenFeeInfo {
 
     /// Check if the caller has sufficient token balance for the given ETH amount.
     pub fn has_sufficient_balance(&self, eth_amount: U256) -> bool {
-        let required = self.calculate_token_amount(eth_amount);
+        let required = self.eth_to_token_amount(eth_amount);
         self.balance >= required
     }
 }
@@ -367,7 +367,7 @@ mod tests {
     }
 
     #[test]
-    fn test_calculate_token_amount() {
+    fn test_eth_to_token_amount() {
         let info = TokenFeeInfo {
             price_ratio: U256::from(2_000_000_000_000_000_000u128), // 2 ETH per token
             scale: U256::from(1_000_000_000_000_000_000u128),       // 1e18
@@ -376,12 +376,12 @@ mod tests {
 
         // 1 ETH should give 0.5 tokens
         let eth_amount = U256::from(1_000_000_000_000_000_000u128); // 1 ETH
-        let token_amount = info.calculate_token_amount(eth_amount);
+        let token_amount = info.eth_to_token_amount(eth_amount);
         assert_eq!(token_amount, U256::from(500_000_000_000_000_000u128)); // 0.5 tokens
     }
 
     #[test]
-    fn test_calculate_token_amount_zero_ratio() {
+    fn test_eth_to_token_amount_zero_ratio() {
         let info = TokenFeeInfo {
             price_ratio: U256::ZERO,
             scale: U256::from(1_000_000_000_000_000_000u128),
@@ -389,7 +389,7 @@ mod tests {
         };
 
         let eth_amount = U256::from(1_000_000_000_000_000_000u128);
-        let token_amount = info.calculate_token_amount(eth_amount);
+        let token_amount = info.eth_to_token_amount(eth_amount);
         assert_eq!(token_amount, U256::ZERO);
     }
 
