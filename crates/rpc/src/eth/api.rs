@@ -196,6 +196,14 @@ where
 {
 }
 
+impl<N, Rpc> EthBlocks for MorphEthApi<N, Rpc>
+where
+    N: MorphNodeCore,
+    Rpc: RpcConvert<Primitives = N::Primitives, Error = EthApiError, Evm = N::Evm>,
+    MorphEthApiError: reth_rpc_eth_types::error::FromEvmError<N::Evm>,
+{
+}
+
 impl<N, Rpc> LoadTransaction for MorphEthApi<N, Rpc>
 where
     N: MorphNodeCore,
@@ -207,14 +215,6 @@ impl<N, Rpc> LoadReceipt for MorphEthApi<N, Rpc>
 where
     N: MorphNodeCore,
     Rpc: RpcConvert<Primitives = N::Primitives, Error = EthApiError, Evm = N::Evm>,
-{
-}
-
-impl<N, Rpc> EthBlocks for MorphEthApi<N, Rpc>
-where
-    N: MorphNodeCore,
-    Rpc: RpcConvert<Primitives = N::Primitives, Error = EthApiError, Evm = N::Evm>,
-    MorphEthApiError: reth_rpc_eth_types::error::FromEvmError<N::Evm>,
 {
 }
 

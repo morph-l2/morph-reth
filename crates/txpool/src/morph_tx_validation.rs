@@ -71,7 +71,7 @@ pub fn validate_morph_tx<DB: Database>(
     }
 
     // Fetch token info from L2TokenRegistry
-    let token_info = TokenFeeInfo::try_fetch(db, fee_token_id, input.sender, input.hardfork)
+    let token_info = TokenFeeInfo::fetch(db, fee_token_id, input.sender, input.hardfork)
         .map_err(|err| MorphTxError::TokenInfoFetchFailed {
             token_id: fee_token_id,
             message: format!("{err:?}"),

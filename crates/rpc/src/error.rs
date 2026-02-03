@@ -13,6 +13,29 @@ use reth_rpc_eth_types::{
 use std::convert::Infallible;
 use thiserror::Error;
 
+/// Extension trait for converting `Result<T, E>` where `E: Into<EthApiError>` to `Result<T, MorphEthApiError>`.
+///
+/// This simplifies the common pattern of:
+/// ```ignore
+/// result
+///     .map_err(Into::<EthApiError>::into)
+///     .map_err(<MorphEthApiError as FromEthApiError>::from_eth_err)
+/// ```
+/// to just:
+/// ```ignore
+/// result.to_morph_err()
+/// ```
+pub trait ToMorphErr<T> {
+    /// Convert the error to `MorphEthApiError`.
+    fn to_morph_err(self) -> Result<T, MorphEthApiError>;
+}
+
+impl<T, E: Into<EthApiError>> ToMorphErr<T> for Result<T, E> {
+    fn to_morph_err(self) -> Result<T, MorphEthApiError> {
+        self.map_err(|e| MorphEthApiError::Eth(e.into()))
+    }
+}
+
 /// Morph Eth API errors
 #[derive(Debug, Error)]
 pub enum MorphEthApiError {
@@ -51,6 +74,19 @@ pub enum MorphEthApiError {
     /// Provider error
     #[error("provider error: {0}")]
     Provider(String),
+
+    // ========== Gas estimation errors ==========
+    /// Insufficient funds for L1 data fee
+    #[error("insufficient funds for l1 fee")]
+    InsufficientFundsForL1Fee,
+
+    /// Insufficient funds for value transfer
+    #[error("insufficient funds for transfer")]
+    InsufficientFundsForTransfer,
+
+    /// Invalid fee token (not registered, inactive, or invalid configuration)
+    #[error("invalid token")]
+    InvalidFeeToken,
 }
 
 impl From<MorphEthApiError> for jsonrpsee::types::ErrorObject<'static> {
@@ -97,6 +133,19 @@ impl From<MorphEthApiError> for jsonrpsee::types::ErrorObject<'static> {
                 format!("Provider error: {msg}"),
                 None::<()>,
             ),
+            MorphEthApiError::InsufficientFundsForL1Fee => jsonrpsee::types::ErrorObject::owned(
+                -32008,
+                "insufficient funds for l1 fee",
+                None::<()>,
+            ),
+            MorphEthApiError::InsufficientFundsForTransfer => jsonrpsee::types::ErrorObject::owned(
+                -32009,
+                "insufficient funds for transfer",
+                None::<()>,
+            ),
+            MorphEthApiError::InvalidFeeToken => {
+                jsonrpsee::types::ErrorObject::owned(-32010, "invalid token", None::<()>)
+            }
         }
     }
 }
@@ -109,6 +158,9 @@ impl AsEthApiError for MorphEthApiError {
         }
     }
 }
+
+// Note: `FromEthApiError` is auto-implemented via blanket impl for any `T: From<EthApiError>`.
+// We get it for free since we have `#[from] EthApiError` above.
 
 impl FromEvmHalt<HaltReasonFor<MorphEvmConfig>> for MorphEthApiError {
     fn from_evm_halt(halt: HaltReasonFor<MorphEvmConfig>, gas_limit: u64) -> Self {

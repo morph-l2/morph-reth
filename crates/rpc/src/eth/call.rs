@@ -1,5 +1,6 @@
 //! Morph `eth_call` and `eth_estimateGas` overrides.
 
+use crate::error::ToMorphErr;
 use crate::eth::api::{MorphEthApi, MorphNodeCore};
 use crate::MorphEthApiError;
 use alloy_primitives::U256;
@@ -11,12 +12,8 @@ use reth_rpc_eth_api::{
     helpers::{estimate::EstimateCall, Call, EthCall},
     EthApiTypes, RpcNodeCore,
 };
-use reth_rpc_eth_types::{error::FromEthApiError, EthApiError};
+use reth_rpc_eth_types::EthApiError;
 use revm::{context::Transaction as RevmTransaction, Database};
-
-const ERR_INSUFFICIENT_FUNDS_FOR_L1_FEE: &str = "insufficient funds for l1 fee";
-const ERR_INSUFFICIENT_FUNDS_FOR_TRANSFER: &str = "insufficient funds for transfer";
-const ERR_INVALID_TOKEN: &str = "invalid token";
 
 impl<N, Rpc> EthCall for MorphEthApi<N, Rpc>
 where
@@ -55,21 +52,16 @@ where
         let caller = tx_env.caller();
         let balance = db
             .basic(caller)
-            .map_err(Into::<EthApiError>::into)
-            .map_err(<MorphEthApiError as FromEthApiError>::from_eth_err)?
+            .to_morph_err()?
             .map(|acc| acc.balance)
             .unwrap_or_default();
 
         let value = tx_env.value();
         if value > balance {
-            return Err(<MorphEthApiError as FromEthApiError>::from_eth_err(
-                EthApiError::InvalidParams(ERR_INSUFFICIENT_FUNDS_FOR_TRANSFER.to_string()),
-            ));
+            return Err(MorphEthApiError::InsufficientFundsForTransfer);
         }
 
-        let (hardfork, l1_fee) = self
-            .estimate_l1_fee(&mut db, evm_env, tx_env)
-            .map_err(<MorphEthApiError as FromEthApiError>::from_eth_err)?;
+        let l1_fee = self.estimate_l1_fee(&mut db, evm_env, tx_env)?;
 
         if let Some(fee_token_id) = tx_env.fee_token_id.filter(|id| *id > 0) {
             return self.caller_gas_allowance_with_token(
@@ -77,7 +69,6 @@ where
                 caller,
                 balance,
                 value,
-                hardfork,
                 l1_fee,
                 fee_token_id,
                 tx_env.fee_limit,
@@ -86,7 +77,6 @@ where
         }
 
         caller_gas_allowance_with_eth(balance, value, l1_fee, tx_env.gas_price())
-            .map_err(<MorphEthApiError as FromEthApiError>::from_eth_err)
     }
 }
 
@@ -101,7 +91,7 @@ where
         db: &mut DB,
         evm_env: &EvmEnvFor<<MorphEthApi<N, Rpc> as RpcNodeCore>::Evm>,
         tx_env: &TxEnvFor<<MorphEthApi<N, Rpc> as RpcNodeCore>::Evm>,
-    ) -> Result<(morph_chainspec::MorphHardfork, U256), EthApiError>
+    ) -> Result<U256, EthApiError>
     where
         DB: Database,
         DB::Error: Into<EthApiError>,
@@ -114,7 +104,7 @@ where
         let hardfork = chain_spec.morph_hardfork_at(block_number, timestamp);
 
         if tx_env.is_l1_msg() {
-            return Ok((hardfork, U256::ZERO));
+            return Ok(U256::ZERO);
         }
 
         let rlp_bytes = tx_env.rlp_bytes.as_ref().ok_or_else(|| {
@@ -125,16 +115,19 @@ where
             EthApiError::InvalidParams(format!("failed to estimate L1 data fee: {err}"))
         })?;
 
-        Ok((hardfork, l1_info.calculate_tx_l1_cost(rlp_bytes, hardfork)))
+        Ok(l1_info.calculate_tx_l1_cost(rlp_bytes, hardfork))
     }
 
+    /// Calculate caller's gas allowance when paying with ERC20 tokens.
+    ///
+    /// Uses storage-only reads. For tokens without a known `balance_slot`,
+    /// skips the token balance limit (EVM handler will verify during execution).
     fn caller_gas_allowance_with_token<DB>(
         &self,
         db: &mut DB,
         caller: alloy_primitives::Address,
         balance: U256,
         value: U256,
-        hardfork: morph_chainspec::MorphHardfork,
         l1_fee: U256,
         fee_token_id: u16,
         fee_limit: Option<U256>,
@@ -144,21 +137,34 @@ where
         DB: Database,
         DB::Error: Into<EthApiError>,
     {
-        let token_fee_info = TokenFeeInfo::try_fetch(db, fee_token_id, caller, hardfork)
-            .map_err(|_| EthApiError::InvalidParams(ERR_INVALID_TOKEN.to_string()))
-            .map_err(<MorphEthApiError as FromEthApiError>::from_eth_err)?
-            .ok_or_else(|| EthApiError::InvalidParams(ERR_INVALID_TOKEN.to_string()))
-            .map_err(<MorphEthApiError as FromEthApiError>::from_eth_err)?;
+        let token_fee_info = TokenFeeInfo::fetch_storage_only(db, fee_token_id, caller)
+            .map_err(|_| MorphEthApiError::InvalidFeeToken)?
+            .ok_or(MorphEthApiError::InvalidFeeToken)?;
 
+        // Validate token is registered and active
         if !token_fee_info.is_active
             || token_fee_info.price_ratio.is_zero()
             || token_fee_info.scale.is_zero()
         {
-            return Err(<MorphEthApiError as FromEthApiError>::from_eth_err(
-                EthApiError::InvalidParams(ERR_INVALID_TOKEN.to_string()),
-            ));
+            return Err(MorphEthApiError::InvalidFeeToken);
         }
 
+        // Calculate base ETH allowance (for tx.value transfer)
+        let eth_allowance = caller_gas_allowance_with_eth(balance, value, U256::ZERO, gas_price)?;
+
+        // If balance_slot is unknown, we cannot accurately read the token balance
+        // via storage. Skip the token balance limit and let the EVM handler
+        // (`validate_and_deduct_token_fee`) verify the actual balance.
+        if token_fee_info.balance_slot.is_none() {
+            tracing::debug!(
+                target: "morph::rpc",
+                token_id = fee_token_id,
+                "Token balance_slot unknown, skipping token balance limit in caller_gas_allowance"
+            );
+            return Ok(eth_allowance);
+        }
+
+        // Calculate token-based gas allowance
         let limit = match fee_limit {
             Some(limit) if !limit.is_zero() => token_fee_info.balance.min(limit),
             _ => token_fee_info.balance,
@@ -166,23 +172,15 @@ where
 
         let l1_fee_in_token = token_fee_info.calculate_token_amount(l1_fee);
         if l1_fee_in_token >= limit {
-            return Err(<MorphEthApiError as FromEthApiError>::from_eth_err(
-                EthApiError::InvalidParams(ERR_INSUFFICIENT_FUNDS_FOR_L1_FEE.to_string()),
-            ));
+            return Err(MorphEthApiError::InsufficientFundsForL1Fee);
         }
 
         let available_token = limit - l1_fee_in_token;
-        let available_eth =
-            token_amount_to_eth(available_token, &token_fee_info).ok_or_else(|| {
-                EthApiError::InvalidParams(ERR_INVALID_TOKEN.to_string())
-            })?;
+        let available_eth = token_amount_to_eth(available_token, &token_fee_info)
+            .ok_or(MorphEthApiError::InvalidFeeToken)?;
 
-        caller_gas_allowance_with_eth(balance, value, U256::ZERO, gas_price)
-            .and_then(|allowance| {
-                let allowance_eth = gas_allowance_from_balance(available_eth, gas_price);
-                Ok(allowance.min(allowance_eth))
-            })
-            .map_err(<MorphEthApiError as FromEthApiError>::from_eth_err)
+        let token_allowance = gas_allowance_from_balance(available_eth, gas_price);
+        Ok(eth_allowance.min(token_allowance))
     }
 }
 
@@ -200,12 +198,10 @@ fn caller_gas_allowance_with_eth(
     value: U256,
     l1_fee: U256,
     gas_price: u128,
-) -> Result<u64, EthApiError> {
+) -> Result<u64, MorphEthApiError> {
     let mut available = balance.saturating_sub(value);
     if l1_fee >= available {
-        return Err(EthApiError::InvalidParams(
-            ERR_INSUFFICIENT_FUNDS_FOR_L1_FEE.to_string(),
-        ));
+        return Err(MorphEthApiError::InsufficientFundsForL1Fee);
     }
     available -= l1_fee;
     Ok(gas_allowance_from_balance(available, gas_price))
