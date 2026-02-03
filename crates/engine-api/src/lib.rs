@@ -4,7 +4,7 @@
 //!
 //! - [`MorphL2EngineApi`]: The L2 Engine API trait for block building and validation
 //! - [`MorphL2EngineRpcServer`]: The JSON-RPC server implementation
-//! - [`MorphValidationContext`]: Validation context with Emerald hardfork support
+//! - [`MorphValidationContext`]: Validation context with MPTFork hardfork support
 //!
 //! # L2 Engine API
 //!
@@ -16,7 +16,6 @@
 //! - `engine_validateL2Block`: Validate a block without importing
 //! - `engine_newL2Block`: Import and finalize a block
 //! - `engine_newSafeL2Block`: Import a safe block from derivation
-//!
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
