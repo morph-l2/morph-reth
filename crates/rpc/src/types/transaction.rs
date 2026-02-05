@@ -42,12 +42,16 @@ pub struct MorphRpcTransaction {
     pub fee_limit: Option<U256>,
 }
 
+/// Implementation of [`Typed2718`] for Morph RPC transactions.
 impl Typed2718 for MorphRpcTransaction {
     fn ty(&self) -> u8 {
         self.inner.ty()
     }
 }
 
+/// Implementation of [`ConsensusTransaction`] for Morph RPC transactions.
+///
+/// Delegates all consensus transaction methods to the inner transaction.
 impl ConsensusTransaction for MorphRpcTransaction {
     fn chain_id(&self) -> Option<u64> {
         self.inner.chain_id()
@@ -122,6 +126,9 @@ impl ConsensusTransaction for MorphRpcTransaction {
     }
 }
 
+/// Implementation of [`TransactionResponse`] for Morph RPC transactions.
+///
+/// Provides RPC-specific transaction metadata like block hash and index.
 impl TransactionResponse for MorphRpcTransaction {
     fn tx_hash(&self) -> alloy_primitives::B256 {
         self.inner.tx_hash()

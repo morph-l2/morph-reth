@@ -41,18 +41,23 @@ pub struct MorphTransactionRequest {
     pub fee_limit: Option<U256>,
 }
 
+/// Returns a reference to the inner [`TransactionRequest`].
 impl AsRef<TransactionRequest> for MorphTransactionRequest {
     fn as_ref(&self) -> &TransactionRequest {
         &self.inner
     }
 }
 
+/// Returns a mutable reference to the inner [`TransactionRequest`].
 impl AsMut<TransactionRequest> for MorphTransactionRequest {
     fn as_mut(&mut self) -> &mut TransactionRequest {
         &mut self.inner
     }
 }
 
+/// Creates a [`MorphTransactionRequest`] from a standard [`TransactionRequest`].
+///
+/// Sets `fee_token_id` and `fee_limit` to `None`.
 impl From<TransactionRequest> for MorphTransactionRequest {
     fn from(value: TransactionRequest) -> Self {
         Self {
@@ -63,6 +68,7 @@ impl From<TransactionRequest> for MorphTransactionRequest {
     }
 }
 
+/// Extracts the inner [`TransactionRequest`] from a [`MorphTransactionRequest`].
 impl From<MorphTransactionRequest> for TransactionRequest {
     fn from(value: MorphTransactionRequest) -> Self {
         value.inner

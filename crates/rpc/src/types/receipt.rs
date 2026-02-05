@@ -39,6 +39,9 @@ pub struct MorphRpcReceipt {
     pub fee_token_id: Option<U64>,
 }
 
+/// Implementation of [`ReceiptResponse`] for Morph receipts.
+///
+/// Delegates all methods to the inner receipt.
 impl ReceiptResponse for MorphRpcReceipt {
     fn contract_address(&self) -> Option<Address> {
         self.inner.contract_address

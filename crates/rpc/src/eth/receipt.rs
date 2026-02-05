@@ -46,6 +46,7 @@ struct MorphReceiptBuilder {
 }
 
 impl MorphReceiptBuilder {
+    /// Creates a new builder from a receipt conversion input.
     fn new<N>(input: ConvertReceiptInput<'_, N>) -> Self
     where
         N: NodePrimitives<Receipt = MorphReceipt>,
@@ -102,6 +103,7 @@ impl MorphReceiptBuilder {
         Self { receipt }
     }
 
+    /// Consumes the builder and returns the built receipt.
     fn build(self) -> MorphRpcReceipt {
         self.receipt
     }

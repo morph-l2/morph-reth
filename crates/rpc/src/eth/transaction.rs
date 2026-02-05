@@ -20,6 +20,7 @@ use morph_primitives::{MorphTxEnvelope, TxMorph};
 use morph_revm::{MorphBlockEnv, MorphTxEnv};
 use reth_evm::EvmEnv;
 
+/// Converts a consensus [`MorphTxEnvelope`] to an RPC [`MorphRpcTransaction`].
 impl FromConsensusTx<MorphTxEnvelope> for MorphRpcTransaction {
     type TxInfo = TransactionInfo;
     type Err = Infallible;
@@ -60,6 +61,9 @@ impl FromConsensusTx<MorphTxEnvelope> for MorphRpcTransaction {
     }
 }
 
+/// Converts a [`MorphTransactionRequest`] into a simulated transaction envelope.
+///
+/// Handles both standard Ethereum transactions and Morph-specific fee token transactions.
 impl TryIntoSimTx<MorphTxEnvelope> for MorphTransactionRequest {
     fn try_into_sim_tx(self) -> Result<MorphTxEnvelope, alloy_consensus::error::ValueError<Self>> {
         if let Some(fee_token_id) = self.fee_token_id.filter(|id| id.to::<u64>() > 0) {
@@ -86,6 +90,9 @@ impl TryIntoSimTx<MorphTxEnvelope> for MorphTransactionRequest {
     }
 }
 
+/// Builds and signs a transaction from an RPC request.
+///
+/// Supports both standard Ethereum transactions and Morph fee token transactions.
 impl SignableTxRequest<MorphTxEnvelope> for MorphTransactionRequest {
     async fn try_build_and_sign(
         self,
@@ -114,6 +121,9 @@ impl SignableTxRequest<MorphTxEnvelope> for MorphTransactionRequest {
     }
 }
 
+/// Converts a transaction request into a transaction environment for EVM execution.
+///
+/// Also encodes the transaction for L1 fee calculation.
 impl TryIntoTxEnv<MorphTxEnv, MorphBlockEnv> for MorphTransactionRequest {
     type Err = EthApiError;
 
@@ -244,7 +254,7 @@ fn encode_tx_for_l1_fee<Spec>(
     evm_env: &EvmEnv<Spec, MorphBlockEnv>,
     inner: alloy_rpc_types_eth::TransactionRequest,
 ) -> Result<Bytes, EthApiError> {
-    if tx_env.fee_token_id.unwrap_or_default() > 0 || tx_env.fee_limit.is_some() {
+    if tx_env.fee_token_id.unwrap_or_default() > 0 {
         let fee_token_id = U64::from(tx_env.fee_token_id.unwrap_or_default());
         let fee_limit = tx_env.fee_limit.unwrap_or_default();
         let morph_tx =

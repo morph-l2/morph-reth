@@ -78,6 +78,7 @@ pub enum MorphEthApiError {
     InvalidFeeToken,
 }
 
+/// Converts [`MorphEthApiError`] to a JSON-RPC error object.
 impl From<MorphEthApiError> for jsonrpsee::types::ErrorObject<'static> {
     fn from(err: MorphEthApiError) -> Self {
         match err {
@@ -139,6 +140,7 @@ impl From<MorphEthApiError> for jsonrpsee::types::ErrorObject<'static> {
     }
 }
 
+/// Extracts the inner [`EthApiError`] if present.
 impl AsEthApiError for MorphEthApiError {
     fn as_err(&self) -> Option<&EthApiError> {
         match self {
@@ -151,24 +153,28 @@ impl AsEthApiError for MorphEthApiError {
 // Note: `FromEthApiError` is auto-implemented via blanket impl for any `T: From<EthApiError>`.
 // We get it for free since we have `#[from] EthApiError` above.
 
+/// Converts EVM halt reasons to [`MorphEthApiError`].
 impl FromEvmHalt<HaltReasonFor<MorphEvmConfig>> for MorphEthApiError {
     fn from_evm_halt(halt: HaltReasonFor<MorphEvmConfig>, gas_limit: u64) -> Self {
         Self::Eth(EthApiError::from_evm_halt(halt, gas_limit))
     }
 }
 
+/// Converts EVM revert output to [`MorphEthApiError`].
 impl FromRevert for MorphEthApiError {
     fn from_revert(output: alloy_primitives::Bytes) -> Self {
         Self::Eth(EthApiError::from_revert(output))
     }
 }
 
+/// Converts [`ProviderError`] to [`MorphEthApiError`].
 impl From<ProviderError> for MorphEthApiError {
     fn from(err: ProviderError) -> Self {
         Self::Eth(err.into())
     }
 }
 
+/// Converts [`EVMError`] to [`MorphEthApiError`].
 impl<T, TxError> From<EVMError<T, TxError>> for MorphEthApiError
 where
     T: Into<EthApiError>,
@@ -179,12 +185,14 @@ where
     }
 }
 
+/// Converts [`TransactionConversionError`] to [`MorphEthApiError`].
 impl From<TransactionConversionError> for MorphEthApiError {
     fn from(err: TransactionConversionError) -> Self {
         Self::Eth(err.into())
     }
 }
 
+/// Infallible conversion (never fails).
 impl From<Infallible> for MorphEthApiError {
     fn from(err: Infallible) -> Self {
         match err {}
