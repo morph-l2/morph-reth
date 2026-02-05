@@ -151,6 +151,9 @@ impl TryIntoTxEnv<MorphTxEnv, MorphBlockEnv> for MorphTransactionRequest {
     }
 }
 
+/// Converts an Ethereum transaction envelope to a Morph envelope.
+///
+/// EIP-4844 blob transactions are not supported on Morph.
 fn morph_envelope_from_ethereum(
     env: EthereumTxEnvelope<TxEip4844>,
 ) -> Result<MorphTxEnvelope, &'static str> {
@@ -163,6 +166,10 @@ fn morph_envelope_from_ethereum(
     }
 }
 
+/// Builds a [`TxMorph`] from an RPC transaction request.
+///
+/// Extracts fields from the request and constructs a Morph transaction
+/// with the specified fee token ID and fee limit.
 fn build_morph_tx_from_request(
     req: &alloy_rpc_types_eth::TransactionRequest,
     fee_token_id: U64,
@@ -195,6 +202,9 @@ fn build_morph_tx_from_request(
     })
 }
 
+/// Builds a [`TxMorph`] from an existing transaction environment.
+///
+/// Used for encoding transactions for L1 fee calculation.
 fn build_morph_tx_from_env<Spec>(
     tx_env: &MorphTxEnv,
     fee_token_id: U64,
@@ -225,6 +235,9 @@ fn build_morph_tx_from_env<Spec>(
     })
 }
 
+/// Encodes a transaction for L1 fee calculation.
+///
+/// Returns the RLP-encoded bytes used to calculate the L1 data fee.
 fn encode_tx_for_l1_fee<Spec>(
     tx_env: &MorphTxEnv,
     access_list: AccessList,
@@ -245,6 +258,7 @@ fn encode_tx_for_l1_fee<Spec>(
     }
 }
 
+/// Encodes a transaction using EIP-2718 typed transaction encoding.
 fn encode_2718<T: Encodable2718>(tx: T) -> Bytes {
     let mut out = Vec::with_capacity(tx.encode_2718_len());
     tx.encode_2718(&mut out);

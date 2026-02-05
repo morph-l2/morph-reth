@@ -114,6 +114,10 @@ where
 {
 }
 
+/// Extracts Morph-specific fee fields from a receipt.
+///
+/// Returns a tuple of (l1_fee, fee_token_id, fee_rate, token_scale, fee_limit).
+/// L1 message receipts return zero/None for all fee fields.
 fn morph_fee_fields(
     receipt: &MorphReceipt,
 ) -> (U256, Option<u16>, Option<U256>, Option<U256>, Option<U256>) {

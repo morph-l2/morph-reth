@@ -11,7 +11,7 @@ workspace = true
 
 [dependencies]
 # Morph crates
-morph-primitives = { workspace = true, features = ["serde", "reth-codec"] }
+morph-primitives = { workspace = true, features = ["serde-bincode-compat", "reth-codec"] }
 morph-chainspec.workspace = true
 morph-revm = { workspace = true, features = ["rpc"] }
 morph-evm = { workspace = true, features = ["rpc"] }

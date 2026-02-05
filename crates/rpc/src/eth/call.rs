@@ -99,6 +99,9 @@ where
     Rpc:
         reth_rpc_convert::RpcConvert<Primitives = N::Primitives, Error = EthApiError, Evm = N::Evm>,
 {
+    /// Estimates the L1 data fee for the given transaction.
+    ///
+    /// Returns zero for L1 message transactions since they don't pay L1 fees.
     fn estimate_l1_fee<DB>(
         &self,
         db: &mut DB,
@@ -198,6 +201,10 @@ where
     }
 }
 
+/// Calculates the caller's gas allowance when paying with ETH.
+///
+/// Subtracts the transaction value and L1 fee from the balance,
+/// then converts the remaining balance to gas units.
 fn caller_gas_allowance_with_eth(
     balance: U256,
     value: U256,
@@ -212,6 +219,9 @@ fn caller_gas_allowance_with_eth(
     Ok(gas_allowance_from_balance(available, gas_price))
 }
 
+/// Converts a balance to gas units based on the gas price.
+///
+/// Returns `u64::MAX` if gas price is zero (unlimited gas).
 fn gas_allowance_from_balance(balance: U256, gas_price: u128) -> u64 {
     if gas_price == 0 {
         return u64::MAX;
@@ -225,6 +235,10 @@ fn gas_allowance_from_balance(balance: U256, gas_price: u128) -> u64 {
     }
 }
 
+/// Converts a token amount to ETH equivalent using the fee token info.
+///
+/// Uses the formula: `eth = token_amount * price_ratio / scale`.
+/// Returns `None` if price_ratio or scale is zero.
 fn token_amount_to_eth(token_amount: U256, info: &TokenFeeInfo) -> Option<U256> {
     if info.price_ratio.is_zero() || info.scale.is_zero() {
         return None;
