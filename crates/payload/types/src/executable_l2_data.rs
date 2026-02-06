@@ -1,7 +1,6 @@
 //! ExecutableL2Data type definition.
 
 use alloy_primitives::{Address, B256, Bytes};
-use serde::{Deserialize, Serialize};
 
 /// L2 block data used for AssembleL2Block/ValidateL2Block/NewL2Block.
 ///
@@ -13,8 +12,9 @@ use serde::{Deserialize, Serialize};
 /// 1. **BLS message fields**: Fields that affect state calculation and need BLS signing
 /// 2. **Execution results**: Fields computed after block execution
 /// 3. **Metadata**: Additional L2-specific fields
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 pub struct ExecutableL2Data {
     // === BLS message fields (need to be signed) ===
     /// Parent block hash.
@@ -24,27 +24,30 @@ pub struct ExecutableL2Data {
     pub miner: Address,
 
     /// Block number.
-    #[serde(with = "alloy_serde::quantity")]
+    #[cfg_attr(feature = "serde", serde(with = "alloy_serde::quantity"))]
     pub number: u64,
 
     /// Gas limit for this block.
-    #[serde(with = "alloy_serde::quantity")]
+    #[cfg_attr(feature = "serde", serde(with = "alloy_serde::quantity"))]
     pub gas_limit: u64,
 
     /// Base fee per gas (EIP-1559).
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        with = "alloy_serde::quantity::opt"
+    #[cfg_attr(
+        feature = "serde",
+        serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "alloy_serde::quantity::opt"
+        )
     )]
     pub base_fee_per_gas: Option<u128>,
 
     /// Block timestamp.
-    #[serde(with = "alloy_serde::quantity")]
+    #[cfg_attr(feature = "serde", serde(with = "alloy_serde::quantity"))]
     pub timestamp: u64,
 
     /// RLP-encoded transactions.
-    #[serde(default)]
+    #[cfg_attr(feature = "serde", serde(default))]
     pub transactions: Vec<Bytes>,
 
     // === Execution results ===
@@ -52,7 +55,7 @@ pub struct ExecutableL2Data {
     pub state_root: B256,
 
     /// Gas used by all transactions.
-    #[serde(with = "alloy_serde::quantity")]
+    #[cfg_attr(feature = "serde", serde(with = "alloy_serde::quantity"))]
     pub gas_used: u64,
 
     /// Receipts root.
@@ -66,7 +69,7 @@ pub struct ExecutableL2Data {
 
     // === Metadata ===
     /// Next L1 message queue index after this block.
-    #[serde(with = "alloy_serde::quantity")]
+    #[cfg_attr(feature = "serde", serde(with = "alloy_serde::quantity"))]
     pub next_l1_message_index: u64,
 
     /// Cached block hash.

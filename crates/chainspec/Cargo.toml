@@ -1,6 +1,6 @@
 [package]
 name = "morph-chainspec"
-description = "TODO:"
+description = "Morph L2 chainspec implementation"
 
 version.workspace = true
 edition.workspace = true

@@ -71,7 +71,7 @@ pub fn validate_morph_tx<DB: Database>(
     }
 
     // Fetch token info from L2TokenRegistry
-    let token_info = TokenFeeInfo::try_fetch(db, fee_token_id, input.sender, input.hardfork)
+    let token_info = TokenFeeInfo::fetch(db, fee_token_id, input.sender, input.hardfork)
         .map_err(|err| MorphTxError::TokenInfoFetchFailed {
             token_id: fee_token_id,
             message: format!("{err:?}"),
@@ -103,7 +103,7 @@ pub fn validate_morph_tx<DB: Database>(
     let total_eth_fee = gas_fee.saturating_add(input.l1_data_fee);
 
     // Convert ETH fee to token amount
-    let required_token_amount = token_info.calculate_token_amount(total_eth_fee);
+    let required_token_amount = token_info.eth_to_token_amount(total_eth_fee);
 
     // Check fee_limit >= required_token_amount
     if fee_limit < required_token_amount {

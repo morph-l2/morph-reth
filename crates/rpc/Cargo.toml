@@ -1,0 +1,61 @@
+[package]
+name = "morph-rpc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Morph crates
+morph-primitives = { workspace = true, features = ["serde-bincode-compat", "reth-codec"] }
+morph-chainspec.workspace = true
+morph-revm = { workspace = true, features = ["rpc"] }
+morph-evm = { workspace = true, features = ["rpc"] }
+
+# Reth
+reth-chainspec.workspace = true
+reth-node-api.workspace = true
+reth-node-builder.workspace = true
+reth-primitives-traits.workspace = true
+reth-rpc.workspace = true
+reth-rpc-convert.workspace = true
+reth-rpc-eth-api.workspace = true
+reth-rpc-eth-types.workspace = true
+reth-evm.workspace = true
+reth-provider.workspace = true
+reth-revm.workspace = true
+reth-tasks.workspace = true
+reth-errors.workspace = true
+reth-transaction-pool.workspace = true
+
+# Alloy
+alloy-consensus.workspace = true
+alloy-primitives.workspace = true
+alloy-rpc-types-eth.workspace = true
+alloy-serde.workspace = true
+alloy-network.workspace = true
+alloy-eips.workspace = true
+
+# JSON-RPC
+jsonrpsee.workspace = true
+
+# Serialization
+serde.workspace = true
+derive_more.workspace = true
+tokio.workspace = true
+revm.workspace = true
+
+# Error handling
+thiserror.workspace = true
+eyre.workspace = true
+
+# Logging
+tracing.workspace = true
+
+
+[features]
+default = []

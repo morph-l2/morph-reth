@@ -3,7 +3,6 @@
 //! This type is used for NewSafeL2Block in the derivation pipeline.
 
 use alloy_primitives::{B256, Bytes};
-use serde::{Deserialize, Serialize};
 
 /// Safe L2 block data, used for NewSafeL2Block (derivation).
 ///
@@ -13,35 +12,42 @@ use serde::{Deserialize, Serialize};
 /// during execution rather than provided upfront.
 ///
 /// [`ExecutableL2Data`]: super::ExecutableL2Data
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 pub struct SafeL2Data {
     /// Block number.
-    #[serde(with = "alloy_serde::quantity")]
+    #[cfg_attr(feature = "serde", serde(with = "alloy_serde::quantity"))]
     pub number: u64,
 
     /// Gas limit.
-    #[serde(with = "alloy_serde::quantity")]
+    #[cfg_attr(feature = "serde", serde(with = "alloy_serde::quantity"))]
     pub gas_limit: u64,
 
     /// Base fee per gas (EIP-1559).
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        with = "alloy_serde::quantity::opt"
+    #[cfg_attr(
+        feature = "serde",
+        serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "alloy_serde::quantity::opt"
+        )
     )]
     pub base_fee_per_gas: Option<u128>,
 
     /// Block timestamp.
-    #[serde(with = "alloy_serde::quantity")]
+    #[cfg_attr(feature = "serde", serde(with = "alloy_serde::quantity"))]
     pub timestamp: u64,
 
     /// RLP-encoded transactions.
-    #[serde(default)]
+    #[cfg_attr(feature = "serde", serde(default))]
     pub transactions: Vec<Bytes>,
 
     /// Optional batch hash for batch association.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
     pub batch_hash: Option<B256>,
 }
 

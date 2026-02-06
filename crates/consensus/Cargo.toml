@@ -14,7 +14,7 @@ workspace = true
 [dependencies]
 # Morph
 morph-chainspec.workspace = true
-morph-primitives = { workspace = true, features = ["reth-codec"] }
+morph-primitives = { workspace = true, features = ["serde-bincode-compat"] }
 
 # Reth
 reth-consensus.workspace = true

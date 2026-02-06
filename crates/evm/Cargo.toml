@@ -1,6 +1,6 @@
 [package]
 name = "morph-evm"
-description = "TODO:"
+description = "Morph EVM implementation"
 
 version.workspace = true
 edition.workspace = true
@@ -16,7 +16,7 @@ morph-chainspec.workspace = true
 morph-primitives.workspace = true
 morph-revm.workspace = true
 
-reth-chainspec = { workspace = true, optional = true }
+reth-chainspec.workspace = true
 reth-evm.workspace = true
 reth-evm-ethereum.workspace = true
 reth-revm.workspace = true
@@ -38,8 +38,7 @@ alloy-genesis.workspace = true
 
 [features]
 default = []
-reth-codec = [
-    "morph-primitives/reth-codec",
-    "dep:reth-chainspec",
+serde-bincode-compat = [
+    "morph-primitives/serde-bincode-compat",
 ]
 rpc = ["dep:reth-rpc-eth-api", "morph-revm/rpc"]

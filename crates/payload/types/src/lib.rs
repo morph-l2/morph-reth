@@ -24,7 +24,6 @@ use alloy_primitives::{B256, Bytes};
 use morph_primitives::Block;
 use reth_payload_primitives::{BuiltPayload, ExecutionPayload, PayloadTypes};
 use reth_primitives_traits::{NodePrimitives, SealedBlock};
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 // Re-export main types
@@ -47,7 +46,8 @@ pub use safe_l2_data::SafeL2Data;
 pub struct MorphPayloadTypes;
 
 /// Execution data for Morph node. Simply wraps a sealed block.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MorphExecutionData {
     /// The built block.
     pub block: Arc<SealedBlock<Block>>,

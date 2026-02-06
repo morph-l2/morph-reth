@@ -8,15 +8,15 @@ use morph_primitives::MorphTxEnvelope;
 use reth_payload_builder::EthPayloadBuilderAttributes;
 use reth_payload_primitives::PayloadBuilderAttributes;
 use reth_primitives_traits::{Recovered, SignerRecoverable, WithEncoded};
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// Morph-specific payload attributes for Engine API.
 ///
 /// This extends the standard Ethereum [`PayloadAttributes`] with L2-specific fields
 /// for forced transaction inclusion (L1 messages).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 pub struct MorphPayloadAttributes {
     /// Standard Ethereum payload attributes.
     #[serde(flatten)]
@@ -26,7 +26,10 @@ pub struct MorphPayloadAttributes {
     ///
     /// This includes L1 messages that must be processed in order.
     /// These transactions are not in the mempool and must be explicitly provided.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
     pub transactions: Option<Vec<Bytes>>,
 }
 

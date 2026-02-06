@@ -168,7 +168,9 @@ impl Sealable for MorphHeader {
     }
 }
 
-#[cfg(feature = "reth")]
+#[cfg(feature = "serde-bincode-compat")]
+impl reth_primitives_traits::serde_bincode_compat::RlpBincode for MorphHeader {}
+
 impl reth_primitives_traits::InMemorySize for MorphHeader {
     fn size(&self) -> usize {
         reth_primitives_traits::InMemorySize::size(&self.inner)
@@ -177,10 +179,8 @@ impl reth_primitives_traits::InMemorySize for MorphHeader {
     }
 }
 
-#[cfg(feature = "reth")]
 impl reth_primitives_traits::BlockHeader for MorphHeader {}
 
-#[cfg(feature = "reth")]
 impl reth_primitives_traits::header::HeaderMut for MorphHeader {
     fn set_parent_hash(&mut self, hash: B256) {
         self.inner.set_parent_hash(hash);
