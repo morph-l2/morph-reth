@@ -1,5 +1,5 @@
 use crate::{
-    MorphEvmConfig, MorphEvmFactory, block::MorphReceiptBuilder, context::MorphBlockExecutionCtx,
+    MorphEvmConfig, MorphEvmFactory, block::DefaultMorphReceiptBuilder, context::MorphBlockExecutionCtx,
 };
 use alloy_evm::{block::BlockExecutionError, eth::EthBlockExecutorFactory};
 use morph_chainspec::MorphChainSpec;
@@ -48,7 +48,7 @@ impl BlockAssembler<MorphEvmConfig> for MorphBlockAssembler {
 
         // Delegate block building to the inner assembler
         let block = self.inner.assemble_block(BlockAssemblerInput::<
-            EthBlockExecutorFactory<MorphReceiptBuilder, MorphChainSpec, MorphEvmFactory>,
+            EthBlockExecutorFactory<DefaultMorphReceiptBuilder, MorphChainSpec, MorphEvmFactory>,
         >::new(
             evm_env,
             inner,
