@@ -270,6 +270,8 @@ where
             )));
         }
 
+        // TODO: Apply EIP-2935 blockhashes contract call when needed
+
         Ok(())
     }
 
