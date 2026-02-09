@@ -400,6 +400,8 @@ impl TxMorph {
         let memo_bytes: Bytes = Decodable::decode(buf)?;
         let memo = if memo_bytes.is_empty() {
             None
+        } else if memo_bytes.len() > MAX_MEMO_LENGTH {
+            return Err(alloy_rlp::Error::Custom("memo exceeds maximum length"));
         } else {
             Some(memo_bytes)
         };
@@ -1755,5 +1757,47 @@ mod tests {
             ..Default::default()
         };
         assert!(v1_valid_with_fee.validate_version().is_ok());
+    }
+
+    #[test]
+    fn test_morph_transaction_decode_rejects_oversized_memo() {
+        use alloy_rlp::Encodable;
+
+        // Create a valid V1 transaction with oversized memo (65 bytes, exceeds MAX_MEMO_LENGTH=64)
+        let oversized_memo = vec![0xab; 65];
+
+        // Manually construct RLP with oversized memo
+        // V1 format: version_byte + RLP([chain_id, nonce, max_priority_fee, max_fee, gas_limit,
+        //            to, value, input, access_list, fee_token_id, fee_limit, reference, memo])
+        let mut inner_buf = Vec::new();
+
+        // Encode all fields
+        1u64.encode(&mut inner_buf); // chain_id
+        0u64.encode(&mut inner_buf); // nonce
+        0u128.encode(&mut inner_buf); // max_priority_fee_per_gas
+        1000u128.encode(&mut inner_buf); // max_fee_per_gas
+        21000u128.encode(&mut inner_buf); // gas_limit
+        alloy_primitives::TxKind::Create.encode(&mut inner_buf); // to
+        U256::ZERO.encode(&mut inner_buf); // value
+        Bytes::new().encode(&mut inner_buf); // input
+        alloy_eips::eip2930::AccessList::default().encode(&mut inner_buf); // access_list
+        1u16.encode(&mut inner_buf); // fee_token_id
+        U256::from(1000u64).encode(&mut inner_buf); // fee_limit
+        Bytes::new().encode(&mut inner_buf); // reference (empty)
+        Bytes::from(oversized_memo).encode(&mut inner_buf); // memo (oversized!)
+
+        // Wrap in RLP list
+        let header = alloy_rlp::Header {
+            list: true,
+            payload_length: inner_buf.len(),
+        };
+        let mut rlp_buf = Vec::new();
+        header.encode(&mut rlp_buf);
+        rlp_buf.extend_from_slice(&inner_buf);
+
+        // Try to decode as V1
+        let result = TxMorph::decode_fields_v1(&mut rlp_buf.as_slice());
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), alloy_rlp::Error::Custom(_)));
     }
 }
