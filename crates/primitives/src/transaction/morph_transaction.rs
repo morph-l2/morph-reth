@@ -213,7 +213,7 @@ impl TxMorph {
 
     /// Returns true if this is a version 1 MorphTx (with Reference/Memo).
     pub const fn is_v1(&self) -> bool {
-        self.version >= MORPH_TX_VERSION_1
+        self.version == MORPH_TX_VERSION_1
     }
 
     /// Calculate the in-memory size of this transaction.
@@ -1652,5 +1652,108 @@ mod tests {
             result.is_err(),
             "V0 with fee_token_id=0 should fail to decode"
         );
+    }
+
+    #[test]
+    fn test_morph_transaction_version_helpers() {
+        // V0 transaction
+        let v0_tx = TxMorph {
+            version: MORPH_TX_VERSION_0,
+            fee_token_id: 1,
+            ..Default::default()
+        };
+        assert!(v0_tx.is_v0());
+        assert!(!v0_tx.is_v1());
+
+        // V1 transaction
+        let v1_tx = TxMorph {
+            version: MORPH_TX_VERSION_1,
+            ..Default::default()
+        };
+        assert!(!v1_tx.is_v0());
+        assert!(v1_tx.is_v1());
+
+        // Unsupported version (e.g., 2) - neither is_v0 nor is_v1
+        let v2_tx = TxMorph {
+            version: 2,
+            ..Default::default()
+        };
+        assert!(!v2_tx.is_v0());
+        assert!(!v2_tx.is_v1()); // is_v1 uses == not >=, so version 2 is not v1
+    }
+
+    #[test]
+    fn test_morph_transaction_v0_no_reference_memo() {
+        // V0 with Reference should fail validation
+        let v0_with_ref = TxMorph {
+            version: MORPH_TX_VERSION_0,
+            fee_token_id: 1,
+            reference: Some(B256::from([0x42; 32])),
+            ..Default::default()
+        };
+        assert!(v0_with_ref.validate_version().is_err());
+        assert_eq!(
+            v0_with_ref.validate_version().unwrap_err(),
+            "version 0 MorphTx does not support Reference field"
+        );
+
+        // V0 with Memo should fail validation
+        let v0_with_memo = TxMorph {
+            version: MORPH_TX_VERSION_0,
+            fee_token_id: 1,
+            memo: Some(Bytes::from(vec![0xca, 0xfe])),
+            ..Default::default()
+        };
+        assert!(v0_with_memo.validate_version().is_err());
+        assert_eq!(
+            v0_with_memo.validate_version().unwrap_err(),
+            "version 0 MorphTx does not support Memo field"
+        );
+
+        // V0 with empty Memo should pass (empty is treated as not set)
+        let v0_empty_memo = TxMorph {
+            version: MORPH_TX_VERSION_0,
+            fee_token_id: 1,
+            memo: Some(Bytes::new()), // Empty memo
+            ..Default::default()
+        };
+        assert!(v0_empty_memo.validate_version().is_ok());
+    }
+
+    #[test]
+    fn test_morph_transaction_v1_fee_limit_validation() {
+        // V1 with FeeTokenID=0 and FeeLimit>0 should fail
+        let v1_invalid = TxMorph {
+            version: MORPH_TX_VERSION_1,
+            fee_token_id: 0,
+            fee_limit: U256::from(1000u64),
+            ..Default::default()
+        };
+        assert!(v1_invalid.validate_version().is_err());
+        assert_eq!(
+            v1_invalid.validate_version().unwrap_err(),
+            "version 1 MorphTx cannot have FeeLimit when FeeTokenID is 0"
+        );
+
+        // V1 with FeeTokenID=0 and FeeLimit=0 should pass
+        let v1_valid_no_fee = TxMorph {
+            version: MORPH_TX_VERSION_1,
+            fee_token_id: 0,
+            fee_limit: U256::ZERO,
+            reference: Some(B256::from([0x42; 32])),
+            memo: Some(Bytes::from(vec![0xca, 0xfe])),
+            ..Default::default()
+        };
+        assert!(v1_valid_no_fee.validate_version().is_ok());
+
+        // V1 with FeeTokenID>0 and FeeLimit>0 should pass
+        let v1_valid_with_fee = TxMorph {
+            version: MORPH_TX_VERSION_1,
+            fee_token_id: 1,
+            fee_limit: U256::from(1000u64),
+            reference: Some(B256::from([0x42; 32])),
+            ..Default::default()
+        };
+        assert!(v1_valid_with_fee.validate_version().is_ok());
     }
 }

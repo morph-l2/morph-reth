@@ -176,7 +176,10 @@ impl<T> MorphTransactionReceipt<T> {
 
     /// Returns true if this receipt is for a TxMorph.
     pub const fn is_morph_tx(&self) -> bool {
-        self.fee_token_id.is_some() || self.version.is_some() || self.reference.is_some()
+        self.fee_token_id.is_some()
+            || self.version.is_some()
+            || self.reference.is_some()
+            || self.memo.is_some()
     }
 
     /// Returns true if this receipt has a reference.
@@ -397,5 +400,60 @@ mod tests {
         let receipt_with_bloom = receipt.with_bloom();
 
         assert_ne!(receipt_with_bloom.logs_bloom, Bloom::default());
+    }
+
+    #[test]
+    fn test_morph_receipt_is_morph_tx() {
+        let inner: Receipt<Log> = Receipt {
+            status: true.into(),
+            cumulative_gas_used: 21000,
+            logs: vec![],
+        };
+
+        // Base receipt without any MorphTx fields
+        let base_receipt = MorphTransactionReceipt::new(inner.clone());
+        assert!(!base_receipt.is_morph_tx());
+
+        // Receipt with only fee_token_id
+        let with_fee_token = MorphTransactionReceipt {
+            fee_token_id: Some(1),
+            ..MorphTransactionReceipt::new(inner.clone())
+        };
+        assert!(with_fee_token.is_morph_tx());
+
+        // Receipt with only version
+        let with_version = MorphTransactionReceipt {
+            version: Some(1),
+            ..MorphTransactionReceipt::new(inner.clone())
+        };
+        assert!(with_version.is_morph_tx());
+
+        // Receipt with only reference
+        let with_reference = MorphTransactionReceipt {
+            reference: Some(b256!(
+                "0000000000000000000000000000000000000000000000000000000000000042"
+            )),
+            ..MorphTransactionReceipt::new(inner.clone())
+        };
+        assert!(with_reference.is_morph_tx());
+
+        // Receipt with only memo
+        let with_memo = MorphTransactionReceipt {
+            memo: Some(bytes!("cafe")),
+            ..MorphTransactionReceipt::new(inner.clone())
+        };
+        assert!(with_memo.is_morph_tx());
+
+        // Receipt with all MorphTx fields
+        let full_morph = MorphTransactionReceipt {
+            fee_token_id: Some(1),
+            version: Some(1),
+            reference: Some(b256!(
+                "0000000000000000000000000000000000000000000000000000000000000042"
+            )),
+            memo: Some(bytes!("deadbeef")),
+            ..MorphTransactionReceipt::new(inner)
+        };
+        assert!(full_morph.is_morph_tx());
     }
 }
