@@ -110,11 +110,7 @@ pub use morph_revm::{MorphBlockEnv, MorphHaltReason};
 /// The internal executor factory is lightweight and stateless.
 #[derive(Debug, Clone)]
 pub struct MorphEvmConfig {
-<<<<<<< HEAD
     /// Internal block executor factory that creates `MorphBlockExecutor` instances.
-=======
-    /// Block executor factory
->>>>>>> c945f3e (refactor: add morph block executor factory)
     executor_factory: MorphBlockExecutorFactory,
 
     /// Block assembler for building `MorphHeader` blocks from execution results.
@@ -149,13 +145,9 @@ impl MorphEvmConfig {
         self.executor_factory.spec()
     }
 
-<<<<<<< HEAD
     /// Returns a reference to the Morph EVM factory.
     ///
     /// The factory is used to create EVM instances for block execution.
-=======
-    /// Returns the EVM factory
->>>>>>> c945f3e (refactor: add morph block executor factory)
     pub const fn evm_factory(&self) -> &MorphEvmFactory {
         self.executor_factory.evm_factory()
     }
