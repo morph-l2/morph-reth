@@ -34,12 +34,32 @@ use reth_revm::{DatabaseCommit, Inspector, State, context::result::ResultAndStat
 use revm::context::Block;
 use std::marker::PhantomData;
 
-/// Block executor for Morph.
+/// Block executor for Morph L2 blocks.
 ///
-/// This executor handles Morph-specific logic including:
-/// - L1 fee calculation for transactions
-/// - Token fee information extraction for MorphTx (0x7F) transactions
-/// - Curie hardfork application
+/// This executor handles Morph-specific block execution logic, differing from
+/// standard Ethereum execution in several key ways:
+///
+/// ## L1 Fee Calculation
+/// All L2 transactions (except L1 messages) must pay an L1 data fee for posting
+/// transaction data to L1. This fee is calculated based on:
+/// - The RLP-encoded transaction size
+/// - Current L1 gas price from the L1 Gas Price Oracle contract
+/// - Hardfork-specific fee calculation logic (pre-Curie vs post-Curie)
+///
+/// ## Token Fee Support (MorphTx 0x7F)
+/// MorphTx transactions allow users to pay gas fees using ERC20 tokens.
+/// The executor extracts token fee information from the L2TokenRegistry contract,
+/// including exchange rate and scale factor.
+///
+/// ## Hardfork Application
+/// The executor applies hardfork-specific state changes at transition blocks,
+/// such as the Curie hardfork which updates the L1 Gas Price Oracle contract.
+///
+/// ## Execution Flow
+/// 1. `apply_pre_execution_changes`: Set up state, load contracts, apply hardforks
+/// 2. `execute_transaction_without_commit`: Execute transaction in EVM
+/// 3. `commit_transaction`: Calculate fees, build receipt, commit state
+/// 4. `finish`: Return final execution result with all receipts
 pub(crate) struct MorphBlockExecutor<'a, DB: Database, I> {
     /// The EVM used by executor
     evm: MorphEvm<&'a mut State<DB>, I>,
@@ -60,6 +80,12 @@ where
     DB: Database,
     I: Inspector<MorphContext<&'a mut State<DB>>>,
 {
+    /// Creates a new [`MorphBlockExecutor`].
+    ///
+    /// # Arguments
+    /// * `evm` - The EVM instance configured for Morph execution
+    /// * `spec` - Chain specification containing hardfork information
+    /// * `receipt_builder` - Builder for constructing transaction receipts
     pub(crate) fn new(
         evm: MorphEvm<&'a mut State<DB>, I>,
         spec: &'a MorphChainSpec,
@@ -77,8 +103,23 @@ where
 
     /// Calculate the L1 data fee for a transaction.
     ///
-    /// Returns `U256::ZERO` for L1 message transactions, or the calculated L1 fee
-    /// based on the L1 Gas Price Oracle state.
+    /// The L1 fee compensates for the cost of posting transaction data to Ethereum L1.
+    /// This is a key component of L2 transaction costs on Morph.
+    ///
+    /// # Calculation Steps
+    /// 1. Check if transaction is an L1 message (which don't pay L1 fees)
+    /// 2. Get RLP-encoded transaction bytes
+    /// 3. Determine current hardfork (affects fee calculation formula)
+    /// 4. Fetch L1 block info from L1 Gas Price Oracle contract
+    /// 5. Calculate fee based on transaction size and L1 gas price
+    ///
+    /// # Returns
+    /// - `Ok(U256::ZERO)` for L1 message transactions
+    /// - `Ok(fee)` for regular transactions, where fee = f(tx_size, l1_gas_price, hardfork)
+    /// - `Err` if L1 block info cannot be fetched
+    ///
+    /// # Errors
+    /// Returns error if the L1 Gas Price Oracle contract state cannot be read.
     fn calculate_l1_fee(&mut self, tx: &MorphTxEnvelope) -> Result<U256, BlockExecutionError> {
         // L1 message transactions don't pay L1 fees
         if tx.is_l1_msg() {
@@ -105,8 +146,30 @@ where
 
     /// Extract token fee information for MorphTx (0x7F) transactions.
     ///
-    /// This queries the L2TokenRegistry contract to get the exchange rate and scale
-    /// for the specified token ID.
+    /// MorphTx allows users to pay gas fees using ERC20 tokens instead of native ETH.
+    /// This method queries the L2TokenRegistry contract to get the current exchange
+    /// rate and scale factor for the specified token.
+    ///
+    /// # How MorphTx Token Fees Work
+    /// 1. User specifies a `fee_token_id` (registered ERC20 token)
+    /// 2. User specifies a `fee_limit` (max tokens willing to pay)
+    /// 3. System fetches token exchange rate from L2TokenRegistry
+    /// 4. System converts ETH fee to token amount using: `token_fee = eth_fee * fee_rate / token_scale`
+    /// 5. System validates user has sufficient token balance
+    ///
+    /// # Arguments
+    /// * `tx` - The transaction to extract fee info from
+    ///
+    /// # Returns
+    /// - `Ok(None)` for non-MorphTx transactions
+    /// - `Ok(Some(info))` for MorphTx with valid token fee info
+    /// - `Err` if MorphTx is missing required fields or token info cannot be fetched
+    ///
+    /// # Errors
+    /// Returns error if:
+    /// - MorphTx is missing `fee_token_id` or `fee_limit`
+    /// - Transaction sender cannot be extracted
+    /// - L2TokenRegistry contract cannot be queried
     fn get_token_fee_info(
         &mut self,
         tx: &MorphTxEnvelope,
@@ -159,6 +222,23 @@ where
     type Receipt = MorphReceipt;
     type Evm = MorphEvm<&'a mut State<DB>, I>;
 
+    /// Applies pre-execution state changes before processing transactions.
+    ///
+    /// This method performs initialization required before executing any transactions:
+    ///
+    /// 1. **State Clear Flag**: Sets the flag that enables EIP-161 state trie clearing
+    ///    if the Spurious Dragon hardfork is active
+    ///
+    /// 2. **L1 Gas Oracle Cache**: Loads the L1 Gas Price Oracle contract into the
+    ///    account cache to optimize L1 fee calculations for all transactions
+    ///
+    /// 3. **Curie Hardfork**: At the exact Curie activation block, applies the
+    ///    hardfork state changes (updates to L1 Gas Price Oracle contract)
+    ///
+    /// # Errors
+    /// Returns error if:
+    /// - L1 Gas Price Oracle account cannot be loaded
+    /// - Curie hardfork application fails at transition block
     fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
         // 1. Set state clear flag if the block is after the Spurious Dragon hardfork
         let block_number: u64 = self.evm.block().number.to();
@@ -188,6 +268,25 @@ where
         Ok(())
     }
 
+    /// Executes a transaction without committing state changes.
+    ///
+    /// This method validates the transaction can fit in the remaining block gas,
+    /// then executes it in the EVM. The state changes are returned but not yet
+    /// committed to the database.
+    ///
+    /// # Gas Validation
+    /// Before execution, validates that:
+    /// ```text
+    /// tx.gas_limit + cumulative_gas_used <= block.gas_limit
+    /// ```
+    ///
+    /// # Returns
+    /// Returns the execution result and state changes that can be committed later.
+    ///
+    /// # Errors
+    /// Returns error if:
+    /// - Transaction gas limit exceeds available block gas
+    /// - EVM execution fails (reverts, halts, out of gas, etc.)
     fn execute_transaction_without_commit(
         &mut self,
         tx: impl ExecutableTx<Self>,
@@ -209,6 +308,25 @@ where
             .map_err(|err| BlockExecutionError::evm(err, *tx.tx().tx_hash()))
     }
 
+    /// Commits a transaction's execution result and builds its receipt.
+    ///
+    /// This method performs post-execution processing for a transaction:
+    ///
+    /// 1. **L1 Fee Calculation**: Calculates the L1 data fee for the transaction
+    /// 2. **Token Fee Info**: For MorphTx, extracts token fee information
+    /// 3. **Gas Accounting**: Updates cumulative gas used for the block
+    /// 4. **Receipt Building**: Constructs receipt with all Morph-specific fields
+    /// 5. **State Commit**: Commits the EVM state changes to the database
+    ///
+    /// # Arguments
+    /// * `output` - The execution result from `execute_transaction_without_commit`
+    /// * `tx` - The original transaction
+    ///
+    /// # Returns
+    /// The gas used by this transaction.
+    ///
+    /// # Errors
+    /// Returns error if L1 fee calculation or token fee info extraction fails.
     fn commit_transaction(
         &mut self,
         output: ResultAndState<MorphHaltReason>,
@@ -242,6 +360,17 @@ where
         Ok(gas_used)
     }
 
+    /// Finalizes block execution and returns the results.
+    ///
+    /// Consumes the executor and returns the EVM instance along with the
+    /// complete execution results including all transaction receipts.
+    ///
+    /// # Returns
+    /// A tuple containing:
+    /// - The EVM instance (for potential reuse or state access)
+    /// - Block execution result with receipts, gas used, and empty requests
+    ///
+    /// Note: `blob_gas_used` is always 0 as Morph doesn't support EIP-4844 blobs.
     fn finish(
         self,
     ) -> Result<(Self::Evm, BlockExecutionResult<Self::Receipt>), BlockExecutionError> {
@@ -256,14 +385,20 @@ where
         ))
     }
 
+    /// Sets a state hook for observing state changes.
+    ///
+    /// Note: State hooks are not yet implemented for the Morph block executor.
+    /// This is a no-op placeholder for future implementation.
     fn set_state_hook(&mut self, _hook: Option<Box<dyn OnStateHook>>) {
         // State hooks are not yet supported for Morph block executor
     }
 
+    /// Returns a mutable reference to the EVM instance.
     fn evm_mut(&mut self) -> &mut Self::Evm {
         &mut self.evm
     }
 
+    /// Returns a reference to the EVM instance.
     fn evm(&self) -> &Self::Evm {
         &self.evm
     }

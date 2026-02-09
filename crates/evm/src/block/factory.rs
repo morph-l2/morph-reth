@@ -29,7 +29,7 @@ use crate::evm::MorphEvmFactory;
 /// - Curie hardfork application
 ///
 /// Unlike using `EthBlockExecutorFactory`, this factory uses the custom
-/// [`MorphReceiptBuilder`] trait which includes `l1_fee` in its context,
+/// `MorphReceiptBuilder` trait which includes `l1_fee` in its context,
 /// ensuring receipts are built with complete information.
 #[derive(Debug, Clone)]
 pub(crate) struct MorphBlockExecutorFactory {

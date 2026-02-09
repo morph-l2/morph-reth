@@ -1,14 +1,19 @@
 //! Morph EVM implementation.
 //!
 //! This crate provides the EVM configuration and block execution logic for Morph L2.
+//! It implements reth's trait system to integrate Morph-specific behavior into the
+//! standard reth node architecture.
 //!
 //! # Main Components
 //!
 //! - [`MorphEvmConfig`]: Main EVM configuration that implements `BlockExecutorFactory`
-//! - [`MorphEvmFactory`]: Factory for creating Morph EVM instances
-//! - [`MorphBlockAssembler`]: Block assembly logic for payload building
+//! - [`MorphEvmFactory`]: Factory for creating Morph EVM instances with custom context
+//! - [`MorphBlockAssembler`]: Block assembly logic for building `MorphHeader` blocks
+//! - [`MorphNextBlockEnvAttributes`]: Attributes for configuring the next block environment
 //!
 //! # Architecture
+//!
+//! The crate is structured around reth's EVM trait hierarchy:
 //!
 //! ```text
 //! ┌─────────────────────────────────────────────────────────────────┐
@@ -21,14 +26,31 @@
 //! │                 ▼                                               │
 //! │  ┌─────────────────────────────────────────────────────────┐   │
 //! │  │              MorphBlockExecutor                         │   │
-//! │  │   - Executes transactions                               │   │
-//! │  │   - Handles L1 messages                                 │   │
-//! │  │   - Calculates L1 data fee                              │   │
-//! │  │   - Builds receipts with full context                   │   │
+//! │  │   - Executes transactions with Morph EVM               │   │
+//! │  │   - Handles L1 message transactions (0x7E)             │   │
+//! │  │   - Calculates L1 data fee for all L2 transactions     │   │
+//! │  │   - Extracts token fee info for MorphTx (0x7F)         │   │
+//! │  │   - Builds receipts with full Morph-specific context   │   │
+//! │  │   - Applies hardfork state changes (Curie, etc.)       │   │
 //! │  └─────────────────────────────────────────────────────────┘   │
 //! └─────────────────────────────────────────────────────────────────┘
 //! ```
 //!
+//! # Key Differences from Standard Ethereum
+//!
+//! 1. **L1 Data Fee**: Every L2 transaction (except L1 messages) pays an L1 fee
+//!    calculated from the L1 Gas Price Oracle contract state.
+//!
+//! 2. **Token Gas Payment**: MorphTx (0x7F) allows users to pay gas with ERC20 tokens.
+//!    The executor queries L2TokenRegistry for exchange rates.
+//!
+//! 3. **Custom Receipts**: Receipts include L1 fee and optional token fee info,
+//!    requiring a custom receipt builder.
+//!
+//! 4. **L2-Specific Header**: `MorphHeader` extends standard header with
+//!    `next_l1_msg_index` and `batch_hash` fields.
+//!
+//! 5. **No Blob Transactions**: EIP-4844 blob transactions are not supported.
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
@@ -65,18 +87,41 @@ use morph_revm::evm::MorphContext;
 
 pub use morph_revm::{MorphBlockEnv, MorphHaltReason};
 
-/// Morph-related EVM configuration.
+/// Morph EVM configuration and block executor factory.
+///
+/// This is the main entry point for Morph EVM integration with reth. It implements
+/// both [`ConfigureEvm`] and [`BlockExecutorFactory`] traits, providing:
+///
+/// - EVM environment configuration for block execution and building
+/// - Block executor creation with Morph-specific execution logic
+/// - Block assembler for constructing `MorphHeader` blocks
+///
+/// # Usage
+///
+/// Create with a chain specification:
+/// # Trait Implementations
+///
+/// - `ConfigureEvm`: Provides EVM environment setup and block context creation
+/// - `BlockExecutorFactory`: Creates `MorphBlockExecutor` instances for block execution
+///
+/// # Thread Safety
+///
+/// `MorphEvmConfig` is `Clone` and can be safely shared across threads.
+/// The internal executor factory is lightweight and stateless.
 #[derive(Debug, Clone)]
 pub struct MorphEvmConfig {
-    /// Block executor factory
+    /// Internal block executor factory that creates `MorphBlockExecutor` instances.
     executor_factory: MorphBlockExecutorFactory,
 
-    /// Block assembler
+    /// Block assembler for building `MorphHeader` blocks from execution results.
     pub block_assembler: MorphBlockAssembler,
 }
 
 impl MorphEvmConfig {
-    /// Create a new [`MorphEvmConfig`] with the given chain spec and EVM factory.
+    /// Creates a new [`MorphEvmConfig`] with the given chain spec and EVM factory.
+    ///
+    /// This is the primary constructor that allows specifying a custom EVM factory
+    /// for advanced use cases (e.g., custom inspector or precompile configuration).
     pub fn new(chain_spec: Arc<MorphChainSpec>, evm_factory: MorphEvmFactory) -> Self {
         let executor_factory = MorphBlockExecutorFactory::new(chain_spec.clone(), evm_factory);
         Self {
@@ -85,17 +130,24 @@ impl MorphEvmConfig {
         }
     }
 
-    /// Create a new [`MorphEvmConfig`] with the given chain spec and default EVM factory.
+    /// Creates a new [`MorphEvmConfig`] with the given chain spec and default EVM factory.
+    ///
+    /// This is the recommended constructor for most use cases. It uses the default
+    /// Morph EVM factory with standard configuration.
     pub fn new_with_default_factory(chain_spec: Arc<MorphChainSpec>) -> Self {
         Self::new(chain_spec, MorphEvmFactory::default())
     }
 
-    /// Returns the chain spec
+    /// Returns a reference to the Morph chain specification.
+    ///
+    /// The chain spec contains hardfork configuration and network parameters.
     pub const fn chain_spec(&self) -> &Arc<MorphChainSpec> {
         self.executor_factory.spec()
     }
 
-    /// Returns the EVM factory
+    /// Returns a reference to the Morph EVM factory.
+    ///
+    /// The factory is used to create EVM instances for block execution.
     pub const fn evm_factory(&self) -> &MorphEvmFactory {
         self.executor_factory.evm_factory()
     }

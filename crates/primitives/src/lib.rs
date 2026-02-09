@@ -57,7 +57,7 @@ pub use transaction::{
     L1_TX_TYPE_ID, MORPH_TX_TYPE_ID, MorphTxEnvelope, MorphTxType, TxL1Msg, TxMorph, TxMorphExt,
 };
 
-/// A [`NodePrimitives`] implementation for Morph.
+/// A [`reth_primitives_traits::NodePrimitives`] implementation for Morph.
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct MorphPrimitives;
