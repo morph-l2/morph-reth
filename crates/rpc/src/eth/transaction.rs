@@ -67,10 +67,14 @@ impl FromConsensusTx<MorphTxEnvelope> for MorphRpcTransaction {
 impl TryIntoSimTx<MorphTxEnvelope> for MorphTransactionRequest {
     fn try_into_sim_tx(self) -> Result<MorphTxEnvelope, alloy_consensus::error::ValueError<Self>> {
         if let Some(fee_token_id) = self.fee_token_id.filter(|id| id.to::<u64>() > 0) {
+            let reference = self.reference;
+            let memo = self.memo.clone();
             let morph_tx = build_morph_tx_from_request(
                 &self.inner,
                 fee_token_id,
                 self.fee_limit.unwrap_or_default(),
+                reference,
+                memo,
             )
             .map_err(|err| alloy_consensus::error::ValueError::new(self, err))?;
             let signature = Signature::new(Default::default(), Default::default(), false);
@@ -83,6 +87,8 @@ impl TryIntoSimTx<MorphTxEnvelope> for MorphTransactionRequest {
                 inner,
                 fee_token_id: self.fee_token_id,
                 fee_limit: self.fee_limit,
+                reference: self.reference,
+                memo: self.memo.clone(),
             })
         })?;
         morph_envelope_from_ethereum(envelope)
@@ -103,6 +109,8 @@ impl SignableTxRequest<MorphTxEnvelope> for MorphTransactionRequest {
                 &self.inner,
                 fee_token_id,
                 self.fee_limit.unwrap_or_default(),
+                self.reference,
+                self.memo,
             )
             .map_err(|_| SignTxRequestError::InvalidTransactionRequest)?;
             let signature = signer.sign_transaction(&mut morph_tx).await?;
@@ -179,11 +187,13 @@ fn morph_envelope_from_ethereum(
 /// Builds a [`TxMorph`] from an RPC transaction request.
 ///
 /// Extracts fields from the request and constructs a Morph transaction
-/// with the specified fee token ID and fee limit.
+/// with the specified fee token ID, fee limit, reference, and memo.
 fn build_morph_tx_from_request(
     req: &alloy_rpc_types_eth::TransactionRequest,
     fee_token_id: U64,
     fee_limit: U256,
+    reference: Option<alloy_primitives::B256>,
+    memo: Option<alloy_primitives::Bytes>,
 ) -> Result<TxMorph, &'static str> {
     let chain_id = req
         .chain_id
@@ -197,6 +207,13 @@ fn build_morph_tx_from_request(
     let input = req.input.clone().into_input().unwrap_or_default();
     let to = req.to.unwrap_or(TxKind::Create);
 
+    // Determine version based on presence of reference or memo
+    let version = if reference.is_some() || memo.is_some() {
+        morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_1
+    } else {
+        morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_0
+    };
+
     Ok(TxMorph {
         chain_id,
         nonce,
@@ -209,9 +226,9 @@ fn build_morph_tx_from_request(
         input,
         fee_token_id,
         fee_limit,
-        version: morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_1,
-        reference: None,
-        memo: None,
+        version,
+        reference,
+        memo,
     })
 }
 
