@@ -4,10 +4,7 @@
 //! for executed transactions based on their type, including L1 fee calculation.
 
 use alloy_consensus::Receipt;
-use alloy_evm::{
-    Evm,
-    eth::receipt_builder::{ReceiptBuilder, ReceiptBuilderCtx as AlloyReceiptBuilderCtx},
-};
+use alloy_evm::Evm;
 use alloy_primitives::U256;
 use morph_primitives::{MorphReceipt, MorphTransactionReceipt, MorphTxEnvelope, MorphTxType};
 use revm::context::result::ExecutionResult;
@@ -106,59 +103,6 @@ impl MorphReceiptBuilder for DefaultMorphReceiptBuilder {
                     // Fallback: just include L1 fee if token info is missing
                     MorphReceipt::Morph(MorphTransactionReceipt::with_l1_fee(inner, l1_fee))
                 }
-            }
-        }
-    }
-}
-
-/// Implementation of alloy-evm's `ReceiptBuilder` trait.
-///
-/// This implementation is primarily needed to satisfy type bounds in `EthBlockExecutorFactory`.
-/// The actual receipt building during block execution is done via `MorphReceiptBuilder`
-/// in `MorphBlockExecutor::commit_transaction`.
-///
-/// Note: This implementation builds receipts without L1 fee and token fee information,
-/// since the alloy-evm `ReceiptBuilderCtx` doesn't provide these fields.
-impl ReceiptBuilder for DefaultMorphReceiptBuilder {
-    type Transaction = MorphTxEnvelope;
-    type Receipt = MorphReceipt;
-
-    fn build_receipt<E: Evm>(
-        &self,
-        ctx: AlloyReceiptBuilderCtx<'_, Self::Transaction, E>,
-    ) -> Self::Receipt {
-        let AlloyReceiptBuilderCtx {
-            tx,
-            result,
-            cumulative_gas_used,
-            ..
-        } = ctx;
-
-        let inner = Receipt {
-            status: result.is_success().into(),
-            cumulative_gas_used,
-            logs: result.into_logs(),
-        };
-
-        // Build receipts without L1 fee since it's not available in the context.
-        // In practice, this code path is not used during execution - receipts are built
-        // via MorphBlockExecutor which has full context including L1 fees.
-        match tx.tx_type() {
-            MorphTxType::Legacy => {
-                MorphReceipt::Legacy(MorphTransactionReceipt::with_l1_fee(inner, U256::ZERO))
-            }
-            MorphTxType::Eip2930 => {
-                MorphReceipt::Eip2930(MorphTransactionReceipt::with_l1_fee(inner, U256::ZERO))
-            }
-            MorphTxType::Eip1559 => {
-                MorphReceipt::Eip1559(MorphTransactionReceipt::with_l1_fee(inner, U256::ZERO))
-            }
-            MorphTxType::Eip7702 => {
-                MorphReceipt::Eip7702(MorphTransactionReceipt::with_l1_fee(inner, U256::ZERO))
-            }
-            MorphTxType::L1Msg => MorphReceipt::L1Msg(inner),
-            MorphTxType::Morph => {
-                MorphReceipt::Morph(MorphTransactionReceipt::with_l1_fee(inner, U256::ZERO))
             }
         }
     }

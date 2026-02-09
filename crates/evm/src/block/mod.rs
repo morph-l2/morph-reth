@@ -2,17 +2,20 @@
 //!
 //! This module provides block execution functionality for Morph, including:
 //! - [`MorphBlockExecutor`]: The main block executor
+//! - [`MorphBlockExecutorFactory`]: Factory for creating block executors
 //! - [`MorphReceiptBuilder`]: Receipt construction for transactions
 //! - Hardfork application logic (Curie, etc.)
 
 pub(crate) mod curie;
+mod factory;
 mod receipt;
 
+pub(crate) use factory::MorphBlockExecutorFactory;
 pub(crate) use receipt::{
     DefaultMorphReceiptBuilder, MorphReceiptBuilder, MorphReceiptBuilderCtx, MorphTxTokenFeeInfo,
 };
 
-use crate::{MorphBlockExecutionCtx, evm::MorphEvm};
+use crate::evm::MorphEvm;
 use alloy_consensus::Transaction;
 use alloy_consensus::transaction::TxHashRef;
 use alloy_evm::{
@@ -43,10 +46,7 @@ pub(crate) struct MorphBlockExecutor<'a, DB: Database, I> {
     /// Chain specification
     spec: &'a MorphChainSpec,
     /// Receipt builder
-    receipt_builder: DefaultMorphReceiptBuilder,
-    /// Context for block execution
-    #[allow(dead_code)]
-    ctx: MorphBlockExecutionCtx<'a>,
+    receipt_builder: &'a DefaultMorphReceiptBuilder,
     /// Receipts of executed transactions
     receipts: Vec<MorphReceipt>,
     /// Total gas used by executed transactions
@@ -62,14 +62,13 @@ where
 {
     pub(crate) fn new(
         evm: MorphEvm<&'a mut State<DB>, I>,
-        ctx: MorphBlockExecutionCtx<'a>,
         spec: &'a MorphChainSpec,
+        receipt_builder: &'a DefaultMorphReceiptBuilder,
     ) -> Self {
         Self {
             evm,
             spec,
-            receipt_builder: DefaultMorphReceiptBuilder,
-            ctx,
+            receipt_builder,
             receipts: Vec::new(),
             gas_used: 0,
             _phantom: PhantomData,
@@ -179,8 +178,6 @@ where
                 "error occurred at Curie fork: {err:?}"
             )));
         }
-
-        // TODO: Apply EIP-2935 blockhashes contract call when needed
 
         Ok(())
     }

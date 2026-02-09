@@ -7,17 +7,16 @@
 //! - [`MorphEvmConfig`]: Main EVM configuration that implements `BlockExecutorFactory`
 //! - [`MorphEvmFactory`]: Factory for creating Morph EVM instances
 //! - [`MorphBlockAssembler`]: Block assembly logic for payload building
-//! - [`MorphBlockExecutionCtx`]: Execution context for block processing
 //!
 //! # Architecture
 //!
 //! ```text
 //! ┌─────────────────────────────────────────────────────────────────┐
 //! │                      MorphEvmConfig                             │
-//! │  ┌─────────────────────┐  ┌─────────────────────────────────┐  │
-//! │  │   EthEvmConfig      │  │    MorphBlockAssembler          │  │
-//! │  │  (inner config)     │  │  (block building)               │  │
-//! │  └─────────────────────┘  └─────────────────────────────────┘  │
+//! │  ┌─────────────────────────┐  ┌─────────────────────────────┐  │
+//! │  │ MorphBlockExecutorFactory│  │    MorphBlockAssembler     │  │
+//! │  │  (creates executors)    │  │  (block building)          │  │
+//! │  └─────────────────────────┘  └─────────────────────────────┘  │
 //! │                 │                                               │
 //! │                 ▼                                               │
 //! │  ┌─────────────────────────────────────────────────────────┐   │
@@ -25,6 +24,7 @@
 //! │  │   - Executes transactions                               │   │
 //! │  │   - Handles L1 messages                                 │   │
 //! │  │   - Calculates L1 data fee                              │   │
+//! │  │   - Builds receipts with full context                   │   │
 //! │  └─────────────────────────────────────────────────────────┘   │
 //! └─────────────────────────────────────────────────────────────────┘
 //! ```
@@ -34,8 +34,7 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 // reth_ethereum_primitives is explicitly depended on to ensure feature unification
-// with reth-evm-ethereum (which transitively depends on it). We need serde features
-// for NodePrimitives trait bounds.
+// for NodePrimitives trait bounds that require serde features.
 use reth_ethereum_primitives as _;
 
 mod config;
@@ -44,7 +43,7 @@ mod assemble;
 pub use assemble::MorphBlockAssembler;
 mod block;
 mod context;
-pub use context::{MorphBlockExecutionCtx, MorphNextBlockEnvAttributes};
+pub use context::MorphNextBlockEnvAttributes;
 
 mod error;
 pub use error::MorphEvmError;
@@ -54,23 +53,23 @@ use std::sync::Arc;
 use alloy_evm::{
     Database,
     block::{BlockExecutorFactory, BlockExecutorFor},
+    eth::EthBlockExecutionCtx,
     revm::{Inspector, database::State},
 };
 pub use evm::MorphEvmFactory;
 use morph_primitives::{MorphReceipt, MorphTxEnvelope};
 
-use crate::{block::MorphBlockExecutor, evm::MorphEvm};
+use crate::{block::MorphBlockExecutorFactory, evm::MorphEvm};
 use morph_chainspec::MorphChainSpec;
 use morph_revm::evm::MorphContext;
-use reth_evm_ethereum::EthEvmConfig;
 
 pub use morph_revm::{MorphBlockEnv, MorphHaltReason};
 
 /// Morph-related EVM configuration.
 #[derive(Debug, Clone)]
 pub struct MorphEvmConfig {
-    /// Inner evm config
-    pub inner: EthEvmConfig<MorphChainSpec, MorphEvmFactory>,
+    /// Block executor factory
+    executor_factory: MorphBlockExecutorFactory,
 
     /// Block assembler
     pub block_assembler: MorphBlockAssembler,
@@ -79,9 +78,9 @@ pub struct MorphEvmConfig {
 impl MorphEvmConfig {
     /// Create a new [`MorphEvmConfig`] with the given chain spec and EVM factory.
     pub fn new(chain_spec: Arc<MorphChainSpec>, evm_factory: MorphEvmFactory) -> Self {
-        let inner = EthEvmConfig::new_with_evm_factory(chain_spec.clone(), evm_factory);
+        let executor_factory = MorphBlockExecutorFactory::new(chain_spec.clone(), evm_factory);
         Self {
-            inner,
+            executor_factory,
             block_assembler: MorphBlockAssembler::new(chain_spec),
         }
     }
@@ -93,23 +92,23 @@ impl MorphEvmConfig {
 
     /// Returns the chain spec
     pub const fn chain_spec(&self) -> &Arc<MorphChainSpec> {
-        self.inner.chain_spec()
+        self.executor_factory.spec()
     }
 
-    /// Returns the inner EVM config
-    pub const fn inner(&self) -> &EthEvmConfig<MorphChainSpec, MorphEvmFactory> {
-        &self.inner
+    /// Returns the EVM factory
+    pub const fn evm_factory(&self) -> &MorphEvmFactory {
+        self.executor_factory.evm_factory()
     }
 }
 
 impl BlockExecutorFactory for MorphEvmConfig {
     type EvmFactory = MorphEvmFactory;
-    type ExecutionCtx<'a> = MorphBlockExecutionCtx<'a>;
+    type ExecutionCtx<'a> = EthBlockExecutionCtx<'a>;
     type Transaction = MorphTxEnvelope;
     type Receipt = MorphReceipt;
 
     fn evm_factory(&self) -> &Self::EvmFactory {
-        self.inner.executor_factory.evm_factory()
+        self.executor_factory.evm_factory()
     }
 
     fn create_executor<'a, DB, I>(
@@ -121,7 +120,7 @@ impl BlockExecutorFactory for MorphEvmConfig {
         DB: Database + 'a,
         I: Inspector<MorphContext<&'a mut State<DB>>> + 'a,
     {
-        MorphBlockExecutor::new(evm, ctx, self.chain_spec())
+        self.executor_factory.create_executor(evm, ctx)
     }
 }
 

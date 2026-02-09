@@ -18,7 +18,6 @@ morph-revm.workspace = true
 
 reth-chainspec.workspace = true
 reth-evm.workspace = true
-reth-evm-ethereum.workspace = true
 reth-ethereum-primitives = { workspace = true, features = ["serde", "serde-bincode-compat"] }
 reth-revm.workspace = true
 reth-primitives-traits.workspace = true
