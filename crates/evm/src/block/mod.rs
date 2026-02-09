@@ -24,8 +24,7 @@ use curie::apply_curie_hard_fork;
 use morph_chainspec::{MorphChainSpec, MorphHardfork, MorphHardforks};
 use morph_primitives::{MorphReceipt, MorphTxEnvelope};
 use morph_revm::{
-    L1BlockInfo, L1_GAS_PRICE_ORACLE_ADDRESS, MorphHaltReason, TokenFeeInfo,
-    evm::MorphContext,
+    L1_GAS_PRICE_ORACLE_ADDRESS, L1BlockInfo, MorphHaltReason, TokenFeeInfo, evm::MorphContext,
 };
 use reth_chainspec::EthereumHardforks;
 use reth_revm::{DatabaseCommit, Inspector, State, context::result::ResultAndState};
@@ -81,10 +80,7 @@ where
     ///
     /// Returns `U256::ZERO` for L1 message transactions, or the calculated L1 fee
     /// based on the L1 Gas Price Oracle state.
-    fn calculate_l1_fee(
-        &mut self,
-        tx: &MorphTxEnvelope,
-    ) -> Result<U256, BlockExecutionError> {
+    fn calculate_l1_fee(&mut self, tx: &MorphTxEnvelope) -> Result<U256, BlockExecutionError> {
         // L1 message transactions don't pay L1 fees
         if tx.is_l1_msg() {
             return Ok(U256::ZERO);
@@ -100,8 +96,9 @@ where
         let hardfork = self.spec.morph_hardfork_at(block_number, timestamp);
 
         // Fetch L1 block info from the L1 Gas Price Oracle contract
-        let l1_block_info = L1BlockInfo::try_fetch(self.evm.db_mut(), hardfork)
-            .map_err(|e| BlockExecutionError::msg(format!("Failed to fetch L1 block info: {e:?}")))?;
+        let l1_block_info = L1BlockInfo::try_fetch(self.evm.db_mut(), hardfork).map_err(|e| {
+            BlockExecutionError::msg(format!("Failed to fetch L1 block info: {e:?}"))
+        })?;
 
         // Calculate L1 data fee
         Ok(l1_block_info.calculate_tx_l1_cost(rlp_bytes.as_ref(), hardfork))
@@ -135,7 +132,9 @@ where
         let sender = tx.signer_unchecked().unwrap_or_default();
 
         let token_info = TokenFeeInfo::fetch(self.evm.db_mut(), fee_token_id, sender, hardfork)
-            .map_err(|e| BlockExecutionError::msg(format!("Failed to fetch token fee info: {e:?}")))?;
+            .map_err(|e| {
+                BlockExecutionError::msg(format!("Failed to fetch token fee info: {e:?}"))
+            })?;
 
         Ok(token_info.map(|info| MorphTxTokenFeeInfo {
             fee_token_id,
@@ -202,7 +201,9 @@ where
         }
 
         // Execute the transaction
-        self.evm.transact(&tx).map_err(|err| BlockExecutionError::evm(err, *tx.tx().tx_hash()))
+        self.evm
+            .transact(&tx)
+            .map_err(|err| BlockExecutionError::evm(err, *tx.tx().tx_hash()))
     }
 
     fn commit_transaction(
@@ -210,7 +211,6 @@ where
         output: ResultAndState<MorphHaltReason>,
         tx: impl ExecutableTx<Self>,
     ) -> Result<u64, BlockExecutionError> {
-        
         let ResultAndState { result, state } = output;
 
         // Calculate L1 fee for the transaction

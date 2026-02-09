@@ -127,7 +127,12 @@ impl ReceiptBuilder for DefaultMorphReceiptBuilder {
         &self,
         ctx: AlloyReceiptBuilderCtx<'_, Self::Transaction, E>,
     ) -> Self::Receipt {
-        let AlloyReceiptBuilderCtx { tx, result, cumulative_gas_used, .. } = ctx;
+        let AlloyReceiptBuilderCtx {
+            tx,
+            result,
+            cumulative_gas_used,
+            ..
+        } = ctx;
 
         let inner = Receipt {
             status: result.is_success().into(),

@@ -1,5 +1,6 @@
 use crate::{
-    MorphEvmConfig, MorphEvmFactory, block::DefaultMorphReceiptBuilder, context::MorphBlockExecutionCtx,
+    MorphEvmConfig, MorphEvmFactory, block::DefaultMorphReceiptBuilder,
+    context::MorphBlockExecutionCtx,
 };
 use alloy_evm::{block::BlockExecutionError, eth::EthBlockExecutorFactory};
 use morph_chainspec::MorphChainSpec;

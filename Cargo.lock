@@ -4514,6 +4514,7 @@ dependencies = [
  "morph-primitives",
  "morph-revm",
  "reth-chainspec",
+ "reth-ethereum-primitives",
  "reth-evm",
  "reth-evm-ethereum",
  "reth-primitives-traits",

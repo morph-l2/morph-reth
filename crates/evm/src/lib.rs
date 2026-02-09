@@ -29,13 +29,14 @@
 //! └─────────────────────────────────────────────────────────────────┘
 //! ```
 //!
-//! # Features
-//!
-//! - `serde-bincode-compat`: Enable `ConfigureEvm` implementation for reth integration
-//! - `engine`: Enable engine API types
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
+
+// reth_ethereum_primitives is explicitly depended on to ensure feature unification
+// with reth-evm-ethereum (which transitively depends on it). We need serde features
+// for NodePrimitives trait bounds.
+use reth_ethereum_primitives as _;
 
 mod config;
 

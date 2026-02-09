@@ -30,7 +30,8 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg), allow(unexpected_cfgs))]
 
-#[cfg(feature = "serde-bincode-compat")]
+// reth-ethereum-primitives is only used when the reth-codec feature is enabled
+#[cfg(feature = "reth-codec")]
 use reth_ethereum_primitives as _;
 
 pub mod header;
@@ -57,13 +58,10 @@ pub use transaction::{
 };
 
 /// A [`NodePrimitives`] implementation for Morph.
-///
-/// This implementation is only available when the `serde-bincode-compat` feature is enabled.
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct MorphPrimitives;
 
-#[cfg(feature = "serde-bincode-compat")]
 impl reth_primitives_traits::NodePrimitives for MorphPrimitives {
     type Block = Block;
     type BlockHeader = MorphHeader;
