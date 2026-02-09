@@ -235,12 +235,15 @@ fn build_morph_tx_from_request(
 /// Builds a [`TxMorph`] from an existing transaction environment.
 ///
 /// Used for encoding transactions for L1 fee calculation.
+/// Extracts reference and memo from the transaction environment if present.
 fn build_morph_tx_from_env<Spec>(
     tx_env: &MorphTxEnv,
     fee_token_id: U64,
     fee_limit: U256,
     access_list: AccessList,
     evm_env: &EvmEnv<Spec, MorphBlockEnv>,
+    reference: Option<alloy_primitives::B256>,
+    memo: Option<alloy_primitives::Bytes>,
 ) -> Result<TxMorph, EthApiError> {
     let fee_token_id = u16::try_from(fee_token_id.to::<u64>())
         .map_err(|_| EthApiError::InvalidParams("invalid token".to_string()))?;
@@ -249,6 +252,13 @@ fn build_morph_tx_from_env<Spec>(
     let to = tx_env.kind();
     let max_fee_per_gas = tx_env.max_fee_per_gas();
     let max_priority_fee_per_gas = tx_env.max_priority_fee_per_gas().unwrap_or_default();
+
+    // Determine version based on presence of reference or memo
+    let version = if reference.is_some() || memo.is_some() {
+        morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_1
+    } else {
+        morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_0
+    };
 
     Ok(TxMorph {
         chain_id,
@@ -262,9 +272,9 @@ fn build_morph_tx_from_env<Spec>(
         input,
         fee_token_id,
         fee_limit,
-        version: morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_1,
-        reference: None,
-        memo: None,
+        version,
+        reference,
+        memo,
     })
 }
 
@@ -280,8 +290,17 @@ fn encode_tx_for_l1_fee<Spec>(
     if tx_env.fee_token_id.unwrap_or_default() > 0 {
         let fee_token_id = U64::from(tx_env.fee_token_id.unwrap_or_default());
         let fee_limit = tx_env.fee_limit.unwrap_or_default();
-        let morph_tx =
-            build_morph_tx_from_env(tx_env, fee_token_id, fee_limit, access_list, evm_env)?;
+        let reference = tx_env.reference;
+        let memo = tx_env.memo.clone();
+        let morph_tx = build_morph_tx_from_env(
+            tx_env,
+            fee_token_id,
+            fee_limit,
+            access_list,
+            evm_env,
+            reference,
+            memo,
+        )?;
         Ok(encode_2718(morph_tx))
     } else {
         let envelope = inner
