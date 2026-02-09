@@ -172,8 +172,9 @@ impl TxMorph {
     /// Validates the MorphTx version and its associated field requirements.
     ///
     /// Rules:
-    /// - Version 0 (legacy format): FeeTokenID must be > 0
-    /// - Version 1 (with Reference/Memo): FeeTokenID, FeeLimit, Reference, Memo are all optional
+    /// - Version 0 (legacy format): FeeTokenID must be > 0, Reference and Memo must not be set
+    /// - Version 1 (with Reference/Memo): FeeTokenID, Reference, Memo are all optional;
+    ///   if FeeTokenID is 0, FeeLimit must not be set
     /// - Other versions: not supported
     pub fn validate_version(&self) -> Result<(), &'static str> {
         match self.version {
@@ -182,10 +183,21 @@ impl TxMorph {
                 if self.fee_token_id == 0 {
                     return Err("version 0 MorphTx requires FeeTokenID > 0");
                 }
+                // Version 0 does not support Reference field
+                if self.reference.is_some() {
+                    return Err("version 0 MorphTx does not support Reference field");
+                }
+                // Version 0 does not support Memo field
+                if self.memo.as_ref().is_some_and(|m| !m.is_empty()) {
+                    return Err("version 0 MorphTx does not support Memo field");
+                }
             }
             MORPH_TX_VERSION_1 => {
-                // Version 1: FeeTokenID, FeeLimit, Reference, Memo are all optional
-                // No additional validation needed
+                // Version 1: FeeTokenID, Reference, Memo are all optional
+                // If FeeTokenID is 0, FeeLimit must not be set
+                if self.fee_token_id == 0 && self.fee_limit > U256::ZERO {
+                    return Err("version 1 MorphTx cannot have FeeLimit when FeeTokenID is 0");
+                }
             }
             _ => {
                 return Err("unsupported MorphTx version");
@@ -948,6 +960,63 @@ mod tests {
             invalid_v0.validate().unwrap_err(),
             "version 0 MorphTx requires FeeTokenID > 0"
         );
+
+        // Invalid: V0 with Reference
+        let v0_with_ref = TxMorph {
+            max_fee_per_gas: 100,
+            max_priority_fee_per_gas: 50,
+            version: MORPH_TX_VERSION_0,
+            fee_token_id: 1,
+            reference: Some(B256::from([0x42; 32])),
+            ..Default::default()
+        };
+        assert!(v0_with_ref.validate().is_err());
+        assert_eq!(
+            v0_with_ref.validate().unwrap_err(),
+            "version 0 MorphTx does not support Reference field"
+        );
+
+        // Invalid: V0 with Memo
+        let v0_with_memo = TxMorph {
+            max_fee_per_gas: 100,
+            max_priority_fee_per_gas: 50,
+            version: MORPH_TX_VERSION_0,
+            fee_token_id: 1,
+            memo: Some(Bytes::from(vec![0xca, 0xfe])),
+            ..Default::default()
+        };
+        assert!(v0_with_memo.validate().is_err());
+        assert_eq!(
+            v0_with_memo.validate().unwrap_err(),
+            "version 0 MorphTx does not support Memo field"
+        );
+
+        // Invalid: V1 with FeeLimit but no FeeTokenID
+        let v1_fee_limit_no_token = TxMorph {
+            max_fee_per_gas: 100,
+            max_priority_fee_per_gas: 50,
+            version: MORPH_TX_VERSION_1,
+            fee_token_id: 0,
+            fee_limit: U256::from(1000u64), // Invalid when fee_token_id is 0
+            ..Default::default()
+        };
+        assert!(v1_fee_limit_no_token.validate().is_err());
+        assert_eq!(
+            v1_fee_limit_no_token.validate().unwrap_err(),
+            "version 1 MorphTx cannot have FeeLimit when FeeTokenID is 0"
+        );
+
+        // Valid: V1 with FeeTokenID=0 and FeeLimit=0
+        let v1_no_fee = TxMorph {
+            max_fee_per_gas: 100,
+            max_priority_fee_per_gas: 50,
+            version: MORPH_TX_VERSION_1,
+            fee_token_id: 0,
+            fee_limit: U256::ZERO,
+            reference: Some(B256::from([0x42; 32])),
+            ..Default::default()
+        };
+        assert!(v1_no_fee.validate().is_ok());
 
         // Invalid: unsupported version
         let invalid_version = TxMorph {
