@@ -4783,6 +4783,7 @@ dependencies = [
  "reth-chainspec",
  "reth-ethereum-primitives",
  "reth-evm",
+ "reth-evm-ethereum",
  "reth-primitives-traits",
  "reth-revm",
  "reth-rpc-eth-api",
