@@ -33,9 +33,9 @@ pub struct MorphTransactionReceipt<T = Log> {
     /// This is the cost of posting the transaction data to L1.
     #[cfg_attr(
         feature = "serde",
-        serde(default, skip_serializing_if = "Option::is_none")
+        serde(default, skip_serializing_if = "U256::is_zero")
     )]
-    pub l1_fee: Option<U256>,
+    pub l1_fee: U256,
 
     /// The version of the Morph transaction format.
     /// Only present for TxMorph.
@@ -100,7 +100,7 @@ impl<T> MorphTransactionReceipt<T> {
     pub const fn new(inner: Receipt<T>) -> Self {
         Self {
             inner,
-            l1_fee: None,
+            l1_fee: U256::ZERO,
             version: None,
             fee_token_id: None,
             fee_rate: None,
@@ -115,7 +115,7 @@ impl<T> MorphTransactionReceipt<T> {
     pub const fn with_l1_fee(inner: Receipt<T>, l1_fee: U256) -> Self {
         Self {
             inner,
-            l1_fee: Some(l1_fee),
+            l1_fee,
             version: None,
             fee_token_id: None,
             fee_rate: None,
@@ -137,7 +137,7 @@ impl<T> MorphTransactionReceipt<T> {
     ) -> Self {
         Self {
             inner,
-            l1_fee: Some(l1_fee),
+            l1_fee,
             version: None,
             fee_token_id: Some(fee_token_id),
             fee_rate: Some(fee_rate),
@@ -163,7 +163,7 @@ impl<T> MorphTransactionReceipt<T> {
     ) -> Self {
         Self {
             inner,
-            l1_fee: Some(l1_fee),
+            l1_fee,
             version: Some(version),
             fee_token_id: Some(fee_token_id),
             fee_rate: Some(fee_rate),
@@ -187,9 +187,9 @@ impl<T> MorphTransactionReceipt<T> {
         self.reference.is_some()
     }
 
-    /// Returns the L1 fee, defaulting to zero if not set.
-    pub fn l1_fee_or_zero(&self) -> U256 {
-        self.l1_fee.unwrap_or(U256::ZERO)
+    /// Returns the L1 fee.
+    pub const fn l1_fee(&self) -> U256 {
+        self.l1_fee
     }
 
     /// Returns the version, defaulting to 0 if not set.
@@ -327,7 +327,7 @@ mod tests {
 
         assert!(receipt.status());
         assert_eq!(receipt.cumulative_gas_used(), 21000);
-        assert!(receipt.l1_fee.is_none());
+        assert_eq!(receipt.l1_fee, U256::ZERO);
         assert!(receipt.fee_token_id.is_none());
         assert!(!receipt.is_morph_tx());
     }
@@ -342,8 +342,8 @@ mod tests {
         let l1_fee = U256::from(1000000);
         let receipt = MorphTransactionReceipt::with_l1_fee(inner, l1_fee);
 
-        assert_eq!(receipt.l1_fee, Some(l1_fee));
-        assert_eq!(receipt.l1_fee_or_zero(), l1_fee);
+        assert_eq!(receipt.l1_fee, l1_fee);
+        assert_eq!(receipt.l1_fee(), l1_fee);
         assert!(!receipt.is_morph_tx());
     }
 

@@ -31,13 +31,12 @@
 //!
 //! # Features
 //!
-//! - `reth-codec`: Enable `ConfigureEvm` implementation for reth integration
+//! - `serde-bincode-compat`: Enable `ConfigureEvm` implementation for reth integration
 //! - `engine`: Enable engine API types
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-#[cfg(feature = "reth-codec")]
 mod config;
 
 mod assemble;

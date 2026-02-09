@@ -4,8 +4,10 @@
 //! - [`MorphTransactionReceipt`]: Receipt with L1 fee and Morph transaction fields
 //! - [`MorphReceipt`]: Typed receipt enum for different transaction types
 
+mod envelope;
 #[allow(clippy::module_inception)]
 mod receipt;
+pub use envelope::MorphReceiptEnvelope;
 pub use receipt::{MorphReceiptWithBloom, MorphTransactionReceipt};
 
 use crate::transaction::envelope::MorphTxType;
@@ -71,15 +73,15 @@ impl MorphReceipt {
         }
     }
 
-    /// Returns the L1 fee if present.
-    pub fn l1_fee(&self) -> Option<alloy_primitives::U256> {
+    /// Returns the L1 fee for the receipt.
+    pub fn l1_fee(&self) -> alloy_primitives::U256 {
         match self {
             Self::Legacy(r)
             | Self::Eip2930(r)
             | Self::Eip1559(r)
             | Self::Eip7702(r)
             | Self::Morph(r) => r.l1_fee,
-            Self::L1Msg(_) => None,
+            Self::L1Msg(_) => alloy_primitives::U256::ZERO,
         }
     }
 
@@ -412,6 +414,9 @@ impl InMemorySize for MorphReceipt {
     }
 }
 
+#[cfg(feature = "serde-bincode-compat")]
+impl reth_primitives_traits::serde_bincode_compat::RlpBincode for MorphReceipt {}
+
 /// Calculates the receipt root for a header.
 ///
 /// This function computes the Merkle root of receipts using the standard encoding
@@ -483,7 +488,7 @@ mod compact {
                     | MorphReceipt::Eip1559(r)
                     | MorphReceipt::Eip7702(r)
                     | MorphReceipt::Morph(r) => (
-                        r.l1_fee,
+                        (r.l1_fee != U256::ZERO).then_some(r.l1_fee),
                         r.version.map(u64::from),
                         r.fee_token_id.map(u64::from),
                         r.fee_rate,
@@ -542,7 +547,7 @@ mod compact {
 
             let morph_receipt = MorphTransactionReceipt {
                 inner,
-                l1_fee,
+                l1_fee: l1_fee.unwrap_or_default(),
                 version: version.map(|v| v as u8),
                 fee_token_id: fee_token_id.map(|id| id as u16),
                 fee_rate,
@@ -666,10 +671,10 @@ mod tests {
     #[test]
     fn test_receipt_l1_fee() {
         let receipt = create_test_receipt();
-        assert_eq!(receipt.l1_fee(), Some(U256::from(1000)));
+        assert_eq!(receipt.l1_fee(), U256::from(1000));
 
         let l1_msg = MorphReceipt::L1Msg(Receipt::default());
-        assert_eq!(l1_msg.l1_fee(), None);
+        assert_eq!(l1_msg.l1_fee(), U256::ZERO);
     }
 
     #[test]

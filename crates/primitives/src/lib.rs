@@ -26,22 +26,12 @@
 //!
 //! [`MorphPrimitives`] implements reth's `NodePrimitives` trait, providing
 //! all the type bindings needed for a Morph node.
-//!
-//! Note: `NodePrimitives` implementation requires the `reth-codec` feature.
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg), allow(unexpected_cfgs))]
 
-// Suppress unused_crate_dependencies warnings for dependencies used in submodules
-use alloy_consensus as _;
-use alloy_eips as _;
-use alloy_primitives as _;
-use alloy_rlp as _;
-use bytes as _;
-#[cfg(feature = "reth")]
+#[cfg(feature = "serde-bincode-compat")]
 use reth_ethereum_primitives as _;
-#[cfg(feature = "reth-codec")]
-use reth_zstd_compressors as _;
 
 pub mod header;
 pub mod receipt;
@@ -57,7 +47,9 @@ pub type Block = alloy_consensus::Block<MorphTxEnvelope, MorphHeader>;
 pub type BlockBody = alloy_consensus::BlockBody<MorphTxEnvelope, MorphHeader>;
 
 // Re-export receipt types
-pub use receipt::{MorphReceipt, MorphReceiptWithBloom, MorphTransactionReceipt};
+pub use receipt::{
+    MorphReceipt, MorphReceiptEnvelope, MorphReceiptWithBloom, MorphTransactionReceipt,
+};
 
 // Re-export transaction types
 pub use transaction::{
@@ -65,11 +57,13 @@ pub use transaction::{
 };
 
 /// A [`NodePrimitives`] implementation for Morph.
+///
+/// This implementation is only available when the `serde-bincode-compat` feature is enabled.
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct MorphPrimitives;
 
-#[cfg(feature = "reth-codec")]
+#[cfg(feature = "serde-bincode-compat")]
 impl reth_primitives_traits::NodePrimitives for MorphPrimitives {
     type Block = Block;
     type BlockHeader = MorphHeader;

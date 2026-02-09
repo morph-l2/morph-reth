@@ -18,7 +18,7 @@ use crate::{
     error::MorphHaltReason,
     evm::MorphContext,
     l1block::L1BlockInfo,
-    token_fee::{TokenFeeInfo, get_mapping_account_slot},
+    token_fee::{TokenFeeInfo, mapping_slot_for},
     tx::MorphTxExt,
 };
 
@@ -329,9 +329,8 @@ where
 
         // Fetch token fee info from Token Registry
         let spec = evm.ctx_ref().cfg().spec();
-        let token_fee_info =
-            TokenFeeInfo::try_fetch(evm.ctx_mut().db_mut(), token_id, caller, spec)?
-                .ok_or(MorphInvalidTransaction::TokenNotRegistered(token_id))?;
+        let token_fee_info = TokenFeeInfo::fetch(evm.ctx_mut().db_mut(), token_id, caller, spec)?
+            .ok_or(MorphInvalidTransaction::TokenNotRegistered(token_id))?;
 
         // Check if token is active
         if !token_fee_info.is_active {
@@ -339,7 +338,7 @@ where
         }
 
         // Calculate token amount required for total fee
-        let token_amount_required = token_fee_info.calculate_token_amount(reimburse_eth);
+        let token_amount_required = token_fee_info.eth_to_token_amount(reimburse_eth);
 
         // Get mutable access to journal components
         let journal = evm.ctx().journal_mut();
@@ -391,7 +390,7 @@ where
 
         // Fetch token fee info from Token Registry
         let token_fee_info =
-            TokenFeeInfo::try_fetch(journal.db_mut(), token_id, caller_addr, hardfork)?
+            TokenFeeInfo::fetch(journal.db_mut(), token_id, caller_addr, hardfork)?
                 .ok_or(MorphInvalidTransaction::TokenNotRegistered(token_id))?;
 
         // Check if token is active
@@ -422,7 +421,7 @@ where
         let total_eth_fee = l2_gas_fee.saturating_add(l1_data_fee);
 
         // Calculate token amount required for total fee
-        let token_amount_required = token_fee_info.calculate_token_amount(total_eth_fee);
+        let token_amount_required = token_fee_info.eth_to_token_amount(total_eth_fee);
 
         // Determine fee limit
         let mut fee_limit = tx.fee_limit.unwrap_or_default();
@@ -526,7 +525,7 @@ where
     DB: alloy_evm::Database,
 {
     // Sub amount
-    let from_storage_slot = get_mapping_account_slot(token_balance_slot, from);
+    let from_storage_slot = mapping_slot_for(token_balance_slot, from);
     let balance = journal.sload(token, from_storage_slot)?;
     journal.sstore(
         token,
@@ -535,7 +534,7 @@ where
     )?;
 
     // Add amount
-    let to_storage_slot = get_mapping_account_slot(token_balance_slot, to);
+    let to_storage_slot = mapping_slot_for(token_balance_slot, to);
     let balance = journal.sload(token, to_storage_slot)?;
     journal.sstore(token, to_storage_slot, balance.saturating_add(token_amount))?;
     Ok((from_storage_slot, to_storage_slot))
