@@ -141,6 +141,8 @@ impl TryIntoTxEnv<MorphTxEnv, MorphBlockEnv> for MorphTransactionRequest {
     ) -> Result<MorphTxEnv, Self::Err> {
         let fee_token_id = self.fee_token_id;
         let fee_limit = self.fee_limit;
+        let reference = self.reference;
+        let memo = self.memo;
         let inner = self.inner;
         let access_list = inner.access_list.clone().unwrap_or_default();
 
@@ -158,6 +160,8 @@ impl TryIntoTxEnv<MorphTxEnv, MorphBlockEnv> for MorphTransactionRequest {
             None => None,
         };
         tx_env.fee_limit = fee_limit;
+        tx_env.reference = reference;
+        tx_env.memo = memo;
         if tx_env.fee_token_id.unwrap_or_default() > 0 {
             tx_env.inner.tx_type = morph_primitives::MORPH_TX_TYPE_ID;
         }
