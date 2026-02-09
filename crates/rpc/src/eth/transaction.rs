@@ -209,6 +209,9 @@ fn build_morph_tx_from_request(
         input,
         fee_token_id,
         fee_limit,
+        version: morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_1,
+        reference: None,
+        memo: None,
     })
 }
 
@@ -242,6 +245,9 @@ fn build_morph_tx_from_env<Spec>(
         input,
         fee_token_id,
         fee_limit,
+        version: morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_1,
+        reference: None,
+        memo: None,
     })
 }
 
