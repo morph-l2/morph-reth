@@ -128,7 +128,9 @@ where
         // Fetch token fee info from L2TokenRegistry contract
         // Note: We use the transaction sender as the caller address
         // This is needed to check token balance when validating MorphTx
-        let sender = tx.signer_unchecked().unwrap_or_default();
+        let sender = tx
+            .signer_unchecked()
+            .map_err(|_| BlockExecutionError::msg("Failed to extract signer from MorphTx"))?;
 
         let token_info = TokenFeeInfo::fetch(self.evm.db_mut(), fee_token_id, sender, hardfork)
             .map_err(|e| {
