@@ -116,8 +116,12 @@ where
             return Ok(None);
         }
 
-        let fee_token_id = tx.fee_token_id().unwrap(); // Safe because we checked is_morph_tx()
-        let fee_limit = tx.fee_limit().unwrap(); // Safe because we checked is_morph_tx()
+        let fee_token_id = tx
+            .fee_token_id()
+            .ok_or_else(|| BlockExecutionError::msg("MorphTx missing fee_token_id"))?;
+        let fee_limit = tx
+            .fee_limit()
+            .ok_or_else(|| BlockExecutionError::msg("MorphTx missing fee_limit"))?;
 
         // Determine the current hardfork based on block number and timestamp
         let block = self.evm.block();
