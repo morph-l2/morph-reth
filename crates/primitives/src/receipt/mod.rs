@@ -646,7 +646,7 @@ mod tests {
             logs: vec![],
         };
 
-        MorphReceipt::Morph(MorphTransactionReceipt::with_morph_tx(
+        MorphReceipt::Morph(MorphTransactionReceipt::with_morph_tx_v0(
             inner,
             U256::from(2000),   // l1_fee
             1,                  // fee_token_id

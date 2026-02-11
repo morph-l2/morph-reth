@@ -126,8 +126,8 @@ impl<T> MorphTransactionReceipt<T> {
         }
     }
 
-    /// Creates a new receipt with TxMorph fields (legacy version without reference/memo).
-    pub const fn with_morph_tx(
+    /// Creates a new receipt with TxMorph V0 fields (legacy version without reference/memo).
+    pub const fn with_morph_tx_v0(
         inner: Receipt<T>,
         l1_fee: U256,
         fee_token_id: u16,
@@ -148,9 +148,9 @@ impl<T> MorphTransactionReceipt<T> {
         }
     }
 
-    /// Creates a new receipt with all TxMorph fields including version, reference, and memo.
+    /// Creates a new receipt with TxMorph V1 fields including version, reference, and memo.
     #[allow(clippy::too_many_arguments)]
-    pub const fn with_morph_tx_full(
+    pub const fn with_morph_tx_v1(
         inner: Receipt<T>,
         l1_fee: U256,
         version: u8,
@@ -348,7 +348,7 @@ mod tests {
     }
 
     #[test]
-    fn test_morph_receipt_with_morph_tx() {
+    fn test_morph_receipt_with_morph_tx_v0() {
         let inner: Receipt<Log> = Receipt {
             status: true.into(),
             cumulative_gas_used: 21000,
@@ -360,7 +360,7 @@ mod tests {
         let token_scale = U256::from(18);
         let fee_limit = U256::from(5000000);
 
-        let receipt = MorphTransactionReceipt::with_morph_tx(
+        let receipt = MorphTransactionReceipt::with_morph_tx_v0(
             inner,
             l1_fee,
             fee_token_id,
