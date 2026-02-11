@@ -192,6 +192,11 @@ fn morph_envelope_from_ethereum(
 ///
 /// Extracts fields from the request and constructs a Morph transaction
 /// with the specified fee token ID, fee limit, reference, and memo.
+///
+/// Version auto-detection rules:
+/// - (Reference present) || (Memo present) → Version 1
+/// - (FeeTokenID > 0) && (no Reference) && (no Memo) → Version 0
+/// - (FeeTokenID == 0) && (no Reference) && (no Memo) → Error
 fn build_morph_tx_from_request(
     req: &alloy_rpc_types_eth::TransactionRequest,
     fee_token_id: U64,
@@ -211,11 +216,20 @@ fn build_morph_tx_from_request(
     let input = req.input.clone().into_input().unwrap_or_default();
     let to = req.to.unwrap_or(TxKind::Create);
 
-    // Determine version based on presence of reference or memo
-    let version = if reference.is_some() || memo.is_some() {
+    // Determine version based on fee_token_id, reference, and memo
+    // Rules follow go-ethereum's validateMorphTxVersion logic
+    let has_reference = reference.is_some();
+    let has_memo = memo.as_ref().is_some_and(|m| !m.is_empty());
+
+    let version = if has_reference || has_memo {
+        // Has reference or memo → Version 1
         morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_1
-    } else {
+    } else if fee_token_id > 0 {
+        // Has fee token but no reference/memo → Version 0
         morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_0
+    } else {
+        // FeeTokenID == 0 and no reference/memo → cannot determine version
+        return Err("cannot determine MorphTx version: FeeTokenID=0 without Reference or Memo");
     };
 
     Ok(TxMorph {
@@ -240,6 +254,11 @@ fn build_morph_tx_from_request(
 ///
 /// Used for encoding transactions for L1 fee calculation.
 /// Extracts reference and memo from the transaction environment if present.
+///
+/// Version auto-detection rules:
+/// - (Reference present) || (Memo present) → Version 1
+/// - (FeeTokenID > 0) && (no Reference) && (no Memo) → Version 0
+/// - (FeeTokenID == 0) && (no Reference) && (no Memo) → Error
 fn build_morph_tx_from_env<Spec>(
     tx_env: &MorphTxEnv,
     fee_token_id: U64,
@@ -257,11 +276,22 @@ fn build_morph_tx_from_env<Spec>(
     let max_fee_per_gas = tx_env.max_fee_per_gas();
     let max_priority_fee_per_gas = tx_env.max_priority_fee_per_gas().unwrap_or_default();
 
-    // Determine version based on presence of reference or memo
-    let version = if reference.is_some() || memo.is_some() {
+    // Determine version based on fee_token_id, reference, and memo
+    // Rules follow go-ethereum's validateMorphTxVersion logic
+    let has_reference = reference.is_some();
+    let has_memo = memo.as_ref().is_some_and(|m| !m.is_empty());
+
+    let version = if has_reference || has_memo {
+        // Has reference or memo → Version 1
         morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_1
-    } else {
+    } else if fee_token_id > 0 {
+        // Has fee token but no reference/memo → Version 0
         morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_0
+    } else {
+        // FeeTokenID == 0 and no reference/memo → cannot determine version
+        return Err(EthApiError::InvalidParams(
+            "cannot determine MorphTx version: FeeTokenID=0 without Reference or Memo".to_string(),
+        ));
     };
 
     Ok(TxMorph {
