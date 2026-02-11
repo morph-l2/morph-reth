@@ -64,9 +64,19 @@ impl FromConsensusTx<MorphTxEnvelope> for MorphRpcTransaction {
 /// Converts a [`MorphTransactionRequest`] into a simulated transaction envelope.
 ///
 /// Handles both standard Ethereum transactions and Morph-specific fee token transactions.
+/// A MorphTx is constructed when:
+/// - fee_token_id > 0, OR
+/// - reference is present, OR
+/// - memo is present and non-empty
 impl TryIntoSimTx<MorphTxEnvelope> for MorphTransactionRequest {
     fn try_into_sim_tx(self) -> Result<MorphTxEnvelope, alloy_consensus::error::ValueError<Self>> {
-        if let Some(fee_token_id) = self.fee_token_id.filter(|id| id.to::<u64>() > 0) {
+        let has_fee_token = self.fee_token_id.is_some_and(|id| id.to::<u64>() > 0);
+        let has_reference = self.reference.is_some();
+        let has_memo = self.memo.as_ref().is_some_and(|m| !m.is_empty());
+
+        // Build MorphTx if any Morph-specific field is present
+        if has_fee_token || has_reference || has_memo {
+            let fee_token_id = self.fee_token_id.unwrap_or_default();
             let reference = self.reference;
             let memo = self.memo.clone();
             let morph_tx = build_morph_tx_from_request(
@@ -81,6 +91,7 @@ impl TryIntoSimTx<MorphTxEnvelope> for MorphTransactionRequest {
             return Ok(MorphTxEnvelope::Morph(morph_tx.into_signed(signature)));
         }
 
+        // Standard Ethereum transaction
         let inner = self.inner.clone();
         let envelope = inner.build_typed_simulate_transaction().map_err(|err| {
             err.map(|inner| Self {
@@ -99,12 +110,22 @@ impl TryIntoSimTx<MorphTxEnvelope> for MorphTransactionRequest {
 /// Builds and signs a transaction from an RPC request.
 ///
 /// Supports both standard Ethereum transactions and Morph fee token transactions.
+/// A MorphTx is constructed when:
+/// - fee_token_id > 0, OR
+/// - reference is present, OR
+/// - memo is present and non-empty
 impl SignableTxRequest<MorphTxEnvelope> for MorphTransactionRequest {
     async fn try_build_and_sign(
         self,
         signer: impl TxSigner<Signature> + Send,
     ) -> Result<MorphTxEnvelope, SignTxRequestError> {
-        if let Some(fee_token_id) = self.fee_token_id.filter(|id| id.to::<u64>() > 0) {
+        let has_fee_token = self.fee_token_id.is_some_and(|id| id.to::<u64>() > 0);
+        let has_reference = self.reference.is_some();
+        let has_memo = self.memo.as_ref().is_some_and(|m| !m.is_empty());
+
+        // Build MorphTx if any Morph-specific field is present
+        if has_fee_token || has_reference || has_memo {
+            let fee_token_id = self.fee_token_id.unwrap_or_default();
             let mut morph_tx = build_morph_tx_from_request(
                 &self.inner,
                 fee_token_id,
@@ -117,6 +138,7 @@ impl SignableTxRequest<MorphTxEnvelope> for MorphTransactionRequest {
             return Ok(MorphTxEnvelope::Morph(morph_tx.into_signed(signature)));
         }
 
+        // Standard Ethereum transaction
         let mut tx = self
             .inner
             .build_typed_tx()
