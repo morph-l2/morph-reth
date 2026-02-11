@@ -376,6 +376,9 @@ impl MorphPayloadBuilderCtx {
             info.cumulative_gas_used += gas_used;
             gas_spent_by_transactions.push(gas_used);
 
+            // Increment transaction count
+            info.transaction_count += 1;
+
             // Store the original transaction bytes for ExecutableL2Data
             executed_txs.push(tx_bytes.clone());
         }
@@ -407,12 +410,17 @@ impl MorphPayloadBuilderCtx {
                 return Ok(Some(()));
             }
 
-            // Check if the breaker triggers (time/gas/DA limits)
-            if breaker.should_break(info.cumulative_gas_used, info.cumulative_da_bytes_used) {
+            // Check if the breaker triggers (time/gas/DA/tx count limits)
+            if breaker.should_break(
+                info.cumulative_gas_used,
+                info.cumulative_da_bytes_used,
+                info.transaction_count,
+            ) {
                 tracing::debug!(
                     target: "payload_builder",
                     cumulative_gas_used = info.cumulative_gas_used,
                     cumulative_da_bytes_used = info.cumulative_da_bytes_used,
+                    transaction_count = info.transaction_count,
                     elapsed = ?breaker.elapsed(),
                     "breaker triggered, stopping pool transaction execution"
                 );
@@ -487,6 +495,7 @@ impl MorphPayloadBuilderCtx {
             // Update execution info
             info.cumulative_gas_used += gas_used;
             info.cumulative_da_bytes_used += tx.length() as u64;
+            info.transaction_count += 1;
 
             // Calculate fees: effective_tip * gas_used
             let effective_tip = tx.effective_tip_per_gas(base_fee).unwrap_or_default();
@@ -513,6 +522,8 @@ struct ExecutionInfo {
     total_fees: U256,
     /// Next L1 message queue index.
     next_l1_message_index: u64,
+    /// Number of transactions executed (including both sequencer and pool transactions).
+    transaction_count: u64,
 }
 
 impl ExecutionInfo {
@@ -523,6 +534,7 @@ impl ExecutionInfo {
             cumulative_da_bytes_used: 0,
             total_fees: U256::ZERO,
             next_l1_message_index,
+            transaction_count: 0,
         }
     }
 

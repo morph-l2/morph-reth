@@ -583,6 +583,35 @@ mod compact {
     }
 }
 
+/// Database storage implementations for [`MorphReceipt`].
+///
+/// These implementations allow `MorphReceipt` to be stored in reth's database
+/// using the Compact codec for compression.
+#[cfg(feature = "reth-codec")]
+mod db_impl {
+    use super::MorphReceipt;
+    use reth_codecs::Compact;
+    use reth_db_api::{
+        DatabaseError,
+        table::{Compress, Decompress},
+    };
+
+    impl Compress for MorphReceipt {
+        type Compressed = Vec<u8>;
+
+        fn compress_to_buf<B: bytes::BufMut + AsMut<[u8]>>(&self, buf: &mut B) {
+            let _ = Compact::to_compact(self, buf);
+        }
+    }
+
+    impl Decompress for MorphReceipt {
+        fn decompress(value: &[u8]) -> Result<Self, DatabaseError> {
+            let (obj, _) = Compact::from_compact(value, value.len());
+            Ok(obj)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

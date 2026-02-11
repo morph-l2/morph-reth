@@ -60,6 +60,7 @@
 use reth_ethereum_primitives as _;
 
 mod config;
+mod engine;
 
 mod assemble;
 pub use assemble::MorphBlockAssembler;

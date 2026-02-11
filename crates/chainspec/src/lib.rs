@@ -66,6 +66,8 @@ pub use hardfork::{MorphHardfork, MorphHardforks};
 pub use morph::MORPH_MAINNET;
 pub use morph_hoodi::MORPH_HOODI;
 pub use spec::MorphChainSpec;
+#[cfg(feature = "cli")]
+pub use spec::MorphChainSpecParser;
 
 // Convenience re-export of the chain spec provider.
 pub use reth_chainspec::ChainSpecProvider;
