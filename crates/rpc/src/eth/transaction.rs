@@ -77,6 +77,7 @@ impl TryIntoSimTx<MorphTxEnvelope> for MorphTransactionRequest {
         // Try to build a MorphTx; returns None if this should be a standard Ethereum tx
         let morph_tx_result = try_build_morph_tx_from_request(
             &self.inner,
+            self.version,
             self.fee_token_id.unwrap_or_default(),
             self.fee_limit.unwrap_or_default(),
             self.reference,
@@ -94,6 +95,7 @@ impl TryIntoSimTx<MorphTxEnvelope> for MorphTransactionRequest {
                 let envelope = inner.build_typed_simulate_transaction().map_err(|err| {
                     err.map(|inner| Self {
                         inner,
+                        version: self.version,
                         fee_token_id: self.fee_token_id,
                         fee_limit: self.fee_limit,
                         reference: self.reference,
@@ -119,6 +121,7 @@ impl SignableTxRequest<MorphTxEnvelope> for MorphTransactionRequest {
         // Try to build a MorphTx; returns None if this should be a standard Ethereum tx
         let morph_tx_result = try_build_morph_tx_from_request(
             &self.inner,
+            self.version,
             self.fee_token_id.unwrap_or_default(),
             self.fee_limit.unwrap_or_default(),
             self.reference,
@@ -157,6 +160,7 @@ impl TryIntoTxEnv<MorphTxEnv, MorphBlockEnv> for MorphTransactionRequest {
         self,
         evm_env: &EvmEnv<Spec, MorphBlockEnv>,
     ) -> Result<MorphTxEnv, Self::Err> {
+        let version = self.version;
         let fee_token_id = self.fee_token_id;
         let fee_limit = self.fee_limit;
         let reference = self.reference;
@@ -170,6 +174,7 @@ impl TryIntoTxEnv<MorphTxEnv, MorphBlockEnv> for MorphTransactionRequest {
             .map_err(EthApiError::from)?;
 
         let mut tx_env = MorphTxEnv::new(inner_tx_env);
+        tx_env.version = version;
         tx_env.fee_token_id = match fee_token_id {
             Some(id) => Some(
                 u16::try_from(id.to::<u64>())
@@ -180,11 +185,11 @@ impl TryIntoTxEnv<MorphTxEnv, MorphBlockEnv> for MorphTransactionRequest {
         tx_env.fee_limit = fee_limit;
         tx_env.reference = reference;
         tx_env.memo = memo;
-        if tx_env.fee_token_id.unwrap_or_default() > 0 {
+        if tx_env.version.is_some() || tx_env.fee_token_id.unwrap_or_default() > 0 {
             tx_env.inner.tx_type = morph_primitives::MORPH_TX_TYPE_ID;
         }
 
-        let rlp_bytes = encode_tx_for_l1_fee(&tx_env, access_list, evm_env, inner)?;
+        let rlp_bytes = encode_tx_for_l1_fee(&tx_env, version, access_list, evm_env, inner)?;
 
         tx_env.rlp_bytes = Some(rlp_bytes);
         Ok(tx_env)
@@ -212,12 +217,15 @@ fn morph_envelope_from_ethereum(
 /// `Ok(None)` if this should be a standard Ethereum transaction,
 /// or `Err(...)` if there's a validation error.
 ///
-/// Version auto-detection rules:
-/// - (Reference present) || (Memo present) → Version 1
-/// - (FeeTokenID > 0) && (no Reference) && (no Memo) → Version 0
-/// - (FeeTokenID == 0) && (no Reference) && (no Memo) → None (standard tx)
+/// Version detection rules:
+/// - If `explicit_version` is provided, use it (allows user to explicitly create V1 tx without reference/memo)
+/// - Otherwise auto-detect:
+///   - (Reference present) || (Memo present) → Version 1
+///   - (FeeTokenID > 0) && (no Reference) && (no Memo) → Version 0
+///   - (FeeTokenID == 0) && (no Reference) && (no Memo) → None (standard tx)
 fn try_build_morph_tx_from_request(
     req: &alloy_rpc_types_eth::TransactionRequest,
+    explicit_version: Option<u8>,
     fee_token_id: U64,
     fee_limit: U256,
     reference: Option<alloy_primitives::B256>,
@@ -225,12 +233,14 @@ fn try_build_morph_tx_from_request(
 ) -> Result<Option<TxMorph>, &'static str> {
     let fee_token_id_u16 = u16::try_from(fee_token_id.to::<u64>()).map_err(|_| "invalid token")?;
 
-    // Determine version based on fee_token_id, reference, and memo
-    // Rules follow go-ethereum's validateMorphTxVersion logic
+    // Determine version: use explicit version if provided, otherwise auto-detect
     let has_reference = reference.is_some();
     let has_memo = memo.as_ref().is_some_and(|m| !m.is_empty());
 
-    let version = if has_reference || has_memo {
+    let version = if let Some(v) = explicit_version {
+        // User explicitly specified version - this is a MorphTx
+        v
+    } else if has_reference || has_memo {
         // Has reference or memo → Version 1
         morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_1
     } else if fee_token_id_u16 > 0 {
@@ -277,12 +287,16 @@ fn try_build_morph_tx_from_request(
 /// `Ok(None)` if this should be a standard Ethereum transaction,
 /// or `Err(...)` if there's a validation error.
 ///
-/// Version auto-detection rules:
-/// - (Reference present) || (Memo present) → Version 1
-/// - (FeeTokenID > 0) && (no Reference) && (no Memo) → Version 0
-/// - (FeeTokenID == 0) && (no Reference) && (no Memo) → None (standard tx)
+/// Version detection rules:
+/// - If `explicit_version` is provided, use it
+/// - Otherwise auto-detect:
+///   - (Reference present) || (Memo present) → Version 1
+///   - (FeeTokenID > 0) && (no Reference) && (no Memo) → Version 0
+///   - (FeeTokenID == 0) && (no Reference) && (no Memo) → None (standard tx)
+#[allow(clippy::too_many_arguments)]
 fn try_build_morph_tx_from_env<Spec>(
     tx_env: &MorphTxEnv,
+    explicit_version: Option<u8>,
     fee_token_id: U64,
     fee_limit: U256,
     access_list: AccessList,
@@ -293,12 +307,14 @@ fn try_build_morph_tx_from_env<Spec>(
     let fee_token_id_u16 = u16::try_from(fee_token_id.to::<u64>())
         .map_err(|_| EthApiError::InvalidParams("invalid token".to_string()))?;
 
-    // Determine version based on fee_token_id, reference, and memo
-    // Rules follow go-ethereum's validateMorphTxVersion logic
+    // Determine version: use explicit version if provided, otherwise auto-detect
     let has_reference = reference.is_some();
     let has_memo = memo.as_ref().is_some_and(|m| !m.is_empty());
 
-    let version = if has_reference || has_memo {
+    let version = if let Some(v) = explicit_version {
+        // User explicitly specified version - this is a MorphTx
+        v
+    } else if has_reference || has_memo {
         // Has reference or memo → Version 1
         morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_1
     } else if fee_token_id_u16 > 0 {
@@ -338,6 +354,7 @@ fn try_build_morph_tx_from_env<Spec>(
 /// Returns the RLP-encoded bytes used to calculate the L1 data fee.
 fn encode_tx_for_l1_fee<Spec>(
     tx_env: &MorphTxEnv,
+    explicit_version: Option<u8>,
     access_list: AccessList,
     evm_env: &EvmEnv<Spec, MorphBlockEnv>,
     inner: alloy_rpc_types_eth::TransactionRequest,
@@ -350,6 +367,7 @@ fn encode_tx_for_l1_fee<Spec>(
     // Try to build a MorphTx; returns None if this should be a standard Ethereum tx
     match try_build_morph_tx_from_env(
         tx_env,
+        explicit_version,
         fee_token_id,
         fee_limit,
         access_list,

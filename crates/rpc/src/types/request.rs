@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 /// Morph RPC transaction request representation.
 ///
 /// Extends standard Ethereum transaction request with:
+/// - `version`: MorphTx version (0 or 1). If not specified, auto-detected based on other fields.
 /// - `feeTokenID`: Token ID for ERC20 gas payment
 /// - `feeLimit`: Maximum token amount willing to pay for fees
 /// - `reference`: 32-byte reference key for transaction indexing
@@ -29,6 +30,15 @@ pub struct MorphTransactionRequest {
     #[deref]
     #[deref_mut]
     pub inner: TransactionRequest,
+
+    /// MorphTx version (0 or 1).
+    ///
+    /// - Version 0: Original MorphTx format (requires feeTokenID > 0, no reference/memo)
+    /// - Version 1: Extended format with reference and memo support
+    ///
+    /// If not specified, version is auto-detected based on reference/memo/feeTokenID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u8>,
 
     /// Token ID for fee payment (only for MorphTx type 0x7F).
     #[serde(
@@ -69,11 +79,12 @@ impl AsMut<TransactionRequest> for MorphTransactionRequest {
 
 /// Creates a [`MorphTransactionRequest`] from a standard [`TransactionRequest`].
 ///
-/// Sets `fee_token_id`, `fee_limit`, `reference`, and `memo` to `None`.
+/// Sets `version`, `fee_token_id`, `fee_limit`, `reference`, and `memo` to `None`.
 impl From<TransactionRequest> for MorphTransactionRequest {
     fn from(value: TransactionRequest) -> Self {
         Self {
             inner: value,
+            version: None,
             fee_token_id: None,
             fee_limit: None,
             reference: None,
