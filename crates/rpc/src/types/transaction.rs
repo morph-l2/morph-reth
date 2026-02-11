@@ -4,7 +4,7 @@ use alloy_consensus::Transaction as ConsensusTransaction;
 use alloy_consensus::Transaction as TransactionTrait;
 use alloy_eips::Typed2718;
 use alloy_network::TransactionResponse;
-use alloy_primitives::{Address, BlockHash, TxKind, U64, U256};
+use alloy_primitives::{Address, B256, BlockHash, Bytes, TxKind, U64, U256};
 use alloy_rpc_types_eth::Transaction as RpcTransaction;
 use morph_primitives::MorphTxEnvelope;
 use serde::{Deserialize, Serialize};
@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Wraps the standard RPC transaction and adds Morph-specific fields:
 /// - L1 message sender/queue index
-/// - Morph fee token fields
+/// - Morph fee token fields (version, fee_token_id, fee_limit, reference, memo)
 #[derive(
     Clone, Debug, PartialEq, Eq, Serialize, Deserialize, derive_more::Deref, derive_more::DerefMut,
 )]
@@ -33,6 +33,11 @@ pub struct MorphRpcTransaction {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub queue_index: Option<U64>,
 
+    /// MorphTx version (only for MorphTx type 0x7F).
+    /// 0 = legacy format, 1 = with reference/memo support.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<u8>,
+
     /// Token ID for fee payment (only for MorphTx type 0x7F).
     #[serde(rename = "feeTokenID", skip_serializing_if = "Option::is_none")]
     pub fee_token_id: Option<U64>,
@@ -40,6 +45,16 @@ pub struct MorphRpcTransaction {
     /// Maximum token amount willing to pay for fees (only for MorphTx type 0x7F).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fee_limit: Option<U256>,
+
+    /// Reference key for transaction indexing (only for MorphTx type 0x7F).
+    /// 32-byte key used for looking up transactions by external systems.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reference: Option<B256>,
+
+    /// Memo field for arbitrary data (only for MorphTx type 0x7F).
+    /// Up to 64 bytes for notes, invoice numbers, or other metadata.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memo: Option<Bytes>,
 }
 
 /// Implementation of [`Typed2718`] for Morph RPC transactions.

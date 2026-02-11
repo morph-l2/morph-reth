@@ -83,6 +83,30 @@ impl MorphTxEnvelope {
         }
     }
 
+    /// Returns the version for MorphTx, or `None` for other transaction types.
+    pub fn version(&self) -> Option<u8> {
+        match self {
+            Self::Morph(tx) => Some(tx.tx().version),
+            _ => None,
+        }
+    }
+
+    /// Returns the reference for MorphTx, or `None` for other transaction types.
+    pub fn reference(&self) -> Option<alloy_primitives::B256> {
+        match self {
+            Self::Morph(tx) => tx.tx().reference,
+            _ => None,
+        }
+    }
+
+    /// Returns the memo for MorphTx, or `None` for other transaction types.
+    pub fn memo(&self) -> Option<alloy_primitives::Bytes> {
+        match self {
+            Self::Morph(tx) => tx.tx().memo.clone(),
+            _ => None,
+        }
+    }
+
     pub fn queue_index(&self) -> Option<u64> {
         match self {
             Self::Legacy(_)

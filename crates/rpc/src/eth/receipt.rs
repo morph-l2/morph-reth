@@ -3,7 +3,7 @@
 use crate::eth::{MorphEthApi, MorphNodeCore};
 use crate::types::receipt::MorphRpcReceipt;
 use alloy_consensus::{Receipt, TxReceipt};
-use alloy_primitives::{U64, U256};
+use alloy_primitives::{B256, Bytes, U64, U256};
 use alloy_rpc_types_eth::Log;
 use morph_primitives::{MorphReceipt, MorphReceiptEnvelope};
 use reth_primitives_traits::NodePrimitives;
@@ -51,8 +51,7 @@ impl MorphReceiptBuilder {
     where
         N: NodePrimitives<Receipt = MorphReceipt>,
     {
-        let (l1_fee, fee_token_id, fee_rate, token_scale, fee_limit) =
-            morph_fee_fields(&input.receipt);
+        let fee_fields = morph_fee_fields(&input.receipt);
 
         let core_receipt = build_receipt(input, None, |receipt, next_log_index, meta| {
             let map_logs = |receipt: Receipt| {
@@ -93,11 +92,14 @@ impl MorphReceiptBuilder {
 
         let receipt = MorphRpcReceipt {
             inner: core_receipt,
-            l1_fee,
-            fee_rate,
-            token_scale,
-            fee_limit,
-            fee_token_id: fee_token_id.map(U64::from),
+            l1_fee: fee_fields.l1_fee,
+            version: fee_fields.version,
+            fee_token_id: fee_fields.fee_token_id.map(U64::from),
+            fee_rate: fee_fields.fee_rate,
+            token_scale: fee_fields.token_scale,
+            fee_limit: fee_fields.fee_limit,
+            reference: fee_fields.reference,
+            memo: fee_fields.memo,
         };
 
         Self { receipt }
@@ -116,25 +118,38 @@ where
 {
 }
 
+/// Morph-specific fee fields extracted from a receipt.
+#[derive(Debug, Default)]
+struct MorphFeeFields {
+    l1_fee: U256,
+    version: Option<u8>,
+    fee_token_id: Option<u16>,
+    fee_rate: Option<U256>,
+    token_scale: Option<U256>,
+    fee_limit: Option<U256>,
+    reference: Option<B256>,
+    memo: Option<Bytes>,
+}
+
 /// Extracts Morph-specific fee fields from a receipt.
 ///
-/// Returns a tuple of (l1_fee, fee_token_id, fee_rate, token_scale, fee_limit).
 /// L1 message receipts return zero/None for all fee fields.
-fn morph_fee_fields(
-    receipt: &MorphReceipt,
-) -> (U256, Option<u16>, Option<U256>, Option<U256>, Option<U256>) {
+fn morph_fee_fields(receipt: &MorphReceipt) -> MorphFeeFields {
     match receipt {
         MorphReceipt::Legacy(r)
         | MorphReceipt::Eip2930(r)
         | MorphReceipt::Eip1559(r)
         | MorphReceipt::Eip7702(r)
-        | MorphReceipt::Morph(r) => (
-            r.l1_fee,
-            r.fee_token_id,
-            r.fee_rate,
-            r.token_scale,
-            r.fee_limit,
-        ),
-        MorphReceipt::L1Msg(_) => (U256::ZERO, None, None, None, None),
+        | MorphReceipt::Morph(r) => MorphFeeFields {
+            l1_fee: r.l1_fee,
+            version: r.version,
+            fee_token_id: r.fee_token_id,
+            fee_rate: r.fee_rate,
+            token_scale: r.token_scale,
+            fee_limit: r.fee_limit,
+            reference: r.reference,
+            memo: r.memo.clone(),
+        },
+        MorphReceipt::L1Msg(_) => MorphFeeFields::default(),
     }
 }

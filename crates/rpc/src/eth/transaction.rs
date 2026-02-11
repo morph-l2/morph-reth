@@ -34,8 +34,13 @@ impl FromConsensusTx<MorphTxEnvelope> for MorphRpcTransaction {
             MorphTxEnvelope::L1Msg(msg) => (Some(msg.sender), Some(U64::from(msg.queue_index))),
             _ => (None, None),
         };
+
+        // Extract MorphTx-specific fields
+        let version = tx.version();
         let fee_token_id = tx.fee_token_id().map(U64::from);
         let fee_limit = tx.fee_limit();
+        let reference = tx.reference();
+        let memo = tx.memo();
 
         let effective_gas_price = tx_info.base_fee.map(|base_fee| {
             tx.effective_tip_per_gas(base_fee)
@@ -55,8 +60,11 @@ impl FromConsensusTx<MorphTxEnvelope> for MorphRpcTransaction {
             inner,
             sender,
             queue_index,
+            version,
             fee_token_id,
             fee_limit,
+            reference,
+            memo,
         })
     }
 }
