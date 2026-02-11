@@ -120,7 +120,7 @@ where
 
 /// Morph-specific fee fields extracted from a receipt.
 #[derive(Debug, Default)]
-struct MorphFeeFields {
+struct MorphTxFields {
     l1_fee: U256,
     version: Option<u8>,
     fee_token_id: Option<u16>,
@@ -134,13 +134,13 @@ struct MorphFeeFields {
 /// Extracts Morph-specific fee fields from a receipt.
 ///
 /// L1 message receipts return zero/None for all fee fields.
-fn morph_fee_fields(receipt: &MorphReceipt) -> MorphFeeFields {
+fn morph_fee_fields(receipt: &MorphReceipt) -> MorphTxFields {
     match receipt {
         MorphReceipt::Legacy(r)
         | MorphReceipt::Eip2930(r)
         | MorphReceipt::Eip1559(r)
         | MorphReceipt::Eip7702(r)
-        | MorphReceipt::Morph(r) => MorphFeeFields {
+        | MorphReceipt::Morph(r) => MorphTxFields {
             l1_fee: r.l1_fee,
             version: r.version,
             fee_token_id: r.fee_token_id,
@@ -150,6 +150,6 @@ fn morph_fee_fields(receipt: &MorphReceipt) -> MorphFeeFields {
             reference: r.reference,
             memo: r.memo.clone(),
         },
-        MorphReceipt::L1Msg(_) => MorphFeeFields::default(),
+        MorphReceipt::L1Msg(_) => MorphTxFields::default(),
     }
 }
