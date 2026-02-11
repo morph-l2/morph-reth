@@ -8,8 +8,7 @@ use eyre::Result;
 use morph_chainspec::MorphChainSpec;
 use morph_evm::MorphEvmConfig;
 use morph_primitives::{MorphHeader, MorphPrimitives};
-use reth_evm::ConfigureEvm;
-use reth_node_api::{FullNodeComponents, FullNodeTypes, HeaderTy, NodeTypes};
+use reth_node_api::{FullNodeComponents, FullNodeTypes, NodeTypes};
 use reth_node_builder::rpc::{EthApiBuilder, EthApiCtx};
 use reth_provider::ChainSpecProvider;
 use reth_rpc::EthApi;
@@ -19,7 +18,7 @@ use reth_rpc_eth_api::{
     helpers::{
         EthApiSpec, EthBlocks, EthFees, EthState, EthTransactions, LoadBlock, LoadFee,
         LoadPendingBlock, LoadState, LoadTransaction, SpawnBlocking, Trace,
-        pending_block::{BuildPendingEnv, PendingEnvBuilder},
+        pending_block::PendingEnvBuilder,
     },
 };
 use reth_rpc_eth_types::{EthApiError, EthStateCache, FeeHistoryCache, GasPriceOracle};
@@ -73,7 +72,6 @@ impl<N, NetworkT> EthApiBuilder<N> for MorphEthApiBuilder<NetworkT>
 where
     N: FullNodeComponents<
             Evm = MorphEvmConfig,
-            Evm: ConfigureEvm<NextBlockEnvCtx: BuildPendingEnv<HeaderTy<N::Types>>>,
             Types: NodeTypes<Primitives = MorphPrimitives, ChainSpec = MorphChainSpec>,
             Provider: ChainSpecProvider<ChainSpec = MorphChainSpec>,
         > + crate::eth::MorphNodeCore

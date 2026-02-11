@@ -1,7 +1,7 @@
 //! Morph RPC receipt type.
 
 use alloy_network::ReceiptResponse;
-use alloy_primitives::{Address, BlockHash, U64, U256};
+use alloy_primitives::{Address, B256, BlockHash, Bytes, U64, U256};
 use alloy_rpc_types_eth::{Log, TransactionReceipt};
 use morph_primitives::MorphReceiptEnvelope;
 use serde::{Deserialize, Serialize};
@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Wraps the standard RPC transaction receipt and adds Morph-specific fields:
 /// - L1 fee and fee token metadata
+/// - Version, reference, and memo for V1 MorphTx
 /// - Custom tx type for L1 message / Morph tx receipts
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -21,6 +22,15 @@ pub struct MorphRpcReceipt {
     /// L1 data fee paid (in wei).
     #[serde(rename = "l1Fee")]
     pub l1_fee: U256,
+
+    /// MorphTx version (only for MorphTx type 0x7F).
+    /// 0 = legacy format, 1 = with reference/memo support.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<u8>,
+
+    /// Token ID used for fee payment.
+    #[serde(rename = "feeTokenID", skip_serializing_if = "Option::is_none")]
+    pub fee_token_id: Option<U64>,
 
     /// Fee rate used for token fee calculation.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -34,9 +44,15 @@ pub struct MorphRpcReceipt {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fee_limit: Option<U256>,
 
-    /// Token ID used for fee payment.
-    #[serde(rename = "feeTokenID", skip_serializing_if = "Option::is_none")]
-    pub fee_token_id: Option<U64>,
+    /// Reference key for transaction indexing (only for MorphTx type 0x7F).
+    /// 32-byte key used for looking up transactions by external systems.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reference: Option<B256>,
+
+    /// Memo field for arbitrary data (only for MorphTx type 0x7F).
+    /// Up to 64 bytes for notes, invoice numbers, or other metadata.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memo: Option<Bytes>,
 }
 
 /// Implementation of [`ReceiptResponse`] for Morph receipts.

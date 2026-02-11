@@ -452,8 +452,8 @@ mod compact {
     /// Note: `tx_type` must be the last field because it's not a known fixed-size type
     /// for the CompactZstd derive macro.
     ///
-    /// Note: `fee_token_id` is stored as `u64` instead of `u16` because `u16` doesn't implement
-    /// `Compact` in reth_codecs. The conversion is lossless since `u16` fits in `u64`.
+    /// Note: `fee_token_id` and `version` are stored as `u64` instead of `u16`/`u8` because
+    /// they don't implement `Compact` in reth_codecs. The conversion is lossless.
     #[derive(reth_codecs::CompactZstd)]
     #[reth_zstd(
         compressor = reth_zstd_compressors::RECEIPT_COMPRESSOR,
@@ -465,41 +465,53 @@ mod compact {
         #[allow(clippy::owned_cow)]
         logs: Cow<'a, Vec<Log>>,
         l1_fee: Option<U256>,
+        /// Stored as u64 for Compact compatibility (u8 doesn't implement Compact)
+        version: Option<u64>,
         /// Stored as u64 for Compact compatibility (u16 doesn't implement Compact)
         fee_token_id: Option<u64>,
         fee_rate: Option<U256>,
         token_scale: Option<U256>,
         fee_limit: Option<U256>,
+        reference: Option<B256>,
+        #[allow(clippy::owned_cow)]
+        memo: Option<Cow<'a, alloy_primitives::Bytes>>,
         /// Must be the last field - not a known fixed-size type
         tx_type: MorphTxType,
     }
 
     impl<'a> From<&'a MorphReceipt> for CompactMorphReceipt<'a> {
         fn from(receipt: &'a MorphReceipt) -> Self {
-            let (l1_fee, fee_token_id, fee_rate, token_scale, fee_limit) = match receipt {
-                MorphReceipt::Legacy(r)
-                | MorphReceipt::Eip2930(r)
-                | MorphReceipt::Eip1559(r)
-                | MorphReceipt::Eip7702(r)
-                | MorphReceipt::Morph(r) => (
-                    (r.l1_fee != U256::ZERO).then_some(r.l1_fee),
-                    r.fee_token_id.map(u64::from),
-                    r.fee_rate,
-                    r.token_scale,
-                    r.fee_limit,
-                ),
-                MorphReceipt::L1Msg(_) => (None, None, None, None, None),
-            };
+            let (l1_fee, version, fee_token_id, fee_rate, token_scale, fee_limit, reference, memo) =
+                match receipt {
+                    MorphReceipt::Legacy(r)
+                    | MorphReceipt::Eip2930(r)
+                    | MorphReceipt::Eip1559(r)
+                    | MorphReceipt::Eip7702(r)
+                    | MorphReceipt::Morph(r) => (
+                        (r.l1_fee != U256::ZERO).then_some(r.l1_fee),
+                        r.version.map(u64::from),
+                        r.fee_token_id.map(u64::from),
+                        r.fee_rate,
+                        r.token_scale,
+                        r.fee_limit,
+                        r.reference,
+                        r.memo.as_ref().map(Cow::Borrowed),
+                    ),
+                    MorphReceipt::L1Msg(_) => (None, None, None, None, None, None, None, None),
+                };
 
             Self {
                 success: receipt.status(),
                 cumulative_gas_used: receipt.cumulative_gas_used(),
                 logs: Cow::Borrowed(&receipt.as_receipt().logs),
                 l1_fee,
+                version,
                 fee_token_id,
                 fee_rate,
                 token_scale,
                 fee_limit,
+                reference,
+                memo,
                 tx_type: receipt.tx_type(),
             }
         }
@@ -512,10 +524,13 @@ mod compact {
                 cumulative_gas_used,
                 logs,
                 l1_fee,
+                version,
                 fee_token_id,
                 fee_rate,
                 token_scale,
                 fee_limit,
+                reference,
+                memo,
                 tx_type,
             } = receipt;
 
@@ -533,10 +548,13 @@ mod compact {
             let morph_receipt = MorphTransactionReceipt {
                 inner,
                 l1_fee: l1_fee.unwrap_or_default(),
+                version: version.map(|v| v as u8),
                 fee_token_id: fee_token_id.map(|id| id as u16),
                 fee_rate,
                 token_scale,
                 fee_limit,
+                reference,
+                memo: memo.map(|m| m.into_owned()),
             };
 
             match tx_type {
@@ -628,7 +646,7 @@ mod tests {
             logs: vec![],
         };
 
-        MorphReceipt::Morph(MorphTransactionReceipt::with_morph_tx(
+        MorphReceipt::Morph(MorphTransactionReceipt::with_morph_tx_v0(
             inner,
             U256::from(2000),   // l1_fee
             1,                  // fee_token_id

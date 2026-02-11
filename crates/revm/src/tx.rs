@@ -25,6 +25,9 @@ use alloy_consensus::transaction::Either;
 /// - L1 message detection (tx_type 0x7E)
 /// - TxMorph with token-based gas payment (tx_type 0x7F)
 /// - RLP encoded transaction bytes for L1 data fee calculation
+/// - Version, reference, and memo fields for extended MorphTx functionality
+///
+/// Reference: <https://github.com/morph-l2/go-ethereum/pull/282>
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MorphTxEnv {
     /// Inner transaction environment.
@@ -32,11 +35,18 @@ pub struct MorphTxEnv {
     /// RLP encoded transaction bytes.
     /// Used only for L1 data fee calculation.
     pub rlp_bytes: Option<Bytes>,
-    /// Maximum amount of tokens the sender is willing to pay as fee.
-    pub fee_limit: Option<U256>,
+    /// Version of the Morph transaction format.
+    pub version: Option<u8>,
     /// Token ID for fee payment (only for TxMorph type 0x7F).
     /// 0 means ETH payment, > 0 means ERC20 token payment.
     pub fee_token_id: Option<u16>,
+    /// Maximum amount of tokens the sender is willing to pay as fee.
+    pub fee_limit: Option<U256>,
+    /// Reference key for the transaction.
+    /// Used for indexing and looking up transactions by external systems.
+    pub reference: Option<alloy_primitives::B256>,
+    /// Memo field for arbitrary data.
+    pub memo: Option<Bytes>,
 }
 
 impl MorphTxEnv {
@@ -45,8 +55,11 @@ impl MorphTxEnv {
         Self {
             inner,
             rlp_bytes: None,
-            fee_limit: None,
+            version: None,
             fee_token_id: None,
+            fee_limit: None,
+            reference: None,
+            memo: None,
         }
     }
 
@@ -56,15 +69,33 @@ impl MorphTxEnv {
         self
     }
 
-    /// Set the fee limit.
-    pub fn with_fee_limit(mut self, fee_limit: U256) -> Self {
-        self.fee_limit = Some(fee_limit);
+    /// Set the version.
+    pub fn with_version(mut self, version: u8) -> Self {
+        self.version = Some(version);
         self
     }
 
     /// Set the fee token ID.
     pub fn with_fee_token_id(mut self, fee_token_id: u16) -> Self {
         self.fee_token_id = Some(fee_token_id);
+        self
+    }
+
+    /// Set the fee limit.
+    pub fn with_fee_limit(mut self, fee_limit: U256) -> Self {
+        self.fee_limit = Some(fee_limit);
+        self
+    }
+
+    /// Set the reference.
+    pub fn with_reference(mut self, reference: alloy_primitives::B256) -> Self {
+        self.reference = Some(reference);
+        self
+    }
+
+    /// Set the memo.
+    pub fn with_memo(mut self, memo: Bytes) -> Self {
+        self.memo = Some(memo);
         self
     }
 
@@ -86,14 +117,11 @@ impl MorphTxEnv {
     fn from_tx_with_rlp_bytes(tx: &MorphTxEnvelope, signer: Address, rlp_bytes: Bytes) -> Self {
         let tx_type: u8 = tx.tx_type().into();
 
-        // Extract fee_token_id for TxMorph (type 0x7F)
-        let fee_token_info = if tx_type == MORPH_TX_TYPE_ID {
-            (
-                Some(extract_fee_token_id_from_rlp(&rlp_bytes)),
-                Some(extract_fee_limit_from_rlp(&rlp_bytes)),
-            )
+        // Extract MorphTx fields for TxMorph (type 0x7F)
+        let morph_tx_info = if tx_type == MORPH_TX_TYPE_ID {
+            extract_morph_tx_fields_from_rlp(&rlp_bytes)
         } else {
-            (None, None)
+            None
         };
 
         // Build TxEnv from the transaction
@@ -132,46 +160,52 @@ impl MorphTxEnv {
 
         // Use builder pattern to set Morph-specific fields
         let mut env = Self::new(inner).with_rlp_bytes(rlp_bytes);
-        if let Some(fee_token_id) = fee_token_info.0 {
-            env = env.with_fee_token_id(fee_token_id);
-        };
-        if let Some(fee_limit) = fee_token_info.1 {
-            env = env.with_fee_limit(fee_limit);
-        };
+        if let Some(info) = morph_tx_info {
+            env = env.with_version(info.version);
+            env = env.with_fee_token_id(info.fee_token_id);
+            env = env.with_fee_limit(info.fee_limit);
+            if let Some(reference) = info.reference {
+                env = env.with_reference(reference);
+            }
+            if let Some(memo) = info.memo
+                && !memo.is_empty()
+            {
+                env = env.with_memo(memo);
+            }
+        }
         env
     }
 }
 
-/// Extract fee_token_id from RLP-encoded TxMorph bytes.
-///
-/// The bytes should be EIP-2718 encoded (type byte + RLP payload).
-/// Returns 0 if decoding fails.
-fn extract_fee_token_id_from_rlp(rlp_bytes: &Bytes) -> u16 {
-    if rlp_bytes.is_empty() {
-        return 0;
-    }
-
-    // Skip the type byte (0x7F) and decode the TxMorph
-    let payload = &rlp_bytes[1..];
-    TxMorph::decode(&mut &payload[..])
-        .map(|tx| tx.fee_token_id)
-        .unwrap_or(0)
+/// Extracted MorphTx fields from RLP-encoded bytes.
+struct MorphTxFields {
+    version: u8,
+    fee_token_id: u16,
+    fee_limit: U256,
+    reference: Option<alloy_primitives::B256>,
+    memo: Option<Bytes>,
 }
 
-/// Extract fee_limit from RLP-encoded TxMorph bytes.
+/// Extract all MorphTx fields from RLP-encoded TxMorph bytes.
 ///
 /// The bytes should be EIP-2718 encoded (type byte + RLP payload).
-/// Returns 0 if decoding fails.
-fn extract_fee_limit_from_rlp(rlp_bytes: &Bytes) -> U256 {
+/// Returns None if decoding fails.
+fn extract_morph_tx_fields_from_rlp(rlp_bytes: &Bytes) -> Option<MorphTxFields> {
     if rlp_bytes.is_empty() {
-        return U256::default();
+        return None;
     }
 
     // Skip the type byte (0x7F) and decode the TxMorph
     let payload = &rlp_bytes[1..];
     TxMorph::decode(&mut &payload[..])
-        .map(|tx| tx.fee_limit)
-        .unwrap_or_default()
+        .map(|tx| MorphTxFields {
+            version: tx.version,
+            fee_token_id: tx.fee_token_id,
+            fee_limit: tx.fee_limit,
+            reference: tx.reference,
+            memo: tx.memo,
+        })
+        .ok()
 }
 
 impl Deref for MorphTxEnv {
@@ -356,6 +390,16 @@ pub trait MorphTxExt {
     /// Returns whether this transaction is a TxMorph (type 0x7F).
     /// TxMorph supports ERC20 token-based gas payment.
     fn is_morph_tx(&self) -> bool;
+
+    /// Returns whether this transaction uses token-based gas payment.
+    fn uses_token_fee(&self) -> bool {
+        false
+    }
+
+    /// Returns whether this transaction has a reference.
+    fn has_reference(&self) -> bool {
+        false
+    }
 }
 
 impl MorphTxExt for MorphTxEnv {
@@ -367,6 +411,16 @@ impl MorphTxExt for MorphTxEnv {
     #[inline]
     fn is_morph_tx(&self) -> bool {
         self.inner.tx_type == MORPH_TX_TYPE_ID
+    }
+
+    #[inline]
+    fn uses_token_fee(&self) -> bool {
+        self.fee_token_id.is_some_and(|id| id > 0)
+    }
+
+    #[inline]
+    fn has_reference(&self) -> bool {
+        self.reference.is_some()
     }
 }
 
