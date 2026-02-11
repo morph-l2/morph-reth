@@ -26,10 +26,12 @@
 //! | MorphTx (0x7F) | inner + l1_fee + token_fee_info + reference + memo |
 
 use alloy_consensus::Receipt;
+use alloy_consensus::transaction::TxHashRef;
 use alloy_evm::Evm;
 use alloy_primitives::{B256, Bytes, U256};
 use morph_primitives::{MorphReceipt, MorphTransactionReceipt, MorphTxEnvelope, MorphTxType};
 use revm::context::result::ExecutionResult;
+use tracing::warn;
 
 /// Context for building a Morph receipt.
 ///
@@ -173,7 +175,14 @@ impl MorphReceiptBuilder for DefaultMorphReceiptBuilder {
                 MorphReceipt::L1Msg(inner)
             }
             MorphTxType::Morph => {
-                // MorphTx transactions include MorphTx-specific fields
+                // MorphTx transactions should always have MorphTx-specific fields.
+                // If fields are missing, it indicates one of the following:
+                // 1. The fee token is not registered in L2TokenRegistry
+                // 2. TokenFeeInfo::fetch returned None (token inactive or query failed)
+                // 3. A bug in get_morph_tx_fields logic
+                //
+                // We log a warning and fallback to L1-fee-only receipt to avoid
+                // blocking block execution, but this should be investigated.
                 if let Some(fields) = morph_tx_fields {
                     MorphReceipt::Morph(MorphTransactionReceipt::with_morph_tx_v1(
                         inner,
@@ -187,7 +196,12 @@ impl MorphReceiptBuilder for DefaultMorphReceiptBuilder {
                         fields.memo,
                     ))
                 } else {
-                    // Fallback: just include L1 fee if MorphTx fields are missing
+                    warn!(
+                        target: "morph::receipt",
+                        tx_hash = ?tx.tx_hash(),
+                        "MorphTx missing token fee fields - receipt will not include fee token info. \
+                         This may indicate an unregistered/inactive token or a bug."
+                    );
                     MorphReceipt::Morph(MorphTransactionReceipt::with_l1_fee(inner, l1_fee))
                 }
             }

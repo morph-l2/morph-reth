@@ -109,9 +109,12 @@ where
     /// # Calculation Steps
     /// 1. Check if transaction is an L1 message (which don't pay L1 fees)
     /// 2. Get RLP-encoded transaction bytes
-    /// 3. Determine current hardfork (affects fee calculation formula)
-    /// 4. Fetch L1 block info from L1 Gas Price Oracle contract
-    /// 5. Calculate fee based on transaction size and L1 gas price
+    /// 3. Fetch L1 block info from L1 Gas Price Oracle contract
+    /// 4. Calculate fee based on transaction size and L1 gas price
+    ///
+    /// # Arguments
+    /// * `tx` - The transaction to calculate L1 fee for
+    /// * `hardfork` - The current Morph hardfork (affects fee calculation formula)
     ///
     /// # Returns
     /// - `Ok(U256::ZERO)` for L1 message transactions
@@ -120,7 +123,11 @@ where
     ///
     /// # Errors
     /// Returns error if the L1 Gas Price Oracle contract state cannot be read.
-    fn calculate_l1_fee(&mut self, tx: &MorphTxEnvelope) -> Result<U256, BlockExecutionError> {
+    fn calculate_l1_fee(
+        &mut self,
+        tx: &MorphTxEnvelope,
+        hardfork: MorphHardfork,
+    ) -> Result<U256, BlockExecutionError> {
         // L1 message transactions don't pay L1 fees
         if tx.is_l1_msg() {
             return Ok(U256::ZERO);
@@ -128,12 +135,6 @@ where
 
         // Get the RLP-encoded transaction bytes
         let rlp_bytes = tx.rlp();
-
-        // Determine the current hardfork based on block number and timestamp
-        let block = self.evm.block();
-        let block_number: u64 = block.number.to();
-        let timestamp: u64 = block.timestamp.to();
-        let hardfork = self.spec.morph_hardfork_at(block_number, timestamp);
 
         // Fetch L1 block info from the L1 Gas Price Oracle contract
         let l1_block_info = L1BlockInfo::try_fetch(self.evm.db_mut(), hardfork).map_err(|e| {
@@ -159,6 +160,7 @@ where
     ///
     /// # Arguments
     /// * `tx` - The transaction to extract fields from
+    /// * `hardfork` - The current Morph hardfork (affects token registry behavior)
     ///
     /// # Returns
     /// - `Ok(None)` for non-MorphTx transactions
@@ -173,6 +175,7 @@ where
     fn get_morph_tx_fields(
         &mut self,
         tx: &MorphTxEnvelope,
+        hardfork: MorphHardfork,
     ) -> Result<Option<MorphTxFields>, BlockExecutionError> {
         // Only MorphTx transactions have these fields
         if !tx.is_morph_tx() {
@@ -190,12 +193,6 @@ where
         let version = tx.version().unwrap_or(0);
         let reference = tx.reference();
         let memo = tx.memo();
-
-        // Determine the current hardfork based on block number and timestamp
-        let block = self.evm.block();
-        let block_number: u64 = block.number.to();
-        let timestamp: u64 = block.timestamp.to();
-        let hardfork = self.spec.morph_hardfork_at(block_number, timestamp);
 
         // Fetch token fee info from L2TokenRegistry contract
         // Note: We use the transaction sender as the caller address
@@ -342,11 +339,17 @@ where
     ) -> Result<u64, BlockExecutionError> {
         let ResultAndState { result, state } = output;
 
+        // Determine hardfork once and reuse for both L1 fee and token fee calculations
+        let block = self.evm.block();
+        let block_number: u64 = block.number.to();
+        let timestamp: u64 = block.timestamp.to();
+        let hardfork = self.spec.morph_hardfork_at(block_number, timestamp);
+
         // Calculate L1 fee for the transaction
-        let l1_fee = self.calculate_l1_fee(tx.tx())?;
+        let l1_fee = self.calculate_l1_fee(tx.tx(), hardfork)?;
 
         // Get MorphTx-specific fields for MorphTx transactions
-        let morph_tx_fields = self.get_morph_tx_fields(tx.tx())?;
+        let morph_tx_fields = self.get_morph_tx_fields(tx.tx(), hardfork)?;
 
         // Update cumulative gas used
         let gas_used = result.gas_used();
