@@ -191,9 +191,8 @@ impl TryIntoTxEnv<MorphTxEnv, MorphBlockEnv> for MorphTransactionRequest {
 
         if is_morph_tx {
             tx_env.inner.tx_type = morph_primitives::MORPH_TX_TYPE_ID;
-            tx_env.version = Some(
-                morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_1,
-            );
+            tx_env.version =
+                Some(morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_1);
         }
 
         let rlp_bytes = encode_tx_for_l1_fee(&tx_env, access_list, evm_env, inner)?;

@@ -301,13 +301,13 @@ impl TxMorph {
             if let Some(ref r) = self.reference {
                 r.0.encode(out);
             } else {
-                0usize.encode(out); // Encode empty bytes for None
+                Bytes::new().encode(out); // Encode empty bytes for None
             }
             // Memo is Option<Bytes> - encode inner bytes or empty
             if let Some(ref memo) = self.memo {
                 memo.0.encode(out);
             } else {
-                0usize.encode(out); // Encode empty bytes for None
+                Bytes::new().encode(out); // Encode empty bytes for None
             }
         }
     }
@@ -547,12 +547,12 @@ impl TxMorph {
             if let Some(ref r) = self.reference {
                 r.0.encode(out);
             } else {
-                0usize.encode(out);
+                Bytes::new().encode(out);
             }
             if let Some(ref memo) = self.memo {
                 memo.0.encode(out);
             } else {
-                0usize.encode(out);
+                Bytes::new().encode(out);
             }
         }
     }
