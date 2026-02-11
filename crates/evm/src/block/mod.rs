@@ -12,7 +12,7 @@ mod receipt;
 
 pub(crate) use factory::MorphBlockExecutorFactory;
 pub(crate) use receipt::{
-    DefaultMorphReceiptBuilder, MorphReceiptBuilder, MorphReceiptBuilderCtx, MorphTxTokenFeeInfo,
+    DefaultMorphReceiptBuilder, MorphReceiptBuilder, MorphReceiptBuilderCtx, MorphTxFields,
 };
 
 use crate::evm::MorphEvm;
@@ -144,11 +144,11 @@ where
         Ok(l1_block_info.calculate_tx_l1_cost(rlp_bytes.as_ref(), hardfork))
     }
 
-    /// Extract token fee information for MorphTx (0x7F) transactions.
+    /// Extract MorphTx-specific fields for MorphTx (0x7F) transactions.
     ///
-    /// MorphTx allows users to pay gas fees using ERC20 tokens instead of native ETH.
-    /// This method queries the L2TokenRegistry contract to get the current exchange
-    /// rate and scale factor for the specified token.
+    /// MorphTx transactions include:
+    /// - Token fee information (when using ERC20 for gas payment)
+    /// - Transaction metadata (version, reference, memo)
     ///
     /// # How MorphTx Token Fees Work
     /// 1. User specifies a `fee_token_id` (registered ERC20 token)
@@ -158,11 +158,11 @@ where
     /// 5. System validates user has sufficient token balance
     ///
     /// # Arguments
-    /// * `tx` - The transaction to extract fee info from
+    /// * `tx` - The transaction to extract fields from
     ///
     /// # Returns
     /// - `Ok(None)` for non-MorphTx transactions
-    /// - `Ok(Some(info))` for MorphTx with valid token fee info
+    /// - `Ok(Some(fields))` for MorphTx with valid fields
     /// - `Err` if MorphTx is missing required fields or token info cannot be fetched
     ///
     /// # Errors
@@ -170,11 +170,11 @@ where
     /// - MorphTx is missing `fee_token_id` or `fee_limit`
     /// - Transaction sender cannot be extracted
     /// - L2TokenRegistry contract cannot be queried
-    fn get_token_fee_info(
+    fn get_morph_tx_fields(
         &mut self,
         tx: &MorphTxEnvelope,
-    ) -> Result<Option<MorphTxTokenFeeInfo>, BlockExecutionError> {
-        // Only MorphTx transactions have token fee information
+    ) -> Result<Option<MorphTxFields>, BlockExecutionError> {
+        // Only MorphTx transactions have these fields
         if !tx.is_morph_tx() {
             return Ok(None);
         }
@@ -185,6 +185,11 @@ where
         let fee_limit = tx
             .fee_limit()
             .ok_or_else(|| BlockExecutionError::msg("MorphTx missing fee_limit"))?;
+
+        // Extract version, reference, and memo from the transaction
+        let version = tx.version().unwrap_or(0);
+        let reference = tx.reference();
+        let memo = tx.memo();
 
         // Determine the current hardfork based on block number and timestamp
         let block = self.evm.block();
@@ -204,11 +209,14 @@ where
                 BlockExecutionError::msg(format!("Failed to fetch token fee info: {e:?}"))
             })?;
 
-        Ok(token_info.map(|info| MorphTxTokenFeeInfo {
+        Ok(token_info.map(|info| MorphTxFields {
+            version,
             fee_token_id,
             fee_rate: info.price_ratio,
             token_scale: info.scale,
             fee_limit,
+            reference,
+            memo,
         }))
     }
 }
@@ -337,8 +345,8 @@ where
         // Calculate L1 fee for the transaction
         let l1_fee = self.calculate_l1_fee(tx.tx())?;
 
-        // Get token fee information for MorphTx transactions
-        let token_fee_info = self.get_token_fee_info(tx.tx())?;
+        // Get MorphTx-specific fields for MorphTx transactions
+        let morph_tx_fields = self.get_morph_tx_fields(tx.tx())?;
 
         // Update cumulative gas used
         let gas_used = result.gas_used();
@@ -350,7 +358,7 @@ where
             result,
             cumulative_gas_used: self.gas_used,
             l1_fee,
-            token_fee_info,
+            morph_tx_fields,
         };
         self.receipts.push(self.receipt_builder.build_receipt(ctx));
 

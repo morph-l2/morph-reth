@@ -8,7 +8,7 @@
 //!
 //! Unlike standard Ethereum receipts, Morph receipts include:
 //! - **L1 Data Fee**: The cost charged for posting transaction data to L1
-//! - **Token Fee Info**: For MorphTx (0x7F), includes exchange rate and fee limit
+//! - **Token Fee Info**: For MorphTx (0x7F), includes exchange rate, fee limit, reference, and memo
 //!
 //! The standard `EthBlockExecutor` doesn't have access to L1 fee information
 //! during receipt building. This module provides a custom builder that receives
@@ -23,11 +23,11 @@
 //! | EIP-1559 (0x02) | inner + l1_fee |
 //! | EIP-7702 (0x04) | inner + l1_fee |
 //! | L1Message (0x7E) | inner only (no L1 fee) |
-//! | MorphTx (0x7F) | inner + l1_fee + token_fee_info |
+//! | MorphTx (0x7F) | inner + l1_fee + token_fee_info + reference + memo |
 
 use alloy_consensus::Receipt;
 use alloy_evm::Evm;
-use alloy_primitives::U256;
+use alloy_primitives::{B256, Bytes, U256};
 use morph_primitives::{MorphReceipt, MorphTransactionReceipt, MorphTxEnvelope, MorphTxType};
 use revm::context::result::ExecutionResult;
 
@@ -53,28 +53,34 @@ pub(crate) struct MorphReceiptBuilderCtx<'a, E: Evm> {
     pub cumulative_gas_used: u64,
     /// L1 data fee for this transaction
     pub l1_fee: U256,
-    /// Token fee information for MorphTx (0x7F) transactions
-    pub token_fee_info: Option<MorphTxTokenFeeInfo>,
+    /// MorphTx-specific fields (token fee info, version, reference, memo)
+    pub morph_tx_fields: Option<MorphTxFields>,
 }
 
-/// Token fee information for MorphTx (0x7F) transactions.
+/// MorphTx (0x7F) specific fields for receipts.
 ///
-/// When a user pays gas fees with ERC20 tokens (MorphTx), these fields
-/// record the exchange rate and limits used for the fee calculation.
-/// This information is stored in receipts for transparency and debugging.
+/// This struct aggregates all Morph-specific transaction fields that need to be
+/// included in the receipt, including:
+/// - Token fee information (when using ERC20 for gas payment)
+/// - Transaction metadata (version, reference, memo)
 ///
-/// # Fee Calculation Formula
+/// # Token Fee Calculation Formula
 /// ```text
 /// token_fee = eth_fee * fee_rate / token_scale
 /// ```
 ///
 /// # Fields
+/// - `version`: The version of the Morph transaction format (0 = legacy, 1 = with reference/memo)
 /// - `fee_token_id`: ID of the ERC20 token registered in L2TokenRegistry
 /// - `fee_rate`: Exchange rate from L2TokenRegistry (token per ETH)
 /// - `token_scale`: Decimal scale factor for the token (e.g., 10^18)
 /// - `fee_limit`: Maximum tokens the user agreed to pay
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct MorphTxTokenFeeInfo {
+/// - `reference`: 32-byte key for transaction indexing by external systems
+/// - `memo`: Arbitrary data field (up to 64 bytes)
+#[derive(Debug, Clone)]
+pub(crate) struct MorphTxFields {
+    /// Version of the Morph transaction format
+    pub version: u8,
     /// Token ID for fee payment
     pub fee_token_id: u16,
     /// Exchange rate for the fee token
@@ -83,6 +89,10 @@ pub(crate) struct MorphTxTokenFeeInfo {
     pub token_scale: U256,
     /// Fee limit specified in the transaction
     pub fee_limit: U256,
+    /// Reference key for transaction indexing
+    pub reference: Option<B256>,
+    /// Memo field for arbitrary data
+    pub memo: Option<Bytes>,
 }
 
 /// Trait for building Morph receipts from execution context.
@@ -118,9 +128,9 @@ pub(crate) trait MorphReceiptBuilder: Send + Sync {
 /// - These transactions originate from L1 and don't pay L1 data fees
 ///
 /// ## MorphTx Transactions (0x7F)
-/// - Includes L1 fee plus token fee information
-/// - Uses `with_morph_tx()` to populate all ERC20 token fee fields
-/// - Falls back to `with_l1_fee()` if token info is unexpectedly missing
+/// - Includes L1 fee plus MorphTx-specific fields
+/// - Uses `with_morph_tx_v1()` to populate all MorphTx fields
+/// - Falls back to `with_l1_fee()` if MorphTx fields are unexpectedly missing
 ///
 /// # Note
 /// The builder is stateless and can be reused across multiple receipts.
@@ -135,7 +145,7 @@ impl MorphReceiptBuilder for DefaultMorphReceiptBuilder {
             result,
             cumulative_gas_used,
             l1_fee,
-            token_fee_info,
+            morph_tx_fields,
         } = ctx;
 
         let inner = Receipt {
@@ -163,18 +173,21 @@ impl MorphReceiptBuilder for DefaultMorphReceiptBuilder {
                 MorphReceipt::L1Msg(inner)
             }
             MorphTxType::Morph => {
-                // MorphTx transactions include token fee information
-                if let Some(token_info) = token_fee_info {
-                    MorphReceipt::Morph(MorphTransactionReceipt::with_morph_tx(
+                // MorphTx transactions include MorphTx-specific fields
+                if let Some(fields) = morph_tx_fields {
+                    MorphReceipt::Morph(MorphTransactionReceipt::with_morph_tx_v1(
                         inner,
                         l1_fee,
-                        token_info.fee_token_id,
-                        token_info.fee_rate,
-                        token_info.token_scale,
-                        token_info.fee_limit,
+                        fields.version,
+                        fields.fee_token_id,
+                        fields.fee_rate,
+                        fields.token_scale,
+                        fields.fee_limit,
+                        fields.reference,
+                        fields.memo,
                     ))
                 } else {
-                    // Fallback: just include L1 fee if token info is missing
+                    // Fallback: just include L1 fee if MorphTx fields are missing
                     MorphReceipt::Morph(MorphTransactionReceipt::with_l1_fee(inner, l1_fee))
                 }
             }
