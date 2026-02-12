@@ -102,6 +102,8 @@ where
     /// Estimates the L1 data fee for the given transaction.
     ///
     /// Returns zero for L1 message transactions since they don't pay L1 fees.
+    /// For RPC calls (eth_call, eth_estimateGas), generates RLP bytes on-demand
+    /// using a mock signature.
     fn estimate_l1_fee<DB>(
         &self,
         db: &mut DB,
@@ -112,6 +114,10 @@ where
         DB: Database,
         DB::Error: Into<EthApiError>,
     {
+        if tx_env.is_l1_msg() {
+            return Ok(U256::ZERO);
+        }
+
         let block_number = u64::try_from(evm_env.block_env.number)
             .map_err(|_| EthApiError::InvalidParams("invalid block number".to_string()))?;
         let timestamp = u64::try_from(evm_env.block_env.timestamp)
@@ -119,19 +125,19 @@ where
         let chain_spec = self.provider().chain_spec();
         let hardfork = chain_spec.morph_hardfork_at(block_number, timestamp);
 
-        if tx_env.is_l1_msg() {
-            return Ok(U256::ZERO);
-        }
-
-        let rlp_bytes = tx_env.rlp_bytes.as_ref().ok_or_else(|| {
-            EthApiError::InvalidParams("missing rlp bytes for l1 fee".to_string())
-        })?;
+        // Get RLP bytes for L1 fee calculation.
+        // For real transactions, rlp_bytes is set by FromRecoveredTx.
+        // For RPC calls (eth_call, eth_estimateGas), we generate it on-demand.
+        let rlp_bytes = match tx_env.rlp_bytes.as_ref() {
+            Some(bytes) => bytes.clone(),
+            None => crate::eth::transaction::build_tx_with_mock_signature(tx_env, evm_env)?,
+        };
 
         let l1_info = L1BlockInfo::try_fetch(db, hardfork).map_err(|err| {
             EthApiError::InvalidParams(format!("failed to estimate L1 data fee: {err}"))
         })?;
 
-        Ok(l1_info.calculate_tx_l1_cost(rlp_bytes, hardfork))
+        Ok(l1_info.calculate_tx_l1_cost(&rlp_bytes, hardfork))
     }
 
     /// Calculate caller's gas allowance when paying with ERC20 tokens.

@@ -165,7 +165,6 @@ impl TryIntoTxEnv<MorphTxEnv, MorphBlockEnv> for MorphTransactionRequest {
         let reference = self.reference;
         let memo = self.memo;
         let inner = self.inner;
-        let access_list = inner.access_list.clone().unwrap_or_default();
 
         let inner_tx_env = inner
             .clone()
@@ -195,9 +194,10 @@ impl TryIntoTxEnv<MorphTxEnv, MorphBlockEnv> for MorphTransactionRequest {
                 Some(morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_1);
         }
 
-        let rlp_bytes = encode_tx_for_l1_fee(&tx_env, access_list, evm_env, inner)?;
-
-        tx_env.rlp_bytes = Some(rlp_bytes);
+        // RLP bytes are not generated here for eth_call and eth_estimateGas.
+        // They will be generated on-demand in estimate_l1_fee if needed.
+        // For real transactions, RLP bytes are extracted in FromRecoveredTx.
+        tx_env.rlp_bytes = None;
         Ok(tx_env)
     }
 }
@@ -338,15 +338,20 @@ fn try_build_morph_tx_from_env<Spec>(
     }))
 }
 
-/// Encodes a transaction for L1 fee calculation.
+/// Builds a transaction with mock signature for L1 fee estimation.
 ///
-/// Returns the RLP-encoded bytes used to calculate the L1 data fee.
-fn encode_tx_for_l1_fee<Spec>(
+/// This is used for eth_call and eth_estimateGas where we don't have
+/// a real signature, but need to estimate the RLP-encoded transaction size
+/// for L1 data fee calculation.
+///
+/// The mock signature has a fixed size (65 bytes for ECDSA), which is
+/// sufficient for accurate L1 fee estimation since the fee is based on
+/// the calldata size.
+pub fn build_tx_with_mock_signature<Spec>(
     tx_env: &MorphTxEnv,
-    access_list: AccessList,
     evm_env: &EvmEnv<Spec, MorphBlockEnv>,
-    inner: alloy_rpc_types_eth::TransactionRequest,
 ) -> Result<Bytes, EthApiError> {
+    let access_list = tx_env.access_list.clone();
     let fee_token_id = U64::from(tx_env.fee_token_id.unwrap_or_default());
     let fee_limit = tx_env.fee_limit.unwrap_or_default();
     let reference = tx_env.reference;
@@ -357,16 +362,32 @@ fn encode_tx_for_l1_fee<Spec>(
         tx_env,
         fee_token_id,
         fee_limit,
-        access_list,
+        access_list.clone(),
         evm_env,
         reference,
         memo,
     )? {
         Some(morph_tx) => Ok(encode_2718(morph_tx)),
         None => {
-            let envelope = inner
-                .build_typed_simulate_transaction()
-                .map_err(|err| EthApiError::InvalidParams(err.to_string()))?;
+            // Build an EIP-1559 transaction directly from tx_env for L1 fee calculation.
+            // This avoids requiring a complete TransactionRequest (which eth_call doesn't provide).
+            let tx = alloy_consensus::TxEip1559 {
+                chain_id: tx_env.chain_id().unwrap_or(evm_env.cfg_env.chain_id),
+                nonce: tx_env.nonce(),
+                gas_limit: tx_env.gas_limit(),
+                max_fee_per_gas: tx_env.max_fee_per_gas(),
+                max_priority_fee_per_gas: tx_env.max_priority_fee_per_gas().unwrap_or_default(),
+                to: tx_env.kind(),
+                value: tx_env.value(),
+                access_list,
+                input: tx_env.input().clone(),
+            };
+            // Use a mock signature (all zeros) for encoding.
+            // Only the signature size matters for L1 fee calculation, not its validity.
+            let signature = Signature::new(Default::default(), Default::default(), false);
+            let signed = tx.into_signed(signature);
+            let envelope: EthereumTxEnvelope<alloy_consensus::TxEip4844> =
+                EthereumTxEnvelope::Eip1559(signed);
             Ok(encode_2718(envelope))
         }
     }

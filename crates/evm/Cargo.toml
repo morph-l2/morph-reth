@@ -15,7 +15,7 @@ workspace = true
 morph-chainspec.workspace = true
 morph-primitives = { workspace = true, features = ["serde-bincode-compat"] }
 morph-revm.workspace = true
-morph-payload-types.workspace = true
+morph-payload-types = { workspace = true, features = ["serde"] }
 
 reth-chainspec.workspace = true
 reth-evm.workspace = true
