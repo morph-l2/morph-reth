@@ -2,7 +2,7 @@
 //!
 //! This crate provides the payload building logic for Morph L2.
 //!
-//! The [`MorphPayloadBuilder`] implements reth's [`PayloadBuilder`] trait
+//! The [`MorphPayloadBuilder`] implements reth's `PayloadBuilder` trait
 //! to construct L2 blocks with:
 //! - L1 message transactions (prioritized, must be at the beginning)
 //! - Sequencer forced transactions

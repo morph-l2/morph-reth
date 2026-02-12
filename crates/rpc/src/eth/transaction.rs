@@ -5,7 +5,6 @@ use crate::types::transaction::MorphRpcTransaction;
 use alloy_consensus::{
     EthereumTxEnvelope, SignableTransaction, Transaction, TxEip4844, transaction::Recovered,
 };
-use alloy_eips::eip2718::Encodable2718;
 use alloy_network::TxSigner;
 use alloy_primitives::{Address, Bytes, Signature, TxKind, U64, U256};
 use alloy_rpc_types_eth::{AccessList, Transaction as RpcTransaction, TransactionInfo};
@@ -166,10 +165,7 @@ impl TryIntoTxEnv<MorphTxEnv, MorphBlockEnv> for MorphTransactionRequest {
         let memo = self.memo;
         let inner = self.inner;
 
-        let inner_tx_env = inner
-            .clone()
-            .try_into_tx_env(evm_env)
-            .map_err(EthApiError::from)?;
+        let inner_tx_env = inner.try_into_tx_env(evm_env).map_err(EthApiError::from)?;
 
         let mut tx_env = MorphTxEnv::new(inner_tx_env);
         tx_env.fee_token_id = match fee_token_id {
@@ -338,16 +334,23 @@ fn try_build_morph_tx_from_env<Spec>(
     }))
 }
 
-/// Builds a transaction with mock signature for L1 fee estimation.
+/// Builds and encodes a transaction for L1 fee estimation.
 ///
 /// This is used for eth_call and eth_estimateGas where we don't have
 /// a real signature, but need to estimate the RLP-encoded transaction size
 /// for L1 data fee calculation.
 ///
-/// The mock signature has a fixed size (65 bytes for ECDSA), which is
-/// sufficient for accurate L1 fee estimation since the fee is based on
-/// the calldata size.
-pub fn build_tx_with_mock_signature<Spec>(
+/// Uses a placeholder signature (all zeros) for encoding. The signature size
+/// (65 bytes for ECDSA) is sufficient for accurate L1 fee estimation since
+/// the fee is based on the encoded byte size.
+///
+/// This function determines the appropriate transaction type based on the transaction fields:
+/// - If max_priority_fee_per_gas is None and access_list is empty -> Legacy transaction (type 0x00)
+/// - If access_list is not empty but max_priority_fee_per_gas is None -> EIP-2930 (type 0x01)
+/// - Otherwise -> EIP-1559 (type 0x02) or MorphTx (type 0x7F)
+///
+/// This matches go-ethereum's asUnsignedTx logic in rollup/fees/rollup_fee.go:88-102.
+pub fn encode_tx_for_l1_fee<Spec>(
     tx_env: &MorphTxEnv,
     evm_env: &EvmEnv<Spec, MorphBlockEnv>,
 ) -> Result<Bytes, EthApiError> {
@@ -356,6 +359,10 @@ pub fn build_tx_with_mock_signature<Spec>(
     let fee_limit = tx_env.fee_limit.unwrap_or_default();
     let reference = tx_env.reference;
     let memo = tx_env.memo.clone();
+
+    // Use a placeholder signature (all zeros) for encoding.
+    // Only the signature size matters for L1 fee calculation, not its validity.
+    let placeholder_signature = Signature::new(Default::default(), Default::default(), false);
 
     // Try to build a MorphTx; returns None if this should be a standard Ethereum tx
     match try_build_morph_tx_from_env(
@@ -367,12 +374,76 @@ pub fn build_tx_with_mock_signature<Spec>(
         reference,
         memo,
     )? {
-        Some(morph_tx) => Ok(encode_2718(morph_tx)),
+        Some(morph_tx) => {
+            // Use MorphTxEnvelope to encode with signature.
+            // Signed<TxMorph> will include the signature in its RLP encoding.
+            let signed = morph_tx.into_signed(placeholder_signature);
+            let envelope = MorphTxEnvelope::Morph(signed);
+            Ok(envelope.rlp())
+        }
         None => {
-            // Build an EIP-1559 transaction directly from tx_env for L1 fee calculation.
-            // This avoids requiring a complete TransactionRequest (which eth_call doesn't provide).
-            let tx = alloy_consensus::TxEip1559 {
-                chain_id: tx_env.chain_id().unwrap_or(evm_env.cfg_env.chain_id),
+            // Build standard Ethereum transaction from TxEnv.
+            // Determines the appropriate type based on available fields,
+            // matching go-ethereum's asUnsignedTx logic (rollup/fees/rollup_fee.go:88-102).
+            let envelope =
+                build_ethereum_tx_from_env(tx_env, evm_env, access_list, placeholder_signature);
+            Ok(envelope.rlp())
+        }
+    }
+}
+
+/// Builds a standard Ethereum transaction envelope from TxEnv.
+///
+/// Determines the appropriate transaction type based on available fields:
+/// - Legacy (0x00): No dynamic fees and no access list
+/// - EIP-2930 (0x01): Has access list but no dynamic fees
+/// - EIP-1559 (0x02): Has dynamic fees (max_priority_fee_per_gas is Some)
+///
+/// This matches go-ethereum's asUnsignedTx logic in rollup/fees/rollup_fee.go:88-102.
+fn build_ethereum_tx_from_env<Spec>(
+    tx_env: &MorphTxEnv,
+    evm_env: &EvmEnv<Spec, MorphBlockEnv>,
+    access_list: AccessList,
+    signature: Signature,
+) -> MorphTxEnvelope {
+    let chain_id = tx_env.chain_id().unwrap_or(evm_env.cfg_env.chain_id);
+    let has_dynamic_fees = tx_env.max_priority_fee_per_gas().is_some();
+    let has_access_list = !access_list.is_empty();
+
+    if !has_dynamic_fees && !has_access_list {
+        // Legacy transaction (type 0x00)
+        MorphTxEnvelope::Legacy(
+            alloy_consensus::TxLegacy {
+                chain_id: Some(chain_id),
+                nonce: tx_env.nonce(),
+                gas_price: tx_env.gas_price(),
+                gas_limit: tx_env.gas_limit(),
+                to: tx_env.kind(),
+                value: tx_env.value(),
+                input: tx_env.input().clone(),
+            }
+            .into_signed(signature),
+        )
+    } else if has_access_list && !has_dynamic_fees {
+        // EIP-2930 transaction (type 0x01)
+        MorphTxEnvelope::Eip2930(
+            alloy_consensus::TxEip2930 {
+                chain_id,
+                nonce: tx_env.nonce(),
+                gas_price: tx_env.gas_price(),
+                gas_limit: tx_env.gas_limit(),
+                to: tx_env.kind(),
+                value: tx_env.value(),
+                access_list,
+                input: tx_env.input().clone(),
+            }
+            .into_signed(signature),
+        )
+    } else {
+        // EIP-1559 transaction (type 0x02)
+        MorphTxEnvelope::Eip1559(
+            alloy_consensus::TxEip1559 {
+                chain_id,
                 nonce: tx_env.nonce(),
                 gas_limit: tx_env.gas_limit(),
                 max_fee_per_gas: tx_env.max_fee_per_gas(),
@@ -381,21 +452,8 @@ pub fn build_tx_with_mock_signature<Spec>(
                 value: tx_env.value(),
                 access_list,
                 input: tx_env.input().clone(),
-            };
-            // Use a mock signature (all zeros) for encoding.
-            // Only the signature size matters for L1 fee calculation, not its validity.
-            let signature = Signature::new(Default::default(), Default::default(), false);
-            let signed = tx.into_signed(signature);
-            let envelope: EthereumTxEnvelope<alloy_consensus::TxEip4844> =
-                EthereumTxEnvelope::Eip1559(signed);
-            Ok(encode_2718(envelope))
-        }
+            }
+            .into_signed(signature),
+        )
     }
-}
-
-/// Encodes a transaction using EIP-2718 typed transaction encoding.
-fn encode_2718<T: Encodable2718>(tx: T) -> Bytes {
-    let mut out = Vec::with_capacity(tx.encode_2718_len());
-    tx.encode_2718(&mut out);
-    Bytes::from(out)
 }

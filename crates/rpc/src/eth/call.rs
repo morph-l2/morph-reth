@@ -130,7 +130,7 @@ where
         // For RPC calls (eth_call, eth_estimateGas), we generate it on-demand.
         let rlp_bytes = match tx_env.rlp_bytes.as_ref() {
             Some(bytes) => bytes.clone(),
-            None => crate::eth::transaction::build_tx_with_mock_signature(tx_env, evm_env)?,
+            None => crate::eth::transaction::encode_tx_for_l1_fee(tx_env, evm_env)?,
         };
 
         let l1_info = L1BlockInfo::try_fetch(db, hardfork).map_err(|err| {

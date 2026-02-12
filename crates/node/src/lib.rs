@@ -5,7 +5,7 @@
 //!
 //! # Main Types
 //!
-//! - [`MorphNode`]: The main node type implementing reth's [`NodeTypes`] trait
+//! - [`MorphNode`]: The main node type implementing reth's `NodeTypes` trait
 //! - [`MorphAddOns`]: RPC add-ons with Morph-specific API extensions
 //!
 //! # Components
