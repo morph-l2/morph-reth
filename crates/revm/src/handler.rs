@@ -186,7 +186,9 @@ where
 
         // reward beneficiary
         let mut beneficiary_account = journal.load_account_mut(beneficiary)?;
-        beneficiary_account.data.incr_balance(execution_fee.saturating_add(l1_data_fee));
+        beneficiary_account
+            .data
+            .incr_balance(execution_fee.saturating_add(l1_data_fee));
 
         Ok(())
     }
@@ -204,7 +206,10 @@ where
     }
 
     #[inline]
-    fn validate_initial_tx_gas(&self, evm: &mut Self::Evm) -> Result<InitialAndFloorGas, Self::Error> {
+    fn validate_initial_tx_gas(
+        &self,
+        evm: &mut Self::Evm,
+    ) -> Result<InitialAndFloorGas, Self::Error> {
         let tx = evm.ctx_ref().tx();
         let cfg = evm.ctx_ref().cfg();
         let spec = (*cfg.spec()).into();

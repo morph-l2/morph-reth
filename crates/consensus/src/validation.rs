@@ -233,7 +233,10 @@ impl Consensus<Block> for MorphConsensus {
     /// 3. **Transaction Root**: Must be valid
     /// 4. **Withdrawals**: Must be empty (Morph L2 doesn't support withdrawals)
     /// 5. **L1 Messages**: Must be ordered correctly (sequential queue indices, L1 before L2)
-    fn validate_block_pre_execution(&self, block: &SealedBlock<Block>) -> Result<(), ConsensusError> {
+    fn validate_block_pre_execution(
+        &self,
+        block: &SealedBlock<Block>,
+    ) -> Result<(), ConsensusError> {
         // Check no uncles allowed (Morph L2 has no uncle blocks)
         let ommers_len = block.body().ommers().map(|o| o.len()).unwrap_or_default();
         if ommers_len > 0 {
