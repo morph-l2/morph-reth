@@ -46,8 +46,7 @@ pub use safe_l2_data::SafeL2Data;
 pub struct MorphPayloadTypes;
 
 /// Execution data for Morph node. Simply wraps a sealed block.
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MorphExecutionData {
     /// The built block.
     pub block: Arc<SealedBlock<Block>>,
@@ -92,6 +91,10 @@ impl ExecutionPayload for MorphExecutionData {
 
     fn block_access_list(&self) -> Option<&Bytes> {
         None
+    }
+
+    fn transaction_count(&self) -> usize {
+        self.block.body().transactions().count()
     }
 }
 

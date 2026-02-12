@@ -12,42 +12,35 @@ use alloy_primitives::{B256, Bytes};
 /// during execution rather than provided upfront.
 ///
 /// [`ExecutableL2Data`]: super::ExecutableL2Data
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SafeL2Data {
     /// Block number.
-    #[cfg_attr(feature = "serde", serde(with = "alloy_serde::quantity"))]
+    #[serde(with = "alloy_serde::quantity")]
     pub number: u64,
 
     /// Gas limit.
-    #[cfg_attr(feature = "serde", serde(with = "alloy_serde::quantity"))]
+    #[serde(with = "alloy_serde::quantity")]
     pub gas_limit: u64,
 
     /// Base fee per gas (EIP-1559).
-    #[cfg_attr(
-        feature = "serde",
-        serde(
-            default,
-            skip_serializing_if = "Option::is_none",
-            with = "alloy_serde::quantity::opt"
-        )
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "alloy_serde::quantity::opt"
     )]
     pub base_fee_per_gas: Option<u128>,
 
     /// Block timestamp.
-    #[cfg_attr(feature = "serde", serde(with = "alloy_serde::quantity"))]
+    #[serde(with = "alloy_serde::quantity")]
     pub timestamp: u64,
 
     /// RLP-encoded transactions.
-    #[cfg_attr(feature = "serde", serde(default))]
+    #[serde(default)]
     pub transactions: Vec<Bytes>,
 
     /// Optional batch hash for batch association.
-    #[cfg_attr(
-        feature = "serde",
-        serde(default, skip_serializing_if = "Option::is_none")
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_hash: Option<B256>,
 }
 

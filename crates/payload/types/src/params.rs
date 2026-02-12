@@ -5,17 +5,16 @@ use alloy_primitives::Bytes;
 /// Parameters for engine_assembleL2Block.
 ///
 /// This struct contains the input parameters for building a new L2 block.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AssembleL2BlockParams {
     /// Block number to build.
-    #[cfg_attr(feature = "serde", serde(with = "alloy_serde::quantity"))]
+    #[serde(with = "alloy_serde::quantity")]
     pub number: u64,
 
     /// Transactions to include in the block.
     /// These are RLP-encoded transaction bytes.
-    #[cfg_attr(feature = "serde", serde(default))]
+    #[serde(default)]
     pub transactions: Vec<Bytes>,
 }
 
@@ -41,8 +40,7 @@ impl AssembleL2BlockParams {
 ///
 /// This is used by methods like engine_validateL2Block that return
 /// a simple success/failure status.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GenericResponse {
     /// Whether the operation was successful.
     pub success: bool,
