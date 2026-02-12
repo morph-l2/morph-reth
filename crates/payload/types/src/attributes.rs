@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 #[serde(rename_all = "camelCase")]
 pub struct MorphPayloadAttributes {
     /// Standard Ethereum payload attributes.
-    #[serde(flatten)]
+    #[cfg_attr(feature = "serde", serde(flatten))]
     pub inner: PayloadAttributes,
 
     /// L1 message transactions to include at the beginning of the block.
