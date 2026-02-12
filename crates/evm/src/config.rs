@@ -1,7 +1,4 @@
-use crate::{
-    MorphBlockAssembler, MorphBlockExecutionCtx, MorphEvmConfig, MorphEvmError,
-    MorphNextBlockEnvAttributes,
-};
+use crate::{MorphBlockAssembler, MorphEvmConfig, MorphEvmError, MorphNextBlockEnvAttributes};
 use alloy_consensus::BlockHeader;
 use morph_chainspec::hardfork::MorphHardforks;
 use morph_primitives::Block;
@@ -85,15 +82,13 @@ impl ConfigureEvm for MorphEvmConfig {
     fn context_for_block<'a>(
         &self,
         block: &'a SealedBlock<Block>,
-    ) -> Result<MorphBlockExecutionCtx<'a>, Self::Error> {
-        Ok(MorphBlockExecutionCtx {
-            inner: EthBlockExecutionCtx {
-                parent_hash: block.header().parent_hash(),
-                parent_beacon_block_root: block.header().parent_beacon_block_root(),
-                ommers: &[],
-                withdrawals: block.body().withdrawals.as_ref().map(Cow::Borrowed),
-                extra_data: block.extra_data().clone(),
-            },
+    ) -> Result<EthBlockExecutionCtx<'a>, Self::Error> {
+        Ok(EthBlockExecutionCtx {
+            parent_hash: block.header().parent_hash(),
+            parent_beacon_block_root: block.header().parent_beacon_block_root(),
+            ommers: &[],
+            withdrawals: block.body().withdrawals.as_ref().map(Cow::Borrowed),
+            extra_data: block.extra_data().clone(),
         })
     }
 
@@ -101,15 +96,13 @@ impl ConfigureEvm for MorphEvmConfig {
         &self,
         parent: &SealedHeader<MorphHeader>,
         attributes: Self::NextBlockEnvCtx,
-    ) -> Result<MorphBlockExecutionCtx<'_>, Self::Error> {
-        Ok(MorphBlockExecutionCtx {
-            inner: EthBlockExecutionCtx {
-                parent_hash: parent.hash(),
-                parent_beacon_block_root: attributes.parent_beacon_block_root,
-                ommers: &[],
-                withdrawals: attributes.inner.withdrawals.map(Cow::Owned),
-                extra_data: attributes.inner.extra_data,
-            },
+    ) -> Result<EthBlockExecutionCtx<'_>, Self::Error> {
+        Ok(EthBlockExecutionCtx {
+            parent_hash: parent.hash(),
+            parent_beacon_block_root: attributes.parent_beacon_block_root,
+            ommers: &[],
+            withdrawals: attributes.inner.withdrawals.map(Cow::Owned),
+            extra_data: attributes.inner.extra_data,
         })
     }
 }

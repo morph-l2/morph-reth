@@ -1,15 +1,6 @@
-use alloy_evm::eth::EthBlockExecutionCtx;
 use reth_evm::NextBlockEnvAttributes;
 #[cfg(feature = "rpc")]
 use reth_primitives_traits::SealedHeader;
-
-/// Execution context for Morph block.
-#[derive(Debug, Clone, derive_more::Deref)]
-pub struct MorphBlockExecutionCtx<'a> {
-    /// Inner [`EthBlockExecutionCtx`].
-    #[deref]
-    pub inner: EthBlockExecutionCtx<'a>,
-}
 
 /// Context required for next block environment.
 #[derive(Debug, Clone, derive_more::Deref)]
