@@ -40,8 +40,10 @@ impl ConfigureEvm for MorphEvmConfig {
             .chain_spec()
             .morph_hardfork_at(header.number(), header.timestamp());
 
+        let cfg_env = cfg_env.with_spec_and_mainnet_gas_params(spec);
+
         Ok(EvmEnv {
-            cfg_env: cfg_env.with_spec(spec),
+            cfg_env,
             block_env: MorphBlockEnv { inner: block_env },
         })
     }
@@ -73,8 +75,10 @@ impl ConfigureEvm for MorphEvmConfig {
             .chain_spec()
             .morph_hardfork_at(parent.number() + 1, attributes.timestamp);
 
+        let cfg_env = cfg_env.with_spec_and_mainnet_gas_params(spec);
+
         Ok(EvmEnv {
-            cfg_env: cfg_env.with_spec(spec),
+            cfg_env,
             block_env: MorphBlockEnv { inner: block_env },
         })
     }
@@ -84,6 +88,7 @@ impl ConfigureEvm for MorphEvmConfig {
         block: &'a SealedBlock<Block>,
     ) -> Result<EthBlockExecutionCtx<'a>, Self::Error> {
         Ok(EthBlockExecutionCtx {
+            tx_count_hint: Some(block.body().transactions.len()),
             parent_hash: block.header().parent_hash(),
             parent_beacon_block_root: block.header().parent_beacon_block_root(),
             ommers: &[],
@@ -98,6 +103,7 @@ impl ConfigureEvm for MorphEvmConfig {
         attributes: Self::NextBlockEnvCtx,
     ) -> Result<EthBlockExecutionCtx<'_>, Self::Error> {
         Ok(EthBlockExecutionCtx {
+            tx_count_hint: None,
             parent_hash: parent.hash(),
             parent_beacon_block_root: attributes.parent_beacon_block_root,
             ommers: &[],

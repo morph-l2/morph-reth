@@ -7,7 +7,7 @@ use revm::{
         Cfg, ContextTr, JournalTr, Transaction,
         result::{EVMError, ExecutionResult, InvalidTransaction},
     },
-    context_interface::Block,
+    context_interface::{Block, journaled_state::account::JournaledAccountTr},
     handler::{EvmTr, FrameTr, Handler, MainnetHandler, post_execution, pre_execution, validation},
     inspector::{Inspector, InspectorHandler},
     interpreter::{Gas, InitialAndFloorGas, interpreter::EthInterpreter},
@@ -167,7 +167,7 @@ where
         let hardfork = cfg.spec();
 
         // Fetch L1 block info from the L1 Gas Price Oracle contract
-        let l1_block_info = L1BlockInfo::try_fetch(journal.db_mut(), hardfork)?;
+        let l1_block_info = L1BlockInfo::try_fetch(journal.db_mut(), *hardfork)?;
 
         // Get RLP-encoded transaction bytes for L1 fee calculation
         // This represents the full transaction data posted to L1 for data availability
@@ -178,15 +178,16 @@ where
             .unwrap_or_default();
 
         // Calculate L1 data fee based on full RLP-encoded transaction
-        let l1_data_fee = l1_block_info.calculate_tx_l1_cost(rlp_bytes, hardfork);
+        let l1_data_fee = l1_block_info.calculate_tx_l1_cost(rlp_bytes, *hardfork);
 
         let gas_used = exec_result.gas().used();
 
         let execution_fee = U256::from(effective_gas_price).saturating_mul(U256::from(gas_used));
 
         // reward beneficiary
-        journal
-            .load_account_mut(beneficiary)?
+        let mut beneficiary_account = journal.load_account_mut(beneficiary)?;
+        beneficiary_account
+            .data
             .incr_balance(execution_fee.saturating_add(l1_data_fee));
 
         Ok(())
@@ -205,10 +206,13 @@ where
     }
 
     #[inline]
-    fn validate_initial_tx_gas(&self, evm: &Self::Evm) -> Result<InitialAndFloorGas, Self::Error> {
+    fn validate_initial_tx_gas(
+        &self,
+        evm: &mut Self::Evm,
+    ) -> Result<InitialAndFloorGas, Self::Error> {
         let tx = evm.ctx_ref().tx();
         let cfg = evm.ctx_ref().cfg();
-        let spec = cfg.spec().into();
+        let spec = (*cfg.spec()).into();
         Ok(
             validation::validate_initial_tx_gas(tx, spec, cfg.is_eip7623_disabled())
                 .map_err(MorphInvalidTransaction::EthInvalidTransaction)?,
@@ -255,7 +259,7 @@ where
         evm: &mut MorphEvm<DB, I>,
     ) -> Result<(), EVMError<DB::Error, MorphInvalidTransaction>> {
         // Get the current hardfork for L1 fee calculation
-        let hardfork = evm.ctx_ref().cfg().spec();
+        let hardfork = *evm.ctx_ref().cfg().spec();
 
         // Fetch L1 block info from the L1 Gas Price Oracle contract
         let l1_block_info = L1BlockInfo::try_fetch(evm.ctx_mut().db_mut(), hardfork)?;
@@ -281,7 +285,7 @@ where
 
         // Validate account nonce and code (EIP-3607)
         pre_execution::validate_account_nonce_and_code(
-            &caller.info,
+            &caller.account().info,
             tx.nonce(),
             cfg.is_eip3607_disabled(),
             cfg.is_nonce_check_disabled(),
@@ -328,7 +332,7 @@ where
         }
 
         // Fetch token fee info from Token Registry
-        let spec = evm.ctx_ref().cfg().spec();
+        let spec = *evm.ctx_ref().cfg().spec();
         let token_fee_info = TokenFeeInfo::fetch(evm.ctx_mut().db_mut(), token_id, caller, spec)?
             .ok_or(MorphInvalidTransaction::TokenNotRegistered(token_id))?;
 
@@ -386,7 +390,7 @@ where
         // Get coinbase address
         let beneficiary = block.beneficiary();
         // Get the current hardfork for L1 fee calculation
-        let hardfork = cfg.spec();
+        let hardfork = *cfg.spec();
 
         // Fetch token fee info from Token Registry
         let token_fee_info =
@@ -496,7 +500,7 @@ where
 
         // Validate account nonce and code (EIP-3607)
         pre_execution::validate_account_nonce_and_code(
-            &caller.info,
+            &caller.account().info,
             nonce,
             cfg.is_eip3607_disabled(),
             cfg.is_nonce_check_disabled(),
