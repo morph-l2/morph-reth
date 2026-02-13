@@ -49,6 +49,7 @@ struct SenderBudget {
 /// Applies cumulative sender-budget checks and consumes budget on success.
 ///
 /// Returns `true` if the transaction can be afforded under the current rolling budget.
+#[allow(clippy::too_many_arguments)]
 fn consume_sender_budget(
     budget: &mut SenderBudget,
     uses_token_fee: bool,
