@@ -56,7 +56,7 @@ pub(crate) struct MorphReceiptBuilderCtx<'a, E: Evm> {
     /// L1 data fee for this transaction
     pub l1_fee: U256,
     /// MorphTx-specific fields (token fee info, version, reference, memo)
-    pub morph_tx_fields: Option<MorphTxFields>,
+    pub morph_tx_fields: Option<MorphReceiptTxFields>,
 }
 
 /// MorphTx (0x7F) specific fields for receipts.
@@ -80,7 +80,7 @@ pub(crate) struct MorphReceiptBuilderCtx<'a, E: Evm> {
 /// - `reference`: 32-byte key for transaction indexing by external systems
 /// - `memo`: Arbitrary data field (up to 64 bytes)
 #[derive(Debug, Clone)]
-pub(crate) struct MorphTxFields {
+pub(crate) struct MorphReceiptTxFields {
     /// Version of the Morph transaction format
     pub version: u8,
     /// Token ID for fee payment

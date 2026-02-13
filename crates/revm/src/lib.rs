@@ -37,8 +37,9 @@ mod block;
 // Suppress unused_crate_dependencies warnings
 #[cfg(not(test))]
 use alloy_consensus as _;
-#[cfg(not(test))]
 use alloy_sol_types as _;
+#[cfg(not(test))]
+use reth_ethereum_primitives as _;
 #[cfg(not(test))]
 use tracing as _;
 
@@ -78,7 +79,7 @@ pub use l1block::{
 };
 pub use precompiles::MorphPrecompiles;
 pub use token_fee::{
-    L2_TOKEN_REGISTRY_ADDRESS, TokenFeeInfo, encode_balance_of, erc20_balance_of, mapping_slot,
-    mapping_slot_for,
+    L2_TOKEN_REGISTRY_ADDRESS, TokenFeeInfo, compute_mapping_slot,
+    compute_mapping_slot_for_address, encode_balance_of_calldata, query_erc20_balance,
 };
 pub use tx::{MorphTxEnv, MorphTxExt};

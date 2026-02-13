@@ -355,15 +355,15 @@ impl MorphPayloadBuilderCtx {
                 }
             };
 
-            // For L1 messages, use full gas limit (no refund) and no fees collected.
-            // L1 gas is prepaid on L1, so unused gas is not refunded.
-            // Also track the next L1 message index.
+            // For L1 messages, track the next L1 message index.
+            // L1 gas is prepaid on L1, so no fees are collected here.
             let gas_used = if recovered_tx.is_l1_msg() {
                 // Update next_l1_message_index to be queue_index + 1
                 if let Some(queue_index) = recovered_tx.queue_index() {
                     info.next_l1_message_index = queue_index + 1;
                 }
-                recovered_tx.gas_limit()
+                // Use actual gas consumed (including intrinsic gas)
+                gas_used
             } else {
                 // Calculate fees for L2 transactions: effective_tip * gas_used
                 let effective_tip = recovered_tx

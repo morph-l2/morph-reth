@@ -63,19 +63,6 @@ pub enum MorphEthApiError {
     /// Provider error
     #[error("provider error: {0}")]
     Provider(String),
-
-    // ========== Gas estimation errors ==========
-    /// Insufficient funds for L1 data fee
-    #[error("insufficient funds for l1 fee")]
-    InsufficientFundsForL1Fee,
-
-    /// Insufficient funds for value transfer
-    #[error("insufficient funds for transfer")]
-    InsufficientFundsForTransfer,
-
-    /// Invalid fee token (not registered, inactive, or invalid configuration)
-    #[error("invalid token")]
-    InvalidFeeToken,
 }
 
 /// Converts [`MorphEthApiError`] to a JSON-RPC error object.
@@ -123,19 +110,6 @@ impl From<MorphEthApiError> for jsonrpsee::types::ErrorObject<'static> {
                 format!("Provider error: {msg}"),
                 None::<()>,
             ),
-            MorphEthApiError::InsufficientFundsForL1Fee => jsonrpsee::types::ErrorObject::owned(
-                -32008,
-                "insufficient funds for l1 fee",
-                None::<()>,
-            ),
-            MorphEthApiError::InsufficientFundsForTransfer => jsonrpsee::types::ErrorObject::owned(
-                -32009,
-                "insufficient funds for transfer",
-                None::<()>,
-            ),
-            MorphEthApiError::InvalidFeeToken => {
-                jsonrpsee::types::ErrorObject::owned(-32010, "invalid token", None::<()>)
-            }
         }
     }
 }

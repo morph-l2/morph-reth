@@ -5,7 +5,7 @@ use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{B256, Bytes};
 use alloy_rlp::BytesMut;
 
-use crate::{TxL1Msg, TxMorph};
+use crate::{TxL1Msg, TxMorph, transaction::morph_transaction::MorphTxFields};
 
 #[derive(Debug, Clone, TransactionEnvelope)]
 #[envelope(tx_type_name = MorphTxType)]
@@ -103,6 +103,20 @@ impl MorphTxEnvelope {
     pub fn memo(&self) -> Option<alloy_primitives::Bytes> {
         match self {
             Self::Morph(tx) => tx.tx().memo.clone(),
+            _ => None,
+        }
+    }
+
+    /// Returns all MorphTx-specific fields, or `None` if this is not a MorphTx.
+    pub fn morph_fields(&self) -> Option<MorphTxFields> {
+        match self {
+            Self::Morph(tx) => Some(MorphTxFields {
+                version: tx.tx().version,
+                fee_token_id: tx.tx().fee_token_id,
+                fee_limit: tx.tx().fee_limit,
+                reference: tx.tx().reference,
+                memo: tx.tx().memo.clone(),
+            }),
             _ => None,
         }
     }

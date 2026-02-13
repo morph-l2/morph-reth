@@ -4933,6 +4933,7 @@ dependencies = [
  "morph-chainspec",
  "morph-evm",
  "morph-primitives",
+ "reth-ethereum-primitives",
  "reth-evm",
  "reth-rpc-eth-types",
  "reth-storage-api",
