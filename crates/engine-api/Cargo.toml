@@ -14,14 +14,28 @@ workspace = true
 # morph
 morph-chainspec.workspace = true
 morph-payload-types = { workspace = true, features = ["serde"] }
-morph-primitives.workspace = true
+morph-primitives = { workspace = true, features = ["reth-codec"] }
+
+# reth
+reth-node-api.workspace = true
+reth-node-builder.workspace = true
+reth-payload-builder.workspace = true
+reth-payload-primitives.workspace = true
+reth-primitives-traits.workspace = true
+reth-provider.workspace = true
+reth-rpc-api.workspace = true
 
 # alloy
+alloy-consensus.workspace = true
+alloy-eips.workspace = true
 alloy-primitives.workspace = true
+alloy-rpc-types-engine.workspace = true
 
 # misc
 async-trait.workspace = true
 auto_impl.workspace = true
+dashmap.workspace = true
+eyre.workspace = true
 jsonrpsee = { workspace = true, features = ["server", "macros"] }
 thiserror.workspace = true
 tracing.workspace = true

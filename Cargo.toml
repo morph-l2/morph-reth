@@ -93,8 +93,10 @@ reth-payload-util = { git = "https://github.com/paradigmxyz/reth", rev = "64909d
 reth-primitives-traits = { git = "https://github.com/paradigmxyz/reth", rev = "64909d3", default-features = false }
 reth-provider = { git = "https://github.com/paradigmxyz/reth", rev = "64909d3" }
 reth-rpc = { git = "https://github.com/paradigmxyz/reth", rev = "64909d3" }
+reth-rpc-api = { git = "https://github.com/paradigmxyz/reth", rev = "64909d3" }
 reth-rpc-builder = { git = "https://github.com/paradigmxyz/reth", rev = "64909d3" }
 reth-rpc-convert = { git = "https://github.com/paradigmxyz/reth", rev = "64909d3" }
+reth-rpc-engine-api = { git = "https://github.com/paradigmxyz/reth", rev = "64909d3" }
 reth-rpc-eth-api = { git = "https://github.com/paradigmxyz/reth", rev = "64909d3" }
 reth-rpc-eth-types = { git = "https://github.com/paradigmxyz/reth", rev = "64909d3" }
 reth-rpc-server-types = { git = "https://github.com/paradigmxyz/reth", rev = "64909d3" }
@@ -141,6 +143,7 @@ blake3 = "1.8"
 bytes = "1.8"
 clap = { version = "4.5.45", features = ["derive"] }
 const-hex = { version = "1.15.0" }
+dashmap = "6.0"
 derive_more = { version = "2.0.0" }
 eyre = "0.6.12"
 futures = "0.3.31"

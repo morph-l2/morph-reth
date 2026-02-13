@@ -13,6 +13,7 @@ workspace = true
 # Morph crates
 morph-chainspec.workspace = true
 morph-consensus.workspace = true
+morph-engine-api.workspace = true
 morph-evm.workspace = true
 morph-payload-builder.workspace = true
 morph-payload-types = { workspace = true, features = ["serde"] }

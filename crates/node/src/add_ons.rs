@@ -12,8 +12,10 @@ use reth_node_builder::{
         NoopEngineApiBuilder, PayloadValidatorBuilder, RethRpcAddOns, RpcAddOns,
     },
 };
+use reth_provider::ChainSpecProvider;
 use reth_rpc_builder::Identity;
 use reth_rpc_eth_api::RpcNodeCore;
+use reth_tracing::tracing;
 
 /// Morph node add-ons for RPC and Engine API.
 ///
@@ -72,7 +74,42 @@ where
     type Handle = <RpcAddOns<N, EthB, PVB, NoopEngineApiBuilder, EVB> as NodeAddOns<N>>::Handle;
 
     async fn launch_add_ons(self, ctx: AddOnsContext<'_, N>) -> eyre::Result<Self::Handle> {
-        self.inner.launch_add_ons(ctx).await
+        use morph_engine_api::MorphL2EngineRpcServer; // Import the RPC trait for into_rpc() method
+
+        // Get components from ctx.node BEFORE calling launch_add_ons_with
+        // This is necessary because we can't access ctx.node inside the closure
+        let provider = ctx.node.provider().clone();
+        let payload_builder = ctx.node.payload_builder_handle().clone();
+        let chain_spec = ctx.node.provider().chain_spec();
+
+        // Use launch_add_ons_with to register custom Engine API
+        self.inner
+            .launch_add_ons_with(ctx, move |container| {
+                let reth_node_builder::rpc::RpcModuleContainer {
+                    auth_module, ..
+                } = container;
+
+                // Create and register Morph L2 Engine API
+                tracing::debug!(target: "morph::node", "Registering Morph L2 Engine API");
+
+                // Create the Engine API implementation
+                let engine_api =
+                    morph_engine_api::RealMorphL2EngineApi::new(provider, payload_builder, chain_spec);
+
+                // Create the RPC handler
+                let handler = morph_engine_api::MorphL2EngineRpcHandler::new(engine_api);
+
+                // Register to the `engine` namespace (for authenticated RPC)
+                // This adds the custom L2 Engine API methods (assembleL2Block, validateL2Block, etc.)
+                auth_module
+                    .merge_auth_methods(handler.into_rpc())
+                    .map_err(|e| eyre::eyre!("Failed to register Morph L2 Engine API: {}", e))?;
+
+                tracing::info!(target: "morph::node", "Morph L2 Engine API registered successfully");
+
+                Ok(())
+            })
+            .await
     }
 }
 

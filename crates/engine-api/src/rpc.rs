@@ -5,9 +5,10 @@
 
 use crate::{EngineApiResult, api::MorphL2EngineApi};
 use alloy_primitives::B256;
-use jsonrpsee::{core::RpcResult, proc_macros::rpc};
+use jsonrpsee::{core::RpcResult, proc_macros::rpc, RpcModule};
 use morph_payload_types::{AssembleL2BlockParams, ExecutableL2Data, GenericResponse, SafeL2Data};
 use morph_primitives::MorphHeader;
+use reth_rpc_api::IntoEngineApiRpcModule;
 use std::sync::Arc;
 
 /// Morph L2 Engine RPC API trait.
@@ -144,4 +145,17 @@ where
 /// Converts an `EngineApiResult` into a `RpcResult`.
 pub fn into_rpc_result<T>(result: EngineApiResult<T>) -> RpcResult<T> {
     result.map_err(|e| e.into_rpc_error())
+}
+
+/// Converts `MorphL2EngineRpcHandler` into an RPC module.
+///
+/// This implementation allows the handler to be used as an Engine API module
+/// in reth's RPC server.
+impl<Api> IntoEngineApiRpcModule for MorphL2EngineRpcHandler<Api>
+where
+    Api: MorphL2EngineApi + 'static,
+{
+    fn into_rpc_module(self) -> RpcModule<()> {
+        self.into_rpc().remove_context()
+    }
 }
