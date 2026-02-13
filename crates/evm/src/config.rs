@@ -5,10 +5,7 @@ use morph_primitives::Block;
 use morph_primitives::{MorphHeader, MorphPrimitives};
 use morph_revm::MorphBlockEnv;
 use reth_chainspec::EthChainSpec;
-use reth_evm::{
-    ConfigureEvm, EvmEnv, EvmEnvFor,
-    eth::EthBlockExecutionCtx,
-};
+use reth_evm::{ConfigureEvm, EvmEnv, EvmEnvFor, eth::EthBlockExecutionCtx};
 use reth_primitives_traits::{SealedBlock, SealedHeader};
 use revm::context::{BlockEnv, CfgEnv};
 use revm::context_interface::block::BlobExcessGasAndPrice;

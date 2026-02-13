@@ -5,7 +5,7 @@
 
 use crate::{EngineApiResult, api::MorphL2EngineApi};
 use alloy_primitives::B256;
-use jsonrpsee::{core::RpcResult, proc_macros::rpc, RpcModule};
+use jsonrpsee::{RpcModule, core::RpcResult, proc_macros::rpc};
 use morph_payload_types::{AssembleL2BlockParams, ExecutableL2Data, GenericResponse, SafeL2Data};
 use morph_primitives::MorphHeader;
 use reth_rpc_api::IntoEngineApiRpcModule;

@@ -116,7 +116,7 @@ where
             .sealed_header(current_head)
             .map_err(|e| MorphEngineApiError::Database(e.to_string()))?
             .ok_or_else(|| {
-                MorphEngineApiError::Internal(format!("parent header {} not found", current_head))
+                MorphEngineApiError::Internal(format!("parent header {current_head} not found"))
             })?;
 
         // 3. Build MorphPayloadAttributes
@@ -152,8 +152,7 @@ where
         )
         .map_err(|e| {
             MorphEngineApiError::BlockBuildError(format!(
-                "failed to create builder attributes: {}",
-                e
+                "failed to create builder attributes: {e}",
             ))
         })?;
 
@@ -177,7 +176,7 @@ where
                 MorphEngineApiError::BlockBuildError("failed to receive build response".to_string())
             })?
             .map_err(|e| {
-                MorphEngineApiError::BlockBuildError(format!("failed to send build request: {}", e))
+                MorphEngineApiError::BlockBuildError(format!("failed to send build request: {e}"))
             })?;
 
         // Wait for the payload to be built
@@ -187,18 +186,15 @@ where
             .best_payload(payload_id)
             .await
             .ok_or_else(|| {
-                MorphEngineApiError::Internal(format!(
-                    "no payload response for id {:?}",
-                    payload_id
-                ))
+                MorphEngineApiError::Internal(format!("no payload response for id {payload_id:?}"))
             })?
             .map_err(|e| {
-                MorphEngineApiError::BlockBuildError(format!("failed to get built payload: {}", e))
+                MorphEngineApiError::BlockBuildError(format!("failed to get built payload: {e}"))
             })?;
 
         // 5. Extract ExecutableL2Data from built payload
         // MorphBuiltPayload directly contains executable_data field
-        let executable_data = built_payload.executable_data.clone();
+        let executable_data = built_payload.executable_data;
 
         tracing::info!(
             target: "morph::engine",
@@ -293,16 +289,18 @@ where
 
         // 5. Compare execution results
         // Check state root if MPTFork is active
-        if self.validation_ctx.should_validate_state_root(data.timestamp) {
-            if rebuilt.state_root != data.state_root {
-                tracing::warn!(
-                    target: "morph::engine",
-                    expected = %data.state_root,
-                    actual = %rebuilt.state_root,
-                    "state root mismatch"
-                );
-                return Ok(GenericResponse { success: false });
-            }
+        if self
+            .validation_ctx
+            .should_validate_state_root(data.timestamp)
+            && rebuilt.state_root != data.state_root
+        {
+            tracing::warn!(
+                target: "morph::engine",
+                expected = %data.state_root,
+                actual = %rebuilt.state_root,
+                "state root mismatch"
+            );
+            return Ok(GenericResponse { success: false });
         }
 
         // Compare other critical fields
@@ -399,8 +397,7 @@ where
             .map_err(|e| MorphEngineApiError::Database(e.to_string()))?
             .ok_or_else(|| {
                 MorphEngineApiError::Internal(format!(
-                    "current header {} not found (database may not be initialized)",
-                    current_number
+                    "current header {current_number} not found (database may not be initialized)",
                 ))
             })?;
 
@@ -418,14 +415,14 @@ where
         }
 
         // 4. Optionally validate the block content
-        if let Ok(validation) = self.validate_l2_block(data.clone()).await {
-            if !validation.success {
-                tracing::warn!(
-                    target: "morph::engine",
-                    block_hash = %data.hash,
-                    "block content validation failed"
-                );
-            }
+        if let Ok(validation) = self.validate_l2_block(data.clone()).await
+            && !validation.success
+        {
+            tracing::warn!(
+                target: "morph::engine",
+                block_hash = %data.hash,
+                "block content validation failed"
+            );
         }
 
         // 5. Convert ExecutableL2Data to SealedBlock
@@ -509,7 +506,7 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
                 MorphTxEnvelope::decode_2718(&mut buf).map_err(|e| {
                     MorphEngineApiError::InvalidTransaction {
                         index: i,
-                        message: format!("failed to decode transaction: {}", e),
+                        message: format!("failed to decode transaction: {e}"),
                     }
                 })
             })
