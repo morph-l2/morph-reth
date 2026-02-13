@@ -1,15 +1,15 @@
 use crate::{MorphBlockAssembler, MorphEvmConfig, MorphEvmError, MorphNextBlockEnvAttributes};
 use alloy_consensus::BlockHeader;
-use morph_chainspec::hardfork::MorphHardforks;
+use morph_chainspec::hardfork::{MorphHardfork, MorphHardforks};
 use morph_primitives::Block;
 use morph_primitives::{MorphHeader, MorphPrimitives};
 use morph_revm::MorphBlockEnv;
 use reth_chainspec::EthChainSpec;
-use reth_evm::{
-    ConfigureEvm, EvmEnv, EvmEnvFor,
-    eth::{EthBlockExecutionCtx, NextEvmEnvAttributes},
-};
+use reth_evm::{ConfigureEvm, EvmEnv, EvmEnvFor, eth::EthBlockExecutionCtx};
 use reth_primitives_traits::{SealedBlock, SealedHeader};
+use revm::context::{BlockEnv, CfgEnv};
+use revm::context_interface::block::BlobExcessGasAndPrice;
+use revm::primitives::U256;
 use std::borrow::Cow;
 
 impl ConfigureEvm for MorphEvmConfig {
@@ -28,19 +28,32 @@ impl ConfigureEvm for MorphEvmConfig {
     }
 
     fn evm_env(&self, header: &MorphHeader) -> Result<EvmEnvFor<Self>, Self::Error> {
-        let EvmEnv { cfg_env, block_env } = EvmEnv::for_eth_block(
-            header,
-            self.chain_spec(),
-            self.chain_spec().chain().id(),
-            self.chain_spec()
-                .blob_params_at_timestamp(header.timestamp()),
-        );
-
         let spec = self
             .chain_spec()
             .morph_hardfork_at(header.number(), header.timestamp());
 
-        let cfg_env = cfg_env.with_spec_and_mainnet_gas_params(spec);
+        let cfg_env = CfgEnv::<MorphHardfork>::default()
+            .with_chain_id(self.chain_spec().chain().id())
+            .with_spec_and_mainnet_gas_params(spec);
+
+        // Morph doesn't support EIP-4844 blob transactions, but when SpecId >= CANCUN,
+        // revm requires `blob_excess_gas_and_price` to be set. We provide a placeholder
+        // value (excess_blob_gas = 0, blob_gasprice = 1) to satisfy the validation.
+        // This won't affect execution since Morph rejects blob transactions at the
+        // transaction pool level.
+        let block_env = BlockEnv {
+            number: U256::from(header.number()),
+            beneficiary: header.beneficiary(),
+            timestamp: U256::from(header.timestamp()),
+            difficulty: header.difficulty(),
+            prevrandao: header.mix_hash(),
+            gas_limit: header.gas_limit(),
+            basefee: header.base_fee_per_gas().unwrap_or_default(),
+            blob_excess_gas_and_price: Some(BlobExcessGasAndPrice {
+                excess_blob_gas: 0,
+                blob_gasprice: 1, // minimum blob gas price
+            }),
+        };
 
         Ok(EvmEnv {
             cfg_env,
@@ -53,29 +66,34 @@ impl ConfigureEvm for MorphEvmConfig {
         parent: &MorphHeader,
         attributes: &Self::NextBlockEnvCtx,
     ) -> Result<EvmEnvFor<Self>, Self::Error> {
-        let EvmEnv { cfg_env, block_env } = EvmEnv::for_eth_next_block(
-            parent,
-            NextEvmEnvAttributes {
-                timestamp: attributes.timestamp,
-                suggested_fee_recipient: attributes.suggested_fee_recipient,
-                prev_randao: attributes.prev_randao,
-                gas_limit: attributes.gas_limit,
-            },
-            self.chain_spec()
-                .next_block_base_fee(parent, attributes.timestamp)
-                .unwrap_or_default(),
-            self.chain_spec(),
-            self.chain_spec().chain().id(),
-            self.chain_spec()
-                .blob_params_at_timestamp(attributes.timestamp),
-        );
-
         // Next block number is parent + 1
         let spec = self
             .chain_spec()
             .morph_hardfork_at(parent.number() + 1, attributes.timestamp);
 
-        let cfg_env = cfg_env.with_spec_and_mainnet_gas_params(spec);
+        let cfg_env = CfgEnv::<MorphHardfork>::default()
+            .with_chain_id(self.chain_spec().chain().id())
+            .with_spec_and_mainnet_gas_params(spec);
+
+        // Morph doesn't support EIP-4844 blob transactions, but when SpecId >= CANCUN,
+        // revm requires `blob_excess_gas_and_price` to be set. We provide a placeholder
+        // value to satisfy the validation.
+        let block_env = BlockEnv {
+            number: U256::from(parent.number() + 1),
+            beneficiary: attributes.suggested_fee_recipient,
+            timestamp: U256::from(attributes.timestamp),
+            difficulty: U256::ONE,
+            prevrandao: Some(attributes.prev_randao),
+            gas_limit: attributes.gas_limit,
+            basefee: self
+                .chain_spec()
+                .next_block_base_fee(parent, attributes.timestamp)
+                .unwrap_or_default(),
+            blob_excess_gas_and_price: Some(BlobExcessGasAndPrice {
+                excess_blob_gas: 0,
+                blob_gasprice: 1, // minimum blob gas price
+            }),
+        };
 
         Ok(EvmEnv {
             cfg_env,

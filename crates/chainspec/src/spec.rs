@@ -6,14 +6,16 @@ use crate::{
     hardfork::{MorphHardfork, MorphHardforks},
 };
 use alloy_chains::Chain;
+use alloy_consensus::Header;
 use alloy_eips::eip7840::BlobParams;
 use alloy_evm::eth::spec::EthExecutorSpec;
 use alloy_genesis::Genesis;
 use alloy_primitives::{Address, B256, U256};
 use morph_primitives::MorphHeader;
 use reth_chainspec::{
-    BaseFeeParams, ChainSpec, DepositContract, DisplayHardforks, EthChainSpec, EthereumHardfork,
-    EthereumHardforks, ForkCondition, ForkFilter, ForkId, Hardfork, Hardforks, Head,
+    BaseFeeParams, ChainHardforks, ChainSpec, DepositContract, DisplayHardforks, EthChainSpec,
+    EthereumHardfork, EthereumHardforks, ForkCondition, ForkFilter, ForkId, Hardfork, Hardforks,
+    Head,
 };
 use reth_network_peers::NodeRecord;
 
@@ -21,6 +23,89 @@ use reth_network_peers::NodeRecord;
 use crate::{morph::MORPH_MAINNET, morph_hoodi::MORPH_HOODI};
 #[cfg(feature = "cli")]
 use std::sync::Arc;
+
+// =============================================================================
+// Genesis Helper Functions
+// =============================================================================
+
+/// Build a genesis header with the given state root.
+///
+/// This allows using a ZK-trie state root (from go-ethereum) instead of
+/// computing an MPT state root from alloc. This is necessary because
+/// Morph uses ZK-trie before MPTFork hardfork.
+pub(crate) fn make_genesis_header(genesis: &Genesis, state_root: B256) -> MorphHeader {
+    let inner = Header {
+        gas_limit: genesis.gas_limit,
+        difficulty: genesis.difficulty,
+        nonce: genesis.nonce.into(),
+        extra_data: genesis.extra_data.clone(),
+        state_root,
+        timestamp: genesis.timestamp,
+        mix_hash: genesis.mix_hash,
+        beneficiary: genesis.coinbase,
+        base_fee_per_gas: genesis.base_fee_per_gas.map(|b| b.try_into().unwrap_or(0)),
+        withdrawals_root: None,
+        parent_beacon_block_root: None,
+        blob_gas_used: None,
+        excess_blob_gas: None,
+        requests_hash: None,
+        ..Default::default()
+    };
+
+    MorphHeader::from(inner)
+}
+
+/// Build MorphChainHardforks from genesis config.
+///
+/// This extracts the hardfork configuration logic from `From<Genesis>` to be reusable
+/// for both the default implementation and the sealed header implementation.
+pub(crate) fn build_morph_hardforks_from_genesis(genesis: &Genesis) -> ChainHardforks {
+    // Start with Ethereum hardforks from genesis
+    let base_spec = ChainSpec::from_genesis(genesis.clone());
+    let mut hardforks = base_spec.hardforks;
+
+    // Extract Morph genesis info
+    let chain_info = MorphGenesisInfo::extract_from(&genesis.config.extra_fields)
+        .expect("failed to extract morph genesis info");
+    let hardfork_info = chain_info
+        .hard_fork_info
+        .as_ref()
+        .cloned()
+        .unwrap_or_default();
+
+    // Add Morph hardforks
+    let block_forks = vec![
+        (MorphHardfork::Bernoulli, hardfork_info.bernoulli_block),
+        (MorphHardfork::Curie, hardfork_info.curie_block),
+    ]
+    .into_iter()
+    .filter_map(|(fork, block)| block.map(|b| (fork, ForkCondition::Block(b))));
+
+    let time_forks = vec![
+        (MorphHardfork::Morph203, hardfork_info.morph203_time),
+        (MorphHardfork::Viridian, hardfork_info.viridian_time),
+        (MorphHardfork::Emerald, hardfork_info.emerald_time),
+        (MorphHardfork::MPTFork, hardfork_info.mpt_fork_time),
+    ]
+    .into_iter()
+    .filter_map(|(fork, time)| time.map(|t| (fork, ForkCondition::Timestamp(t))));
+
+    hardforks.extend(block_forks.chain(time_forks));
+
+    // Add Prague at Emerald time for EIP-7702
+    if let Some(emerald_time) = hardfork_info.emerald_time {
+        hardforks.insert(
+            EthereumHardfork::Prague,
+            ForkCondition::Timestamp(emerald_time),
+        );
+    }
+
+    hardforks
+}
+
+// =============================================================================
+// Chain Specification Parser (CLI)
+// =============================================================================
 
 /// Chains supported by Morph. First value should be used as the default.
 pub const SUPPORTED_CHAINS: &[&str] = &["mainnet", "hoodi"];

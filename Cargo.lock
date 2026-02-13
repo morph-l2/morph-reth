@@ -4714,6 +4714,7 @@ dependencies = [
  "reth-chainspec",
  "reth-cli",
  "reth-network-peers",
+ "reth-primitives-traits",
  "serde",
  "serde_json",
 ]
