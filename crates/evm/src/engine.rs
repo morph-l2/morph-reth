@@ -36,12 +36,11 @@ impl ConfigureEngineEvm<MorphExecutionData> for MorphEvmConfig {
         payload: &MorphExecutionData,
     ) -> Result<impl ExecutableTxIterator<Self>, Self::Error> {
         let block = payload.block.clone();
-        // Create an iterator over (block, index) pairs
-        // Use into_iter() to get a proper Iterator implementation
+        // Create a collection of (block, index) pairs.
+        // The engine consumes this via IntoParallelIterator.
         let transactions = (0..payload.block.body().transactions.len())
             .map(move |i| (block.clone(), i))
-            .collect::<Vec<_>>()
-            .into_iter();
+            .collect::<Vec<_>>();
 
         Ok((transactions, RecoveredInBlock::new))
     }
@@ -95,6 +94,7 @@ mod tests {
     use alloy_primitives::{B256, Bytes, Signature, TxKind, U256};
     use morph_chainspec::MorphChainSpec;
     use morph_primitives::{BlockBody, MorphHeader};
+    use rayon::prelude::*;
     use reth_evm::ConfigureEngineEvm;
 
     fn create_legacy_tx() -> MorphTxEnvelope {
@@ -184,7 +184,7 @@ mod tests {
         let (iter, recover_fn): (_, _) = tuple.into();
 
         // Collect items and verify we have 2 transactions
-        let items: Vec<_> = iter.collect();
+        let items: Vec<_> = iter.into_par_iter().collect();
         assert_eq!(items.len(), 2);
 
         // Test the recovery function works on all items

@@ -2,6 +2,7 @@
 
 use alloy_primitives::B256;
 use reth_evm::execute::ProviderError;
+use reth_revm::db::bal::EvmDatabaseError;
 
 /// Errors that can occur during Morph payload building.
 #[derive(Debug, thiserror::Error)]
@@ -53,5 +54,5 @@ pub enum MorphPayloadBuilderError {
 
     /// Database error when reading contract storage.
     #[error("database error: {0}")]
-    Database(#[from] ProviderError),
+    Database(#[from] EvmDatabaseError<ProviderError>),
 }

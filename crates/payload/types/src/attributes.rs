@@ -14,9 +14,8 @@ use sha2::{Digest, Sha256};
 ///
 /// This extends the standard Ethereum [`PayloadAttributes`] with L2-specific fields
 /// for forced transaction inclusion (L1 messages).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MorphPayloadAttributes {
     /// Standard Ethereum payload attributes.
     #[cfg_attr(feature = "serde", serde(flatten))]
@@ -26,10 +25,7 @@ pub struct MorphPayloadAttributes {
     ///
     /// This includes L1 messages that must be processed in order.
     /// These transactions are not in the mempool and must be explicitly provided.
-    #[cfg_attr(
-        feature = "serde",
-        serde(default, skip_serializing_if = "Option::is_none")
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transactions: Option<Vec<Bytes>>,
 }
 

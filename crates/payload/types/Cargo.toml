@@ -29,7 +29,7 @@ alloy-rpc-types-engine = { workspace = true, features = ["serde"] }
 alloy-serde.workspace = true
 
 # Utils
-serde = { workspace = true, features = ["derive"], optional = true }
+serde = { workspace = true, features = ["derive"] }
 sha2.workspace = true
 
 [dev-dependencies]
@@ -38,4 +38,5 @@ rand.workspace = true
 alloy-primitives = { workspace = true, features = ["rand"] }
 
 [features]
-default = ["serde"]
+default = []
+serde = []
