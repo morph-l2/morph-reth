@@ -26,6 +26,13 @@ pub enum MorphPayloadBuilderError {
         gas: u64,
     },
 
+    /// Invalid sequencer transaction in forced transaction list.
+    #[error("invalid sequencer transaction: {error}")]
+    InvalidSequencerTransaction {
+        /// Human-readable validation error.
+        error: String,
+    },
+
     /// Failed to decode transaction from payload attributes.
     #[error("failed to decode transaction: {0}")]
     TransactionDecodeError(#[from] alloy_rlp::Error),

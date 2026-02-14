@@ -4742,7 +4742,6 @@ name = "morph-engine-api"
 version = "0.7.5"
 dependencies = [
  "alloy-consensus",
- "alloy-eips",
  "alloy-genesis",
  "alloy-primitives",
  "alloy-rpc-types-engine",
@@ -4754,6 +4753,7 @@ dependencies = [
  "morph-chainspec",
  "morph-payload-types",
  "morph-primitives",
+ "reth-execution-types",
  "reth-node-api",
  "reth-node-builder",
  "reth-payload-builder",
@@ -4847,6 +4847,7 @@ dependencies = [
  "reth-basic-payload-builder",
  "reth-chainspec",
  "reth-evm",
+ "reth-execution-types",
  "reth-payload-builder",
  "reth-payload-primitives",
  "reth-payload-util",

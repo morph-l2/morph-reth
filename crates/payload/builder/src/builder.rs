@@ -19,8 +19,11 @@ use reth_evm::{
     block::{BlockExecutionError, BlockValidationError},
     execute::{BlockBuilder, BlockBuilderOutcome},
 };
+use reth_execution_types::BlockExecutionOutput;
 use reth_payload_builder::PayloadId;
-use reth_payload_primitives::{PayloadBuilderAttributes, PayloadBuilderError};
+use reth_payload_primitives::{
+    BuiltPayloadExecutedBlock, PayloadBuilderAttributes, PayloadBuilderError,
+};
 use reth_payload_util::{BestPayloadTransactions, NoopPayloadTransactions, PayloadTransactions};
 use reth_primitives_traits::{RecoveredBlock, SealedHeader};
 use reth_revm::{database::StateProviderDatabase, db::State};
@@ -296,7 +299,7 @@ impl MorphPayloadBuilderCtx {
         // Track gas spent by each transaction for error reporting
         let mut gas_spent_by_transactions: Vec<u64> = Vec::new();
 
-        for tx_with_encoded in &self.attributes().transactions {
+        for (tx_idx, tx_with_encoded) in self.attributes().transactions.iter().enumerate() {
             // The transaction is already recovered in `try_new` via `try_into_recovered()`.
             // For L1 message transactions (which have no signature), this extracts
             // the `from` address directly from the transaction.
@@ -330,24 +333,32 @@ impl MorphPayloadBuilderCtx {
                     error,
                     ..
                 })) => {
-                    // For sequencer transactions, we log and skip invalid transactions
-                    // but don't fail the entire block build
-                    tracing::trace!(
+                    tracing::warn!(
                         target: "payload_builder",
+                        tx_index = tx_idx,
                         %error,
                         ?recovered_tx,
-                        "Error in sequencer transaction, skipping."
+                        "invalid sequencer transaction in forced list"
                     );
-                    continue;
+                    return Err(PayloadBuilderError::other(
+                        MorphPayloadBuilderError::InvalidSequencerTransaction {
+                            error: error.to_string(),
+                        },
+                    ));
                 }
                 Err(BlockExecutionError::Validation(err)) => {
-                    tracing::trace!(
+                    tracing::warn!(
                         target: "payload_builder",
+                        tx_index = tx_idx,
                         %err,
                         ?recovered_tx,
-                        "Validation error in sequencer transaction, skipping."
+                        "validation error in sequencer transaction"
                     );
-                    continue;
+                    return Err(PayloadBuilderError::other(
+                        MorphPayloadBuilderError::InvalidSequencerTransaction {
+                            error: err.to_string(),
+                        },
+                    ));
                 }
                 Err(err) => {
                     // Fatal error - this is a bug or misconfiguration
@@ -589,11 +600,12 @@ where
             timestamp: attributes.inner.timestamp,
             suggested_fee_recipient: attributes.inner.suggested_fee_recipient,
             prev_randao: attributes.inner.prev_randao,
-            gas_limit: ctx.parent().gas_limit(),
+            gas_limit: attributes.gas_limit.unwrap_or(ctx.parent().gas_limit()),
             withdrawals: Some(attributes.inner.withdrawals.clone()),
             parent_beacon_block_root: attributes.inner.parent_beacon_block_root,
             extra_data: Default::default(),
         },
+        base_fee_per_gas: attributes.base_fee_per_gas,
     };
 
     // Create block builder
@@ -619,30 +631,38 @@ where
     // Execute sequencer transactions (L1 messages and forced transactions)
     let mut executed_txs = ctx.execute_sequencer_transactions(&mut builder, &mut info)?;
 
-    // Execute pool transactions (best transactions from mempool)
-    let best_txs = best(ctx.best_transaction_attributes(base_fee));
-    if ctx
-        .execute_pool_transactions(
-            &mut builder,
-            &mut info,
-            &mut executed_txs,
-            best_txs,
-            &breaker,
-        )?
-        .is_some()
-    {
-        // Check if it was a cancellation or just breaker triggered
-        if ctx.cancel.is_cancelled() {
-            return Ok(BuildOutcomeKind::Cancelled);
+    if attributes.include_tx_pool() {
+        // Execute pool transactions (best transactions from mempool)
+        let best_txs = best(ctx.best_transaction_attributes(base_fee));
+        if ctx
+            .execute_pool_transactions(
+                &mut builder,
+                &mut info,
+                &mut executed_txs,
+                best_txs,
+                &breaker,
+            )?
+            .is_some()
+        {
+            // Check if it was a cancellation or just breaker triggered
+            if ctx.cancel.is_cancelled() {
+                return Ok(BuildOutcomeKind::Cancelled);
+            }
+            // Breaker triggered - continue with current transactions
+            tracing::debug!(
+                target: "payload_builder",
+                elapsed = ?breaker.elapsed(),
+                cumulative_gas_used = info.cumulative_gas_used,
+                cumulative_da_bytes_used = info.cumulative_da_bytes_used,
+                tx_count = executed_txs.len(),
+                "breaker stopped pool execution, finalizing payload"
+            );
         }
-        // Breaker triggered - continue with current transactions
+    } else {
         tracing::debug!(
             target: "payload_builder",
-            elapsed = ?breaker.elapsed(),
-            cumulative_gas_used = info.cumulative_gas_used,
-            cumulative_da_bytes_used = info.cumulative_da_bytes_used,
             tx_count = executed_txs.len(),
-            "breaker stopped pool execution, finalizing payload"
+            "skipping txpool inclusion: explicit transaction list provided"
         );
     }
 
@@ -661,8 +681,9 @@ where
     // 6. Finish building the block
     let BlockBuilderOutcome {
         execution_result,
+        hashed_state,
+        trie_updates,
         mut block,
-        ..
     } = builder.finish(state_provider)?;
 
     // Update MorphHeader with next_l1_msg_index.
@@ -688,8 +709,8 @@ where
     );
 
     // Build ExecutableL2Data from the sealed block
-    let mut logs_bloom_bytes = Vec::new();
-    header.logs_bloom().encode(&mut logs_bloom_bytes);
+    // ExecutableL2Data expects raw 256-byte bloom, not RLP-encoded bytes.
+    let logs_bloom_bytes = header.logs_bloom().as_slice().to_vec();
 
     let executable_data = ExecutableL2Data {
         parent_hash: header.parent_hash(),
@@ -708,11 +729,25 @@ where
         hash: sealed_block.hash(),
     };
 
+    let execution_output = BlockExecutionOutput {
+        state: db.take_bundle(),
+        result: execution_result,
+    };
+
+    let executed = BuiltPayloadExecutedBlock {
+        recovered_block: Arc::new(block),
+        execution_output: Arc::new(execution_output),
+        // Keep unsorted; conversion to sorted is deferred until required.
+        hashed_state: Err(Arc::new(hashed_state)).into(),
+        trie_updates: Err(Arc::new(trie_updates)).into(),
+    };
+
     let payload = MorphBuiltPayload::new(
         ctx.payload_id(),
         sealed_block,
         info.total_fees,
         executable_data,
+        Some(executed),
     );
 
     Ok(BuildOutcomeKind::Better { payload })

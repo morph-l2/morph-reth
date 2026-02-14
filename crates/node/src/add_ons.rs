@@ -2,7 +2,7 @@
 
 use crate::{MorphNode, validator::MorphEngineValidatorBuilder};
 use morph_evm::MorphEvmConfig;
-use morph_primitives::MorphHeader;
+use morph_primitives::{Block, MorphHeader, MorphReceipt};
 use morph_rpc::MorphEthApiBuilder;
 use reth_node_api::{AddOnsContext, FullNodeComponents, FullNodeTypes, NodeAddOns, NodePrimitives};
 use reth_node_builder::{
@@ -12,7 +12,9 @@ use reth_node_builder::{
         NoopEngineApiBuilder, PayloadValidatorBuilder, RethRpcAddOns, RpcAddOns,
     },
 };
-use reth_provider::ChainSpecProvider;
+use reth_provider::{
+    BlockWriter, CanonChainTracker, ChainSpecProvider, DBProvider, DatabaseProviderFactory,
+};
 use reth_rpc_builder::Identity;
 use reth_rpc_eth_api::RpcNodeCore;
 use reth_tracing::tracing;
@@ -38,6 +40,9 @@ pub struct MorphAddOns<
 impl<N> MorphAddOns<NodeAdapter<N>, MorphEthApiBuilder>
 where
     N: FullNodeTypes<Types = MorphNode>,
+    N::Provider: CanonChainTracker<Header = MorphHeader> + DatabaseProviderFactory,
+    <N::Provider as DatabaseProviderFactory>::ProviderRW:
+        BlockWriter<Block = Block, Receipt = MorphReceipt> + DBProvider,
 {
     /// Creates a new [`MorphAddOns`] with default configuration.
     pub fn new() -> Self {
@@ -56,6 +61,9 @@ where
 impl<N> Default for MorphAddOns<NodeAdapter<N>, MorphEthApiBuilder>
 where
     N: FullNodeTypes<Types = MorphNode>,
+    N::Provider: CanonChainTracker<Header = MorphHeader> + DatabaseProviderFactory,
+    <N::Provider as DatabaseProviderFactory>::ProviderRW:
+        BlockWriter<Block = Block, Receipt = MorphReceipt> + DBProvider,
 {
     fn default() -> Self {
         Self::new()
@@ -65,6 +73,9 @@ where
 impl<N, EthB, PVB, EVB> NodeAddOns<N> for MorphAddOns<N, EthB, PVB, EVB>
 where
     N: FullNodeComponents<Types = MorphNode, Evm = MorphEvmConfig>,
+    N::Provider: CanonChainTracker<Header = MorphHeader> + DatabaseProviderFactory,
+    <N::Provider as DatabaseProviderFactory>::ProviderRW:
+        BlockWriter<Block = Block, Receipt = MorphReceipt> + DBProvider,
     EthB: EthApiBuilder<N>,
     PVB: Send + PayloadValidatorBuilder<N>,
     EVB: EngineValidatorBuilder<N>,
@@ -116,6 +127,9 @@ where
 impl<N, EthB, PVB, EVB> RethRpcAddOns<N> for MorphAddOns<N, EthB, PVB, EVB>
 where
     N: FullNodeComponents<Types = MorphNode, Evm = MorphEvmConfig>,
+    N::Provider: CanonChainTracker<Header = MorphHeader> + DatabaseProviderFactory,
+    <N::Provider as DatabaseProviderFactory>::ProviderRW:
+        BlockWriter<Block = Block, Receipt = MorphReceipt> + DBProvider,
     EthB: EthApiBuilder<N>,
     PVB: PayloadValidatorBuilder<N>,
     EVB: EngineValidatorBuilder<N>,

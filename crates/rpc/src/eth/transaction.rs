@@ -189,9 +189,7 @@ impl TryIntoTxEnv<MorphTxEnv, MorphBlockEnv> for MorphTransactionRequest {
                 Some(morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_1);
         }
 
-        // For eth_call/eth_estimateGas we still need encoded tx bytes so REVM can
-        // account for L1 data fee correctly during validation.
-        tx_env.rlp_bytes = Some(tx_env.encode_for_l1_fee(evm_env.cfg_env.chain_id));
+        tx_env.rlp_bytes = None; // Do not encode for L1 fee in RPC calls
         Ok(tx_env)
     }
 }

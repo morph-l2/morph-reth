@@ -151,6 +151,25 @@ where
     }
 
     #[inline]
+    fn refund(
+        &self,
+        evm: &mut Self::Evm,
+        exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
+        eip7702_refund: i64,
+    ) {
+        // L1 message tx follows go-ethereum semantics: no gas refunds.
+        // Keep gas_used as actual consumed gas without applying post-exec refund.
+        if evm.ctx_ref().tx().is_l1_msg() {
+            // revm::Gas::used() subtracts `refunded` by default.
+            // For L1 messages we must zero it out, otherwise gas_used is undercounted.
+            exec_result.gas_mut().set_refund(0);
+            return;
+        }
+        let spec = (*evm.ctx().cfg().spec()).into();
+        post_execution::refund(spec, exec_result.gas_mut(), eip7702_refund);
+    }
+
+    #[inline]
     fn reward_beneficiary(
         &self,
         evm: &mut Self::Evm,
@@ -217,38 +236,30 @@ where
         evm: &mut Self::Evm,
     ) -> Result<InitialAndFloorGas, Self::Error> {
         let tx = evm.ctx_ref().tx();
-        let cfg = evm.ctx_ref().cfg();
-        let spec = (*cfg.spec()).into();
+        let spec = (*evm.ctx_ref().cfg().spec()).into();
+        let disable_eip7623 = evm.ctx_ref().cfg().is_eip7623_disabled();
 
         // For L1 message transactions, handle intrinsic gas specially
         if tx.is_l1_msg() {
             // Calculate intrinsic gas (same as normal transactions)
-            let initial_and_floor =
-                validation::validate_initial_tx_gas(tx, spec, cfg.is_eip7623_disabled())
-                    .unwrap_or_else(|_| {
-                        // If intrinsic gas > gas_limit, use gas_limit as intrinsic gas
-                        // This matches go-ethereum's behavior for L1 messages
-                        InitialAndFloorGas {
-                            initial_gas: tx.gas_limit(),
-                            floor_gas: 0,
-                        }
-                    });
-
-            tracing::debug!(
-                target: "morph::revm::handler",
-                gas_limit = tx.gas_limit(),
-                initial_gas = initial_and_floor.initial_gas,
-                "L1 Message intrinsic gas calculated"
-            );
+            let initial_and_floor = validation::validate_initial_tx_gas(tx, spec, disable_eip7623)
+                .unwrap_or_else(|_| {
+                    // If intrinsic gas > gas_limit, use gas_limit as intrinsic gas
+                    // This matches go-ethereum's behavior for L1 messages
+                    InitialAndFloorGas {
+                        initial_gas: tx.gas_limit(),
+                        floor_gas: 0,
+                    }
+                });
 
             return Ok(initial_and_floor);
         }
 
         // Normal transaction validation
-        Ok(
-            validation::validate_initial_tx_gas(tx, spec, cfg.is_eip7623_disabled())
-                .map_err(MorphInvalidTransaction::EthInvalidTransaction)?,
-        )
+        let initial_and_floor = validation::validate_initial_tx_gas(tx, spec, disable_eip7623)
+            .map_err(MorphInvalidTransaction::EthInvalidTransaction)?;
+
+        Ok(initial_and_floor)
     }
 
     fn catch_error(
@@ -653,6 +664,7 @@ fn calculate_caller_fee_with_l1_cost(
     let basefee = block.basefee() as u128;
     let blob_price = block.blob_gasprice().unwrap_or_default();
     let is_balance_check_disabled = cfg.is_balance_check_disabled();
+    let is_fee_charge_disabled = cfg.is_fee_charge_disabled();
 
     // Calculate L2 effective balance spending (gas + value + blob fees)
     let effective_balance_spending = tx
@@ -661,8 +673,11 @@ fn calculate_caller_fee_with_l1_cost(
 
     // Total spending = L2 fees + L1 data fee
     let total_spending = effective_balance_spending.saturating_add(l1_data_fee);
-    // Check if caller has enough balance for total spending
-    if !is_balance_check_disabled && balance < total_spending {
+
+    // Skip balance check if either:
+    // - Balance check is explicitly disabled (for special scenarios)
+    // - Fee charge is disabled (eth_call simulation - no point checking balance if fees won't be charged)
+    if !is_balance_check_disabled && !is_fee_charge_disabled && balance < total_spending {
         return Err(InvalidTransaction::LackOfFundForMaxFee {
             fee: Box::new(total_spending),
             balance: Box::new(balance),

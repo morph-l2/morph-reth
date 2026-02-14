@@ -24,10 +24,10 @@ reth-payload-primitives.workspace = true
 reth-primitives-traits.workspace = true
 reth-provider.workspace = true
 reth-rpc-api.workspace = true
+reth-execution-types.workspace = true
 
 # alloy
 alloy-consensus.workspace = true
-alloy-eips.workspace = true
 alloy-primitives.workspace = true
 alloy-rpc-types-engine.workspace = true
 

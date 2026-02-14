@@ -26,7 +26,7 @@ use alloy_rpc_types_engine::PayloadAttributes;
 use morph_chainspec::MorphChainSpec;
 use morph_payload_builder::MorphBuilderConfig;
 use morph_payload_types::{MorphPayloadAttributes, MorphPayloadTypes};
-use morph_primitives::{MorphHeader, MorphPrimitives, MorphTxEnvelope};
+use morph_primitives::{Block, MorphHeader, MorphPrimitives, MorphReceipt, MorphTxEnvelope};
 use reth_node_api::{FullNodeComponents, FullNodeTypes, NodeTypes, PayloadTypes};
 use reth_node_builder::{
     DebugNode, Node, NodeAdapter,
@@ -35,7 +35,9 @@ use reth_node_builder::{
 use reth_node_ethereum::EthereumNetworkBuilder;
 use reth_payload_primitives::PayloadAttributesBuilder;
 use reth_primitives_traits::SealedHeader;
-use reth_provider::EthStorage;
+use reth_provider::{
+    BlockWriter, CanonChainTracker, DBProvider, DatabaseProviderFactory, EthStorage,
+};
 use std::sync::Arc;
 
 /// Type configuration for a Morph L2 node.
@@ -94,6 +96,9 @@ impl NodeTypes for MorphNode {
 impl<N> Node<N> for MorphNode
 where
     N: FullNodeTypes<Types = Self>,
+    N::Provider: CanonChainTracker<Header = MorphHeader> + DatabaseProviderFactory,
+    <N::Provider as DatabaseProviderFactory>::ProviderRW:
+        BlockWriter<Block = Block, Receipt = MorphReceipt> + DBProvider,
 {
     type ComponentsBuilder = ComponentsBuilder<
         N,
@@ -132,6 +137,9 @@ where
 impl<N> DebugNode<N> for MorphNode
 where
     N: FullNodeComponents<Types = Self>,
+    N::Provider: CanonChainTracker<Header = MorphHeader> + DatabaseProviderFactory,
+    <N::Provider as DatabaseProviderFactory>::ProviderRW:
+        BlockWriter<Block = Block, Receipt = MorphReceipt> + DBProvider,
 {
     type RpcBlock = alloy_rpc_types_eth::Block<MorphTxEnvelope>;
 
@@ -200,6 +208,8 @@ impl PayloadAttributesBuilder<MorphPayloadAttributes, MorphHeader>
             },
             // No L1 transactions in local mining mode
             transactions: None,
+            gas_limit: None,
+            base_fee_per_gas: None,
         }
     }
 }

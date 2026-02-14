@@ -341,9 +341,8 @@ where
         let ResultAndState { result, state } = output;
 
         // Determine hardfork once and reuse for both L1 fee and token fee calculations
-        let block = self.evm.block();
-        let block_number: u64 = block.number.to();
-        let timestamp: u64 = block.timestamp.to();
+        let block_number: u64 = self.evm.block().number.to();
+        let timestamp: u64 = self.evm.block().timestamp.to();
         let hardfork = self.spec.morph_hardfork_at(block_number, timestamp);
 
         // Calculate L1 fee for the transaction

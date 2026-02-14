@@ -5,8 +5,7 @@
 
 use crate::{EngineApiResult, MorphEngineApiError, MorphL2EngineApi, MorphValidationContext};
 use alloy_consensus::BlockHeader;
-use alloy_eips::eip2718::Decodable2718;
-use alloy_primitives::{Address, B256, Bloom, Sealable};
+use alloy_primitives::{Address, B256, Sealable};
 use alloy_rpc_types_engine::PayloadAttributes;
 use dashmap::DashMap;
 use morph_chainspec::MorphChainSpec;
@@ -14,12 +13,16 @@ use morph_payload_types::{
     AssembleL2BlockParams, ExecutableL2Data, GenericResponse, MorphBuiltPayload,
     MorphPayloadBuilderAttributes, MorphPayloadTypes, SafeL2Data,
 };
-use morph_primitives::{Block, BlockBody, MorphHeader, MorphTxEnvelope};
+use morph_primitives::{Block, MorphHeader, MorphPrimitives, MorphReceipt};
+use reth_execution_types::ExecutionOutcome;
 use reth_payload_builder::PayloadBuilderHandle;
 use reth_payload_primitives::PayloadBuilderAttributes;
-use reth_primitives_traits::{Block as BlockTrait, SealedBlock};
-use reth_provider::BlockReader;
-use std::sync::Arc;
+use reth_primitives_traits::RecoveredBlock;
+use reth_provider::{
+    BlockReader, BlockWriter, CanonChainTracker, DBProvider, DatabaseProviderFactory,
+    StateProviderFactory,
+};
+use std::{sync::Arc, sync::RwLock};
 
 // =============================================================================
 // Real Implementation
@@ -43,9 +46,28 @@ pub struct RealMorphL2EngineApi<Provider> {
     /// Validation context for state root checks.
     validation_ctx: MorphValidationContext,
 
-    /// Cache for validated blocks (keyed by block hash).
-    /// Used to avoid re-executing the same block multiple times.
-    validation_cache: Arc<DashMap<B256, ()>>,
+    /// Cache for validated/executed blocks (keyed by block hash).
+    /// Used to avoid re-executing before import and to persist execution artifacts.
+    validation_cache: Arc<DashMap<B256, CachedExecutionArtifacts>>,
+
+    /// In-memory head tracking for local sequential imports.
+    ///
+    /// This bridges the gap before DB persistence is wired, so block `n+1`
+    /// can still be validated against an accepted in-process head `n`.
+    in_memory_head: Arc<RwLock<Option<InMemoryHead>>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct InMemoryHead {
+    number: u64,
+    hash: B256,
+    timestamp: u64,
+}
+
+#[derive(Debug, Clone)]
+struct CachedExecutionArtifacts {
+    executable_data: ExecutableL2Data,
+    executed: reth_payload_primitives::BuiltPayloadExecutedBlock<MorphPrimitives>,
 }
 
 impl<Provider> RealMorphL2EngineApi<Provider> {
@@ -62,6 +84,7 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
             chain_spec,
             validation_ctx,
             validation_cache: Arc::new(DashMap::new()),
+            in_memory_head: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -79,122 +102,35 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
     pub fn chain_spec(&self) -> &MorphChainSpec {
         &self.chain_spec
     }
+
+    fn set_in_memory_head(&self, head: InMemoryHead) {
+        if let Ok(mut guard) = self.in_memory_head.write() {
+            *guard = Some(head);
+        }
+    }
 }
 
 #[async_trait::async_trait]
 impl<Provider> MorphL2EngineApi for RealMorphL2EngineApi<Provider>
 where
-    Provider: BlockReader + Clone + Send + Sync + 'static,
+    Provider: BlockReader<Header = MorphHeader>
+        + CanonChainTracker<Header = MorphHeader>
+        + DatabaseProviderFactory
+        + StateProviderFactory
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+    <Provider as DatabaseProviderFactory>::ProviderRW:
+        BlockWriter<Block = Block, Receipt = MorphReceipt> + DBProvider,
 {
     async fn assemble_l2_block(
         &self,
         params: AssembleL2BlockParams,
     ) -> EngineApiResult<ExecutableL2Data> {
-        tracing::debug!(
-            target: "morph::engine",
-            block_number = params.number,
-            tx_count = params.transactions.len(),
-            "assembling L2 block"
-        );
-
-        // 1. Validate block number (must be current_head + 1)
-        let current_head = self
-            .provider
-            .last_block_number()
-            .map_err(|e| MorphEngineApiError::Database(e.to_string()))?;
-
-        if params.number != current_head + 1 {
-            return Err(MorphEngineApiError::DiscontinuousBlockNumber {
-                expected: current_head + 1,
-                actual: params.number,
-            });
-        }
-
-        // 2. Get parent header
-        let parent = self
-            .provider
-            .sealed_header(current_head)
-            .map_err(|e| MorphEngineApiError::Database(e.to_string()))?
-            .ok_or_else(|| {
-                MorphEngineApiError::Internal(format!("parent header {current_head} not found"))
-            })?;
-
-        // 3. Build MorphPayloadAttributes
-        let parent_hash = parent.hash();
-
-        // Calculate timestamp (current time or parent + 1 second, whichever is greater)
-        let timestamp = std::cmp::max(
-            parent.timestamp() + 1,
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-        );
-
-        // Create payload attributes (RPC format)
-        let rpc_attributes = morph_payload_types::MorphPayloadAttributes {
-            inner: PayloadAttributes {
-                timestamp,
-                prev_randao: parent.mix_hash().unwrap_or_default(),
-                suggested_fee_recipient: Address::ZERO, // Morph doesn't use fee recipient
-                withdrawals: Some(Vec::new()),
-                parent_beacon_block_root: None,
-            },
-            // Include all transactions from params (forced L1 messages + L2 txs)
-            transactions: Some(params.transactions.clone()),
-        };
-
-        // Convert to builder attributes (internal format with decoded transactions)
-        let builder_attrs = MorphPayloadBuilderAttributes::try_new(
-            parent_hash,
-            rpc_attributes,
-            1, // Use version 1 for now
-        )
-        .map_err(|e| {
-            MorphEngineApiError::BlockBuildError(format!(
-                "failed to create builder attributes: {e}",
-            ))
-        })?;
-
-        // 4. Request payload building from the service
-        // The PayloadBuilderHandle manages the async building process
-        let payload_id = builder_attrs.payload_id();
-
-        tracing::debug!(
-            target: "morph::engine",
-            ?payload_id,
-            "requesting payload build from service"
-        );
-
-        // Send build request to the payload builder service
-        // send_new_payload returns a Receiver<Result<PayloadId, PayloadBuilderError>>
-        let _ = self
-            .payload_builder
-            .send_new_payload(builder_attrs)
-            .await
-            .map_err(|_| {
-                MorphEngineApiError::BlockBuildError("failed to receive build response".to_string())
-            })?
-            .map_err(|e| {
-                MorphEngineApiError::BlockBuildError(format!("failed to send build request: {e}"))
-            })?;
-
-        // Wait for the payload to be built
-        // best_payload returns Option<Result<MorphBuiltPayload, PayloadBuilderError>>
-        let built_payload: MorphBuiltPayload = self
-            .payload_builder
-            .best_payload(payload_id)
-            .await
-            .ok_or_else(|| {
-                MorphEngineApiError::Internal(format!("no payload response for id {payload_id:?}"))
-            })?
-            .map_err(|e| {
-                MorphEngineApiError::BlockBuildError(format!("failed to get built payload: {e}"))
-            })?;
-
-        // 5. Extract ExecutableL2Data from built payload
-        // MorphBuiltPayload directly contains executable_data field
-        let executable_data = built_payload.executable_data;
+        let built_payload = self.build_l2_payload(params, None, None).await?;
+        let executable_data = built_payload.executable_data.clone();
+        self.cache_built_payload(&built_payload);
 
         tracing::info!(
             target: "morph::engine",
@@ -225,69 +161,52 @@ where
             return Ok(GenericResponse { success: true });
         }
 
-        // 2. Try to get parent header
-        let parent = match self.provider.sealed_header_by_hash(data.parent_hash) {
-            Ok(Some(header)) => header,
-            Ok(None) => {
-                // Parent not found - this can happen when:
-                // 1. reth database is empty (first block)
-                // 2. morphnode is importing historical blocks
-                // In Morph's architecture, morphnode is responsible for validation,
-                // so we trust the data and skip re-execution validation
-                tracing::debug!(
-                    target: "morph::engine",
-                    block_number = data.number,
-                    parent_hash = %data.parent_hash,
-                    "parent header not found, skipping re-execution validation"
-                );
-                self.validation_cache.insert(data.hash, ());
-                return Ok(GenericResponse { success: true });
-            }
-            Err(e) => {
-                tracing::warn!(
-                    target: "morph::engine",
-                    error = %e,
-                    "failed to query parent header"
-                );
-                // Database error - but don't fail, just skip validation
-                self.validation_cache.insert(data.hash, ());
-                return Ok(GenericResponse { success: true });
-            }
-        };
-
-        // 3. Verify parent hash matches
-        if parent.hash() != data.parent_hash {
+        // 2. Enforce canonical continuity against the current head.
+        let current_head = self.current_head()?;
+        if data.number != current_head.number + 1 {
             tracing::warn!(
                 target: "morph::engine",
-                expected = %parent.hash(),
+                expected = current_head.number + 1,
+                actual = data.number,
+                "cannot validate block with discontinuous block number"
+            );
+            return Ok(GenericResponse { success: false });
+        }
+
+        if data.parent_hash != current_head.hash {
+            tracing::warn!(
+                target: "morph::engine",
+                expected = %current_head.hash,
                 actual = %data.parent_hash,
                 "parent hash mismatch"
             );
             return Ok(GenericResponse { success: false });
         }
 
-        // 4. Re-build the block with the same inputs and compare results
+        // 3. Re-build the block with the same inputs and compare results.
         let rebuild_params = AssembleL2BlockParams {
             number: data.number,
             transactions: data.transactions.clone(),
+            timestamp: Some(data.timestamp),
         };
 
-        let rebuilt = match self.assemble_l2_block(rebuild_params).await {
-            Ok(rebuilt_data) => rebuilt_data,
+        let rebuilt_payload = match self
+            .build_l2_payload(rebuild_params, Some(data.gas_limit), data.base_fee_per_gas)
+            .await
+        {
+            Ok(payload) => payload,
             Err(e) => {
                 tracing::warn!(
                     target: "morph::engine",
                     error = %e,
-                    "failed to rebuild block for validation, skipping"
+                    "failed to rebuild block for validation"
                 );
-                // Can't rebuild - probably missing state
-                // In Morph's architecture, trust morphnode's validation
-                self.validation_cache.insert(data.hash, ());
-                return Ok(GenericResponse { success: true });
+                return Ok(GenericResponse { success: false });
             }
         };
+        let rebuilt = rebuilt_payload.executable_data.clone();
 
-        // 5. Compare execution results
+        // 4. Compare execution results
         // Check state root if MPTFork is active
         if self
             .validation_ctx
@@ -303,12 +222,13 @@ where
             return Ok(GenericResponse { success: false });
         }
 
-        // Compare other critical fields
+        // Compare other critical fields.
         if rebuilt.gas_used != data.gas_used {
             tracing::warn!(
                 target: "morph::engine",
                 expected = data.gas_used,
                 actual = rebuilt.gas_used,
+                tx_count = data.transactions.len(),
                 "gas used mismatch"
             );
             return Ok(GenericResponse { success: false });
@@ -332,8 +252,33 @@ where
             return Ok(GenericResponse { success: false });
         }
 
-        // 6. Cache validation result
-        self.validation_cache.insert(data.hash, ());
+        if rebuilt.withdraw_trie_root != data.withdraw_trie_root {
+            tracing::warn!(
+                target: "morph::engine",
+                expected = %data.withdraw_trie_root,
+                actual = %rebuilt.withdraw_trie_root,
+                "withdraw trie root mismatch"
+            );
+            return Ok(GenericResponse { success: false });
+        }
+
+        // 5. Cache validation result with execution artifacts for new_l2_block.
+        if let Some(executed) = rebuilt_payload.executed().cloned() {
+            self.validation_cache.insert(
+                data.hash,
+                CachedExecutionArtifacts {
+                    executable_data: data.clone(),
+                    executed,
+                },
+            );
+        } else {
+            tracing::warn!(
+                target: "morph::engine",
+                block_hash = %data.hash,
+                "validated payload missing execution artifacts"
+            );
+            return Ok(GenericResponse { success: false });
+        }
 
         tracing::debug!(
             target: "morph::engine",
@@ -358,10 +303,8 @@ where
         );
 
         // 1. Get current head from blockchain (same as go-ethereum's parent := api.eth.BlockChain().CurrentBlock())
-        let current_number = self
-            .provider
-            .last_block_number()
-            .map_err(|e| MorphEngineApiError::Database(e.to_string()))?;
+        let current_head = self.current_head()?;
+        let current_number = current_head.number;
 
         let expected_number = current_number + 1;
 
@@ -391,48 +334,80 @@ where
         }
 
         // 3. Get current head header and validate parent hash
-        let current_header = self
-            .provider
-            .sealed_header(current_number)
-            .map_err(|e| MorphEngineApiError::Database(e.to_string()))?
-            .ok_or_else(|| {
-                MorphEngineApiError::Internal(format!(
-                    "current header {current_number} not found (database may not be initialized)",
-                ))
-            })?;
-
-        if data.parent_hash != current_header.hash() {
+        if data.parent_hash != current_head.hash {
             tracing::warn!(
                 target: "morph::engine",
-                expected = %current_header.hash(),
+                expected = %current_head.hash,
                 actual = %data.parent_hash,
                 "wrong parent hash"
             );
             return Err(MorphEngineApiError::WrongParentHash {
-                expected: current_header.hash(),
+                expected: current_head.hash,
                 actual: data.parent_hash,
             });
         }
 
-        // 4. Optionally validate the block content
-        if let Ok(validation) = self.validate_l2_block(data.clone()).await
-            && !validation.success
-        {
-            tracing::warn!(
-                target: "morph::engine",
-                block_hash = %data.hash,
-                "block content validation failed"
-            );
+        // 4. Validate block content before import.
+        let validation = self.validate_l2_block(data.clone()).await?;
+        if !validation.success {
+            return Err(MorphEngineApiError::ValidationFailed(format!(
+                "block content validation failed for {}",
+                data.hash
+            )));
         }
 
-        // 5. Convert ExecutableL2Data to SealedBlock
-        let sealed_block = self.executable_data_to_sealed_block(&data, batch_hash)?;
+        // 5. Read and consume cached execution artifacts produced during assemble/validate.
+        let (_, cached) = self.validation_cache.remove(&data.hash).ok_or_else(|| {
+            MorphEngineApiError::Internal(format!(
+                "missing cached execution artifacts for block {}",
+                data.hash
+            ))
+        })?;
+        if cached.executable_data != data {
+            return Err(MorphEngineApiError::ValidationFailed(format!(
+                "cached execution data mismatch for block {}",
+                data.hash
+            )));
+        }
 
-        // 6. TODO: Write block to database
-        // In go-ethereum: api.eth.BlockChain().WriteStateAndSetHead(block, receipts, stateDB, procTime)
-        // In reth, this should be handled by Engine Tree when it processes forkchoice updates.
-        // For now, we just accept the block and log success.
-        // Future work: integrate with reth's Engine Tree for actual persistence.
+        let executed = cached.executed.into_executed_payload();
+        let recovered_with_batch =
+            self.apply_batch_hash(executed.recovered_block().clone(), batch_hash);
+        let recovered_with_data = apply_executable_data_overrides(recovered_with_batch, &data)?;
+        let computed_hash = recovered_with_data.hash();
+        if computed_hash != data.hash {
+            return Err(MorphEngineApiError::ValidationFailed(format!(
+                "block hash mismatch: expected {}, computed {}",
+                data.hash, computed_hash
+            )));
+        }
+
+        let (block, senders) = recovered_with_data.split();
+        // Keep external block hash as canonical identity for engine API compatibility.
+        let recovered_for_import = RecoveredBlock::new(block, senders, data.hash);
+
+        let execution_outcome = ExecutionOutcome::from((
+            executed.execution_outcome().clone(),
+            executed.block_number(),
+        ));
+        let hashed_state = Arc::unwrap_or_clone(executed.hashed_state());
+
+        let provider_rw = self
+            .provider
+            .database_provider_rw()
+            .map_err(|e| MorphEngineApiError::Database(e.to_string()))?;
+        provider_rw
+            .append_blocks_with_state(
+                vec![recovered_for_import.clone()],
+                &execution_outcome,
+                hashed_state,
+            )
+            .map_err(|e| MorphEngineApiError::Database(e.to_string()))?;
+        provider_rw
+            .commit()
+            .map_err(|e| MorphEngineApiError::Database(e.to_string()))?;
+
+        let sealed_block = recovered_for_import.sealed_block();
 
         tracing::info!(
             target: "morph::engine",
@@ -440,6 +415,19 @@ where
             block_number = sealed_block.number(),
             "L2 block accepted"
         );
+
+        // Keep reth's canonical in-memory view in sync so eth_blockNumber advances.
+        self.provider
+            .set_canonical_head(sealed_block.clone_sealed_header());
+
+        self.set_in_memory_head(InMemoryHead {
+            number: sealed_block.number(),
+            hash: sealed_block.hash(),
+            timestamp: sealed_block.timestamp(),
+        });
+
+        // Clear cache after successful import. Next block validation will repopulate it.
+        self.validation_cache.clear();
 
         Ok(())
     }
@@ -452,10 +440,7 @@ where
         );
 
         // 1. Get latest block number
-        let latest_number = self
-            .provider
-            .last_block_number()
-            .map_err(|e| MorphEngineApiError::Database(e.to_string()))?;
+        let latest_number = self.current_head()?.number;
 
         if data.number != latest_number + 1 {
             return Err(MorphEngineApiError::DiscontinuousBlockNumber {
@@ -464,20 +449,35 @@ where
             });
         }
 
-        // 2. Assemble the block from SafeL2Data inputs
+        // 2. Assemble the block from SafeL2Data inputs.
         let assemble_params = AssembleL2BlockParams {
             number: data.number,
             transactions: data.transactions.clone(),
+            timestamp: Some(data.timestamp),
         };
 
-        let executable_data = self.assemble_l2_block(assemble_params).await?;
+        let built_payload = self
+            .build_l2_payload(assemble_params, Some(data.gas_limit), data.base_fee_per_gas)
+            .await?;
+        let executable_data = built_payload.executable_data.clone();
+        self.cache_built_payload(&built_payload);
 
         // 3. Import the block
         self.new_l2_block(executable_data.clone(), data.batch_hash)
             .await?;
 
-        // 4. Return the header
-        let header = self.executable_data_to_header(&executable_data, data.batch_hash)?;
+        // 4. Return the persisted header.
+        let header = self
+            .provider
+            .sealed_header(data.number)
+            .map_err(|e| MorphEngineApiError::Database(e.to_string()))?
+            .ok_or_else(|| {
+                MorphEngineApiError::Internal(format!(
+                    "imported safe block header {} not found",
+                    data.number
+                ))
+            })?
+            .into_header();
 
         tracing::info!(
             target: "morph::engine",
@@ -490,90 +490,199 @@ where
 }
 
 impl<Provider> RealMorphL2EngineApi<Provider> {
-    /// Converts ExecutableL2Data to a SealedBlock.
-    fn executable_data_to_sealed_block(
+    async fn build_l2_payload(
         &self,
-        data: &ExecutableL2Data,
-        batch_hash: Option<B256>,
-    ) -> EngineApiResult<SealedBlock<Block>> {
-        // Decode transactions from bytes
-        let transactions: Vec<MorphTxEnvelope> = data
-            .transactions
-            .iter()
-            .enumerate()
-            .map(|(i, tx_bytes)| {
-                let mut buf = tx_bytes.as_ref();
-                MorphTxEnvelope::decode_2718(&mut buf).map_err(|e| {
-                    MorphEngineApiError::InvalidTransaction {
-                        index: i,
-                        message: format!("failed to decode transaction: {e}"),
-                    }
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        // Build header
-        let header = self.executable_data_to_header(data, batch_hash)?;
-
-        // Build block
-        let block = Block::new(
-            header,
-            BlockBody {
-                transactions,
-                ommers: Vec::new(),
-                withdrawals: Some(Default::default()),
-            },
+        params: AssembleL2BlockParams,
+        gas_limit_override: Option<u64>,
+        base_fee_override: Option<u128>,
+    ) -> EngineApiResult<MorphBuiltPayload>
+    where
+        Provider: BlockReader<Header = MorphHeader> + Clone + Send + Sync + 'static,
+    {
+        tracing::debug!(
+            target: "morph::engine",
+            block_number = params.number,
+            tx_count = params.transactions.len(),
+            "assembling L2 block"
         );
 
-        // Seal with the provided hash (use seal_unchecked to avoid recalculating)
-        Ok(block.seal_unchecked(data.hash))
+        // 1. Validate block number (must be current_head + 1).
+        let current_head = self.current_head()?;
+        if params.number != current_head.number + 1 {
+            return Err(MorphEngineApiError::DiscontinuousBlockNumber {
+                expected: current_head.number + 1,
+                actual: params.number,
+            });
+        }
+
+        // 2. Build payload attributes.
+        let parent_hash = current_head.hash;
+        let timestamp = params.timestamp.unwrap_or_else(|| {
+            std::cmp::max(
+                current_head.timestamp + 1,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+            )
+        });
+        let base_fee_override = base_fee_override
+            .map(|fee| {
+                u64::try_from(fee).map_err(|_| {
+                    MorphEngineApiError::BlockBuildError(format!(
+                        "base fee override exceeds u64: {fee}"
+                    ))
+                })
+            })
+            .transpose()?;
+
+        let rpc_attributes = morph_payload_types::MorphPayloadAttributes {
+            inner: PayloadAttributes {
+                timestamp,
+                // Deterministic placeholder: Morph does not use fee recipient/prev_randao here.
+                prev_randao: B256::ZERO,
+                suggested_fee_recipient: Address::ZERO,
+                withdrawals: Some(Vec::new()),
+                parent_beacon_block_root: None,
+            },
+            transactions: Some(params.transactions.clone()),
+            gas_limit: gas_limit_override,
+            base_fee_per_gas: base_fee_override,
+        };
+
+        let builder_attrs = MorphPayloadBuilderAttributes::try_new(parent_hash, rpc_attributes, 1)
+            .map_err(|e| {
+                MorphEngineApiError::BlockBuildError(format!(
+                    "failed to create builder attributes: {e}",
+                ))
+            })?;
+        let payload_id = builder_attrs.payload_id();
+
+        let _ = self
+            .payload_builder
+            .send_new_payload(builder_attrs)
+            .await
+            .map_err(|_| {
+                MorphEngineApiError::BlockBuildError("failed to receive build response".to_string())
+            })?
+            .map_err(|e| {
+                MorphEngineApiError::BlockBuildError(format!("failed to send build request: {e}"))
+            })?;
+
+        self.payload_builder
+            .best_payload(payload_id)
+            .await
+            .ok_or_else(|| {
+                MorphEngineApiError::Internal(format!("no payload response for id {payload_id:?}"))
+            })?
+            .map_err(|e| {
+                MorphEngineApiError::BlockBuildError(format!("failed to get built payload: {e}"))
+            })
     }
 
-    /// Converts ExecutableL2Data to a MorphHeader.
-    fn executable_data_to_header(
+    fn cache_built_payload(&self, payload: &MorphBuiltPayload) {
+        let Some(executed) = payload.executed().cloned() else {
+            tracing::warn!(
+                target: "morph::engine",
+                block_hash = %payload.executable_data.hash,
+                "built payload missing execution artifacts"
+            );
+            return;
+        };
+        self.validation_cache.insert(
+            payload.executable_data.hash,
+            CachedExecutionArtifacts {
+                executable_data: payload.executable_data.clone(),
+                executed,
+            },
+        );
+    }
+
+    fn apply_batch_hash(
         &self,
-        data: &ExecutableL2Data,
+        recovered_block: RecoveredBlock<Block>,
         batch_hash: Option<B256>,
-    ) -> EngineApiResult<MorphHeader> {
-        use alloy_consensus::Header;
-
-        // Parse logs bloom
-        let logs_bloom = if data.logs_bloom.len() == 256 {
-            Bloom::from_slice(&data.logs_bloom)
-        } else {
-            Bloom::ZERO
+    ) -> RecoveredBlock<Block> {
+        let Some(batch_hash) = batch_hash else {
+            return recovered_block;
         };
+        let (block, senders) = recovered_block.split();
+        let block = block.map_header(|mut header: MorphHeader| {
+            header.batch_hash = batch_hash;
+            header
+        });
+        RecoveredBlock::new_unhashed(block, senders)
+    }
 
-        let inner = Header {
-            parent_hash: data.parent_hash,
-            ommers_hash: alloy_primitives::B256::ZERO, // No ommers in L2
-            beneficiary: data.miner,
-            state_root: data.state_root,
-            transactions_root: alloy_primitives::B256::ZERO, // Will be calculated when sealing
-            receipts_root: data.receipts_root,
-            logs_bloom,
-            difficulty: alloy_primitives::U256::ZERO, // No PoW in L2
-            number: data.number,
-            gas_limit: data.gas_limit,
-            gas_used: data.gas_used,
-            timestamp: data.timestamp,
-            extra_data: Default::default(),
-            mix_hash: alloy_primitives::B256::ZERO,
-            nonce: alloy_primitives::B64::ZERO,
-            base_fee_per_gas: data.base_fee_per_gas.map(|f| f as u64),
-            withdrawals_root: Some(alloy_primitives::B256::ZERO),
-            blob_gas_used: None,
-            excess_blob_gas: None,
-            parent_beacon_block_root: None,
-            requests_hash: None,
-        };
+    fn current_head(&self) -> EngineApiResult<InMemoryHead>
+    where
+        Provider: BlockReader,
+    {
+        if let Ok(guard) = self.in_memory_head.read()
+            && let Some(head) = *guard
+        {
+            return Ok(head);
+        }
 
-        Ok(MorphHeader {
-            inner,
-            next_l1_msg_index: data.next_l1_message_index,
-            batch_hash: batch_hash.unwrap_or_default(),
+        let number = self
+            .provider
+            .last_block_number()
+            .map_err(|e| MorphEngineApiError::Database(e.to_string()))?;
+        let header = self
+            .provider
+            .sealed_header(number)
+            .map_err(|e| MorphEngineApiError::Database(e.to_string()))?
+            .ok_or_else(|| MorphEngineApiError::Internal(format!("header {number} not found")))?;
+
+        Ok(InMemoryHead {
+            number,
+            hash: header.hash(),
+            timestamp: header.timestamp(),
         })
     }
+}
+
+fn apply_executable_data_overrides(
+    recovered_block: RecoveredBlock<Block>,
+    data: &ExecutableL2Data,
+) -> EngineApiResult<RecoveredBlock<Block>> {
+    let base_fee_per_gas = data
+        .base_fee_per_gas
+        .map(|fee| {
+            u64::try_from(fee).map_err(|_| {
+                MorphEngineApiError::ValidationFailed(format!(
+                    "base_fee_per_gas exceeds u64 in block {}",
+                    data.hash
+                ))
+            })
+        })
+        .transpose()?;
+    if data.logs_bloom.len() != 256 {
+        return Err(MorphEngineApiError::ValidationFailed(format!(
+            "logs_bloom must be 256 bytes, got {} bytes in block {}",
+            data.logs_bloom.len(),
+            data.hash
+        )));
+    }
+    let logs_bloom = alloy_primitives::Bloom::from_slice(data.logs_bloom.as_ref());
+
+    let (block, senders) = recovered_block.split();
+    let block = block.map_header(|mut header: MorphHeader| {
+        // Normalize header fields from sequencer input so hash calculation is deterministic.
+        header.inner.parent_hash = data.parent_hash;
+        header.inner.beneficiary = data.miner;
+        header.inner.number = data.number;
+        header.inner.gas_limit = data.gas_limit;
+        header.inner.gas_used = data.gas_used;
+        header.inner.timestamp = data.timestamp;
+        header.inner.state_root = data.state_root;
+        header.inner.receipts_root = data.receipts_root;
+        header.inner.base_fee_per_gas = base_fee_per_gas;
+        header.inner.logs_bloom = logs_bloom;
+        header.next_l1_msg_index = data.next_l1_message_index;
+        header
+    });
+    Ok(RecoveredBlock::new_unhashed(block, senders))
 }
 
 // =============================================================================
@@ -653,5 +762,181 @@ impl<N: FullNodeComponents> EngineApiBuilder<N> for MorphL2EngineApiBuilder {
     async fn build_engine_api(self, _ctx: &AddOnsContext<'_, N>) -> eyre::Result<Self::EngineApi> {
         // Use stub implementation - real implementation is registered in MorphAddOns
         Ok(MorphL2EngineRpcHandler::new(StubMorphL2EngineApi))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_consensus::Header;
+    use alloy_primitives::{Address, Bloom, Bytes};
+    use morph_primitives::BlockBody;
+
+    fn recovered_with_header(header: MorphHeader) -> RecoveredBlock<Block> {
+        let block = Block::new(header, BlockBody::default());
+        RecoveredBlock::new_unhashed(block, Vec::new())
+    }
+
+    #[test]
+    fn test_apply_executable_data_overrides_aligns_hash_with_engine_data() {
+        let source_header: MorphHeader = Header::default().into();
+        let source_recovered = recovered_with_header(source_header);
+
+        let target_header = MorphHeader {
+            next_l1_msg_index: 42,
+            batch_hash: B256::ZERO,
+            inner: Header {
+                parent_hash: B256::from([0x11; 32]),
+                beneficiary: Address::from([0x22; 20]),
+                number: 7,
+                gas_limit: 30_000_000,
+                gas_used: 21_000,
+                timestamp: 1_700_000_001,
+                state_root: B256::from([0x33; 32]),
+                receipts_root: B256::from([0x44; 32]),
+                base_fee_per_gas: Some(1_000_000_000),
+                logs_bloom: Bloom::from([0x55; 256]),
+                ..Default::default()
+            },
+        };
+        let expected_hash = recovered_with_header(target_header.clone()).hash();
+
+        let data = ExecutableL2Data {
+            parent_hash: target_header.inner.parent_hash,
+            miner: target_header.inner.beneficiary,
+            number: target_header.inner.number,
+            gas_limit: target_header.inner.gas_limit,
+            base_fee_per_gas: target_header.inner.base_fee_per_gas.map(u128::from),
+            timestamp: target_header.inner.timestamp,
+            transactions: Vec::new(),
+            state_root: target_header.inner.state_root,
+            gas_used: target_header.inner.gas_used,
+            receipts_root: target_header.inner.receipts_root,
+            logs_bloom: Bytes::copy_from_slice(target_header.inner.logs_bloom.as_slice()),
+            withdraw_trie_root: B256::ZERO,
+            next_l1_message_index: target_header.next_l1_msg_index,
+            hash: expected_hash,
+        };
+
+        let overridden = apply_executable_data_overrides(source_recovered, &data).unwrap();
+        assert_eq!(overridden.hash(), expected_hash);
+    }
+
+    #[test]
+    fn test_apply_executable_data_overrides_rejects_overflow_base_fee() {
+        let recovered = recovered_with_header(Header::default().into());
+        let data = ExecutableL2Data {
+            base_fee_per_gas: Some((u64::MAX as u128) + 1),
+            hash: B256::from([0x99; 32]),
+            ..Default::default()
+        };
+
+        let err = apply_executable_data_overrides(recovered, &data).unwrap_err();
+        match err {
+            MorphEngineApiError::ValidationFailed(msg) => {
+                assert!(msg.contains("base_fee_per_gas exceeds u64"))
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn test_apply_executable_data_overrides_rejects_invalid_logs_bloom_len() {
+        let recovered = recovered_with_header(Header::default().into());
+        let data = ExecutableL2Data {
+            logs_bloom: Bytes::from(vec![0u8; 32]),
+            hash: B256::from([0x77; 32]),
+            ..Default::default()
+        };
+
+        let err = apply_executable_data_overrides(recovered, &data).unwrap_err();
+        match err {
+            MorphEngineApiError::ValidationFailed(msg) => {
+                assert!(msg.contains("logs_bloom must be 256 bytes"))
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn test_apply_executable_data_overrides_sets_header_fields_exactly() {
+        let source_header = MorphHeader {
+            next_l1_msg_index: 1,
+            batch_hash: B256::from([0xab; 32]),
+            inner: Header {
+                parent_hash: B256::from([0x01; 32]),
+                beneficiary: Address::from([0x02; 20]),
+                number: 1,
+                gas_limit: 1_000_000,
+                gas_used: 500_000,
+                timestamp: 10,
+                state_root: B256::from([0x03; 32]),
+                receipts_root: B256::from([0x04; 32]),
+                base_fee_per_gas: Some(123),
+                logs_bloom: Bloom::from([0x05; 256]),
+                ..Default::default()
+            },
+        };
+        let source_batch_hash = source_header.batch_hash;
+        let recovered = recovered_with_header(source_header);
+        let data = ExecutableL2Data {
+            parent_hash: B256::from([0x11; 32]),
+            miner: Address::from([0x22; 20]),
+            number: 9,
+            gas_limit: 30_000_000,
+            base_fee_per_gas: Some(1_000_000_000),
+            timestamp: 1_700_000_009,
+            transactions: Vec::new(),
+            state_root: B256::from([0x33; 32]),
+            gas_used: 21_009,
+            receipts_root: B256::from([0x44; 32]),
+            logs_bloom: Bytes::from(vec![0x55; 256]),
+            withdraw_trie_root: B256::ZERO,
+            next_l1_message_index: 99,
+            hash: B256::from([0x66; 32]),
+        };
+
+        let overridden = apply_executable_data_overrides(recovered, &data).unwrap();
+        let sealed = overridden.sealed_block();
+        let header = sealed.header();
+
+        assert_eq!(header.inner.parent_hash, data.parent_hash);
+        assert_eq!(header.inner.beneficiary, data.miner);
+        assert_eq!(header.inner.number, data.number);
+        assert_eq!(header.inner.gas_limit, data.gas_limit);
+        assert_eq!(header.inner.gas_used, data.gas_used);
+        assert_eq!(header.inner.timestamp, data.timestamp);
+        assert_eq!(header.inner.state_root, data.state_root);
+        assert_eq!(header.inner.receipts_root, data.receipts_root);
+        assert_eq!(
+            header.inner.base_fee_per_gas,
+            data.base_fee_per_gas.map(|v| v as u64)
+        );
+        assert_eq!(header.inner.logs_bloom.as_slice(), data.logs_bloom.as_ref());
+        assert_eq!(header.next_l1_msg_index, data.next_l1_message_index);
+        assert_eq!(header.batch_hash, source_batch_hash);
+    }
+
+    #[test]
+    fn test_apply_executable_data_overrides_supports_none_base_fee() {
+        let recovered = recovered_with_header(MorphHeader {
+            inner: Header {
+                base_fee_per_gas: Some(10),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let data = ExecutableL2Data {
+            base_fee_per_gas: None,
+            logs_bloom: Bytes::from(vec![0u8; 256]),
+            hash: B256::from([0x44; 32]),
+            ..Default::default()
+        };
+
+        let overridden = apply_executable_data_overrides(recovered, &data).unwrap();
+        assert_eq!(
+            overridden.sealed_block().header().inner.base_fee_per_gas,
+            None
+        );
     }
 }

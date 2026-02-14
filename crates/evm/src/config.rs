@@ -34,7 +34,14 @@ impl ConfigureEvm for MorphEvmConfig {
 
         let cfg_env = CfgEnv::<MorphHardfork>::default()
             .with_chain_id(self.chain_spec().chain().id())
-            .with_spec_and_mainnet_gas_params(spec);
+            .with_spec_and_mainnet_gas_params(spec)
+            .with_disable_eip7623(true);
+
+        let fee_recipient = self
+            .chain_spec()
+            .fee_vault_address()
+            .filter(|_| self.chain_spec().is_fee_vault_enabled())
+            .unwrap_or(header.beneficiary());
 
         // Morph doesn't support EIP-4844 blob transactions, but when SpecId >= CANCUN,
         // revm requires `blob_excess_gas_and_price` to be set. We provide a placeholder
@@ -43,7 +50,7 @@ impl ConfigureEvm for MorphEvmConfig {
         // transaction pool level.
         let block_env = BlockEnv {
             number: U256::from(header.number()),
-            beneficiary: header.beneficiary(),
+            beneficiary: fee_recipient,
             timestamp: U256::from(header.timestamp()),
             difficulty: header.difficulty(),
             prevrandao: header.mix_hash(),
@@ -73,22 +80,30 @@ impl ConfigureEvm for MorphEvmConfig {
 
         let cfg_env = CfgEnv::<MorphHardfork>::default()
             .with_chain_id(self.chain_spec().chain().id())
-            .with_spec_and_mainnet_gas_params(spec);
+            .with_spec_and_mainnet_gas_params(spec)
+            .with_disable_eip7623(true);
+
+        let fee_recipient = self
+            .chain_spec()
+            .fee_vault_address()
+            .filter(|_| self.chain_spec().is_fee_vault_enabled())
+            .unwrap_or(attributes.suggested_fee_recipient);
 
         // Morph doesn't support EIP-4844 blob transactions, but when SpecId >= CANCUN,
         // revm requires `blob_excess_gas_and_price` to be set. We provide a placeholder
         // value to satisfy the validation.
         let block_env = BlockEnv {
             number: U256::from(parent.number() + 1),
-            beneficiary: attributes.suggested_fee_recipient,
+            beneficiary: fee_recipient,
             timestamp: U256::from(attributes.timestamp),
-            difficulty: U256::ONE,
+            difficulty: U256::ZERO,
             prevrandao: Some(attributes.prev_randao),
             gas_limit: attributes.gas_limit,
-            basefee: self
-                .chain_spec()
-                .next_block_base_fee(parent, attributes.timestamp)
-                .unwrap_or_default(),
+            basefee: attributes.base_fee_per_gas.unwrap_or_else(|| {
+                self.chain_spec()
+                    .next_block_base_fee(parent, attributes.timestamp)
+                    .unwrap_or_default()
+            }),
             blob_excess_gas_and_price: Some(BlobExcessGasAndPrice {
                 excess_blob_gas: 0,
                 blob_gasprice: 1, // minimum blob gas price
