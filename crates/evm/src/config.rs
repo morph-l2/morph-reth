@@ -32,10 +32,14 @@ impl ConfigureEvm for MorphEvmConfig {
             .chain_spec()
             .morph_hardfork_at(header.number(), header.timestamp());
 
-        let cfg_env = CfgEnv::<MorphHardfork>::default()
+        let mut cfg_env = CfgEnv::<MorphHardfork>::default()
             .with_chain_id(self.chain_spec().chain().id())
             .with_spec_and_mainnet_gas_params(spec)
             .with_disable_eip7623(true);
+
+        // Disable EIP-7825 transaction gas limit cap
+        // Morph allows transactions with gas limit > 16777216 (EIP-7825 cap)
+        cfg_env.tx_gas_limit_cap = Some(header.gas_limit());
 
         let fee_recipient = self
             .chain_spec()
@@ -78,10 +82,14 @@ impl ConfigureEvm for MorphEvmConfig {
             .chain_spec()
             .morph_hardfork_at(parent.number() + 1, attributes.timestamp);
 
-        let cfg_env = CfgEnv::<MorphHardfork>::default()
+        let mut cfg_env = CfgEnv::<MorphHardfork>::default()
             .with_chain_id(self.chain_spec().chain().id())
             .with_spec_and_mainnet_gas_params(spec)
             .with_disable_eip7623(true);
+
+        // Disable EIP-7825 transaction gas limit cap
+        // Morph allows transactions with gas limit > 16777216 (EIP-7825 cap)
+        cfg_env.tx_gas_limit_cap = Some(attributes.gas_limit);
 
         let fee_recipient = self
             .chain_spec()
