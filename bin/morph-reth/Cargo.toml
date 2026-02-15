@@ -1,0 +1,34 @@
+[package]
+name = "morph-reth"
+description = "Morph L2 Execution Layer Client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "morph-reth"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Morph crates
+morph-chainspec = { workspace = true, features = ["cli"] }
+morph-consensus.workspace = true
+morph-evm.workspace = true
+morph-node.workspace = true
+
+# Reth CLI
+reth-cli.workspace = true
+reth-cli-util.workspace = true
+reth-ethereum-cli.workspace = true
+reth-node-builder.workspace = true
+reth-rpc-server-types.workspace = true
+
+# Other
+clap.workspace = true
+eyre.workspace = true
+tracing.workspace = true

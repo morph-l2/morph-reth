@@ -12,11 +12,12 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-morph-primitives.workspace = true
+morph-primitives = { workspace = true, features = ["serde"] }
 
 reth-cli = { workspace = true, optional = true }
 reth-chainspec.workspace = true
 reth-network-peers.workspace = true
+reth-primitives-traits.workspace = true
 
 alloy-chains.workspace = true
 alloy-consensus.workspace = true

@@ -12,7 +12,7 @@ mod receipt;
 
 pub(crate) use factory::MorphBlockExecutorFactory;
 pub(crate) use receipt::{
-    DefaultMorphReceiptBuilder, MorphReceiptBuilder, MorphReceiptBuilderCtx, MorphTxFields,
+    DefaultMorphReceiptBuilder, MorphReceiptBuilder, MorphReceiptBuilderCtx, MorphReceiptTxFields,
 };
 
 use crate::evm::MorphEvm;
@@ -176,7 +176,7 @@ where
         &mut self,
         tx: &MorphTxEnvelope,
         hardfork: MorphHardfork,
-    ) -> Result<Option<MorphTxFields>, BlockExecutionError> {
+    ) -> Result<Option<MorphReceiptTxFields>, BlockExecutionError> {
         // Only MorphTx transactions have these fields
         if !tx.is_morph_tx() {
             return Ok(None);
@@ -201,12 +201,13 @@ where
             .signer_unchecked()
             .map_err(|_| BlockExecutionError::msg("Failed to extract signer from MorphTx"))?;
 
-        let token_info = TokenFeeInfo::fetch(self.evm.db_mut(), fee_token_id, sender, hardfork)
-            .map_err(|e| {
-                BlockExecutionError::msg(format!("Failed to fetch token fee info: {e:?}"))
-            })?;
+        let token_info =
+            TokenFeeInfo::load_for_caller(self.evm.db_mut(), fee_token_id, sender, hardfork)
+                .map_err(|e| {
+                    BlockExecutionError::msg(format!("Failed to fetch token fee info: {e:?}"))
+                })?;
 
-        Ok(token_info.map(|info| MorphTxFields {
+        Ok(token_info.map(|info| MorphReceiptTxFields {
             version,
             fee_token_id,
             fee_rate: info.price_ratio,
@@ -340,9 +341,8 @@ where
         let ResultAndState { result, state } = output;
 
         // Determine hardfork once and reuse for both L1 fee and token fee calculations
-        let block = self.evm.block();
-        let block_number: u64 = block.number.to();
-        let timestamp: u64 = block.timestamp.to();
+        let block_number: u64 = self.evm.block().number.to();
+        let timestamp: u64 = self.evm.block().timestamp.to();
         let hardfork = self.spec.morph_hardfork_at(block_number, timestamp);
 
         // Calculate L1 fee for the transaction

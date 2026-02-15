@@ -31,6 +31,26 @@ pub const MORPH_TX_VERSION_1: u8 = 1;
 /// Maximum length of the memo field in bytes.
 pub const MAX_MEMO_LENGTH: usize = 64;
 
+/// Canonical MorphTx-specific fields shared across modules.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
+pub struct MorphTxFields {
+    pub version: u8,
+    pub fee_token_id: u16,
+    pub fee_limit: U256,
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub reference: Option<B256>,
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub memo: Option<Bytes>,
+}
+
 /// Morph Transaction for Morph L2.
 ///
 /// This transaction type extends EIP-1559 style transactions with Morph-specific fields:

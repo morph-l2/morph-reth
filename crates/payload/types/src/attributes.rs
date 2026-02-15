@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 #[serde(rename_all = "camelCase")]
 pub struct MorphPayloadAttributes {
     /// Standard Ethereum payload attributes.
-    #[serde(flatten)]
+    #[cfg_attr(feature = "serde", serde(flatten))]
     pub inner: PayloadAttributes,
 
     /// Forced transactions to include at the beginning of the block.
@@ -27,6 +27,22 @@ pub struct MorphPayloadAttributes {
     /// These transactions are not in the mempool and must be explicitly provided.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transactions: Option<Vec<Bytes>>,
+
+    /// Optional gas limit override used by derivation/safe import.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "alloy_serde::quantity::opt"
+    )]
+    pub gas_limit: Option<u64>,
+
+    /// Optional base fee override used by derivation/safe import.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "alloy_serde::quantity::opt"
+    )]
+    pub base_fee_per_gas: Option<u64>,
 }
 
 impl reth_payload_primitives::PayloadAttributes for MorphPayloadAttributes {
@@ -57,6 +73,18 @@ pub struct MorphPayloadBuilderAttributes {
     /// Transactions are decoded and recovered during construction to avoid
     /// repeated decoding in the payload builder.
     pub transactions: Vec<WithEncoded<Recovered<MorphTxEnvelope>>>,
+
+    /// `no_tx_pool` option for the generated payload.
+    ///
+    /// If true, payload building must only execute the supplied transaction list
+    /// and must not include additional transactions from the txpool.
+    pub no_tx_pool: bool,
+
+    /// Optional gas limit override propagated to EVM env construction.
+    pub gas_limit: Option<u64>,
+
+    /// Optional base fee override propagated to EVM env construction.
+    pub base_fee_per_gas: Option<u64>,
 }
 
 impl PayloadBuilderAttributes for MorphPayloadBuilderAttributes {
@@ -69,6 +97,7 @@ impl PayloadBuilderAttributes for MorphPayloadBuilderAttributes {
         version: u8,
     ) -> Result<Self, Self::Error> {
         let id = payload_id_morph(&parent, &attributes, version);
+        let no_tx_pool = attributes.transactions.is_some();
 
         // Decode and recover transactions
         let transactions = attributes
@@ -102,6 +131,9 @@ impl PayloadBuilderAttributes for MorphPayloadBuilderAttributes {
         Ok(Self {
             inner,
             transactions,
+            no_tx_pool,
+            gas_limit: attributes.gas_limit,
+            base_fee_per_gas: attributes.base_fee_per_gas,
         })
     }
 
@@ -139,6 +171,11 @@ impl MorphPayloadBuilderAttributes {
     pub fn has_forced_transactions(&self) -> bool {
         !self.transactions.is_empty()
     }
+
+    /// Returns true if txpool transactions may be included.
+    pub fn include_tx_pool(&self) -> bool {
+        !self.no_tx_pool
+    }
 }
 
 /// Compute payload ID from parent hash and attributes.
@@ -171,13 +208,30 @@ fn payload_id_morph(parent: &B256, attributes: &MorphPayloadAttributes, version:
         hasher.update(root.as_slice());
     }
 
-    // Hash forced transactions if present
-    if let Some(txs) = attributes.transactions.as_ref().filter(|t| !t.is_empty()) {
+    // Hash whether transaction list was explicitly supplied.
+    hasher.update([u8::from(attributes.transactions.is_some())]);
+
+    // Hash forced transactions if present.
+    if let Some(txs) = &attributes.transactions {
         hasher.update(&txs.len().to_be_bytes()[..]);
         for tx in txs {
             let tx_hash = alloy_primitives::keccak256(tx);
             hasher.update(tx_hash.as_slice());
         }
+    }
+
+    // Hash optional gas/base fee overrides.
+    if let Some(gas_limit) = attributes.gas_limit {
+        hasher.update([1u8]);
+        hasher.update(gas_limit.to_be_bytes());
+    } else {
+        hasher.update([0u8]);
+    }
+    if let Some(base_fee) = attributes.base_fee_per_gas {
+        hasher.update([1u8]);
+        hasher.update(base_fee.to_be_bytes());
+    } else {
+        hasher.update([0u8]);
     }
 
     // Finalize and create payload ID
@@ -205,6 +259,8 @@ mod tests {
                 parent_beacon_block_root: None,
             },
             transactions: None,
+            gas_limit: None,
+            base_fee_per_gas: None,
         }
     }
 

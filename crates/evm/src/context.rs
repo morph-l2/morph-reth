@@ -8,6 +8,9 @@ pub struct MorphNextBlockEnvAttributes {
     /// Inner [`NextBlockEnvAttributes`].
     #[deref]
     pub inner: NextBlockEnvAttributes,
+
+    /// Optional base fee override for deterministic derivation/safe imports.
+    pub base_fee_per_gas: Option<u64>,
 }
 
 #[cfg(feature = "rpc")]
@@ -17,6 +20,7 @@ impl reth_rpc_eth_api::helpers::pending_block::BuildPendingEnv<morph_primitives:
     fn build_pending_env(parent: &SealedHeader<morph_primitives::MorphHeader>) -> Self {
         Self {
             inner: NextBlockEnvAttributes::build_pending_env(parent),
+            base_fee_per_gas: None,
         }
     }
 }

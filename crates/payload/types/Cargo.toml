@@ -36,3 +36,7 @@ sha2.workspace = true
 serde_json.workspace = true
 rand.workspace = true
 alloy-primitives = { workspace = true, features = ["rand"] }
+
+[features]
+default = []
+serde = []

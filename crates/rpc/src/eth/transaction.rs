@@ -5,15 +5,13 @@ use crate::types::transaction::MorphRpcTransaction;
 use alloy_consensus::{
     EthereumTxEnvelope, SignableTransaction, Transaction, TxEip4844, transaction::Recovered,
 };
-use alloy_eips::eip2718::Encodable2718;
 use alloy_network::TxSigner;
-use alloy_primitives::{Address, Bytes, Signature, TxKind, U64, U256};
+use alloy_primitives::{Address, Signature, TxKind, U64, U256};
 use alloy_rpc_types_eth::{AccessList, Transaction as RpcTransaction, TransactionInfo};
 use reth_rpc_convert::{
     SignTxRequestError, SignableTxRequest, TryIntoSimTx, TryIntoTxEnv, transaction::FromConsensusTx,
 };
 use reth_rpc_eth_types::EthApiError;
-use revm::context::Transaction as RevmTransaction;
 use std::convert::Infallible;
 
 use morph_primitives::{MorphTxEnvelope, TxMorph};
@@ -165,12 +163,8 @@ impl TryIntoTxEnv<MorphTxEnv, MorphBlockEnv> for MorphTransactionRequest {
         let reference = self.reference;
         let memo = self.memo;
         let inner = self.inner;
-        let access_list = inner.access_list.clone().unwrap_or_default();
 
-        let inner_tx_env = inner
-            .clone()
-            .try_into_tx_env(evm_env)
-            .map_err(EthApiError::from)?;
+        let inner_tx_env = inner.try_into_tx_env(evm_env).map_err(EthApiError::from)?;
 
         let mut tx_env = MorphTxEnv::new(inner_tx_env);
         tx_env.fee_token_id = match fee_token_id {
@@ -195,9 +189,7 @@ impl TryIntoTxEnv<MorphTxEnv, MorphBlockEnv> for MorphTransactionRequest {
                 Some(morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_1);
         }
 
-        let rlp_bytes = encode_tx_for_l1_fee(&tx_env, access_list, evm_env, inner)?;
-
-        tx_env.rlp_bytes = Some(rlp_bytes);
+        tx_env.rlp_bytes = None; // Do not encode for L1 fee in RPC calls
         Ok(tx_env)
     }
 }
@@ -277,104 +269,4 @@ fn try_build_morph_tx_from_request(
         reference,
         memo,
     }))
-}
-
-/// Attempts to build a [`TxMorph`] from an existing transaction environment.
-///
-/// Returns `Ok(Some(tx))` if a MorphTx should be constructed (always Version 1),
-/// `Ok(None)` if this should be a standard Ethereum transaction,
-/// or `Err(...)` if there's a validation error.
-///
-/// A MorphTx is constructed when any of these conditions are met:
-/// - `feeTokenID > 0` (ERC20 gas payment)
-/// - `reference` is present
-/// - `memo` is present and non-empty
-fn try_build_morph_tx_from_env<Spec>(
-    tx_env: &MorphTxEnv,
-    fee_token_id: U64,
-    fee_limit: U256,
-    access_list: AccessList,
-    evm_env: &EvmEnv<Spec, MorphBlockEnv>,
-    reference: Option<alloy_primitives::B256>,
-    memo: Option<alloy_primitives::Bytes>,
-) -> Result<Option<TxMorph>, EthApiError> {
-    let fee_token_id_u16 = u16::try_from(fee_token_id.to::<u64>())
-        .map_err(|_| EthApiError::InvalidParams("invalid token".to_string()))?;
-
-    // Check if this should be a MorphTx
-    let has_fee_token = fee_token_id_u16 > 0;
-    let has_reference = reference.is_some();
-    let has_memo = memo.as_ref().is_some_and(|m| !m.is_empty());
-
-    if !has_fee_token && !has_reference && !has_memo {
-        // No Morph-specific fields → standard Ethereum tx
-        return Ok(None);
-    }
-
-    // All MorphTx are constructed as Version 1
-    let version = morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_1;
-
-    let chain_id = tx_env.chain_id().unwrap_or(evm_env.cfg_env.chain_id);
-    let input = tx_env.input().clone();
-    let to = tx_env.kind();
-    let max_fee_per_gas = tx_env.max_fee_per_gas();
-    let max_priority_fee_per_gas = tx_env.max_priority_fee_per_gas().unwrap_or_default();
-
-    Ok(Some(TxMorph {
-        chain_id,
-        nonce: tx_env.nonce(),
-        gas_limit: tx_env.gas_limit() as u128,
-        max_fee_per_gas,
-        max_priority_fee_per_gas,
-        to,
-        value: tx_env.value(),
-        access_list,
-        input,
-        fee_token_id: fee_token_id_u16,
-        fee_limit,
-        version,
-        reference,
-        memo,
-    }))
-}
-
-/// Encodes a transaction for L1 fee calculation.
-///
-/// Returns the RLP-encoded bytes used to calculate the L1 data fee.
-fn encode_tx_for_l1_fee<Spec>(
-    tx_env: &MorphTxEnv,
-    access_list: AccessList,
-    evm_env: &EvmEnv<Spec, MorphBlockEnv>,
-    inner: alloy_rpc_types_eth::TransactionRequest,
-) -> Result<Bytes, EthApiError> {
-    let fee_token_id = U64::from(tx_env.fee_token_id.unwrap_or_default());
-    let fee_limit = tx_env.fee_limit.unwrap_or_default();
-    let reference = tx_env.reference;
-    let memo = tx_env.memo.clone();
-
-    // Try to build a MorphTx; returns None if this should be a standard Ethereum tx
-    match try_build_morph_tx_from_env(
-        tx_env,
-        fee_token_id,
-        fee_limit,
-        access_list,
-        evm_env,
-        reference,
-        memo,
-    )? {
-        Some(morph_tx) => Ok(encode_2718(morph_tx)),
-        None => {
-            let envelope = inner
-                .build_typed_simulate_transaction()
-                .map_err(|err| EthApiError::InvalidParams(err.to_string()))?;
-            Ok(encode_2718(envelope))
-        }
-    }
-}
-
-/// Encodes a transaction using EIP-2718 typed transaction encoding.
-fn encode_2718<T: Encodable2718>(tx: T) -> Bytes {
-    let mut out = Vec::with_capacity(tx.encode_2718_len());
-    tx.encode_2718(&mut out);
-    Bytes::from(out)
 }

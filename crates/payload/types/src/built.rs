@@ -6,7 +6,7 @@ use alloy_eips::eip7685::Requests;
 use alloy_primitives::U256;
 use alloy_rpc_types_engine::PayloadId;
 use morph_primitives::{Block, MorphPrimitives};
-use reth_payload_primitives::BuiltPayload;
+use reth_payload_primitives::{BuiltPayload, BuiltPayloadExecutedBlock};
 use reth_primitives_traits::SealedBlock;
 use std::sync::Arc;
 
@@ -27,6 +27,9 @@ pub struct MorphBuiltPayload {
 
     /// L2 executable data for compatibility with L2 Engine API.
     pub executable_data: ExecutableL2Data,
+
+    /// Full execution artifacts for reth-native block persistence.
+    pub executed: Option<BuiltPayloadExecutedBlock<MorphPrimitives>>,
 }
 
 impl MorphBuiltPayload {
@@ -36,12 +39,14 @@ impl MorphBuiltPayload {
         block: Arc<SealedBlock<Block>>,
         fees: U256,
         executable_data: ExecutableL2Data,
+        executed: Option<BuiltPayloadExecutedBlock<MorphPrimitives>>,
     ) -> Self {
         Self {
             id,
             block,
             fees,
             executable_data,
+            executed,
         }
     }
 
@@ -64,6 +69,11 @@ impl MorphBuiltPayload {
     pub fn executable_data(&self) -> &ExecutableL2Data {
         &self.executable_data
     }
+
+    /// Returns execution artifacts if available.
+    pub fn executed(&self) -> Option<&BuiltPayloadExecutedBlock<MorphPrimitives>> {
+        self.executed.as_ref()
+    }
 }
 
 impl BuiltPayload for MorphBuiltPayload {
@@ -80,6 +90,10 @@ impl BuiltPayload for MorphBuiltPayload {
     fn requests(&self) -> Option<Requests> {
         // L2 blocks don't have EIP-7685 requests
         None
+    }
+
+    fn executed_block(&self) -> Option<BuiltPayloadExecutedBlock<Self::Primitives>> {
+        self.executed.clone()
     }
 }
 
@@ -104,7 +118,7 @@ mod tests {
         let fees = U256::from(1000);
         let executable_data = ExecutableL2Data::default();
 
-        let payload = MorphBuiltPayload::new(id, block.clone(), fees, executable_data);
+        let payload = MorphBuiltPayload::new(id, block.clone(), fees, executable_data, None);
 
         assert_eq!(payload.id, id);
         assert_eq!(payload.fees(), fees);
@@ -120,7 +134,7 @@ mod tests {
             ..Default::default()
         };
 
-        let payload = MorphBuiltPayload::new(id, block, U256::ZERO, executable_data);
+        let payload = MorphBuiltPayload::new(id, block, U256::ZERO, executable_data, None);
 
         assert_eq!(payload.gas_used(), 21000);
         assert_eq!(payload.block_number(), 0);

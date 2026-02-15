@@ -33,8 +33,10 @@ pub struct MorphTxValidationInput<'a> {
 /// Result of MorphTx validation.
 #[derive(Debug)]
 pub struct MorphTxValidationResult {
-    /// The token info fetched during validation
-    pub token_info: TokenFeeInfo,
+    /// Whether this tx uses token fee payment (`fee_token_id > 0`)
+    pub uses_token_fee: bool,
+    /// The token info fetched during validation (token-fee tx only)
+    pub token_info: Option<TokenFeeInfo>,
     /// The required token amount
     pub required_token_amount: U256,
     /// The amount that will be paid (min of fee_limit and required)
@@ -45,14 +47,13 @@ pub struct MorphTxValidationResult {
 ///
 /// This is the main entry point for MorphTx validation. It:
 /// 1. Validates ETH balance >= tx.value() (value is still paid in ETH)
-/// 2. Validates token balance and fee_limit
+/// 2. For `fee_token_id > 0`, validates token balance with REVM-compatible fee_limit semantics
+/// 3. For `fee_token_id == 0`, validates ETH can cover full tx cost + L1 data fee
 ///
 pub fn validate_morph_tx<DB: Database>(
     db: &mut DB,
     input: &MorphTxValidationInput<'_>,
 ) -> Result<MorphTxValidationResult, MorphTxError> {
-    // Check ETH balance >= tx.value() (value is still paid in ETH)
-    // Reference: geth tx_pool.go:1649 - costLimit.Cmp(tx.Value()) < 0
     let tx_value = input.consensus_tx.value();
     if tx_value > input.eth_balance {
         return Err(MorphTxError::InsufficientEthForValue {
@@ -61,17 +62,37 @@ pub fn validate_morph_tx<DB: Database>(
         });
     }
 
-    // Extract MorphTx fields
-    let (fee_token_id, fee_limit) =
-        extract_morph_tx_fields(input.consensus_tx).ok_or(MorphTxError::InvalidTokenId)?;
+    let fields = input
+        .consensus_tx
+        .morph_fields()
+        .ok_or(MorphTxError::InvalidTokenId)?;
+    let fee_token_id = fields.fee_token_id;
+    let fee_limit = fields.fee_limit;
 
-    // Token ID 0 is reserved for ETH
+    // Shared fee components used by both ETH-fee and token-fee branches.
+    let gas_limit = U256::from(input.consensus_tx.gas_limit());
+    let max_fee_per_gas = U256::from(input.consensus_tx.max_fee_per_gas());
+    let gas_fee = gas_limit.saturating_mul(max_fee_per_gas);
+    let total_eth_fee = gas_fee.saturating_add(input.l1_data_fee);
+    let total_eth_cost = total_eth_fee.saturating_add(tx_value);
+
+    // fee_token_id == 0 means MorphTx uses ETH-fee path (reference/memo-only MorphTx).
     if fee_token_id == 0 {
-        return Err(MorphTxError::InvalidTokenId);
+        if total_eth_cost > input.eth_balance {
+            return Err(MorphTxError::InsufficientEthForValue {
+                balance: input.eth_balance,
+                value: total_eth_cost,
+            });
+        }
+        return Ok(MorphTxValidationResult {
+            uses_token_fee: false,
+            token_info: None,
+            required_token_amount: U256::ZERO,
+            amount_to_pay: U256::ZERO,
+        });
     }
 
-    // Fetch token info from L2TokenRegistry
-    let token_info = TokenFeeInfo::fetch(db, fee_token_id, input.sender, input.hardfork)
+    let token_info = TokenFeeInfo::load_for_caller(db, fee_token_id, input.sender, input.hardfork)
         .map_err(|err| MorphTxError::TokenInfoFetchFailed {
             token_id: fee_token_id,
             message: format!("{err:?}"),
@@ -94,50 +115,33 @@ pub fn validate_morph_tx<DB: Database>(
         });
     }
 
-    // Calculate gas fee in ETH
-    let gas_limit = U256::from(input.consensus_tx.gas_limit());
-    let max_fee_per_gas = U256::from(input.consensus_tx.max_fee_per_gas());
-    let gas_fee = gas_limit.saturating_mul(max_fee_per_gas);
-
-    // Total ETH fee = gas_fee + l1_data_fee
-    let total_eth_fee = gas_fee.saturating_add(input.l1_data_fee);
-
-    // Convert ETH fee to token amount
     let required_token_amount = token_info.eth_to_token_amount(total_eth_fee);
 
-    // Check fee_limit >= required_token_amount
-    if fee_limit < required_token_amount {
-        return Err(MorphTxError::FeeLimitTooLow {
-            fee_limit,
+    // Match REVM semantics:
+    // - fee_limit == 0 => use token balance as effective limit
+    // - fee_limit > balance => cap by token balance
+    let effective_limit = if fee_limit.is_zero() || fee_limit > token_info.balance {
+        token_info.balance
+    } else {
+        fee_limit
+    };
+
+    // Check token balance against effective limit.
+    if effective_limit < required_token_amount {
+        return Err(MorphTxError::InsufficientTokenBalance {
+            token_id: fee_token_id,
+            token_address: token_info.token_address,
+            balance: effective_limit,
             required: required_token_amount,
         });
     }
 
-    // Check token balance >= required amount (use min of fee_limit and required)
-    let amount_to_pay = fee_limit.min(required_token_amount);
-    if token_info.balance < amount_to_pay {
-        return Err(MorphTxError::InsufficientTokenBalance {
-            token_id: fee_token_id,
-            token_address: token_info.token_address,
-            balance: token_info.balance,
-            required: amount_to_pay,
-        });
-    }
-
     Ok(MorphTxValidationResult {
-        token_info,
+        uses_token_fee: true,
+        token_info: Some(token_info),
         required_token_amount,
-        amount_to_pay,
+        amount_to_pay: required_token_amount,
     })
-}
-
-/// Helper function to extract MorphTx fields from a consensus transaction.
-///
-/// Returns `None` if this is not a MorphTx or if required fields are missing.
-pub fn extract_morph_tx_fields(tx: &MorphTxEnvelope) -> Option<(u16, U256)> {
-    let fee_token_id = tx.fee_token_id()?;
-    let fee_limit = tx.fee_limit()?;
-    Some((fee_token_id, fee_limit))
 }
 
 #[cfg(test)]

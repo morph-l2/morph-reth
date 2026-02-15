@@ -10,7 +10,50 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+# Morph crates
+morph-chainspec.workspace = true
+morph-consensus.workspace = true
+morph-engine-api.workspace = true
+morph-evm.workspace = true
+morph-payload-builder.workspace = true
+morph-payload-types = { workspace = true, features = ["serde"] }
+morph-primitives = { workspace = true, features = ["reth-codec"] }
 morph-rpc.workspace = true
+morph-txpool.workspace = true
+
+# Reth dependencies
+reth-db.workspace = true
+reth-engine-local.workspace = true
+reth-engine-tree.workspace = true
+reth-node-api.workspace = true
+reth-node-builder.workspace = true
+reth-node-ethereum.workspace = true
+reth-payload-builder.workspace = true
+reth-payload-primitives.workspace = true
+reth-primitives-traits.workspace = true
+reth-provider.workspace = true
+reth-rpc-builder.workspace = true
+reth-rpc-eth-api.workspace = true
+reth-transaction-pool.workspace = true
+reth-tracing.workspace = true
+
+# Alloy
+alloy-consensus.workspace = true
+alloy-hardforks.workspace = true
+alloy-primitives.workspace = true
+alloy-rpc-types-engine.workspace = true
+alloy-rpc-types-eth.workspace = true
+
+# Async
+eyre.workspace = true
+clap.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+reth-chainspec.workspace = true
+reth-db = { workspace = true, features = ["test-utils"] }
+reth-node-core.workspace = true
+reth-tasks.workspace = true
 
 [features]
 default = []

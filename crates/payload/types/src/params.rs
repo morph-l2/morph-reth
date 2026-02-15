@@ -16,6 +16,16 @@ pub struct AssembleL2BlockParams {
     /// These are RLP-encoded transaction bytes.
     #[serde(default)]
     pub transactions: Vec<Bytes>,
+
+    /// Optional block timestamp.
+    ///
+    /// If not provided, builder can choose a local current timestamp.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "alloy_serde::quantity::opt"
+    )]
+    pub timestamp: Option<u64>,
 }
 
 impl AssembleL2BlockParams {
@@ -24,6 +34,7 @@ impl AssembleL2BlockParams {
         Self {
             number,
             transactions,
+            timestamp: None,
         }
     }
 
@@ -32,6 +43,7 @@ impl AssembleL2BlockParams {
         Self {
             number,
             transactions: Vec::new(),
+            timestamp: None,
         }
     }
 }

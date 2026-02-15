@@ -9,10 +9,7 @@ use alloy_evm::Database;
 use alloy_primitives::{Address, Bytes, U256, address, keccak256};
 use morph_chainspec::hardfork::MorphHardfork;
 use revm::SystemCallEvm;
-use revm::{
-    Database as RevmDatabase, Inspector, context_interface::result::EVMError,
-    inspector::NoOpInspector,
-};
+use revm::{Inspector, context_interface::result::EVMError, inspector::NoOpInspector};
 
 use crate::evm::MorphContext;
 use crate::{MorphEvm, MorphInvalidTransaction};
@@ -61,57 +58,29 @@ struct TokenRegistryEntry {
 }
 
 impl TokenFeeInfo {
-    /// Fetch token fee information with EVM call fallback.
+    /// Load token fee information with EVM call fallback.
     ///
     /// Reads token parameters from L2 Token Registry storage. If the token's
     /// balance slot is unknown, falls back to an EVM `balanceOf` call.
     /// Returns `None` if the token is not registered.
-    pub fn fetch<DB: Database>(
+    pub fn load_for_caller<DB: Database>(
         db: &mut DB,
         token_id: u16,
         caller: Address,
         hardfork: MorphHardfork,
     ) -> Result<Option<Self>, DB::Error> {
-        let entry = match load_registry_entry(db, token_id)? {
+        let entry = match read_registry_entry(db, token_id)? {
             Some(e) => e,
             None => return Ok(None),
         };
 
-        let balance = read_erc20_balance(
+        let balance = read_token_balance_with_fallback(
             db,
             entry.token_address,
             caller,
             entry.balance_slot,
             hardfork,
         )?;
-
-        Ok(Some(Self {
-            token_address: entry.token_address,
-            is_active: entry.is_active,
-            decimals: entry.decimals,
-            price_ratio: entry.price_ratio,
-            scale: entry.scale,
-            caller,
-            balance,
-            balance_slot: entry.balance_slot,
-        }))
-    }
-
-    /// Fetch token fee information using storage-only reads.
-    ///
-    /// Does not execute EVM calls. If the balance slot is unknown,
-    /// the returned `balance` will be zero.
-    pub fn fetch_storage_only<DB: RevmDatabase>(
-        db: &mut DB,
-        token_id: u16,
-        caller: Address,
-    ) -> Result<Option<Self>, DB::Error> {
-        let entry = match load_registry_entry(db, token_id)? {
-            Some(e) => e,
-            None => return Ok(None),
-        };
-
-        let balance = read_balance_slot(db, entry.token_address, caller, entry.balance_slot)?;
 
         Ok(Some(Self {
             token_address: entry.token_address,
@@ -144,22 +113,16 @@ impl TokenFeeInfo {
             token_amount
         }
     }
-
-    /// Check if the caller has sufficient token balance for the given ETH amount.
-    pub fn has_sufficient_balance(&self, eth_amount: U256) -> bool {
-        let required = self.eth_to_token_amount(eth_amount);
-        self.balance >= required
-    }
 }
 
-fn load_registry_entry<DB: RevmDatabase>(
+fn read_registry_entry<DB: Database>(
     db: &mut DB,
     token_id: u16,
 ) -> Result<Option<TokenRegistryEntry>, DB::Error> {
     // Get the base slot for this token_id in tokenRegistry mapping
     let mut token_id_bytes = [0u8; 32];
     token_id_bytes[30..32].copy_from_slice(&token_id.to_be_bytes());
-    let base = mapping_slot(TOKEN_REGISTRY_SLOT, token_id_bytes.to_vec());
+    let base = compute_mapping_slot(TOKEN_REGISTRY_SLOT, token_id_bytes.to_vec());
 
     // TokenInfo struct layout in storage (Solidity packing):
     // base + 0: tokenAddress (20 bytes) + padding
@@ -189,7 +152,7 @@ fn load_registry_entry<DB: RevmDatabase>(
     let scale = db.storage(L2_TOKEN_REGISTRY_ADDRESS, base + U256::from(3))?;
 
     // Get price ratio from priceRatio mapping
-    let price_ratio = load_mapping_value(
+    let price_ratio = read_mapping_value(
         db,
         L2_TOKEN_REGISTRY_ADDRESS,
         PRICE_RATIO_SLOT,
@@ -210,7 +173,7 @@ fn load_registry_entry<DB: RevmDatabase>(
 ///
 /// For `mapping(keyType => valueType)` at slot `base_slot`,
 /// the value for `key` is at `keccak256(key ++ base_slot)`.
-pub fn mapping_slot(base_slot: U256, mut key: Vec<u8>) -> U256 {
+pub fn compute_mapping_slot(base_slot: U256, mut key: Vec<u8>) -> U256 {
     let mut preimage = base_slot.to_be_bytes_vec();
     key.append(&mut preimage);
     U256::from_be_bytes(keccak256(key).0)
@@ -218,27 +181,27 @@ pub fn mapping_slot(base_slot: U256, mut key: Vec<u8>) -> U256 {
 
 /// Calculate mapping slot for an address key (left-padded to 32 bytes).
 #[inline]
-pub fn mapping_slot_for(base_slot: U256, account: Address) -> U256 {
+pub fn compute_mapping_slot_for_address(base_slot: U256, account: Address) -> U256 {
     let mut key = [0u8; 32];
     key[12..32].copy_from_slice(account.as_slice());
-    mapping_slot(base_slot, key.to_vec())
+    compute_mapping_slot(base_slot, key.to_vec())
 }
 
 /// Load a value from a mapping in contract storage.
-fn load_mapping_value<DB: RevmDatabase>(
+fn read_mapping_value<DB: Database>(
     db: &mut DB,
     contract: Address,
     base_slot: U256,
     key: Vec<u8>,
 ) -> Result<U256, DB::Error> {
-    db.storage(contract, mapping_slot(base_slot, key))
+    db.storage(contract, compute_mapping_slot(base_slot, key))
 }
 
 /// Read ERC20 balance with EVM call fallback.
 ///
 /// If `balance_slot` is known, reads directly from storage.
 /// Otherwise, constructs a temporary EVM to call `balanceOf(address)`.
-fn read_erc20_balance<DB: Database>(
+fn read_token_balance_with_fallback<DB: Database>(
     db: &mut DB,
     token: Address,
     account: Address,
@@ -246,14 +209,14 @@ fn read_erc20_balance<DB: Database>(
     hardfork: MorphHardfork,
 ) -> Result<U256, DB::Error> {
     if balance_slot.is_some() {
-        return read_balance_slot(db, token, account, balance_slot);
+        return read_balance_from_storage(db, token, account, balance_slot);
     }
 
     // EVM fallback: construct temporary MorphEvm for balanceOf call
     let db: &mut dyn Database<Error = DB::Error> = db;
     let mut evm = MorphEvm::new(MorphContext::new(db, hardfork), NoOpInspector {});
 
-    match call_balance_of(&mut evm, token, account) {
+    match query_balance_via_system_call(&mut evm, token, account) {
         Ok(balance) => Ok(balance),
         Err(EVMError::Database(e)) => Err(e),
         Err(_) => Ok(U256::ZERO), // Non-DB errors → zero (safe fallback)
@@ -263,7 +226,7 @@ fn read_erc20_balance<DB: Database>(
 /// Read ERC20 balance directly from storage slot.
 ///
 /// Returns zero if `balance_slot` is `None`.
-fn read_balance_slot<DB: RevmDatabase>(
+fn read_balance_from_storage<DB: Database>(
     db: &mut DB,
     token: Address,
     account: Address,
@@ -273,14 +236,14 @@ fn read_balance_slot<DB: RevmDatabase>(
         Some(slot) => {
             let mut key = [0u8; 32];
             key[12..32].copy_from_slice(account.as_slice());
-            load_mapping_value(db, token, slot, key.to_vec())
+            read_mapping_value(db, token, slot, key.to_vec())
         }
         None => Ok(U256::ZERO),
     }
 }
 
 /// Execute EVM `balanceOf(address)` call.
-fn call_balance_of<DB, I>(
+fn query_balance_via_system_call<DB, I>(
     evm: &mut MorphEvm<DB, I>,
     token: Address,
     account: Address,
@@ -289,7 +252,7 @@ where
     DB: Database,
     I: Inspector<MorphContext<DB>>,
 {
-    let calldata = encode_balance_of(account);
+    let calldata = encode_balance_of_calldata(account);
     match evm.system_call_one(token, calldata) {
         Ok(result) if result.is_success() => {
             if let Some(output) = result.output()
@@ -307,7 +270,7 @@ where
 /// Query ERC20 balance via EVM call.
 ///
 /// Use this when you have a `MorphEvm` instance and need to call `balanceOf`.
-pub fn erc20_balance_of<DB, I>(
+pub fn query_erc20_balance<DB, I>(
     evm: &mut MorphEvm<DB, I>,
     token: Address,
     account: Address,
@@ -316,13 +279,13 @@ where
     DB: Database,
     I: Inspector<MorphContext<DB>>,
 {
-    call_balance_of(evm, token, account)
+    query_balance_via_system_call(evm, token, account)
 }
 
 /// Encode ERC20 `balanceOf(address)` calldata.
 ///
 /// Function selector: `0x70a08231`
-pub fn encode_balance_of(account: Address) -> Bytes {
+pub fn encode_balance_of_calldata(account: Address) -> Bytes {
     const SELECTOR: [u8; 4] = [0x70, 0xa0, 0x82, 0x31];
     let mut data = Vec::with_capacity(36);
     data.extend_from_slice(&SELECTOR);
@@ -352,8 +315,8 @@ mod tests {
         // Test that mapping slot calculation produces deterministic results
         let slot = U256::from(151);
         let key = vec![0u8; 32];
-        let result1 = mapping_slot(slot, key.clone());
-        let result2 = mapping_slot(slot, key);
+        let result1 = compute_mapping_slot(slot, key.clone());
+        let result2 = compute_mapping_slot(slot, key);
         assert_eq!(result1, result2);
     }
 
@@ -361,7 +324,7 @@ mod tests {
     fn test_mapping_slot_for() {
         let slot = U256::from(1);
         let account = address!("1234567890123456789012345678901234567890");
-        let result = mapping_slot_for(slot, account);
+        let result = compute_mapping_slot_for_address(slot, account);
         // Result should be non-zero
         assert!(!result.is_zero());
     }
@@ -394,26 +357,9 @@ mod tests {
     }
 
     #[test]
-    fn test_has_sufficient_balance() {
-        let info = TokenFeeInfo {
-            price_ratio: U256::from(1_000_000_000_000_000_000u128), // 1:1
-            scale: U256::from(1_000_000_000_000_000_000u128),
-            balance: U256::from(1_000_000_000_000_000_000u128), // 1 token
-            ..Default::default()
-        };
-
-        // Has exactly enough
-        assert!(info.has_sufficient_balance(U256::from(1_000_000_000_000_000_000u128)));
-        // Has more than enough
-        assert!(info.has_sufficient_balance(U256::from(500_000_000_000_000_000u128)));
-        // Not enough
-        assert!(!info.has_sufficient_balance(U256::from(2_000_000_000_000_000_000u128)));
-    }
-
-    #[test]
     fn test_encode_balance_of() {
         let account = address!("1234567890123456789012345678901234567890");
-        let calldata = encode_balance_of(account);
+        let calldata = encode_balance_of_calldata(account);
 
         // Should be 4 bytes selector + 32 bytes address = 36 bytes
         assert_eq!(calldata.len(), 36);

@@ -77,7 +77,7 @@ impl MorphL1BlockInfo {
 /// This validator extends [`EthTransactionValidator`] with Morph-specific checks:
 /// - Rejects EIP-4844 blob transactions (not supported on L2)
 /// - Rejects L1 message transactions (only included by sequencer)
-/// - Optionally validates L1 data fee affordability
+/// - Validates L1 data fee affordability
 /// - Validates MorphTx (0x7F) ERC20 token balance and fee_limit
 ///
 /// # MorphTx Validation
@@ -99,9 +99,6 @@ pub struct MorphTransactionValidator<Client, Tx> {
     inner: EthTransactionValidator<Client, Tx>,
     /// Additional block info required for validation.
     block_info: Arc<MorphL1BlockInfo>,
-    /// If true, ensure that the transaction's sender has enough balance to cover the L1 gas fee
-    /// derived from the tracked L1 block info.
-    require_l1_data_gas_fee: bool,
 }
 
 impl<Client, Tx> MorphTransactionValidator<Client, Tx> {
@@ -126,21 +123,6 @@ impl<Client, Tx> MorphTransactionValidator<Client, Tx> {
     /// Returns the current block number.
     fn block_number(&self) -> u64 {
         self.block_info.number()
-    }
-
-    /// Whether to ensure that the transaction's sender has enough balance to also cover the L1 gas
-    /// fee.
-    pub fn require_l1_data_gas_fee(self, require_l1_data_gas_fee: bool) -> Self {
-        Self {
-            require_l1_data_gas_fee,
-            ..self
-        }
-    }
-
-    /// Returns whether this validator also requires the transaction's sender to have enough balance
-    /// to cover the L1 gas fee.
-    pub const fn requires_l1_data_gas_fee(&self) -> bool {
-        self.require_l1_data_gas_fee
     }
 
     /// Returns a reference to the block info tracker.
@@ -182,7 +164,6 @@ where
         Self {
             inner,
             block_info: Arc::new(block_info),
-            require_l1_data_gas_fee: true,
         }
     }
 
@@ -232,7 +213,7 @@ where
     /// - Rejects EIP-4844 blob transactions
     /// - Rejects L1 message transactions
     /// - Validates MorphTx (0x7F) ERC20 token balance and fee_limit
-    /// - Ensures that the account has enough balance to cover the L1 gas cost (if enabled)
+    /// - Ensures that the account has enough balance to cover the L1 gas cost
     pub fn validate_one(
         &self,
         origin: TransactionOrigin,
@@ -287,19 +268,41 @@ where
             if is_morph_tx {
                 // MorphTx: validate ERC20 token balance
                 let sender = valid_tx.transaction().sender();
-                if let Err(err) = self.validate_morph_tx_balance(
+                let validation = match self.validate_morph_tx_balance(
                     valid_tx.transaction(),
                     sender,
                     balance,
                     l1_data_fee,
                     hardfork,
                 ) {
-                    return TransactionValidationOutcome::Invalid(
-                        valid_tx.into_transaction(),
-                        err.into(),
-                    );
+                    Ok(v) => v,
+                    Err(err) => {
+                        return TransactionValidationOutcome::Invalid(
+                            valid_tx.into_transaction(),
+                            err.into(),
+                        );
+                    }
+                };
+
+                // MorphTx with fee_token_id = 0 uses ETH fee path and must pass
+                // the same ETH affordability check as regular txs.
+                if !validation.uses_token_fee {
+                    let cost = valid_tx.transaction().cost().saturating_add(l1_data_fee);
+                    if cost > balance {
+                        return TransactionValidationOutcome::Invalid(
+                            valid_tx.into_transaction(),
+                            InvalidTransactionError::InsufficientFunds(
+                                GotExpected {
+                                    got: balance,
+                                    expected: cost,
+                                }
+                                .into(),
+                            )
+                            .into(),
+                        );
+                    }
                 }
-            } else if self.requires_l1_data_gas_fee() {
+            } else {
                 // Regular transaction: validate ETH balance covers cost + L1 fee
                 let cost = valid_tx.transaction().cost().saturating_add(l1_data_fee);
                 if cost > balance {
@@ -333,13 +336,11 @@ where
     /// Validates MorphTx (0x7F) ERC20 token balance and fee_limit.
     ///
     /// This method performs the following checks (reference: go-ethereum tx_pool.go:727-791):
-    /// 1. Token ID must be non-zero (0 is reserved for ETH)
-    /// 2. Token must be registered in L2TokenRegistry
-    /// 3. Token must be active for gas payment
-    /// 4. Token price ratio must be valid (non-zero)
-    /// 5. fee_limit must be >= required token amount
-    /// 6. Token balance must be >= required token amount
-    /// 7. ETH balance must be >= transaction value (value is still in ETH)
+    /// 1. `fee_token_id == 0`: ETH-fee path, require ETH affordability for `cost + l1_fee`
+    /// 2. `fee_token_id > 0`: token must be registered and active in L2TokenRegistry
+    /// 3. Token price ratio must be valid (non-zero)
+    /// 4. Effective token limit must cover required token amount
+    /// 5. ETH balance must be >= transaction value (value is still in ETH)
     fn validate_morph_tx_balance(
         &self,
         tx: &Tx,
@@ -347,7 +348,7 @@ where
         eth_balance: U256,
         l1_data_fee: U256,
         hardfork: morph_chainspec::hardfork::MorphHardfork,
-    ) -> Result<(), MorphTxError> {
+    ) -> Result<crate::MorphTxValidationResult, MorphTxError> {
         let consensus_tx = tx.clone_into_consensus();
 
         // Get state provider for token info lookup
@@ -371,20 +372,26 @@ where
         };
 
         let result = crate::validate_morph_tx(&mut db, &input)?;
+        let token_balance = result
+            .token_info
+            .as_ref()
+            .map(|info| info.balance)
+            .unwrap_or_default();
 
         tracing::trace!(
             target: "morph_txpool",
             fee_token_id = ?consensus_tx.fee_token_id(),
             fee_limit = ?consensus_tx.fee_limit(),
+            uses_token_fee = result.uses_token_fee,
             required_token_amount = ?result.required_token_amount,
-            token_balance = ?result.token_info.balance,
+            token_balance = ?token_balance,
             l1_data_fee = ?l1_data_fee,
             eth_balance = ?eth_balance,
             tx_value = ?consensus_tx.value(),
             "MorphTx validation passed"
         );
 
-        Ok(())
+        Ok(result)
     }
 
     /// Validates all given transactions.
@@ -459,7 +466,7 @@ mod tests {
     use morph_chainspec::MORPH_MAINNET;
     use morph_primitives::TxL1Msg;
     use reth_primitives_traits::Recovered;
-    use reth_provider::test_utils::MockEthProvider;
+    use reth_provider::test_utils::{ExtendedAccount, MockEthProvider};
     use reth_transaction_pool::{
         blobstore::InMemoryBlobStore, validate::EthTransactionValidatorBuilder,
     };
@@ -525,16 +532,16 @@ mod tests {
     fn validate_valid_eip1559_transaction() {
         // Create validator with mock provider and disable balance check for simplicity
         let client = MockEthProvider::default().with_chain_spec(MORPH_MAINNET.clone());
+        let signer = address!("0000000000000000000000000000000000000001");
+        client.add_account(signer, ExtendedAccount::new(0, U256::from(10u128.pow(18))));
         let eth_validator = EthTransactionValidatorBuilder::new(client)
             .no_shanghai()
             .no_cancun()
             .disable_balance_check()
             .build(InMemoryBlobStore::default());
-        let validator =
-            MorphTransactionValidator::new(eth_validator).require_l1_data_gas_fee(false); // Disable L1 fee check for simplicity
+        let validator = MorphTransactionValidator::new(eth_validator);
 
         let origin = TransactionOrigin::External;
-        let signer = address!("0000000000000000000000000000000000000001");
 
         // Create valid EIP-1559 transaction
         let tx = TxEip1559 {
@@ -575,16 +582,16 @@ mod tests {
     fn validate_valid_legacy_transaction() {
         // Create validator with mock provider and disable balance check for simplicity
         let client = MockEthProvider::default().with_chain_spec(MORPH_MAINNET.clone());
+        let signer = address!("0000000000000000000000000000000000000001");
+        client.add_account(signer, ExtendedAccount::new(0, U256::from(10u128.pow(18))));
         let eth_validator = EthTransactionValidatorBuilder::new(client)
             .no_shanghai()
             .no_cancun()
             .disable_balance_check()
             .build(InMemoryBlobStore::default());
-        let validator =
-            MorphTransactionValidator::new(eth_validator).require_l1_data_gas_fee(false); // Disable L1 fee check for simplicity
+        let validator = MorphTransactionValidator::new(eth_validator);
 
         let origin = TransactionOrigin::External;
-        let signer = address!("0000000000000000000000000000000000000001");
 
         // Create valid Legacy transaction
         let tx = TxLegacy {

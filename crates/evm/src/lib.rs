@@ -60,6 +60,7 @@
 use reth_ethereum_primitives as _;
 
 mod config;
+mod engine;
 
 mod assemble;
 pub use assemble::MorphBlockAssembler;
@@ -90,7 +91,7 @@ pub use morph_revm::{MorphBlockEnv, MorphHaltReason};
 /// Morph EVM configuration and block executor factory.
 ///
 /// This is the main entry point for Morph EVM integration with reth. It implements
-/// both [`ConfigureEvm`] and [`BlockExecutorFactory`] traits, providing:
+/// both `ConfigureEvm` and `BlockExecutorFactory` traits, providing:
 ///
 /// - EVM environment configuration for block execution and building
 /// - Block executor creation with Morph-specific execution logic

@@ -12,7 +12,7 @@ use std::fmt;
 /// These errors are specific to transactions that use ERC20 tokens for gas payment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MorphTxError {
-    /// Token ID 0 is not allowed (reserved for ETH).
+    /// Transaction does not contain valid MorphTx fee fields.
     InvalidTokenId,
 
     /// Token is not registered in the L2TokenRegistry.
@@ -75,7 +75,7 @@ impl fmt::Display for MorphTxError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidTokenId => {
-                write!(f, "invalid token ID: token ID 0 is reserved for ETH")
+                write!(f, "invalid MorphTx fee fields")
             }
             Self::TokenNotFound { token_id } => {
                 write!(
@@ -130,7 +130,7 @@ impl PoolTransactionError for MorphTxError {
         // MorphTx validation errors are not necessarily "bad" transactions that warrant
         // peer penalization. They are often just insufficient balance or inactive tokens.
         match self {
-            // Invalid token ID is a bad transaction (should never be submitted)
+            // Missing/invalid MorphTx fee fields indicate malformed transaction input.
             Self::InvalidTokenId => true,
             // Token not found or not active - could be due to temporary state, not penalizable
             Self::TokenNotFound { .. } | Self::TokenNotActive { .. } => false,
@@ -164,7 +164,7 @@ mod tests {
     #[test]
     fn test_error_display() {
         let err = MorphTxError::InvalidTokenId;
-        assert!(err.to_string().contains("token ID 0"));
+        assert!(err.to_string().contains("invalid MorphTx fee fields"));
 
         let err = MorphTxError::TokenNotFound { token_id: 1 };
         assert!(err.to_string().contains("token ID 1"));

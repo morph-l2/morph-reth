@@ -18,7 +18,7 @@ use crate::{
     error::MorphHaltReason,
     evm::MorphContext,
     l1block::L1BlockInfo,
-    token_fee::{TokenFeeInfo, mapping_slot_for},
+    token_fee::{TokenFeeInfo, compute_mapping_slot_for_address},
     tx::MorphTxExt,
 };
 
@@ -109,11 +109,13 @@ where
             return Ok(());
         }
 
-        // Check if transaction is MorphTransaction (tx_type 0x7F) which uses token fee
+        // MorphTx (0x7F) can use token fee (fee_token_id > 0) or ETH fee (fee_token_id == 0).
         if evm.ctx_ref().tx().is_morph_tx() {
-            // Get fee_token_id directly from MorphTxEnv
             let token_id = evm.ctx_ref().tx().fee_token_id.unwrap_or_default();
-            return self.validate_and_deduct_token_fee(evm, token_id);
+            if token_id > 0 {
+                return self.validate_and_deduct_token_fee(evm, token_id);
+            }
+            return self.validate_and_deduct_eth_fee(evm);
         }
 
         // Standard ETH-based fee handling
@@ -132,16 +134,39 @@ where
             return Ok(());
         }
 
-        // Check if transaction is MorphTransaction (tx_type 0x7F) which uses token fee
+        // MorphTx (0x7F) can use token fee (fee_token_id > 0) or ETH fee (fee_token_id == 0).
         if tx.is_morph_tx() {
-            // Get fee_token_id directly from MorphTxEnv
             let token_id = tx.fee_token_id.unwrap_or_default();
-            return self.reimburse_caller_token_fee(evm, exec_result.gas(), token_id);
+            if token_id > 0 {
+                return self.reimburse_caller_token_fee(evm, exec_result.gas(), token_id);
+            }
+            // fee_token_id == 0 follows standard ETH reimbursement flow
+            post_execution::reimburse_caller(evm.ctx(), exec_result.gas(), U256::ZERO)?;
+            return Ok(());
         }
 
         // Standard ETH-based fee handling
         post_execution::reimburse_caller(evm.ctx(), exec_result.gas(), U256::ZERO)?;
         Ok(())
+    }
+
+    #[inline]
+    fn refund(
+        &self,
+        evm: &mut Self::Evm,
+        exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
+        eip7702_refund: i64,
+    ) {
+        // L1 message tx follows go-ethereum semantics: no gas refunds.
+        // Keep gas_used as actual consumed gas without applying post-exec refund.
+        if evm.ctx_ref().tx().is_l1_msg() {
+            // revm::Gas::used() subtracts `refunded` by default.
+            // For L1 messages we must zero it out, otherwise gas_used is undercounted.
+            exec_result.gas_mut().set_refund(0);
+            return;
+        }
+        let spec = (*evm.ctx().cfg().spec()).into();
+        post_execution::refund(spec, exec_result.gas_mut(), eip7702_refund);
     }
 
     #[inline]
@@ -152,9 +177,9 @@ where
     ) -> Result<(), Self::Error> {
         let (block, tx, cfg, journal, _, _) = evm.ctx().all_mut();
 
-        // L1 message transactions skip all reward.
-        // MorphTransaction rewards are already applied when gasFee is deducted.
-        if tx.is_l1_msg() || tx.is_morph_tx() {
+        // L1 messages skip all reward.
+        // Token-fee MorphTx rewards are already applied when token fee is deducted.
+        if tx.is_l1_msg() || (tx.is_morph_tx() && tx.fee_token_id.unwrap_or_default() > 0) {
             return Ok(());
         }
 
@@ -211,12 +236,30 @@ where
         evm: &mut Self::Evm,
     ) -> Result<InitialAndFloorGas, Self::Error> {
         let tx = evm.ctx_ref().tx();
-        let cfg = evm.ctx_ref().cfg();
-        let spec = (*cfg.spec()).into();
-        Ok(
-            validation::validate_initial_tx_gas(tx, spec, cfg.is_eip7623_disabled())
-                .map_err(MorphInvalidTransaction::EthInvalidTransaction)?,
-        )
+        let spec = (*evm.ctx_ref().cfg().spec()).into();
+        let disable_eip7623 = evm.ctx_ref().cfg().is_eip7623_disabled();
+
+        // For L1 message transactions, handle intrinsic gas specially
+        if tx.is_l1_msg() {
+            // Calculate intrinsic gas (same as normal transactions)
+            let initial_and_floor = validation::validate_initial_tx_gas(tx, spec, disable_eip7623)
+                .unwrap_or_else(|_| {
+                    // If intrinsic gas > gas_limit, use gas_limit as intrinsic gas
+                    // This matches go-ethereum's behavior for L1 messages
+                    InitialAndFloorGas {
+                        initial_gas: tx.gas_limit(),
+                        floor_gas: 0,
+                    }
+                });
+
+            return Ok(initial_and_floor);
+        }
+
+        // Normal transaction validation
+        let initial_and_floor = validation::validate_initial_tx_gas(tx, spec, disable_eip7623)
+            .map_err(MorphInvalidTransaction::EthInvalidTransaction)?;
+
+        Ok(initial_and_floor)
     }
 
     fn catch_error(
@@ -333,8 +376,9 @@ where
 
         // Fetch token fee info from Token Registry
         let spec = *evm.ctx_ref().cfg().spec();
-        let token_fee_info = TokenFeeInfo::fetch(evm.ctx_mut().db_mut(), token_id, caller, spec)?
-            .ok_or(MorphInvalidTransaction::TokenNotRegistered(token_id))?;
+        let token_fee_info =
+            TokenFeeInfo::load_for_caller(evm.ctx_mut().db_mut(), token_id, caller, spec)?
+                .ok_or(MorphInvalidTransaction::TokenNotRegistered(token_id))?;
 
         // Check if token is active
         if !token_fee_info.is_active {
@@ -394,7 +438,7 @@ where
 
         // Fetch token fee info from Token Registry
         let token_fee_info =
-            TokenFeeInfo::fetch(journal.db_mut(), token_id, caller_addr, hardfork)?
+            TokenFeeInfo::load_for_caller(journal.db_mut(), token_id, caller_addr, hardfork)?
                 .ok_or(MorphInvalidTransaction::TokenNotRegistered(token_id))?;
 
         // Check if token is active
@@ -529,7 +573,7 @@ where
     DB: alloy_evm::Database,
 {
     // Sub amount
-    let from_storage_slot = mapping_slot_for(token_balance_slot, from);
+    let from_storage_slot = compute_mapping_slot_for_address(token_balance_slot, from);
     let balance = journal.sload(token, from_storage_slot)?;
     journal.sstore(
         token,
@@ -538,7 +582,7 @@ where
     )?;
 
     // Add amount
-    let to_storage_slot = mapping_slot_for(token_balance_slot, to);
+    let to_storage_slot = compute_mapping_slot_for_address(token_balance_slot, to);
     let balance = journal.sload(token, to_storage_slot)?;
     journal.sstore(token, to_storage_slot, balance.saturating_add(token_amount))?;
     Ok((from_storage_slot, to_storage_slot))
@@ -620,6 +664,7 @@ fn calculate_caller_fee_with_l1_cost(
     let basefee = block.basefee() as u128;
     let blob_price = block.blob_gasprice().unwrap_or_default();
     let is_balance_check_disabled = cfg.is_balance_check_disabled();
+    let is_fee_charge_disabled = cfg.is_fee_charge_disabled();
 
     // Calculate L2 effective balance spending (gas + value + blob fees)
     let effective_balance_spending = tx
@@ -628,8 +673,11 @@ fn calculate_caller_fee_with_l1_cost(
 
     // Total spending = L2 fees + L1 data fee
     let total_spending = effective_balance_spending.saturating_add(l1_data_fee);
-    // Check if caller has enough balance for total spending
-    if !is_balance_check_disabled && balance < total_spending {
+
+    // Skip balance check if either:
+    // - Balance check is explicitly disabled (for special scenarios)
+    // - Fee charge is disabled (eth_call simulation - no point checking balance if fees won't be charged)
+    if !is_balance_check_disabled && !is_fee_charge_disabled && balance < total_spending {
         return Err(InvalidTransaction::LackOfFundForMaxFee {
             fee: Box::new(total_spending),
             balance: Box::new(balance),

@@ -21,11 +21,13 @@
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
 mod api;
+mod builder;
 mod error;
 mod rpc;
 mod validator;
 
 pub use api::MorphL2EngineApi;
+pub use builder::{MorphL2EngineApiBuilder, RealMorphL2EngineApi, StubMorphL2EngineApi};
 pub use error::{EngineApiResult, MorphEngineApiError};
 pub use rpc::{MorphL2EngineRpcHandler, MorphL2EngineRpcServer, into_rpc_result};
 pub use validator::{MorphValidationContext, should_validate_state_root};

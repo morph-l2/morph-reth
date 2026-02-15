@@ -42,6 +42,7 @@ serde = [
     "alloy-eips/serde",
     "alloy-primitives/serde",
     "reth-primitives-traits/serde",
+    "reth-ethereum-primitives?/std",
     "reth-ethereum-primitives?/serde",
 ]
 
@@ -58,6 +59,7 @@ reth-codec = [
     "dep:modular-bitfield",
     "dep:reth-zstd-compressors",
     "dep:reth-ethereum-primitives",
+    "reth-ethereum-primitives/std",
     "reth-ethereum-primitives/reth-codec",
     "reth-codecs/alloy",
 	"dep:bytes",
