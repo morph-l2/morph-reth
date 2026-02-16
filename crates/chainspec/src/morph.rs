@@ -2,12 +2,9 @@
 
 use crate::{
     MORPH_MAINNET_GENESIS_HASH, MORPH_MAINNET_GENESIS_STATE_ROOT, MorphChainSpec,
-    genesis::MorphGenesisInfo,
-    spec::{build_morph_hardforks_from_genesis, make_genesis_header},
+    spec::GenesisConfig,
 };
 use alloy_genesis::Genesis;
-use reth_chainspec::ChainSpec;
-use reth_primitives_traits::SealedHeader;
 use std::sync::{Arc, LazyLock};
 
 /// Morph Mainnet chain specification.
@@ -15,26 +12,11 @@ pub static MORPH_MAINNET: LazyLock<Arc<MorphChainSpec>> = LazyLock::new(|| {
     let genesis: Genesis = serde_json::from_str(include_str!("../res/genesis/mainnet.json"))
         .expect("Failed to parse Morph Mainnet genesis");
 
-    let chain_info = MorphGenesisInfo::extract_from(&genesis.config.extra_fields)
-        .expect("failed to extract morph genesis info");
+    // Use ZK-trie state root (hardcoded constant from go-ethereum)
+    let config = GenesisConfig::default()
+        .with_state_root(MORPH_MAINNET_GENESIS_STATE_ROOT, MORPH_MAINNET_GENESIS_HASH);
 
-    // Build hardforks from genesis
-    let hardforks = build_morph_hardforks_from_genesis(&genesis);
-
-    // Build genesis header with ZK-trie state root (from go-ethereum)
-    let header = make_genesis_header(&genesis, MORPH_MAINNET_GENESIS_STATE_ROOT);
-
-    MorphChainSpec {
-        inner: ChainSpec {
-            chain: genesis.config.chain_id.into(),
-            genesis_header: SealedHeader::new(header, MORPH_MAINNET_GENESIS_HASH),
-            genesis,
-            hardforks,
-            ..Default::default()
-        },
-        info: chain_info,
-    }
-    .into()
+    MorphChainSpec::from_genesis_with_config(genesis, config).into()
 });
 
 #[cfg(test)]

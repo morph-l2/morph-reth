@@ -18,6 +18,7 @@ use reth_chainspec::{
     Head,
 };
 use reth_network_peers::NodeRecord;
+use reth_primitives_traits::SealedHeader;
 
 #[cfg(feature = "cli")]
 use crate::{morph::MORPH_MAINNET, morph_hoodi::MORPH_HOODI};
@@ -55,25 +56,57 @@ pub(crate) fn make_genesis_header(genesis: &Genesis, state_root: B256) -> MorphH
     MorphHeader::from(inner)
 }
 
-/// Build MorphChainHardforks from genesis config.
+/// Configuration for building a genesis header.
 ///
-/// This extracts the hardfork configuration logic from `From<Genesis>` to be reusable
-/// for both the default implementation and the sealed header implementation.
-pub(crate) fn build_morph_hardforks_from_genesis(genesis: &Genesis) -> ChainHardforks {
+/// This allows customization of the genesis header construction,
+/// particularly for networks that use ZK-trie state roots instead of MPT.
+#[derive(Default)]
+pub struct GenesisConfig {
+    /// Custom state root to use (e.g., ZK-trie state root).
+    ///
+    /// If `None`, the state root will be computed from the genesis alloc using MPT.
+    pub state_root: Option<B256>,
+    /// Genesis block hash.
+    ///
+    /// Required when `state_root` is provided.
+    pub genesis_hash: Option<B256>,
+}
+
+impl GenesisConfig {
+    /// Create a configuration with custom state root and genesis hash.
+    ///
+    /// This is used for predefined networks (mainnet, testnet) that use ZK-trie
+    /// state roots before the MPTFork hardfork.
+    pub fn with_state_root(mut self, state_root: B256, genesis_hash: B256) -> Self {
+        self.state_root = Some(state_root);
+        self.genesis_hash = Some(genesis_hash);
+        self
+    }
+}
+
+/// Build Morph hardforks configuration from genesis.
+///
+/// This is the unified hardfork construction logic, eliminating code duplication
+/// between different construction paths (CLI genesis parsing vs predefined networks).
+///
+/// # Arguments
+/// * `genesis` - Genesis configuration containing Ethereum and Morph hardfork info
+/// * `chain_info` - Morph-specific genesis information extracted from genesis config
+///
+/// # Returns
+/// A `ChainHardforks` containing both Ethereum and Morph hardforks
+fn build_hardforks(genesis: &Genesis, chain_info: &MorphGenesisInfo) -> ChainHardforks {
     // Start with Ethereum hardforks from genesis
     let base_spec = ChainSpec::from_genesis(genesis.clone());
     let mut hardforks = base_spec.hardforks;
 
-    // Extract Morph genesis info
-    let chain_info = MorphGenesisInfo::extract_from(&genesis.config.extra_fields)
-        .expect("failed to extract morph genesis info");
     let hardfork_info = chain_info
         .hard_fork_info
         .as_ref()
         .cloned()
         .unwrap_or_default();
 
-    // Add Morph hardforks
+    // Morph block-based hardforks (Bernoulli, Curie)
     let block_forks = vec![
         (MorphHardfork::Bernoulli, hardfork_info.bernoulli_block),
         (MorphHardfork::Curie, hardfork_info.curie_block),
@@ -81,6 +114,7 @@ pub(crate) fn build_morph_hardforks_from_genesis(genesis: &Genesis) -> ChainHard
     .into_iter()
     .filter_map(|(fork, block)| block.map(|b| (fork, ForkCondition::Block(b))));
 
+    // Morph timestamp-based hardforks (Morph203, Viridian, Emerald, MPTFork)
     let time_forks = vec![
         (MorphHardfork::Morph203, hardfork_info.morph203_time),
         (MorphHardfork::Viridian, hardfork_info.viridian_time),
@@ -90,9 +124,10 @@ pub(crate) fn build_morph_hardforks_from_genesis(genesis: &Genesis) -> ChainHard
     .into_iter()
     .filter_map(|(fork, time)| time.map(|t| (fork, ForkCondition::Timestamp(t))));
 
+    // Merge all Morph hardforks into the base hardforks
     hardforks.extend(block_forks.chain(time_forks));
 
-    // Add Prague at Emerald time for EIP-7702
+    // Activate Prague at Emerald time to enable EIP-7702 support
     if let Some(emerald_time) = hardfork_info.emerald_time {
         hardforks.insert(
             EthereumHardfork::Prague,
@@ -183,6 +218,80 @@ impl MorphChainSpec {
         Self { inner, info }
     }
 
+    /// Build a [`MorphChainSpec`] from a genesis configuration.
+    ///
+    /// This is the default method for constructing a chain spec from genesis.
+    /// It automatically computes the MPT state root from the genesis alloc.
+    ///
+    /// This method is suitable for CLI scenarios where users provide custom
+    /// genesis.json files.
+    pub fn from_genesis(genesis: Genesis) -> Self {
+        Self::from_genesis_with_config(genesis, GenesisConfig::default())
+    }
+
+    /// Build a [`MorphChainSpec`] from a genesis configuration with custom settings.
+    ///
+    /// This is an advanced method that allows customizing the genesis header construction,
+    /// particularly for predefined networks that use ZK-trie state roots instead of MPT.
+    ///
+    /// # Arguments
+    /// * `genesis` - Genesis configuration
+    /// * `config` - Genesis header configuration (state root, genesis hash)
+    ///
+    /// # Panics
+    /// Panics if `config.state_root` is provided but `config.genesis_hash` is not.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use morph_chainspec::{MorphChainSpec, spec::GenesisConfig};
+    /// # use alloy_genesis::Genesis;
+    /// # use alloy_primitives::b256;
+    /// # let genesis = Genesis::default();
+    /// let config = GenesisConfig::default()
+    ///     .with_state_root(
+    ///         b256!("0000000000000000000000000000000000000000000000000000000000000000"),
+    ///         b256!("0000000000000000000000000000000000000000000000000000000000000000"),
+    ///     );
+    /// let spec = MorphChainSpec::from_genesis_with_config(genesis, config);
+    /// ```
+    pub fn from_genesis_with_config(genesis: Genesis, config: GenesisConfig) -> Self {
+        let chain_info = MorphGenesisInfo::extract_from(&genesis.config.extra_fields)
+            .expect("failed to extract morph genesis info");
+
+        // Build hardforks using the unified logic
+        let hardforks = build_hardforks(&genesis, &chain_info);
+
+        // Build genesis header based on configuration
+        let genesis_header = match config.state_root {
+            Some(state_root) => {
+                // Use custom state root (for predefined networks with ZK-trie)
+                let header = make_genesis_header(&genesis, state_root);
+                let genesis_hash = config
+                    .genesis_hash
+                    .expect("genesis_hash is required when state_root is provided");
+                SealedHeader::new(header, genesis_hash)
+            }
+            None => {
+                // Compute MPT state root from alloc (for CLI-provided genesis)
+                let base_spec = ChainSpec::from_genesis(genesis.clone());
+                let header = MorphHeader::from(base_spec.genesis_header.header().clone());
+                let hash = base_spec.genesis_hash();
+                SealedHeader::new(header, hash)
+            }
+        };
+
+        Self {
+            inner: ChainSpec {
+                chain: genesis.config.chain_id.into(),
+                genesis_header,
+                genesis,
+                hardforks,
+                ..Default::default()
+            },
+            info: chain_info,
+        }
+    }
+
     /// Returns whether the fee vault is enabled.
     pub fn is_fee_vault_enabled(&self) -> bool {
         self.info.morph_chain_info.is_fee_vault_enabled()
@@ -213,52 +322,8 @@ impl From<ChainSpec> for MorphChainSpec {
 
 impl From<Genesis> for MorphChainSpec {
     fn from(genesis: Genesis) -> Self {
-        let chain_info = MorphGenesisInfo::extract_from(&genesis.config.extra_fields)
-            .expect("failed to extract morph genesis info");
-
-        let hardfork_info = chain_info.hard_fork_info.clone().unwrap_or_default();
-
-        // Create base chainspec from genesis (already has ordered Ethereum hardforks)
-        let mut base_spec = ChainSpec::from_genesis(genesis);
-
-        // Add Morph hardforks
-        // Note: Bernoulli and Curie use block-based activation,
-        // while Morph203, Viridian, Emerald, and MPTFork use timestamp-based activation.
-        let block_forks = vec![
-            (MorphHardfork::Bernoulli, hardfork_info.bernoulli_block),
-            (MorphHardfork::Curie, hardfork_info.curie_block),
-        ]
-        .into_iter()
-        .filter_map(|(fork, block)| block.map(|b| (fork, ForkCondition::Block(b))));
-
-        let time_forks = vec![
-            (MorphHardfork::Morph203, hardfork_info.morph203_time),
-            (MorphHardfork::Viridian, hardfork_info.viridian_time),
-            (MorphHardfork::Emerald, hardfork_info.emerald_time),
-            (MorphHardfork::MPTFork, hardfork_info.mpt_fork_time),
-        ]
-        .into_iter()
-        .filter_map(|(fork, time)| time.map(|t| (fork, ForkCondition::Timestamp(t))));
-
-        let morph_forks = block_forks.chain(time_forks);
-
-        base_spec.hardforks.extend(morph_forks);
-
-        // Add EthereumHardfork::Prague at Emerald activation time.
-        // This enables EIP-7702 support in the transaction pool validator,
-        // which checks `is_prague_active_at_timestamp()`.
-        // Note: genesis.json doesn't need pragueTime - we derive it from emeraldTime.
-        if let Some(emerald_time) = hardfork_info.emerald_time {
-            base_spec.hardforks.insert(
-                EthereumHardfork::Prague,
-                ForkCondition::Timestamp(emerald_time),
-            );
-        }
-
-        Self {
-            inner: base_spec.map_header(MorphHeader::from),
-            info: chain_info,
-        }
+        // Delegate to the unified construction method
+        Self::from_genesis(genesis)
     }
 }
 
