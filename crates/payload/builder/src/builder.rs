@@ -82,8 +82,11 @@ impl<T: PoolTransaction> MorphPayloadTransactions<T> for () {
 /// Morph's payload builder.
 ///
 /// Builds L2 blocks by executing:
-/// 1. Forced transactions from payload attributes (L1 messages first)
-/// 2. Pool transactions (if allowed)
+/// 1. L1 message transactions from payload attributes
+/// 2. Pool transactions (L2 transactions from mempool, always included)
+///
+/// This matches go-ethereum's behavior where txpool transactions are always
+/// pulled after L1 messages are executed.
 #[derive(Clone, Debug)]
 pub struct MorphPayloadBuilder<Pool, Client, Txs = ()> {
     /// The EVM configuration.
@@ -284,11 +287,13 @@ impl MorphPayloadBuilderCtx {
         BestTransactionsAttributes::new(base_fee, None)
     }
 
-    /// Executes all sequencer transactions that are included in the payload attributes.
+    /// Executes all L1 message transactions from payload attributes.
     ///
-    /// These transactions are forced and come from the sequencer (L1 messages first).
+    /// L1 messages are forced transactions from the L1 bridge that must be executed first.
+    /// They must have sequential queue indices and are never pulled from the transaction pool.
+    ///
     /// Returns the executed transaction bytes for inclusion in ExecutableL2Data.
-    fn execute_sequencer_transactions(
+    fn execute_l1_messages(
         &self,
         builder: &mut impl BlockBuilder<Primitives = morph_primitives::MorphPrimitives>,
         info: &mut ExecutionInfo,
@@ -338,7 +343,7 @@ impl MorphPayloadBuilderCtx {
                         tx_index = tx_idx,
                         %error,
                         ?recovered_tx,
-                        "invalid sequencer transaction in forced list"
+                        "invalid L1 message transaction in payload attributes"
                     );
                     return Err(PayloadBuilderError::other(
                         MorphPayloadBuilderError::InvalidSequencerTransaction {
@@ -352,7 +357,7 @@ impl MorphPayloadBuilderCtx {
                         tx_index = tx_idx,
                         %err,
                         ?recovered_tx,
-                        "validation error in sequencer transaction"
+                        "validation error in L1 message transaction"
                     );
                     return Err(PayloadBuilderError::other(
                         MorphPayloadBuilderError::InvalidSequencerTransaction {
@@ -628,41 +633,34 @@ where
     // Create breaker for early exit from pool transaction execution
     let breaker = ctx.builder_config.breaker(block_gas_limit);
 
-    // Execute sequencer transactions (L1 messages and forced transactions)
-    let mut executed_txs = ctx.execute_sequencer_transactions(&mut builder, &mut info)?;
+    // Execute L1 message transactions (must be first, with sequential queue indices)
+    let mut executed_txs = ctx.execute_l1_messages(&mut builder, &mut info)?;
 
-    if attributes.include_tx_pool() {
-        // Execute pool transactions (best transactions from mempool)
-        let best_txs = best(ctx.best_transaction_attributes(base_fee));
-        if ctx
-            .execute_pool_transactions(
-                &mut builder,
-                &mut info,
-                &mut executed_txs,
-                best_txs,
-                &breaker,
-            )?
-            .is_some()
-        {
-            // Check if it was a cancellation or just breaker triggered
-            if ctx.cancel.is_cancelled() {
-                return Ok(BuildOutcomeKind::Cancelled);
-            }
-            // Breaker triggered - continue with current transactions
-            tracing::debug!(
-                target: "payload_builder",
-                elapsed = ?breaker.elapsed(),
-                cumulative_gas_used = info.cumulative_gas_used,
-                cumulative_da_bytes_used = info.cumulative_da_bytes_used,
-                tx_count = executed_txs.len(),
-                "breaker stopped pool execution, finalizing payload"
-            );
+    // Always execute pool transactions (L2 transactions from mempool)
+    // This matches go-ethereum behavior where txpool transactions are always included
+    let best_txs = best(ctx.best_transaction_attributes(base_fee));
+    if ctx
+        .execute_pool_transactions(
+            &mut builder,
+            &mut info,
+            &mut executed_txs,
+            best_txs,
+            &breaker,
+        )?
+        .is_some()
+    {
+        // Check if it was a cancellation or just breaker triggered
+        if ctx.cancel.is_cancelled() {
+            return Ok(BuildOutcomeKind::Cancelled);
         }
-    } else {
+        // Breaker triggered - continue with current transactions
         tracing::debug!(
             target: "payload_builder",
+            elapsed = ?breaker.elapsed(),
+            cumulative_gas_used = info.cumulative_gas_used,
+            cumulative_da_bytes_used = info.cumulative_da_bytes_used,
             tx_count = executed_txs.len(),
-            "skipping txpool inclusion: explicit transaction list provided"
+            "breaker stopped pool execution, finalizing payload"
         );
     }
 

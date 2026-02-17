@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 /// Morph-specific payload attributes for Engine API.
 ///
 /// This extends the standard Ethereum [`PayloadAttributes`] with L2-specific fields
-/// for forced transaction inclusion (L1 messages).
+/// for L1 message inclusion.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MorphPayloadAttributes {
@@ -21,10 +21,16 @@ pub struct MorphPayloadAttributes {
     #[cfg_attr(feature = "serde", serde(flatten))]
     pub inner: PayloadAttributes,
 
-    /// Forced transactions to include at the beginning of the block.
+    /// L1 message transactions to include at the beginning of the block.
     ///
-    /// This includes L1 messages that must be processed in order.
-    /// These transactions are not in the mempool and must be explicitly provided.
+    /// **IMPORTANT**: This field contains **only L1 messages** (L1→L2 deposit transactions).
+    /// L2 transactions are always pulled from the transaction pool, matching go-ethereum's behavior.
+    ///
+    /// L1 messages:
+    /// - Must have sequential queue indices
+    /// - Are never in the mempool
+    /// - Must be explicitly provided by the sequencer
+    /// - Are executed before any L2 transactions
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transactions: Option<Vec<Bytes>>,
 
@@ -62,23 +68,20 @@ impl reth_payload_primitives::PayloadAttributes for MorphPayloadAttributes {
 /// Internal payload builder attributes.
 ///
 /// This is the internal representation used by the payload builder,
-/// with decoded transactions and computed payload ID.
+/// with decoded L1 messages and computed payload ID.
 #[derive(Debug, Clone)]
 pub struct MorphPayloadBuilderAttributes {
     /// Inner Ethereum payload builder attributes.
     pub inner: EthPayloadBuilderAttributes,
 
-    /// Decoded sequencer transactions with original encoded bytes.
+    /// Decoded L1 message transactions with original encoded bytes.
     ///
-    /// Transactions are decoded and recovered during construction to avoid
+    /// **IMPORTANT**: This contains **only L1 messages**, not L2 transactions.
+    /// L2 transactions are always pulled from the transaction pool.
+    ///
+    /// L1 messages are decoded and recovered during construction to avoid
     /// repeated decoding in the payload builder.
     pub transactions: Vec<WithEncoded<Recovered<MorphTxEnvelope>>>,
-
-    /// `no_tx_pool` option for the generated payload.
-    ///
-    /// If true, payload building must only execute the supplied transaction list
-    /// and must not include additional transactions from the txpool.
-    pub no_tx_pool: bool,
 
     /// Optional gas limit override propagated to EVM env construction.
     pub gas_limit: Option<u64>,
@@ -97,9 +100,8 @@ impl PayloadBuilderAttributes for MorphPayloadBuilderAttributes {
         version: u8,
     ) -> Result<Self, Self::Error> {
         let id = payload_id_morph(&parent, &attributes, version);
-        let no_tx_pool = attributes.transactions.is_some();
 
-        // Decode and recover transactions
+        // Decode and recover L1 message transactions
         let transactions = attributes
             .transactions
             .unwrap_or_default()
@@ -131,7 +133,6 @@ impl PayloadBuilderAttributes for MorphPayloadBuilderAttributes {
         Ok(Self {
             inner,
             transactions,
-            no_tx_pool,
             gas_limit: attributes.gas_limit,
             base_fee_per_gas: attributes.base_fee_per_gas,
         })
@@ -167,14 +168,9 @@ impl PayloadBuilderAttributes for MorphPayloadBuilderAttributes {
 }
 
 impl MorphPayloadBuilderAttributes {
-    /// Returns true if there are forced transactions.
-    pub fn has_forced_transactions(&self) -> bool {
+    /// Returns true if there are L1 messages to execute.
+    pub fn has_l1_messages(&self) -> bool {
         !self.transactions.is_empty()
-    }
-
-    /// Returns true if txpool transactions may be included.
-    pub fn include_tx_pool(&self) -> bool {
-        !self.no_tx_pool
     }
 }
 
@@ -208,10 +204,10 @@ fn payload_id_morph(parent: &B256, attributes: &MorphPayloadAttributes, version:
         hasher.update(root.as_slice());
     }
 
-    // Hash whether transaction list was explicitly supplied.
+    // Hash whether L1 message list was explicitly supplied.
     hasher.update([u8::from(attributes.transactions.is_some())]);
 
-    // Hash forced transactions if present.
+    // Hash L1 messages if present.
     if let Some(txs) = &attributes.transactions {
         hasher.update(&txs.len().to_be_bytes()[..]);
         for tx in txs {
