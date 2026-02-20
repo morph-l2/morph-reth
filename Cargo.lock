@@ -4872,6 +4872,7 @@ dependencies = [
  "alloy-serde",
  "morph-primitives",
  "rand 0.8.5",
+ "reth-ethereum-primitives",
  "reth-payload-builder",
  "reth-payload-primitives",
  "reth-primitives-traits",

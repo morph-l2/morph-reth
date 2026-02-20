@@ -26,6 +26,11 @@ use reth_payload_primitives::{BuiltPayload, ExecutionPayload, PayloadTypes};
 use reth_primitives_traits::{NodePrimitives, SealedBlock};
 use std::sync::Arc;
 
+// Feature unification: Ensure reth-ethereum-primitives' serde features are enabled
+// for transitive dependencies (via reth-payload-builder → reth-chain-state).
+// This is required to satisfy trait bounds on EthereumReceipt in test builds.
+use reth_ethereum_primitives as _;
+
 // Re-export main types
 pub use attributes::{MorphPayloadAttributes, MorphPayloadBuilderAttributes};
 pub use built::MorphBuiltPayload;
