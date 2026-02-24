@@ -1,0 +1,18 @@
+# Data directories
+reth-data/
+geth-data/
+node-data/
+
+# Runtime files
+jwt-secret.txt
+*.pid
+*.log
+
+# Log rotation directories (numeric names like 2818/)
+[0-9]*/
+
+# Downloaded artifacts
+mainnet-data.zip
+mainnet-data/
+.config-extract/
+config-prep.*/
