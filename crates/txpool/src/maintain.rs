@@ -254,7 +254,7 @@ where
                             "Removing MorphTx: validation failed"
                         );
                         to_remove.insert(*tx.hash());
-                        continue;
+                        break;
                     }
                 };
 
@@ -285,7 +285,7 @@ where
                         "Removing MorphTx: insufficient cumulative sender budget"
                     );
                     to_remove.insert(*tx.hash());
-                    continue;
+                    break;
                 }
             }
         }

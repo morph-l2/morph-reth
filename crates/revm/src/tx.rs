@@ -137,9 +137,15 @@ impl MorphTxEnv {
             input: self.input().clone(),
             fee_token_id: self.fee_token_id.unwrap_or_default(),
             fee_limit: self.fee_limit.unwrap_or_default(),
-            version: self
-                .version
-                .unwrap_or(morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_1),
+            version: self.version.unwrap_or_else(|| {
+                // If version is missing (e.g. from an older transaction type), we fallback to V1
+                // to safely overestimate the L1 fee, ensuring we don't underprice the transaction.
+                tracing::debug!(
+                    target: "morph::revm",
+                    "MorphTx version not set, falling back to V1 for L1 fee calculation to safely overestimate"
+                );
+                morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_1
+            }),
             reference: self.reference,
             memo: self.memo.clone(),
         })

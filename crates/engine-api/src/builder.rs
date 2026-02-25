@@ -519,15 +519,18 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
 
         // 2. Build payload attributes.
         let parent_hash = current_head.hash;
-        let timestamp = params.timestamp.unwrap_or_else(|| {
-            std::cmp::max(
-                current_head.timestamp + 1,
-                std::time::SystemTime::now()
+        let timestamp = match params.timestamp {
+            Some(t) => t,
+            None => {
+                let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs(),
-            )
-        });
+                    .map_err(|e| {
+                        MorphEngineApiError::BlockBuildError(format!("system time error: {e}"))
+                    })?
+                    .as_secs();
+                std::cmp::max(current_head.timestamp + 1, now)
+            }
+        };
         let base_fee_override = base_fee_override
             .map(|fee| {
                 u64::try_from(fee).map_err(|_| {
@@ -916,7 +919,7 @@ mod tests {
         assert_eq!(header.inner.receipts_root, data.receipts_root);
         assert_eq!(
             header.inner.base_fee_per_gas,
-            data.base_fee_per_gas.map(|v| v as u64)
+            data.base_fee_per_gas.map(|v| u64::try_from(v).unwrap())
         );
         assert_eq!(header.inner.logs_bloom.as_slice(), data.logs_bloom.as_ref());
         assert_eq!(header.next_l1_msg_index, data.next_l1_message_index);
