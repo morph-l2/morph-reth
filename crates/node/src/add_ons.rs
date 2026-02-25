@@ -18,6 +18,7 @@ use reth_provider::{
 use reth_rpc_builder::Identity;
 use reth_rpc_eth_api::RpcNodeCore;
 use reth_tracing::tracing;
+use tokio_stream::StreamExt;
 
 /// Morph node add-ons for RPC and Engine API.
 ///
@@ -92,6 +93,20 @@ where
         let provider = ctx.node.provider().clone();
         let payload_builder = ctx.node.payload_builder_handle().clone();
         let chain_spec = ctx.node.provider().chain_spec();
+        let beacon_engine_handle = ctx.beacon_engine_handle.clone();
+        let engine_events = ctx.engine_events.clone();
+        let task_executor = ctx.node.task_executor().clone();
+        let engine_state_tracker =
+            std::sync::Arc::new(morph_engine_api::EngineStateTracker::default());
+
+        // Keep a local view of canonical head/forkchoice from reth engine events.
+        let tracker_for_events = engine_state_tracker.clone();
+        task_executor.spawn_critical("morph engine state tracker", async move {
+            let mut listener = engine_events.new_listener();
+            while let Some(event) = listener.next().await {
+                tracker_for_events.on_consensus_engine_event(&event);
+            }
+        });
 
         // Use launch_add_ons_with to register custom Engine API
         self.inner
@@ -105,7 +120,13 @@ where
 
                 // Create the Engine API implementation
                 let engine_api =
-                    morph_engine_api::RealMorphL2EngineApi::new(provider, payload_builder, chain_spec);
+                    morph_engine_api::RealMorphL2EngineApi::new(
+                        provider,
+                        payload_builder,
+                        chain_spec,
+                        beacon_engine_handle,
+                        engine_state_tracker,
+                    );
 
                 // Create the RPC handler
                 let handler = morph_engine_api::MorphL2EngineRpcHandler::new(engine_api);

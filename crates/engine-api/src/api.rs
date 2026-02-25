@@ -45,8 +45,10 @@ pub trait MorphL2EngineApi: Send + Sync {
 
     /// Validate an L2 block without importing it.
     ///
-    /// This method validates a block by re-executing it and comparing the results.
-    /// If the block has been previously validated (cached), it returns immediately.
+    /// This method validates a block by forwarding it to the reth engine tree
+    /// (`newPayload`) and mapping the returned payload status to a boolean.
+    ///
+    /// It does not issue a forkchoice update, so it does not advance canonical head.
     ///
     /// # Arguments
     ///
@@ -59,8 +61,8 @@ pub trait MorphL2EngineApi: Send + Sync {
 
     /// Import and finalize a new L2 block.
     ///
-    /// This method imports a validated block into the chain and updates the
-    /// canonical head. The block must have been previously validated.
+    /// This method imports a block through the reth engine pipeline using
+    /// `newPayload + forkchoiceUpdated`, which advances the canonical head on success.
     ///
     /// # Arguments
     ///

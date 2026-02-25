@@ -55,12 +55,29 @@ pub struct MorphPayloadTypes;
 pub struct MorphExecutionData {
     /// The built block.
     pub block: Arc<SealedBlock<Block>>,
+    /// Optional expected withdraw trie root supplied by custom engine APIs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_withdraw_trie_root: Option<B256>,
 }
 
 impl MorphExecutionData {
     /// Creates a new `MorphExecutionData` from a sealed block.
     pub fn new(block: Arc<SealedBlock<Block>>) -> Self {
-        Self { block }
+        Self {
+            block,
+            expected_withdraw_trie_root: None,
+        }
+    }
+
+    /// Creates a new `MorphExecutionData` with an expected withdraw trie root.
+    pub fn with_expected_withdraw_trie_root(
+        block: Arc<SealedBlock<Block>>,
+        expected_withdraw_trie_root: B256,
+    ) -> Self {
+        Self {
+            block,
+            expected_withdraw_trie_root: Some(expected_withdraw_trie_root),
+        }
     }
 }
 

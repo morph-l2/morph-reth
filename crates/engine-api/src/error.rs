@@ -46,15 +46,6 @@ pub enum MorphEngineApiError {
     #[error("block execution failed: {0}")]
     ExecutionFailed(String),
 
-    /// Withdraw trie root mismatch.
-    #[error("withdraw trie root mismatch: expected {expected}, got {actual}")]
-    WithdrawTrieRootMismatch {
-        /// Expected withdraw trie root.
-        expected: B256,
-        /// Actual withdraw trie root.
-        actual: B256,
-    },
-
     /// Database error.
     #[error("database error: {0}")]
     Database(String),
@@ -75,7 +66,6 @@ impl MorphEngineApiError {
             Self::BlockBuildError(_) => -32003,
             Self::ValidationFailed(_) => -32004,
             Self::ExecutionFailed(_) => -32005,
-            Self::WithdrawTrieRootMismatch { .. } => -32006,
             Self::Database(_) => -32010,
             Self::Internal(_) => -32099,
         };

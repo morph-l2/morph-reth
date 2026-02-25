@@ -1,6 +1,6 @@
 //! Morph chainspec constants.
 
-use alloy_primitives::{B256, b256};
+use alloy_primitives::{Address, B256, U256, address, b256};
 
 /// The Morph Mainnet chain ID.
 pub const MORPH_MAINNET_CHAIN_ID: u64 = 2818;
@@ -35,3 +35,17 @@ pub const MORPH_HOODI_GENESIS_HASH: B256 =
 /// Source: go-ethereum/params/config.go
 pub const MORPH_HOODI_GENESIS_STATE_ROOT: B256 =
     b256!("0a31941eb1853862c0c38f378eb0c519e9e66f0942e39b47dca38c0437ab6b3e");
+
+// =============================================================================
+// L2 System Contract Constants
+// =============================================================================
+
+/// L2 Message Queue contract address.
+///
+/// Manages the L1-to-L2 message queue and stores the withdraw trie root.
+pub const L2_MESSAGE_QUEUE_ADDRESS: Address = address!("5300000000000000000000000000000000000001");
+
+/// Storage slot for the withdraw trie root (`messageRoot`) in L2MessageQueue contract.
+///
+/// This is slot 33, which stores the Merkle root for L2->L1 messages.
+pub const L2_MESSAGE_QUEUE_WITHDRAW_TRIE_ROOT_SLOT: U256 = U256::from_limbs([33, 0, 0, 0]);
