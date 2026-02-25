@@ -6,7 +6,6 @@ use crate::{
     hardfork::{MorphHardfork, MorphHardforks},
 };
 use alloy_chains::Chain;
-use alloy_consensus::Header;
 use alloy_eips::eip7840::BlobParams;
 use alloy_evm::eth::spec::EthExecutorSpec;
 use alloy_genesis::Genesis;
@@ -35,23 +34,9 @@ use std::sync::Arc;
 /// computing an MPT state root from alloc. This is necessary because
 /// Morph uses ZK-trie before MPTFork hardfork.
 pub(crate) fn make_genesis_header(genesis: &Genesis, state_root: B256) -> MorphHeader {
-    let inner = Header {
-        gas_limit: genesis.gas_limit,
-        difficulty: genesis.difficulty,
-        nonce: genesis.nonce.into(),
-        extra_data: genesis.extra_data.clone(),
-        state_root,
-        timestamp: genesis.timestamp,
-        mix_hash: genesis.mix_hash,
-        beneficiary: genesis.coinbase,
-        base_fee_per_gas: genesis.base_fee_per_gas.map(|b| b.try_into().unwrap_or(0)),
-        withdrawals_root: None,
-        parent_beacon_block_root: None,
-        blob_gas_used: None,
-        excess_blob_gas: None,
-        requests_hash: None,
-        ..Default::default()
-    };
+    let base_spec = ChainSpec::from_genesis(genesis.clone());
+    let mut inner = base_spec.genesis_header.header().clone();
+    inner.state_root = state_root;
 
     MorphHeader::from(inner)
 }

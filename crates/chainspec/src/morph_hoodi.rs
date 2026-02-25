@@ -22,7 +22,7 @@ pub static MORPH_HOODI: LazyLock<Arc<MorphChainSpec>> = LazyLock::new(|| {
 mod tests {
     use super::*;
     use crate::{MORPH_HOODI_CHAIN_ID, hardfork::MorphHardforks};
-    use alloy_primitives::{address, b256};
+    use alloy_primitives::address;
     use reth_chainspec::EthChainSpec;
 
     #[test]
@@ -32,8 +32,7 @@ mod tests {
 
     #[test]
     fn test_morph_hoodi_genesis_hash() {
-        let expected = b256!("2cbcff7ec8d68255cb130d5274217cded0c83c417b9ed5e045e1ffcc3ebfc35c");
-        assert_eq!(MORPH_HOODI.genesis_hash(), expected);
+        assert_eq!(MORPH_HOODI.genesis_hash(), MORPH_HOODI_GENESIS_HASH);
     }
 
     #[test]

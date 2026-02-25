@@ -121,12 +121,7 @@ impl MorphTxEnv {
     }
 
     fn build_morph_tx_for_l1_fee(&self, fallback_chain_id: u64) -> Option<TxMorph> {
-        let fee_token_id = self.fee_token_id.unwrap_or_default();
-        let has_fee_token = fee_token_id > 0;
-        let has_reference = self.reference.is_some();
-        let has_memo = self.memo.as_ref().is_some_and(|m| !m.is_empty());
-
-        if !has_fee_token && !has_reference && !has_memo {
+        if !self.is_morph_tx() {
             return None;
         }
 
@@ -140,9 +135,11 @@ impl MorphTxEnv {
             value: self.value(),
             access_list: self.access_list.clone(),
             input: self.input().clone(),
-            fee_token_id,
+            fee_token_id: self.fee_token_id.unwrap_or_default(),
             fee_limit: self.fee_limit.unwrap_or_default(),
-            version: morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_1,
+            version: self
+                .version
+                .unwrap_or(morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_1),
             reference: self.reference,
             memo: self.memo.clone(),
         })

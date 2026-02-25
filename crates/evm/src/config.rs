@@ -41,11 +41,7 @@ impl ConfigureEvm for MorphEvmConfig {
         // Morph allows transactions with gas limit > 16777216 (EIP-7825 cap)
         cfg_env.tx_gas_limit_cap = Some(header.gas_limit());
 
-        let fee_recipient = self
-            .chain_spec()
-            .fee_vault_address()
-            .filter(|_| self.chain_spec().is_fee_vault_enabled())
-            .unwrap_or(header.beneficiary());
+        let fee_recipient = header.beneficiary();
 
         // Morph doesn't support EIP-4844 blob transactions, but when SpecId >= CANCUN,
         // revm requires `blob_excess_gas_and_price` to be set. We provide a placeholder
@@ -91,11 +87,7 @@ impl ConfigureEvm for MorphEvmConfig {
         // Morph allows transactions with gas limit > 16777216 (EIP-7825 cap)
         cfg_env.tx_gas_limit_cap = Some(attributes.gas_limit);
 
-        let fee_recipient = self
-            .chain_spec()
-            .fee_vault_address()
-            .filter(|_| self.chain_spec().is_fee_vault_enabled())
-            .unwrap_or(attributes.suggested_fee_recipient);
+        let fee_recipient = attributes.suggested_fee_recipient;
 
         // Morph doesn't support EIP-4844 blob transactions, but when SpecId >= CANCUN,
         // revm requires `blob_excess_gas_and_price` to be set. We provide a placeholder

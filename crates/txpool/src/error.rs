@@ -152,7 +152,19 @@ impl PoolTransactionError for MorphTxError {
 
 impl From<MorphTxError> for InvalidPoolTransactionError {
     fn from(err: MorphTxError) -> Self {
-        Self::Other(Box::new(err))
+        match err {
+            MorphTxError::InsufficientEthForValue { balance, value } => Self::Overdraft {
+                cost: value,
+                balance,
+            },
+            MorphTxError::InsufficientTokenBalance {
+                balance, required, ..
+            } => Self::Overdraft {
+                cost: required,
+                balance,
+            },
+            _ => Self::Other(Box::new(err)),
+        }
     }
 }
 

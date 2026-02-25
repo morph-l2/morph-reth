@@ -104,9 +104,11 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
     }
 
     fn set_in_memory_head(&self, head: InMemoryHead) {
-        if let Ok(mut guard) = self.in_memory_head.write() {
-            *guard = Some(head);
-        }
+        let mut guard = self
+            .in_memory_head
+            .write()
+            .expect("in-memory head lock poisoned");
+        *guard = Some(head);
     }
 }
 
@@ -563,14 +565,16 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
             .send_new_payload(builder_attrs)
             .await
             .map_err(|_| {
-                MorphEngineApiError::BlockBuildError("failed to receive build response".to_string())
+                MorphEngineApiError::BlockBuildError("failed to send build request".to_string())
             })?
             .map_err(|e| {
-                MorphEngineApiError::BlockBuildError(format!("failed to send build request: {e}"))
+                MorphEngineApiError::BlockBuildError(format!(
+                    "failed to receive build response: {e}"
+                ))
             })?;
 
         self.payload_builder
-            .best_payload(payload_id)
+            .resolve_kind(payload_id, reth_payload_builder::PayloadKind::Earliest)
             .await
             .ok_or_else(|| {
                 MorphEngineApiError::Internal(format!("no payload response for id {payload_id:?}"))
@@ -618,8 +622,10 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
     where
         Provider: BlockReader,
     {
-        if let Ok(guard) = self.in_memory_head.read()
-            && let Some(head) = *guard
+        if let Some(head) = *self
+            .in_memory_head
+            .read()
+            .expect("in-memory head lock poisoned")
         {
             return Ok(head);
         }

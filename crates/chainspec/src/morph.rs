@@ -23,7 +23,7 @@ pub static MORPH_MAINNET: LazyLock<Arc<MorphChainSpec>> = LazyLock::new(|| {
 mod tests {
     use super::*;
     use crate::{MORPH_MAINNET_CHAIN_ID, hardfork::MorphHardforks};
-    use alloy_primitives::{address, b256};
+    use alloy_primitives::address;
     use reth_chainspec::EthChainSpec;
 
     #[test]
@@ -33,8 +33,7 @@ mod tests {
 
     #[test]
     fn test_morph_mainnet_genesis_hash() {
-        let expected = b256!("649c9b1f9f831771529dbf286a63dd071530d73c8fa410997eebaf449acfa7a9");
-        assert_eq!(MORPH_MAINNET.genesis_hash(), expected);
+        assert_eq!(MORPH_MAINNET.genesis_hash(), MORPH_MAINNET_GENESIS_HASH);
     }
 
     #[test]
