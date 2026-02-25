@@ -40,6 +40,7 @@ cmd=(
   --authrpc.jwtsecret "${JWT_SECRET}"
   --log.file.directory "$(dirname "${RETH_LOG_FILE}")"
   --morph.max-tx-payload-bytes "${MORPH_MAX_TX_PAYLOAD_BYTES}"
+  --engine.legacy-state-root
 )
 
 # Add optional max-tx-per-block if configured
