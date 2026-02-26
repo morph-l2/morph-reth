@@ -54,59 +54,59 @@ morph-rpc = { path = "crates/rpc" }
 morph-revm = { path = "crates/revm", default-features = false }
 morph-txpool = { path = "crates/txpool", default-features = false }
 
-reth-basic-payload-builder = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-chain-state = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-chainspec = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-cli = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-cli-commands = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-cli-util = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-codecs = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-codecs-derive = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-consensus = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-consensus-common = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-db = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-db-api = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-e2e-test-utils = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-engine-local = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-engine-primitives = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-engine-tree = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-errors = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-eth-wire-types = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-ethereum = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-ethereum-cli = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-ethereum-consensus = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-ethereum-engine-primitives = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-ethereum-primitives = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511", default-features = false }
-reth-evm = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-evm-ethereum = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-execution-types = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-metrics = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-network-peers = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-node-api = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-node-builder = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-node-core = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-node-ethereum = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-node-metrics = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-payload-builder = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-payload-primitives = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-payload-util = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-primitives-traits = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511", default-features = false }
-reth-provider = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-rpc = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-rpc-api = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-rpc-builder = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-rpc-convert = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-rpc-eth-api = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-rpc-eth-types = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-rpc-server-types = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-storage-api = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-tasks = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-tracing = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-trie = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-transaction-pool = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511" }
-reth-zstd-compressors = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511", default-features = false }
+reth-basic-payload-builder = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-chain-state = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-chainspec = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-cli = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-cli-commands = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-cli-util = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-codecs = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-codecs-derive = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-consensus = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-consensus-common = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-db = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-db-api = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-e2e-test-utils = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-engine-local = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-engine-primitives = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-engine-tree = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-errors = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-eth-wire-types = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-ethereum = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-ethereum-cli = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-ethereum-consensus = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-ethereum-engine-primitives = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-ethereum-primitives = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a", default-features = false }
+reth-evm = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-evm-ethereum = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-execution-types = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-metrics = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-network-peers = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-node-api = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-node-builder = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-node-core = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-node-ethereum = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-node-metrics = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-payload-builder = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-payload-primitives = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-payload-util = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-primitives-traits = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a", default-features = false }
+reth-provider = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-rpc = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-rpc-api = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-rpc-builder = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-rpc-convert = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-rpc-eth-api = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-rpc-eth-types = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-rpc-server-types = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-storage-api = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-tasks = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-tracing = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-trie = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-transaction-pool = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a" }
+reth-zstd-compressors = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a", default-features = false }
 
-reth-revm = { git = "https://github.com/panos-xyz/reth", rev = "9530439fa44f3fac1817658ad3bb540a8db44511", features = [
+reth-revm = { git = "https://github.com/morph-l2/reth", rev = "b8c8a9411bb1b4668119559e1b752bae18a76c5a", features = [
   "std",
   "optional-checks",
 ] }

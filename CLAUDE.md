@@ -26,7 +26,7 @@ Nightly is **not** required. CI uses stable toolchain for fmt, clippy, and tests
 
 ## Architecture
 
-Morph Reth is an L2 execution client built as a **Reth SDK extension** — it extends reth via its node-builder/SDK extension points rather than forking reth source. All reth crates are pinned to a fork at `panos-xyz/reth` rev `9530439`.
+Morph Reth is an L2 execution client built as a **Reth SDK extension** — it extends reth via its node-builder/SDK extension points rather than forking reth source. All reth crates are pinned to a fork at `morph-l2/reth` rev `b8c8a9411bb1b4668119559e1b752bae18a76c5a` (v1.10.2-based patch branch). This fork temporarily carries the `PayloadValidator` state-root validation hook needed for Morph pre-MPTFork semantics until an upstream reth equivalent is available.
 
 ### Crate Dependency Flow
 
@@ -97,7 +97,7 @@ All located under `~/workspace/`. Use these for understanding patterns, API desi
 |-----------|-------------|-----------------|
 | `scroll-reth` | Scroll's reth implementation. Morph's go-ethereum was originally based on Scroll's, so their reth code is the closest architectural reference. | Crate structure, system contract constants layout, L1 message handling, custom tx types |
 | `morph` | Morph's official go-ethereum (geth) implementation. The canonical reference for all L2 logic. | Verifying engine API behavior, block building logic, consensus rules, hardfork semantics |
-| `paradigmxyz-reth` | Upstream reth by Paradigm. The SDK/framework morph-reth extends. | Understanding reth traits (`PayloadValidator`, `PayloadBuilder`, `ConsensusEngineHandle`), node-builder patterns, engine tree internals |
+| `reth` | Morph fork of upstream reth by Paradigm. The SDK/framework morph-reth extends. | Understanding reth traits (`PayloadValidator`, `PayloadBuilder`, `ConsensusEngineHandle`), node-builder patterns, engine tree internals |
 | `tempo` | Tempo's reth-based L2 with stablecoin payment as a highlight. | Alternative fee token patterns, EVM+ transaction design |
 
 ## Code Style & Design Patterns
