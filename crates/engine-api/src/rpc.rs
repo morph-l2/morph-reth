@@ -4,7 +4,6 @@
 //! allowing the sequencer to interact with the execution layer via RPC.
 
 use crate::{EngineApiResult, api::MorphL2EngineApi};
-use alloy_primitives::B256;
 use jsonrpsee::{RpcModule, core::RpcResult, proc_macros::rpc};
 use morph_payload_types::{AssembleL2BlockParams, ExecutableL2Data, GenericResponse, SafeL2Data};
 use morph_primitives::MorphHeader;
@@ -40,8 +39,7 @@ pub trait MorphL2EngineRpc {
     ///
     /// `engine_newL2Block`
     #[method(name = "newL2Block")]
-    async fn new_l2_block(&self, data: ExecutableL2Data, batch_hash: Option<B256>)
-    -> RpcResult<()>;
+    async fn new_l2_block(&self, data: ExecutableL2Data) -> RpcResult<()>;
 
     /// Import a safe L2 block from derivation.
     ///
@@ -106,26 +104,18 @@ where
         })
     }
 
-    async fn new_l2_block(
-        &self,
-        data: ExecutableL2Data,
-        batch_hash: Option<B256>,
-    ) -> RpcResult<()> {
+    async fn new_l2_block(&self, data: ExecutableL2Data) -> RpcResult<()> {
         tracing::info!(
             target: "morph::engine",
             block_number = data.number,
             block_hash = %data.hash,
-            ?batch_hash,
             "importing new L2 block"
         );
 
-        self.inner
-            .new_l2_block(data, batch_hash)
-            .await
-            .map_err(|e| {
-                tracing::error!(target: "morph::engine", error = %e, "failed to import L2 block");
-                e.into()
-            })
+        self.inner.new_l2_block(data).await.map_err(|e| {
+            tracing::error!(target: "morph::engine", error = %e, "failed to import L2 block");
+            e.into()
+        })
     }
 
     async fn new_safe_l2_block(&self, data: SafeL2Data) -> RpcResult<MorphHeader> {

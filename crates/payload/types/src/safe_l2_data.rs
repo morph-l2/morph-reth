@@ -2,7 +2,7 @@
 //!
 //! This type is used for NewSafeL2Block in the derivation pipeline.
 
-use alloy_primitives::{B256, Bytes};
+use alloy_primitives::Bytes;
 
 /// Safe L2 block data, used for NewSafeL2Block (derivation).
 ///
@@ -38,10 +38,6 @@ pub struct SafeL2Data {
     /// RLP-encoded transactions.
     #[serde(default)]
     pub transactions: Vec<Bytes>,
-
-    /// Optional batch hash for batch association.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub batch_hash: Option<B256>,
 }
 
 impl SafeL2Data {
@@ -59,11 +55,6 @@ impl SafeL2Data {
     pub fn transaction_count(&self) -> usize {
         self.transactions.len()
     }
-
-    /// Returns true if this block is associated with a batch.
-    pub fn has_batch(&self) -> bool {
-        self.batch_hash.is_some()
-    }
 }
 
 #[cfg(test)]
@@ -77,7 +68,6 @@ mod tests {
         assert_eq!(data.gas_limit, 0);
         assert!(data.base_fee_per_gas.is_none());
         assert!(!data.has_transactions());
-        assert!(!data.has_batch());
     }
 
     #[test]
@@ -88,7 +78,6 @@ mod tests {
             base_fee_per_gas: Some(1_000_000_000),
             timestamp: 1234567890,
             transactions: vec![Bytes::from(vec![0x01, 0x02])],
-            batch_hash: Some(B256::random()),
         };
 
         let json = serde_json::to_string(&data).expect("serialize");
@@ -105,13 +94,11 @@ mod tests {
             base_fee_per_gas: None,
             timestamp: 1234567890,
             transactions: vec![],
-            batch_hash: None,
         };
 
         let json = serde_json::to_string(&data).expect("serialize");
         // Optional fields should not appear in JSON when None
         assert!(!json.contains("baseFeePerGas"));
-        assert!(!json.contains("batchHash"));
 
         let decoded: SafeL2Data = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(data, decoded);

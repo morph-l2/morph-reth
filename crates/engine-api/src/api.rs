@@ -5,7 +5,6 @@
 //! by the sequencer to produce new blocks.
 
 use crate::EngineApiResult;
-use alloy_primitives::B256;
 use morph_payload_types::{AssembleL2BlockParams, ExecutableL2Data, GenericResponse, SafeL2Data};
 use morph_primitives::MorphHeader;
 
@@ -66,16 +65,11 @@ pub trait MorphL2EngineApi: Send + Sync {
     /// # Arguments
     ///
     /// * `data` - The block data to import
-    /// * `batch_hash` - Optional batch hash if this block is a batch point
     ///
     /// # Returns
     ///
     /// Returns `Ok(())` on success.
-    async fn new_l2_block(
-        &self,
-        data: ExecutableL2Data,
-        batch_hash: Option<B256>,
-    ) -> EngineApiResult<()>;
+    async fn new_l2_block(&self, data: ExecutableL2Data) -> EngineApiResult<()>;
 
     /// Import a safe L2 block from derivation.
     ///

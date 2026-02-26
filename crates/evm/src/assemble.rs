@@ -13,7 +13,7 @@ use std::sync::Arc;
 ///
 /// This assembler builds Morph blocks from the execution output.
 /// Unlike `EthBlockAssembler`, it produces `MorphHeader` with proper
-/// L2-specific fields (next_l1_msg_index, batch_hash).
+/// L2-specific fields (next_l1_msg_index).
 #[derive(Debug, Clone)]
 pub struct MorphBlockAssembler {
     /// Chain specification
@@ -48,12 +48,11 @@ impl BlockAssembler<MorphEvmConfig> for MorphBlockAssembler {
     /// 2. **Build Logs Bloom**: Aggregates logs from all receipts
     /// 3. **Check Hardforks**: Determines if EIP-1559 (London) is active for base fee
     /// 4. **Build Header**: Creates standard Ethereum header fields
-    /// 5. **Wrap in MorphHeader**: Adds L2-specific fields (next_l1_msg_index, batch_hash)
+    /// 5. **Wrap in MorphHeader**: Adds L2-specific fields (next_l1_msg_index)
     /// 6. **Build Block Body**: Combines transactions and empty ommers
     ///
     /// # L2-Specific Fields
     /// - `next_l1_msg_index`: Inherited from parent block
-    /// - `batch_hash`: Set to default (will be filled by payload builder)
     ///
     /// # Arguments
     /// * `input` - Contains execution context, transactions, receipts, and state root
@@ -117,11 +116,10 @@ impl BlockAssembler<MorphEvmConfig> for MorphBlockAssembler {
         };
 
         // Wrap in MorphHeader with L2-specific fields
-        // Note: next_l1_msg_index and batch_hash will be set by the payload builder
+        // Note: next_l1_msg_index will be updated by the payload builder
         let header = MorphHeader {
             inner,
             next_l1_msg_index: parent.header().next_l1_msg_index,
-            batch_hash: Default::default(),
         };
 
         Ok(alloy_consensus::Block::new(

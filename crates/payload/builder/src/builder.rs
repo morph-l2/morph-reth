@@ -700,7 +700,6 @@ where
     let (mut morph_block, senders) = block.split();
     morph_block = morph_block.map_header(|mut header: MorphHeader| {
         header.next_l1_msg_index = info.next_l1_message_index;
-        // batch_hash remains B256::ZERO - it will be set by the batch submitter
         header
     });
     block = RecoveredBlock::new_unhashed(morph_block, senders);

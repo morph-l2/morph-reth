@@ -48,7 +48,7 @@
 //!    requiring a custom receipt builder.
 //!
 //! 4. **L2-Specific Header**: `MorphHeader` extends standard header with
-//!    `next_l1_msg_index` and `batch_hash` fields.
+//!    the `next_l1_msg_index` field.
 //!
 //! 5. **No Blob Transactions**: EIP-4844 blob transactions are not supported.
 

@@ -120,7 +120,6 @@ mod tests {
                 ..Default::default()
             },
             next_l1_msg_index: 0,
-            batch_hash: B256::ZERO,
         };
 
         let body = BlockBody {

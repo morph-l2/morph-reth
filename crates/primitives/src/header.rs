@@ -2,9 +2,8 @@
 //!
 //! This module defines the Morph-specific header type that includes:
 //! - `next_l1_msg_index`: The next L1 message queue index to process
-//! - `batch_hash`: The batch hash (non-zero if this block is a batch point)
 //!
-//! These fields are NOT included in the block hash calculation to maintain
+//! This field is NOT included in the block hash calculation to maintain
 //! compatibility with standard Ethereum header hashing (matching go-ethereum's behavior).
 
 use alloy_consensus::{BlockHeader, Header, Sealable};
@@ -15,12 +14,10 @@ use alloy_rlp::{RlpDecodable, RlpEncodable};
 ///
 /// This header extends the standard Ethereum header with Morph-specific fields:
 /// - `next_l1_msg_index`: Next L1 message queue index to process
-/// - `batch_hash`: Non-zero if this block is a batch point
 ///
 /// **Important**: The `hash_slow()` method only hashes the inner Ethereum header,
-/// excluding `next_l1_msg_index` and `batch_hash`. This matches go-ethereum's
-/// `Header.Hash()` behavior where these L2-specific fields are not part of the
-/// block hash calculation.
+/// excluding `next_l1_msg_index`. This matches go-ethereum's `Header.Hash()` behavior
+/// where L2-specific fields are not part of the block hash calculation.
 ///
 /// Note: The `inner` field must be placed last for the `Compact` derive macro,
 /// as fields with unknown size must come last in the struct definition.
@@ -34,21 +31,10 @@ pub struct MorphHeader {
     #[cfg_attr(feature = "serde", serde(with = "alloy_serde::quantity"))]
     pub next_l1_msg_index: u64,
 
-    /// Batch hash - non-zero if this block is a batch point.
-    /// Not part of the header hash calculation.
-    pub batch_hash: B256,
-
     /// Standard Ethereum header (flattened in JSON serialization).
     /// Must be placed last due to Compact derive requirements.
     #[cfg_attr(feature = "serde", serde(flatten))]
     pub inner: Header,
-}
-
-impl MorphHeader {
-    /// Returns true if this block is a batch point (batch_hash is non-zero).
-    pub fn is_batch_point(&self) -> bool {
-        self.batch_hash != B256::ZERO
-    }
 }
 
 impl From<Header> for MorphHeader {
@@ -56,7 +42,6 @@ impl From<Header> for MorphHeader {
         Self {
             inner,
             next_l1_msg_index: 0,
-            batch_hash: B256::ZERO,
         }
     }
 }
@@ -157,13 +142,12 @@ impl BlockHeader for MorphHeader {
 /// Sealable implementation for MorphHeader.
 ///
 /// **Critical**: The `hash_slow()` method only hashes the inner Ethereum header,
-/// NOT the `next_l1_msg_index` and `batch_hash` fields. This matches go-ethereum's
-/// `Header.Hash()` behavior which explicitly excludes these L2-specific fields
-/// from the hash calculation.
+/// NOT the `next_l1_msg_index` field. This matches go-ethereum's `Header.Hash()`
+/// behavior which explicitly excludes L2-specific fields from the hash calculation.
 impl Sealable for MorphHeader {
     fn hash_slow(&self) -> B256 {
         // Only hash the inner header to match go-ethereum behavior.
-        // next_l1_msg_index and batch_hash are NOT part of the hash.
+        // next_l1_msg_index is NOT part of the hash.
         self.inner.hash_slow()
     }
 }
@@ -175,7 +159,6 @@ impl reth_primitives_traits::InMemorySize for MorphHeader {
     fn size(&self) -> usize {
         reth_primitives_traits::InMemorySize::size(&self.inner)
             + core::mem::size_of::<u64>() // next_l1_msg_index
-            + core::mem::size_of::<B256>() // batch_hash
     }
 }
 
@@ -262,35 +245,28 @@ mod tests {
 
         assert_eq!(header.inner, inner);
         assert_eq!(header.next_l1_msg_index, 0);
-        assert_eq!(header.batch_hash, B256::ZERO);
-        assert!(!header.is_batch_point());
     }
 
     #[test]
     fn test_morph_header_with_fields() {
         let inner = create_test_header();
-        let batch_hash = b256!("0000000000000000000000000000000000000000000000000000000000000abc");
         let header = MorphHeader {
             inner,
             next_l1_msg_index: 100,
-            batch_hash,
         };
 
         assert_eq!(header.next_l1_msg_index, 100);
-        assert_eq!(header.batch_hash, batch_hash);
-        assert!(header.is_batch_point());
     }
 
     #[test]
     fn test_morph_header_hash_excludes_l2_fields() {
         let inner = create_test_header();
 
-        // Create two headers with different L2 fields
+        // Create two headers with different next_l1_msg_index values
         let header1: MorphHeader = inner.clone().into();
         let header2 = MorphHeader {
             inner: inner.clone(),
             next_l1_msg_index: 999,
-            batch_hash: b256!("1111111111111111111111111111111111111111111111111111111111111111"),
         };
 
         // Both should have the same hash since L2 fields are excluded
@@ -307,11 +283,6 @@ mod tests {
 
         header.next_l1_msg_index = 50;
         assert_eq!(header.next_l1_msg_index, 50);
-
-        let batch_hash = b256!("2222222222222222222222222222222222222222222222222222222222222222");
-        header.batch_hash = batch_hash;
-        assert_eq!(header.batch_hash, batch_hash);
-        assert!(header.is_batch_point());
     }
 
     #[test]
@@ -337,7 +308,6 @@ mod tests {
         let header = MorphHeader {
             inner,
             next_l1_msg_index: 42,
-            batch_hash: b256!("3333333333333333333333333333333333333333333333333333333333333333"),
         };
 
         let json = serde_json::to_string(&header).expect("serialization failed");

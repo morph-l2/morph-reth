@@ -291,16 +291,11 @@ where
         Ok(GenericResponse { success: true })
     }
 
-    async fn new_l2_block(
-        &self,
-        data: ExecutableL2Data,
-        batch_hash: Option<B256>,
-    ) -> EngineApiResult<()> {
+    async fn new_l2_block(&self, data: ExecutableL2Data) -> EngineApiResult<()> {
         tracing::info!(
             target: "morph::engine",
             block_number = data.number,
             block_hash = %data.hash,
-            ?batch_hash,
             "importing new L2 block"
         );
 
@@ -373,9 +368,7 @@ where
         }
 
         let executed = cached.executed.into_executed_payload();
-        let recovered_with_batch =
-            self.apply_batch_hash(executed.recovered_block().clone(), batch_hash);
-        let recovered_with_data = apply_executable_data_overrides(recovered_with_batch, &data)?;
+        let recovered_with_data = apply_executable_data_overrides(executed.recovered_block().clone(), &data)?;
         let computed_hash = recovered_with_data.hash();
         if computed_hash != data.hash {
             return Err(MorphEngineApiError::ValidationFailed(format!(
@@ -462,8 +455,7 @@ where
         self.cache_built_payload(&built_payload);
 
         // 3. Import the block
-        self.new_l2_block(executable_data.clone(), data.batch_hash)
-            .await?;
+        self.new_l2_block(executable_data.clone()).await?;
 
         // 4. Return the persisted header.
         let header = self
@@ -602,22 +594,6 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
         );
     }
 
-    fn apply_batch_hash(
-        &self,
-        recovered_block: RecoveredBlock<Block>,
-        batch_hash: Option<B256>,
-    ) -> RecoveredBlock<Block> {
-        let Some(batch_hash) = batch_hash else {
-            return recovered_block;
-        };
-        let (block, senders) = recovered_block.split();
-        let block = block.map_header(|mut header: MorphHeader| {
-            header.batch_hash = batch_hash;
-            header
-        });
-        RecoveredBlock::new_unhashed(block, senders)
-    }
-
     fn current_head(&self) -> EngineApiResult<InMemoryHead>
     where
         Provider: BlockReader,
@@ -728,7 +704,6 @@ impl MorphL2EngineApi for StubMorphL2EngineApi {
     async fn new_l2_block(
         &self,
         _data: morph_payload_types::ExecutableL2Data,
-        _batch_hash: Option<alloy_primitives::B256>,
     ) -> crate::EngineApiResult<()> {
         tracing::warn!(target: "morph::engine", "new_l2_block called on stub implementation");
         Err(crate::MorphEngineApiError::Internal(
@@ -790,7 +765,6 @@ mod tests {
 
         let target_header = MorphHeader {
             next_l1_msg_index: 42,
-            batch_hash: B256::ZERO,
             inner: Header {
                 parent_hash: B256::from([0x11; 32]),
                 beneficiary: Address::from([0x22; 20]),
@@ -868,7 +842,6 @@ mod tests {
     fn test_apply_executable_data_overrides_sets_header_fields_exactly() {
         let source_header = MorphHeader {
             next_l1_msg_index: 1,
-            batch_hash: B256::from([0xab; 32]),
             inner: Header {
                 parent_hash: B256::from([0x01; 32]),
                 beneficiary: Address::from([0x02; 20]),
@@ -883,7 +856,6 @@ mod tests {
                 ..Default::default()
             },
         };
-        let source_batch_hash = source_header.batch_hash;
         let recovered = recovered_with_header(source_header);
         let data = ExecutableL2Data {
             parent_hash: B256::from([0x11; 32]),
@@ -920,7 +892,6 @@ mod tests {
         );
         assert_eq!(header.inner.logs_bloom.as_slice(), data.logs_bloom.as_ref());
         assert_eq!(header.next_l1_msg_index, data.next_l1_message_index);
-        assert_eq!(header.batch_hash, source_batch_hash);
     }
 
     #[test]
