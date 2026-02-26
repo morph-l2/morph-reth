@@ -368,7 +368,8 @@ where
         }
 
         let executed = cached.executed.into_executed_payload();
-        let recovered_with_data = apply_executable_data_overrides(executed.recovered_block().clone(), &data)?;
+        let recovered_with_data =
+            apply_executable_data_overrides(executed.recovered_block().clone(), &data)?;
         let computed_hash = recovered_with_data.hash();
         if computed_hash != data.hash {
             return Err(MorphEngineApiError::ValidationFailed(format!(

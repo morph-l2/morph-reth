@@ -157,8 +157,7 @@ impl reth_primitives_traits::serde_bincode_compat::RlpBincode for MorphHeader {}
 
 impl reth_primitives_traits::InMemorySize for MorphHeader {
     fn size(&self) -> usize {
-        reth_primitives_traits::InMemorySize::size(&self.inner)
-            + core::mem::size_of::<u64>() // next_l1_msg_index
+        reth_primitives_traits::InMemorySize::size(&self.inner) + core::mem::size_of::<u64>() // next_l1_msg_index
     }
 }
 
