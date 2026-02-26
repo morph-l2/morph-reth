@@ -428,9 +428,6 @@ where
             timestamp: sealed_block.timestamp(),
         });
 
-        // Clear cache after successful import. Next block validation will repopulate it.
-        self.validation_cache.clear();
-
         Ok(())
     }
 

@@ -156,6 +156,11 @@ impl MorphTxEnv {
         fallback_chain_id: u64,
         signature: Signature,
     ) -> MorphTxEnvelope {
+        debug_assert!(
+            !self.is_l1_msg() && self.inner.blob_hashes.is_empty(),
+            "L1 messages and blob transactions should not use fallback L1 fee calculation"
+        );
+
         let chain_id = self.chain_id().unwrap_or(fallback_chain_id);
         let has_dynamic_fees = self.max_priority_fee_per_gas().is_some();
         let has_access_list = !self.access_list.is_empty();
