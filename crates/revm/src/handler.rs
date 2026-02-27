@@ -226,7 +226,31 @@ where
             return Ok(());
         }
 
+        // Standard validation.
+        // Note: revm maps MorphTx (type 0x7F) to `TransactionType::Custom`,
+        // which skips gas-price checks entirely.
         validation::validate_env::<_, Self::Error>(evm.ctx())?;
+
+        // For MorphTx V1 with ETH fee (fee_token_id == 0), gas price must be validated
+        // against basefee — the same rule that applies to EIP-1559 transactions.
+        // Token-fee MorphTx (fee_token_id > 0) intentionally skips this check because
+        // fees are paid in ERC20 tokens.
+        if evm.ctx_ref().tx().is_morph_tx()
+            && !evm.ctx_ref().tx().uses_token_fee()
+            && !evm.ctx_ref().cfg().is_base_fee_check_disabled()
+        {
+            let base_fee = Some(evm.ctx_ref().block().basefee() as u128);
+            validation::validate_priority_fee_tx(
+                evm.ctx_ref().tx().max_fee_per_gas(),
+                evm.ctx_ref()
+                    .tx()
+                    .max_priority_fee_per_gas()
+                    .unwrap_or_default(),
+                base_fee,
+                evm.ctx_ref().cfg().is_priority_fee_check_disabled(),
+            )?;
+        }
+
         Ok(())
     }
 
