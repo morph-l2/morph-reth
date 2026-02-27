@@ -298,11 +298,11 @@ impl PayloadValidator<MorphPayloadTypes> for MorphEngineValidator {
 
 impl StateRootValidator<morph_primitives::MorphPrimitives> for MorphEngineValidator {
     fn should_compute_state_root(&self, input: &StateRootDecisionInput) -> bool {
-        // Long-term behavior: always compute after MPTFork.
-        // Temporary behavior: if geth RPC is configured, also compute before MPTFork
+        // Long-term behavior: always compute after Jade.
+        // Temporary behavior: if geth RPC is configured, also compute before Jade
         // so we can cross-check against geth's `morph_diskRoot`.
         self.chain_spec
-            .is_mpt_fork_active_at_timestamp(input.timestamp)
+            .is_jade_active_at_timestamp(input.timestamp)
             || self.geth_rpc_url.is_some()
     }
 
@@ -312,12 +312,12 @@ impl StateRootValidator<morph_primitives::MorphPrimitives> for MorphEngineValida
         computed_state_root: B256,
     ) -> Result<(), ConsensusError> {
         let block_number = block.header().number();
-        let mpt_fork_active = self
+        let jade_active = self
             .chain_spec
-            .is_mpt_fork_active_at_timestamp(block.header().timestamp());
+            .is_jade_active_at_timestamp(block.header().timestamp());
 
         // Always enforce canonical state-root equality in MPT mode.
-        if mpt_fork_active {
+        if jade_active {
             let expected_state_root = block.header().state_root();
             if computed_state_root != expected_state_root {
                 return Err(ConsensusError::BodyStateRootDiff(
