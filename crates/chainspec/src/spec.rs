@@ -32,7 +32,7 @@ use std::sync::Arc;
 ///
 /// This allows using a ZK-trie state root (from go-ethereum) instead of
 /// computing an MPT state root from alloc. This is necessary because
-/// Morph uses ZK-trie before MPTFork hardfork.
+/// Morph uses ZK-trie before Jade hardfork.
 pub(crate) fn make_genesis_header(genesis: &Genesis, state_root: B256) -> MorphHeader {
     let base_spec = ChainSpec::from_genesis(genesis.clone());
     let mut inner = base_spec.genesis_header.header().clone();
@@ -61,7 +61,7 @@ impl GenesisConfig {
     /// Create a configuration with custom state root and genesis hash.
     ///
     /// This is used for predefined networks (mainnet, testnet) that use ZK-trie
-    /// state roots before the MPTFork hardfork.
+    /// state roots before the Jade hardfork.
     pub fn with_state_root(mut self, state_root: B256, genesis_hash: B256) -> Self {
         self.state_root = Some(state_root);
         self.genesis_hash = Some(genesis_hash);
@@ -99,12 +99,12 @@ fn build_hardforks(genesis: &Genesis, chain_info: &MorphGenesisInfo) -> ChainHar
     .into_iter()
     .filter_map(|(fork, block)| block.map(|b| (fork, ForkCondition::Block(b))));
 
-    // Morph timestamp-based hardforks (Morph203, Viridian, Emerald, MPTFork)
+    // Morph timestamp-based hardforks (Morph203, Viridian, Emerald, Jade)
     let time_forks = vec![
         (MorphHardfork::Morph203, hardfork_info.morph203_time),
         (MorphHardfork::Viridian, hardfork_info.viridian_time),
         (MorphHardfork::Emerald, hardfork_info.emerald_time),
-        (MorphHardfork::MPTFork, hardfork_info.mpt_fork_time),
+        (MorphHardfork::Jade, hardfork_info.jade_time),
     ]
     .into_iter()
     .filter_map(|(fork, time)| time.map(|t| (fork, ForkCondition::Timestamp(t))));

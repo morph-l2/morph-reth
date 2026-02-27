@@ -209,7 +209,7 @@ where
         let rebuilt = rebuilt_payload.executable_data.clone();
 
         // 4. Compare execution results
-        // Check state root if MPTFork is active
+        // Check state root if Jade is active
         if self
             .validation_ctx
             .should_validate_state_root(data.timestamp)

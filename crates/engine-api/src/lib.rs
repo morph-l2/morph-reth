@@ -4,7 +4,7 @@
 //!
 //! - [`MorphL2EngineApi`]: The L2 Engine API trait for block building and validation
 //! - [`MorphL2EngineRpcServer`]: The JSON-RPC server implementation
-//! - [`MorphValidationContext`]: Validation context with MPTFork hardfork support
+//! - [`MorphValidationContext`]: Validation context with Jade hardfork support
 //!
 //! # L2 Engine API
 //!

@@ -29,7 +29,7 @@
 //! ## Current State
 //!
 //! Bernoulli and Curie use block-based activation, while Morph203, Viridian,
-//! Emerald, and MPTFork use timestamp-based activation.
+//! Emerald, and Jade use timestamp-based activation.
 
 use alloy_evm::revm::primitives::hardfork::SpecId;
 use alloy_hardforks::hardfork;
@@ -39,7 +39,7 @@ hardfork!(
     /// Morph-specific hardforks for network upgrades.
     ///
     /// Note: Bernoulli and Curie use block-based activation, while Morph203, Viridian,
-    /// Emerald, and MPTFork use timestamp-based activation (matching go-ethereum behavior).
+    /// Emerald, and Jade use timestamp-based activation (matching go-ethereum behavior).
     #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
     #[derive(Default)]
     MorphHardfork {
@@ -53,9 +53,9 @@ hardfork!(
         Viridian,
         /// Emerald hardfork (timestamp-based).
         Emerald,
-        /// MPTFork hardfork (timestamp-based).
+        /// Jade hardfork (timestamp-based).
         #[default]
-        MPTFork,
+        Jade,
     }
 );
 
@@ -90,10 +90,10 @@ impl MorphHardfork {
         self >= Self::Emerald
     }
 
-    /// Returns `true` if this hardfork is MPTFork or later.
+    /// Returns `true` if this hardfork is Jade or later.
     #[inline]
-    pub fn is_mpt_fork(self) -> bool {
-        self >= Self::MPTFork
+    pub fn is_jade(self) -> bool {
+        self >= Self::Jade
     }
 }
 
@@ -135,19 +135,19 @@ pub trait MorphHardforks: EthereumHardforks {
             .active_at_timestamp(timestamp)
     }
 
-    /// Convenience method to check if MPTFork hardfork is active at a given timestamp.
-    fn is_mpt_fork_active_at_timestamp(&self, timestamp: u64) -> bool {
-        self.morph_fork_activation(MorphHardfork::MPTFork)
+    /// Convenience method to check if Jade hardfork is active at a given timestamp.
+    fn is_jade_active_at_timestamp(&self, timestamp: u64) -> bool {
+        self.morph_fork_activation(MorphHardfork::Jade)
             .active_at_timestamp(timestamp)
     }
 
     /// Retrieves the latest Morph hardfork active at a given block and timestamp.
     ///
     /// Note: This method checks both block-based (Bernoulli, Curie) and
-    /// timestamp-based (Morph203, Viridian, Emerald, MPTFork) hardforks.
+    /// timestamp-based (Morph203, Viridian, Emerald, Jade) hardforks.
     fn morph_hardfork_at(&self, block_number: u64, timestamp: u64) -> MorphHardfork {
-        if self.is_mpt_fork_active_at_timestamp(timestamp) {
-            MorphHardfork::MPTFork
+        if self.is_jade_active_at_timestamp(timestamp) {
+            MorphHardfork::Jade
         } else if self.is_emerald_active_at_timestamp(timestamp) {
             MorphHardfork::Emerald
         } else if self.is_viridian_active_at_timestamp(timestamp) {
@@ -171,7 +171,7 @@ impl From<MorphHardfork> for SpecId {
             MorphHardfork::Morph203 => Self::OSAKA,
             MorphHardfork::Viridian => Self::OSAKA,
             MorphHardfork::Emerald => Self::OSAKA,
-            MorphHardfork::MPTFork => Self::OSAKA,
+            MorphHardfork::Jade => Self::OSAKA,
         }
     }
 }
@@ -183,8 +183,8 @@ impl From<SpecId> for MorphHardfork {
     /// `From<MorphHardfork> for SpecId`, because multiple Morph
     /// hardforks may share the same underlying EVM spec.
     fn from(spec: SpecId) -> Self {
-        if spec.is_enabled_in(SpecId::from(Self::MPTFork)) {
-            Self::MPTFork
+        if spec.is_enabled_in(SpecId::from(Self::Jade)) {
+            Self::Jade
         } else if spec.is_enabled_in(SpecId::from(Self::Emerald)) {
             Self::Emerald
         } else if spec.is_enabled_in(SpecId::from(Self::Viridian)) {
@@ -238,7 +238,7 @@ mod tests {
         assert!(MorphHardfork::Morph203.is_curie());
         assert!(MorphHardfork::Viridian.is_curie());
         assert!(MorphHardfork::Emerald.is_curie());
-        assert!(MorphHardfork::MPTFork.is_curie());
+        assert!(MorphHardfork::Jade.is_curie());
     }
 
     #[test]
@@ -248,7 +248,7 @@ mod tests {
         assert!(MorphHardfork::Morph203.is_morph203());
         assert!(MorphHardfork::Viridian.is_morph203());
         assert!(MorphHardfork::Emerald.is_morph203());
-        assert!(MorphHardfork::MPTFork.is_morph203());
+        assert!(MorphHardfork::Jade.is_morph203());
     }
 
     #[test]
@@ -258,7 +258,7 @@ mod tests {
         assert!(!MorphHardfork::Morph203.is_viridian());
         assert!(MorphHardfork::Viridian.is_viridian());
         assert!(MorphHardfork::Emerald.is_viridian());
-        assert!(MorphHardfork::MPTFork.is_viridian());
+        assert!(MorphHardfork::Jade.is_viridian());
     }
 
     #[test]
@@ -268,16 +268,16 @@ mod tests {
         assert!(!MorphHardfork::Morph203.is_emerald());
         assert!(!MorphHardfork::Viridian.is_emerald());
         assert!(MorphHardfork::Emerald.is_emerald());
-        assert!(MorphHardfork::MPTFork.is_emerald());
+        assert!(MorphHardfork::Jade.is_emerald());
     }
 
     #[test]
-    fn test_is_mpt_fork() {
-        assert!(!MorphHardfork::Bernoulli.is_mpt_fork());
-        assert!(!MorphHardfork::Curie.is_mpt_fork());
-        assert!(!MorphHardfork::Morph203.is_mpt_fork());
-        assert!(!MorphHardfork::Viridian.is_mpt_fork());
-        assert!(!MorphHardfork::Emerald.is_mpt_fork());
-        assert!(MorphHardfork::MPTFork.is_mpt_fork());
+    fn test_is_jade() {
+        assert!(!MorphHardfork::Bernoulli.is_jade());
+        assert!(!MorphHardfork::Curie.is_jade());
+        assert!(!MorphHardfork::Morph203.is_jade());
+        assert!(!MorphHardfork::Viridian.is_jade());
+        assert!(!MorphHardfork::Emerald.is_jade());
+        assert!(MorphHardfork::Jade.is_jade());
     }
 }
