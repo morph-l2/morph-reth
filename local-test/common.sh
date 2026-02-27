@@ -9,7 +9,6 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 : "${MORPHNODE_BIN:=../morph/node/build/bin/morphnode}"
 : "${NODE_HOME:=./local-test/node-data}"
 : "${JWT_SECRET:=./local-test/jwt-secret.txt}"
-: "${NODE_PID_FILE:=./local-test/node.pid}"
 : "${NODE_LOG_FILE:=./local-test/node.log}"
 : "${DOWNLOAD_CONFIG_IF_MISSING:=1}"
 : "${MAINNET_CONFIG_ZIP_URL:=https://raw.githubusercontent.com/morph-l2/run-morph-node/main/mainnet/data.zip}"
@@ -20,7 +19,6 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # Morph-Reth configuration
 : "${RETH_BIN:=./target/release/morph-reth}"
 : "${RETH_DATA_DIR:=./local-test/reth-data}"
-: "${RETH_PID_FILE:=./local-test/reth.pid}"
 : "${RETH_LOG_FILE:=./local-test/reth.log}"
 : "${RETH_HTTP_ADDR:=127.0.0.1}"
 : "${RETH_HTTP_PORT:=8545}"
@@ -29,11 +27,6 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 : "${RETH_BOOTNODES:=}"
 : "${MORPH_MAX_TX_PAYLOAD_BYTES:=122880}"
 : "${MORPH_MAX_TX_PER_BLOCK:=}"
-
-pid_running() {
-  local pid="$1"
-  kill -0 "${pid}" >/dev/null 2>&1
-}
 
 check_binary() {
   local bin_path="$1"
@@ -50,41 +43,30 @@ cleanup_runtime_logs() {
   rm -rf "$(dirname "${RETH_LOG_FILE}")"/{[0-9]*,*.log*}
 }
 
-stop_by_pid_file() {
+# pm2 helper functions
+pm2_check() {
+  if ! command -v pm2 &> /dev/null; then
+    echo "ERROR: pm2 is not installed"
+    echo "Install with: npm install -g pm2"
+    return 1
+  fi
+}
+
+pm2_is_running() {
   local name="$1"
-  local pid_file="$2"
+  pm2 describe "${name}" &>/dev/null && \
+    [[ "$(pm2 jlist 2>/dev/null | jq -r ".[] | select(.name==\"${name}\") | .pm2_env.status")" == "online" ]]
+}
 
-  if [[ ! -f "${pid_file}" ]]; then
-    echo "${name}: no pid file"
-    return 0
-  fi
-
-  local pid
-  pid="$(cat "${pid_file}")"
-  if [[ -z "${pid}" ]]; then
-    rm -f "${pid_file}"
-    echo "${name}: empty pid file removed"
-    return 0
-  fi
-
-  if pid_running "${pid}"; then
-    kill "${pid}"
-    for _ in {1..20}; do
-      if ! pid_running "${pid}"; then
-        break
-      fi
-      sleep 1
-    done
-
-    if pid_running "${pid}"; then
-      kill -9 "${pid}"
-    fi
-    echo "${name}: stopped (pid ${pid})"
+pm2_stop() {
+  local name="$1"
+  if pm2 describe "${name}" &>/dev/null; then
+    pm2 stop "${name}" 2>/dev/null || true
+    pm2 delete "${name}" 2>/dev/null || true
+    echo "${name}: stopped"
   else
-    echo "${name}: not running (stale pid ${pid})"
+    echo "${name}: not running"
   fi
-
-  rm -f "${pid_file}"
 }
 
 rel_path() {

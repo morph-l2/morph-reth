@@ -7,16 +7,16 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 cd "${REPO_ROOT}"
 
 echo "=========================================="
-echo "Starting Morph full node"
+echo "Starting Morph full node (pm2)"
 echo "=========================================="
 
-# Step 1: Prepare configuration
-echo "[1/4] Preparing configuration..."
-"${SCRIPT_DIR}/prepare.sh"
+# Step 1: Check pm2
+echo "[1/4] Checking pm2..."
+pm2_check
 
-# Step 2: Clean logs
-echo "[2/4] Cleaning previous logs..."
-cleanup_runtime_logs
+# Step 2: Prepare configuration
+echo "[2/4] Preparing configuration..."
+"${SCRIPT_DIR}/prepare.sh"
 
 # Step 3: Start morph-reth
 echo "[3/4] Starting morph-reth..."
@@ -44,7 +44,7 @@ done
 
 if [[ ${retry_count} -eq ${max_retries} ]]; then
   echo "ERROR: RPC did not become ready after ${max_retries} seconds"
-  echo "Check logs: $(rel_path "${RETH_LOG_FILE}")"
+  echo "Check logs: pm2 logs morph-reth"
   exit 1
 fi
 
@@ -53,6 +53,15 @@ echo "[4/4] Starting morphnode..."
 "${SCRIPT_DIR}/node-start.sh"
 
 echo
-echo "✓ Full node started"
+echo "Full node started"
 echo "RPC: http://${RETH_HTTP_ADDR}:${RETH_HTTP_PORT}"
+echo
+echo "Useful commands:"
+echo "  pm2 list              - view process status"
+echo "  pm2 logs              - view all logs"
+echo "  pm2 logs morph-reth   - view morph-reth logs"
+echo "  pm2 logs morph-node   - view morphnode logs"
+echo "  pm2 monit             - real-time monitoring"
+echo "  pm2 save              - save process list for restart"
+echo
 echo "Check status: $(rel_path "${SCRIPT_DIR}")/status.sh"

@@ -6,29 +6,14 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 cd "${REPO_ROOT}"
 
-print_proc() {
-  local name="$1"
-  local pid_file="$2"
-  if [[ -f "${pid_file}" ]]; then
-    local pid
-    pid="$(cat "${pid_file}")"
-    if [[ -n "${pid}" ]] && pid_running "${pid}"; then
-      echo "${name}: running (pid ${pid})"
-      return
-    fi
-  fi
-  echo "${name}: not running"
-}
-
 echo "=========================================="
 echo "Morph Node Status (with morph-reth)"
 echo "=========================================="
 echo
 
-# Process status
-echo "--- Process Status ---"
-print_proc "morph-reth" "${RETH_PID_FILE}"
-print_proc "morphnode" "${NODE_PID_FILE}"
+# Process status via pm2
+echo "--- Process Status (pm2) ---"
+pm2 list --no-color 2>/dev/null | grep -E "morph-reth|morph-node|name" || echo "No pm2 processes found"
 echo
 
 # morph-reth RPC status
@@ -119,6 +104,7 @@ fi
 echo
 echo "=========================================="
 echo "Logs:"
-echo "  - morph-reth: tail -f $(rel_path "${RETH_LOG_FILE}")"
-echo "  - morphnode:  tail -f $(rel_path "${NODE_LOG_FILE}")"
+echo "  - pm2 logs morph-reth"
+echo "  - pm2 logs morph-node"
+echo "  - pm2 monit  (real-time monitoring)"
 echo "=========================================="
