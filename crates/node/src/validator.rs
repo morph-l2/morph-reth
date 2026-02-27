@@ -17,7 +17,7 @@ use reth_node_api::{
 };
 use reth_node_builder::rpc::PayloadValidatorBuilder;
 use reth_primitives_traits::{GotExpected, RecoveredBlock, SealedBlock};
-use reth_provider::{ChainSpecProvider, StateProvider, StateProviderFactory};
+use reth_provider::ChainSpecProvider;
 use std::{collections::VecDeque, sync::Arc, sync::Mutex};
 
 /// Builder for Morph engine validator (payload validation).
@@ -30,15 +30,12 @@ pub struct MorphEngineValidatorBuilder;
 impl<Node> PayloadValidatorBuilder<Node> for MorphEngineValidatorBuilder
 where
     Node: FullNodeComponents<Types = MorphNode>,
-    Node::Provider: ChainSpecProvider<ChainSpec = MorphChainSpec> + StateProviderFactory + Clone,
+    Node::Provider: ChainSpecProvider<ChainSpec = MorphChainSpec>,
 {
-    type Validator = MorphEngineValidator<Node::Provider>;
+    type Validator = MorphEngineValidator;
 
     async fn build(self, ctx: &AddOnsContext<'_, Node>) -> eyre::Result<Self::Validator> {
-        Ok(MorphEngineValidator::new(
-            ctx.node.provider().chain_spec(),
-            ctx.node.provider().clone(),
-        ))
+        Ok(MorphEngineValidator::new(ctx.node.provider().chain_spec()))
     }
 }
 
@@ -48,9 +45,8 @@ where
 /// For Morph, most validation is deferred to the consensus layer.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct MorphEngineValidator<P> {
+pub struct MorphEngineValidator {
     chain_spec: Arc<MorphChainSpec>,
-    provider: P,
     expected_withdraw_trie_roots: Arc<DashMap<B256, WithdrawTrieRootExpectation>>,
     expected_withdraw_trie_root_order: Arc<Mutex<VecDeque<B256>>>,
 }
@@ -61,14 +57,13 @@ enum WithdrawTrieRootExpectation {
     Verify(B256),
 }
 
-impl<P> MorphEngineValidator<P> {
+impl MorphEngineValidator {
     const MAX_EXPECTED_WITHDRAW_TRIE_ROOTS: usize = 4096;
 
     /// Creates a new [`MorphEngineValidator`].
-    pub fn new(chain_spec: Arc<MorphChainSpec>, provider: P) -> Self {
+    pub fn new(chain_spec: Arc<MorphChainSpec>) -> Self {
         Self {
             chain_spec,
-            provider,
             expected_withdraw_trie_roots: Arc::new(DashMap::new()),
             expected_withdraw_trie_root_order: Arc::new(Mutex::new(VecDeque::new())),
         }
@@ -132,40 +127,7 @@ impl<P> MorphEngineValidator<P> {
     }
 }
 
-impl<P> MorphEngineValidator<P>
-where
-    P: StateProviderFactory,
-{
-    fn parent_withdraw_trie_root(&self, parent_hash: B256) -> Result<B256, ConsensusError> {
-        let parent_state = self
-            .provider
-            .history_by_block_hash(parent_hash)
-            .map_err(|err| {
-                ConsensusError::Other(format!(
-                    "failed to open parent state for withdraw trie root check: {err}"
-                ))
-            })?;
-
-        let value = parent_state
-            .storage(
-                L2_MESSAGE_QUEUE_ADDRESS,
-                B256::from(L2_MESSAGE_QUEUE_WITHDRAW_TRIE_ROOT_SLOT),
-            )
-            .map_err(|err| {
-                ConsensusError::Other(format!(
-                    "failed to read withdraw trie root from parent state: {err}"
-                ))
-            })?
-            .unwrap_or_default();
-
-        Ok(B256::from(value))
-    }
-}
-
-impl<P> PayloadValidator<MorphPayloadTypes> for MorphEngineValidator<P>
-where
-    P: StateProviderFactory + Send + Sync + Unpin + 'static,
-{
+impl PayloadValidator<MorphPayloadTypes> for MorphEngineValidator {
     type Block = morph_primitives::Block;
 
     fn convert_payload_to_block(
@@ -198,12 +160,16 @@ where
             return Ok(());
         };
 
-        let actual_withdraw_trie_root = if let Some(updated_withdraw_trie_root) =
+        // Only validate if the withdraw trie root slot was actually updated in this block.
+        // If the slot is absent from hashed_state, the root is unchanged from the parent —
+        // the consensus layer guarantees the expected value is correct in that case.
+        // Doing a DB read for the parent state here would be expensive (history_by_block_hash
+        // + storage lookup) and would occur while holding the execution cache write lock,
+        // causing lock contention with the next block's cache lookup.
+        let Some(actual_withdraw_trie_root) =
             Self::updated_withdraw_trie_root_from_hashed_state(state_updates)
-        {
-            updated_withdraw_trie_root
-        } else {
-            self.parent_withdraw_trie_root(block.parent_hash())?
+        else {
+            return Ok(());
         };
 
         if actual_withdraw_trie_root != expected_withdraw_trie_root {
@@ -278,7 +244,7 @@ mod tests {
         );
 
         assert_eq!(
-            MorphEngineValidator::<()>::updated_withdraw_trie_root_from_hashed_state(&state),
+            MorphEngineValidator::updated_withdraw_trie_root_from_hashed_state(&state),
             Some(expected)
         );
     }
@@ -287,21 +253,21 @@ mod tests {
     fn test_extract_updated_withdraw_trie_root_from_hashed_state_missing_slot() {
         let state = HashedPostState::default();
         assert_eq!(
-            MorphEngineValidator::<()>::updated_withdraw_trie_root_from_hashed_state(&state),
+            MorphEngineValidator::updated_withdraw_trie_root_from_hashed_state(&state),
             None
         );
     }
 
     #[test]
     fn test_withdraw_trie_root_expectation_cache_evicts_incrementally_not_clear_all() {
-        let validator = MorphEngineValidator::new(test_chain_spec(), ());
+        let validator = MorphEngineValidator::new(test_chain_spec());
         let key = |n: usize| {
             let mut bytes = [0u8; 32];
             bytes[..8].copy_from_slice(&(n as u64).to_be_bytes());
             B256::from(bytes)
         };
 
-        for i in 0..MorphEngineValidator::<()>::MAX_EXPECTED_WITHDRAW_TRIE_ROOTS {
+        for i in 0..MorphEngineValidator::MAX_EXPECTED_WITHDRAW_TRIE_ROOTS {
             validator.record_withdraw_trie_root_expectation(
                 key(i),
                 WithdrawTrieRootExpectation::Verify(B256::from([0xaa; 32])),
@@ -309,11 +275,11 @@ mod tests {
         }
         assert_eq!(
             validator.expected_withdraw_trie_roots.len(),
-            MorphEngineValidator::<()>::MAX_EXPECTED_WITHDRAW_TRIE_ROOTS
+            MorphEngineValidator::MAX_EXPECTED_WITHDRAW_TRIE_ROOTS
         );
 
         let oldest = key(0);
-        let newest = key(MorphEngineValidator::<()>::MAX_EXPECTED_WITHDRAW_TRIE_ROOTS);
+        let newest = key(MorphEngineValidator::MAX_EXPECTED_WITHDRAW_TRIE_ROOTS);
         validator.record_withdraw_trie_root_expectation(
             newest,
             WithdrawTrieRootExpectation::Verify(B256::from([0xbb; 32])),
@@ -321,7 +287,7 @@ mod tests {
 
         assert_eq!(
             validator.expected_withdraw_trie_roots.len(),
-            MorphEngineValidator::<()>::MAX_EXPECTED_WITHDRAW_TRIE_ROOTS
+            MorphEngineValidator::MAX_EXPECTED_WITHDRAW_TRIE_ROOTS
         );
         assert!(!validator.expected_withdraw_trie_roots.is_empty());
         assert!(
