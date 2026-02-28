@@ -48,6 +48,18 @@ pub trait MorphL2EngineRpc {
     /// `engine_newSafeL2Block`
     #[method(name = "newSafeL2Block")]
     async fn new_safe_l2_block(&self, data: SafeL2Data) -> RpcResult<MorphHeader>;
+
+    /// Set the safe and finalized block tags.
+    ///
+    /// # JSON-RPC Method
+    ///
+    /// `engine_setBlockTags`
+    #[method(name = "setBlockTags")]
+    async fn set_block_tags(
+        &self,
+        safe_block_hash: B256,
+        finalized_block_hash: B256,
+    ) -> RpcResult<()>;
 }
 
 /// Implementation of the L2 Engine RPC API.
@@ -129,6 +141,27 @@ where
             tracing::error!(target: "morph::engine", error = %e, "failed to import safe L2 block");
             e.into()
         })
+    }
+
+    async fn set_block_tags(
+        &self,
+        safe_block_hash: B256,
+        finalized_block_hash: B256,
+    ) -> RpcResult<()> {
+        tracing::debug!(
+            target: "morph::engine",
+            %safe_block_hash,
+            %finalized_block_hash,
+            "RPC setBlockTags called"
+        );
+
+        self.inner
+            .set_block_tags(safe_block_hash, finalized_block_hash)
+            .await
+            .map_err(|e| {
+                tracing::error!(target: "morph::engine", error = %e, "failed to set block tags");
+                e.into()
+            })
     }
 }
 

@@ -88,4 +88,21 @@ pub trait MorphL2EngineApi: Send + Sync {
     ///
     /// Returns the header of the imported block.
     async fn new_safe_l2_block(&self, data: SafeL2Data) -> EngineApiResult<MorphHeader>;
+
+    /// Set the safe and finalized block tags.
+    ///
+    /// This method updates the safe and finalized block pointers without
+    /// importing any new block. It aligns with go-ethereum's `engine_setBlockTags`.
+    ///
+    /// Either hash can be `B256::ZERO` to skip updating that tag.
+    ///
+    /// # Arguments
+    ///
+    /// * `safe_block_hash` - Hash of the block to mark as safe
+    /// * `finalized_block_hash` - Hash of the block to mark as finalized
+    async fn set_block_tags(
+        &self,
+        safe_block_hash: B256,
+        finalized_block_hash: B256,
+    ) -> EngineApiResult<()>;
 }
