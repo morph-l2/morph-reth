@@ -7,16 +7,31 @@
 //!
 //! ```text
 //! Berlin (base)
-//!   └── Bernoulli/Curie = Berlin - ripemd160 - blake2f
-//!         └── Morph203/Viridian = Bernoulli + blake2f + ripemd160
+//!   └── Bernoulli/Curie = Berlin with ripemd160/blake2f replaced by disabled stubs
+//!         └── Morph203/Viridian = Bernoulli with ripemd160/blake2f re-enabled (working)
 //!               └── Emerald = Morph203 + Osaka precompiles
 //! ```
 //!
-//! | Hardfork         | Base      | Added                                           | Disabled          |
-//! |------------------|-----------|------------------------------------------------|-------------------|
-//! | Bernoulli/Curie  | Berlin    | -                                              | ripemd160/blake2f |
-//! | Morph203/Viridian| Bernoulli | blake2f, ripemd160                             | -                 |
-//! | Emerald          | Morph203  | Osaka (P256verify, BLS12-381, point eval, etc) | -                 |
+//! | Hardfork         | Base      | Added                                                     | Notes                         |
+//! |------------------|-----------|----------------------------------------------------------|-------------------------------|
+//! | Bernoulli/Curie  | Berlin    | -                                                        | ripemd160/blake2f as disabled stubs |
+//! | Morph203/Viridian| Bernoulli | blake2f, ripemd160 (working)                             | replaces disabled stubs       |
+//! | Emerald          | Morph203  | Osaka (P256verify, BLS12-381, point eval, etc)           | -                             |
+//!
+//! ## Why Disabled Stubs?
+//!
+//! go-ethereum's `PrecompiledContractsBernoulli` includes 0x03 (ripemd160) and 0x09 (blake2f)
+//! as disabled stubs (`ripemd160hashDisabled`, `blake2FDisabled`). This has two effects:
+//!
+//! 1. Both addresses are included in `PrecompiledAddressesBernoulli`, so they get **warmed**
+//!    via `StateDB.Prepare` (EIP-2929). CALL costs 100 gas (warm) instead of 2600 (cold).
+//!
+//! 2. When called, go-eth's CALL handler sets `gas = 0` for any non-revert error, consuming
+//!    all forwarded gas. revm's `PrecompileError` result also causes all forwarded gas to
+//!    be consumed (parent does not reclaim gas when sub-call is not ok-or-revert).
+//!
+//! Omitting these stubs causes morph-reth to treat 0x03/0x09 as cold empty accounts (2600
+//! base cost, forwarded gas returned), creating a gas mismatch vs go-ethereum.
 
 use alloy_primitives::Address;
 use morph_chainspec::hardfork::MorphHardfork;
@@ -25,7 +40,7 @@ use revm::{
     context_interface::ContextTr,
     handler::{EthPrecompiles, PrecompileProvider},
     interpreter::{CallInputs, InterpreterResult},
-    precompile::Precompiles,
+    precompile::{Precompile, PrecompileError, PrecompileId, PrecompileResult, Precompiles},
     primitives::{OnceLock, hardfork::SpecId},
 };
 use std::boxed::Box;
@@ -117,29 +132,48 @@ impl Default for MorphPrecompiles {
     }
 }
 
+/// Disabled stub for ripemd160 (0x03) in Bernoulli/Curie hardfork.
+///
+/// Returns `PrecompileError` to consume all forwarded gas, matching go-ethereum's behavior
+/// where a disabled precompile error causes the CALL handler to burn all remaining gas.
+fn ripemd160_disabled(_input: &[u8], _gas_limit: u64) -> PrecompileResult {
+    Err(PrecompileError::Other(
+        "ripemd160 precompile disabled in Bernoulli/Curie hardfork".into(),
+    ))
+}
+
+/// Disabled stub for blake2f (0x09) in Bernoulli/Curie hardfork.
+///
+/// Returns `PrecompileError` to consume all forwarded gas, matching go-ethereum's behavior
+/// where a disabled precompile error causes the CALL handler to burn all remaining gas.
+fn blake2f_disabled(_input: &[u8], _gas_limit: u64) -> PrecompileResult {
+    Err(PrecompileError::Other(
+        "blake2f precompile disabled in Bernoulli/Curie hardfork".into(),
+    ))
+}
+
 /// Returns precompiles for Bernoulli hardfork.
 ///
-/// Based on Berlin but with ripemd160 and blake2f excluded.
-/// Enabled: ecrecover, sha256, identity, modexp, bn256 ops
-/// Disabled: ripemd160 (0x03), blake2f (0x09)
+/// Based on Berlin with ripemd160 (0x03) and blake2f (0x09) replaced by disabled stubs.
+/// All 9 Berlin addresses are present (so they get warmed via EIP-2929), but 0x03/0x09
+/// consume all forwarded gas and return failure when called.
 ///
 /// Matches: <https://github.com/morph-l2/go-ethereum/blob/main/core/vm/contracts.go#L136-L148>
 pub fn bernoulli() -> &'static Precompiles {
     static INSTANCE: OnceLock<Precompiles> = OnceLock::new();
     INSTANCE.get_or_init(|| {
-        let berlin = Precompiles::berlin();
+        // Start from Berlin (9 precompiles including 0x03 and 0x09).
+        let mut precompiles = Precompiles::berlin().clone();
 
-        // Create a set with only ripemd160 and blake2f to exclude
-        let mut to_exclude = Precompiles::default();
-        if let Some(ripemd) = berlin.get(&addresses::RIPEMD160) {
-            to_exclude.extend([ripemd.clone()]);
-        }
-        if let Some(blake2f) = berlin.get(&addresses::BLAKE2F) {
-            to_exclude.extend([blake2f.clone()]);
-        }
+        // Replace ripemd160 (0x03) and blake2f (0x09) with disabled stubs.
+        // This keeps them in warm_addresses() so EIP-2929 warms them (100 gas instead of
+        // 2600 cold), matching go-ethereum's PrecompiledContractsBernoulli behavior.
+        precompiles.extend([
+            Precompile::new(PrecompileId::Ripemd160, addresses::RIPEMD160, ripemd160_disabled),
+            Precompile::new(PrecompileId::Blake2F, addresses::BLAKE2F, blake2f_disabled),
+        ]);
 
-        // Return berlin precompiles minus the excluded ones
-        berlin.difference(&to_exclude)
+        precompiles
     })
 }
 
@@ -247,10 +281,12 @@ mod tests {
         assert!(precompiles.contains(&addresses::MODEXP));
         assert!(precompiles.contains(&addresses::BN256_ADD));
 
-        // ripemd160 and blake2f should NOT be present (disabled in Bernoulli)
-        // Matches Go: PrecompiledContractsBernoulli
-        assert!(!precompiles.contains(&addresses::RIPEMD160));
-        assert!(!precompiles.contains(&addresses::BLAKE2F));
+        // ripemd160 (0x03) and blake2f (0x09) ARE present as disabled stubs.
+        // They must be in the precompile set so they get warmed (EIP-2929: 100 gas warm
+        // instead of 2600 cold), matching go-ethereum's PrecompiledContractsBernoulli
+        // which includes &ripemd160hashDisabled{} and &blake2FDisabled{}.
+        assert!(precompiles.contains(&addresses::RIPEMD160));
+        assert!(precompiles.contains(&addresses::BLAKE2F));
     }
 
     #[test]
@@ -263,10 +299,10 @@ mod tests {
         // Both should have the same precompiles
         assert_eq!(bernoulli_p.precompiles().len(), curie_p.precompiles().len());
 
-        // Both should have sha256 enabled, ripemd160/blake2f disabled
+        // Both should have sha256 enabled and 0x03/0x09 as disabled stubs (present in set)
         assert!(curie_p.contains(&addresses::SHA256));
-        assert!(!curie_p.contains(&addresses::RIPEMD160));
-        assert!(!curie_p.contains(&addresses::BLAKE2F));
+        assert!(curie_p.contains(&addresses::RIPEMD160));
+        assert!(curie_p.contains(&addresses::BLAKE2F));
     }
 
     #[test]
@@ -308,8 +344,9 @@ mod tests {
         let morph203_count = morph203().len();
         let emerald_count = emerald().len();
 
-        // Morph203/Viridian should have more than Bernoulli (adds blake2f + ripemd160)
-        assert!(morph203_count > bernoulli_count);
+        // Bernoulli and Morph203 have the same number of addresses (9), but
+        // Bernoulli has 0x03/0x09 as disabled stubs while Morph203 re-enables them.
+        assert_eq!(morph203_count, bernoulli_count);
 
         // Emerald should have more than Morph203 (adds Osaka precompiles)
         assert!(emerald_count > morph203_count);
@@ -324,11 +361,12 @@ mod tests {
         let viridian_p = MorphPrecompiles::new_with_spec(MorphHardfork::Viridian);
         let emerald_p = MorphPrecompiles::new_with_spec(MorphHardfork::Emerald);
 
-        // Bernoulli and Curie: no ripemd160, no blake2f (same precompile set)
-        assert!(!bernoulli_p.contains(&addresses::RIPEMD160));
-        assert!(!bernoulli_p.contains(&addresses::BLAKE2F));
-        assert!(!curie_p.contains(&addresses::RIPEMD160));
-        assert!(!curie_p.contains(&addresses::BLAKE2F));
+        // Bernoulli and Curie: ripemd160 and blake2f are present as disabled stubs (same precompile set).
+        // They're in the set to ensure EIP-2929 warming matches go-ethereum.
+        assert!(bernoulli_p.contains(&addresses::RIPEMD160));
+        assert!(bernoulli_p.contains(&addresses::BLAKE2F));
+        assert!(curie_p.contains(&addresses::RIPEMD160));
+        assert!(curie_p.contains(&addresses::BLAKE2F));
 
         // Morph203 and Viridian: blake2f + ripemd160 enabled, no P256verify (same precompile set)
         assert!(morph203_p.contains(&addresses::RIPEMD160));
