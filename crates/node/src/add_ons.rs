@@ -61,7 +61,7 @@ where
                 MorphEthApiBuilder::default(),
                 pvb.clone(),
                 NoopEngineApiBuilder::default(),
-                MorphTreeEngineValidatorBuilder::default(),
+                MorphTreeEngineValidatorBuilder::new(pvb),
                 Identity::default(),
             ),
         }
