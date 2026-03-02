@@ -52,12 +52,13 @@ where
 
     /// Creates a new [`MorphAddOns`] with an optional geth RPC URL for state root validation.
     pub fn with_geth_rpc_url(geth_rpc_url: Option<String>) -> Self {
+        let pvb = MorphEngineValidatorBuilder::default().with_geth_rpc_url(geth_rpc_url);
         Self {
             inner: RpcAddOns::new(
                 MorphEthApiBuilder::default(),
-                MorphEngineValidatorBuilder::default().with_geth_rpc_url(geth_rpc_url),
+                pvb.clone(),
                 NoopEngineApiBuilder::default(),
-                BasicEngineValidatorBuilder::default(),
+                BasicEngineValidatorBuilder::new(pvb),
                 Identity::default(),
             ),
         }
