@@ -10,4 +10,7 @@ cd "${REPO_ROOT}"
 pm2_stop "morph-node"
 pm2_stop "morph-reth"
 
+pm2 delete morph-node
+pm2 delete morph-reth
+
 echo "All services stopped"
