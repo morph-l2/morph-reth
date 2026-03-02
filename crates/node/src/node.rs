@@ -38,6 +38,7 @@ use reth_primitives_traits::SealedHeader;
 use reth_provider::{
     BlockWriter, CanonChainTracker, DBProvider, DatabaseProviderFactory, EthStorage,
 };
+use reth_storage_api::StageCheckpointWriter;
 use std::sync::Arc;
 
 /// Type configuration for a Morph L2 node.
@@ -98,7 +99,7 @@ where
     N: FullNodeTypes<Types = Self>,
     N::Provider: CanonChainTracker<Header = MorphHeader> + DatabaseProviderFactory,
     <N::Provider as DatabaseProviderFactory>::ProviderRW:
-        BlockWriter<Block = Block, Receipt = MorphReceipt> + DBProvider,
+        BlockWriter<Block = Block, Receipt = MorphReceipt> + DBProvider + StageCheckpointWriter,
 {
     type ComponentsBuilder = ComponentsBuilder<
         N,
@@ -139,7 +140,7 @@ where
     N: FullNodeComponents<Types = Self>,
     N::Provider: CanonChainTracker<Header = MorphHeader> + DatabaseProviderFactory,
     <N::Provider as DatabaseProviderFactory>::ProviderRW:
-        BlockWriter<Block = Block, Receipt = MorphReceipt> + DBProvider,
+        BlockWriter<Block = Block, Receipt = MorphReceipt> + DBProvider + StageCheckpointWriter,
 {
     type RpcBlock = alloy_rpc_types_eth::Block<MorphTxEnvelope>;
 

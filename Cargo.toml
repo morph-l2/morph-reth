@@ -99,6 +99,7 @@ reth-rpc-convert = { git = "https://github.com/morph-l2/reth", rev = "8057627ac9
 reth-rpc-eth-api = { git = "https://github.com/morph-l2/reth", rev = "8057627ac9f169a0da4de44b616006a9e30382c1" }
 reth-rpc-eth-types = { git = "https://github.com/morph-l2/reth", rev = "8057627ac9f169a0da4de44b616006a9e30382c1" }
 reth-rpc-server-types = { git = "https://github.com/morph-l2/reth", rev = "8057627ac9f169a0da4de44b616006a9e30382c1" }
+reth-stages-types = { git = "https://github.com/morph-l2/reth", rev = "8057627ac9f169a0da4de44b616006a9e30382c1" }
 reth-storage-api = { git = "https://github.com/morph-l2/reth", rev = "8057627ac9f169a0da4de44b616006a9e30382c1" }
 reth-tasks = { git = "https://github.com/morph-l2/reth", rev = "8057627ac9f169a0da4de44b616006a9e30382c1" }
 reth-tracing = { git = "https://github.com/morph-l2/reth", rev = "8057627ac9f169a0da4de44b616006a9e30382c1" }
