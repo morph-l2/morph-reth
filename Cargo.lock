@@ -4753,6 +4753,7 @@ dependencies = [
  "morph-chainspec",
  "morph-payload-types",
  "morph-primitives",
+ "parking_lot",
  "reth-node-api",
  "reth-payload-builder",
  "reth-payload-primitives",

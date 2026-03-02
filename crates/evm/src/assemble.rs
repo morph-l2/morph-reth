@@ -108,7 +108,7 @@ impl BlockAssembler<MorphEvmConfig> for MorphBlockAssembler {
             gas_limit: evm_env.block_env.gas_limit(),
             difficulty: evm_env.block_env.difficulty(),
             gas_used: *gas_used,
-            extra_data: Default::default(),
+            extra_data: execution_ctx.extra_data.clone(),
             parent_beacon_block_root: None,
             blob_gas_used: None,
             excess_blob_gas: None,
