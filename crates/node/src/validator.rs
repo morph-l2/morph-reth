@@ -239,7 +239,7 @@ impl PayloadValidator<MorphPayloadTypes> for MorphEngineValidator {
         match fetch_geth_disk_root(geth_url, block_number) {
             Ok(disk_root) => {
                 if computed_state_root == disk_root {
-                    tracing::debug!(
+                    tracing::info!(
                         target: "morph::validator",
                         block_number,
                         ?computed_state_root,
