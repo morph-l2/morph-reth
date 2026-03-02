@@ -38,6 +38,7 @@ args=(
   --log.file.directory "$(dirname "${RETH_LOG_FILE}")"
   --log.file.filter info
   --morph.max-tx-payload-bytes "${MORPH_MAX_TX_PAYLOAD_BYTES}"
+  --nat none
   --engine.legacy-state-root
 )
 
