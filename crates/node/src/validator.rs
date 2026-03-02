@@ -301,9 +301,7 @@ impl StateRootValidator<morph_primitives::MorphPrimitives> for MorphEngineValida
         // Long-term behavior: always compute after Jade.
         // Temporary behavior: if geth RPC is configured, also compute before Jade
         // so we can cross-check against geth's `morph_diskRoot`.
-        self.chain_spec
-            .is_jade_active_at_timestamp(input.timestamp)
-            || self.geth_rpc_url.is_some()
+        self.chain_spec.is_jade_active_at_timestamp(input.timestamp) || self.geth_rpc_url.is_some()
     }
 
     fn validate_state_root(

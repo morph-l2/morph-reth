@@ -169,7 +169,11 @@ pub fn bernoulli() -> &'static Precompiles {
         // This keeps them in warm_addresses() so EIP-2929 warms them (100 gas instead of
         // 2600 cold), matching go-ethereum's PrecompiledContractsBernoulli behavior.
         precompiles.extend([
-            Precompile::new(PrecompileId::Ripemd160, addresses::RIPEMD160, ripemd160_disabled),
+            Precompile::new(
+                PrecompileId::Ripemd160,
+                addresses::RIPEMD160,
+                ripemd160_disabled,
+            ),
             Precompile::new(PrecompileId::Blake2F, addresses::BLAKE2F, blake2f_disabled),
         ]);
 
