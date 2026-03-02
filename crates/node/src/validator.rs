@@ -212,6 +212,15 @@ impl PayloadValidator<MorphPayloadTypes> for MorphEngineValidator {
         block: &RecoveredBlock<Self::Block>,
         computed_state_root: B256,
     ) -> Result<StateRootValidationOutcome, ConsensusError> {
+        let block_number = block.header().number();
+        tracing::info!(
+            target: "morph::validator",
+            block_number,
+            ?computed_state_root,
+            geth_rpc_configured = self.geth_rpc_url.is_some(),
+            mpt_fork_active = self.chain_spec.is_mpt_fork_active_at_timestamp(block.header().timestamp()),
+            "validate_computed_state_root called"
+        );
         if self
             .chain_spec
             .is_mpt_fork_active_at_timestamp(block.header().timestamp())
