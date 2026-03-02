@@ -52,6 +52,11 @@ clap.workspace = true
 dashmap.workspace = true
 tokio-stream.workspace = true
 
+# HTTP (for geth diskRoot RPC cross-validation)
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+
 [dev-dependencies]
 tokio.workspace = true
 reth-chainspec.workspace = true
