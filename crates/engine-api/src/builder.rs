@@ -607,15 +607,34 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
             return Ok(head);
         }
 
+        let canonical_best = self.provider.best_block_number();
         let number = self
             .provider
             .last_block_number()
             .map_err(|e| MorphEngineApiError::Database(e.to_string()))?;
-        let header = self
+        tracing::warn!(
+            target: "morph::engine",
+            canonical_best = ?canonical_best,
+            db_last = number,
+            "current_head fallback: tracker empty, using DB head"
+        );
+        let header = match self
             .provider
             .sealed_header(number)
             .map_err(|e| MorphEngineApiError::Database(e.to_string()))?
-            .ok_or_else(|| MorphEngineApiError::Internal(format!("header {number} not found")))?;
+        {
+            Some(header) => header,
+            None => {
+                tracing::warn!(
+                    target: "morph::engine",
+                    db_last = number,
+                    "current_head fallback: db head header missing"
+                );
+                return Err(MorphEngineApiError::Internal(format!(
+                    "header {number} not found"
+                )));
+            }
+        };
 
         Ok(InMemoryHead {
             number,

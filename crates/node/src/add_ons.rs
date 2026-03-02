@@ -17,7 +17,8 @@ use reth_node_builder::{
     },
 };
 use reth_provider::{
-    BlockWriter, CanonChainTracker, ChainSpecProvider, DBProvider, DatabaseProviderFactory,
+    BlockNumReader, BlockWriter, CanonChainTracker, ChainSpecProvider, DBProvider,
+    DatabaseProviderFactory,
 };
 use reth_rpc_builder::Identity;
 use reth_rpc_eth_api::RpcNodeCore;
@@ -106,6 +107,12 @@ where
         // Get components from ctx.node BEFORE calling launch_add_ons_with
         // This is necessary because we can't access ctx.node inside the closure
         let provider = ctx.node.provider().clone();
+        tracing::info!(
+            target: "morph::node",
+            best_before = ?provider.best_block_number(),
+            db_last_before = ?provider.last_block_number(),
+            "launch_add_ons: provider startup snapshot"
+        );
         let provider_for_stage = provider.clone();
 
         let payload_builder = ctx.node.payload_builder_handle().clone();
