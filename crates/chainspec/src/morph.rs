@@ -48,10 +48,18 @@ mod tests {
 
     #[test]
     fn test_morph_mainnet_hardforks() {
-        // Block-based hardforks should be active at block 0
+        // Block-based hardforks: both Bernoulli and Curie active from block 0
         assert!(MORPH_MAINNET.is_bernoulli_active_at_block(0));
-        // Curie is activated at a later block on mainnet
-        // Timestamp-based hardforks may not be active at timestamp 0 on mainnet
-        // depending on the genesis configuration
+        assert!(MORPH_MAINNET.is_curie_active_at_block(0));
+
+        // Timestamp-based hardforks from go-ethereum MorphMainnetChainConfig
+        assert!(!MORPH_MAINNET.is_morph203_active_at_timestamp(1747029599));
+        assert!(MORPH_MAINNET.is_morph203_active_at_timestamp(1747029600));
+
+        assert!(!MORPH_MAINNET.is_viridian_active_at_timestamp(1762149599));
+        assert!(MORPH_MAINNET.is_viridian_active_at_timestamp(1762149600));
+
+        assert!(!MORPH_MAINNET.is_emerald_active_at_timestamp(1767765599));
+        assert!(MORPH_MAINNET.is_emerald_active_at_timestamp(1767765600));
     }
 }
