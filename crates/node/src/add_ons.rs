@@ -1,6 +1,9 @@
 //! Morph node RPC add-ons.
 
-use crate::{MorphNode, validator::MorphEngineValidatorBuilder};
+use crate::{
+    MorphNode,
+    validator::{MorphEngineValidatorBuilder, MorphTreeEngineValidatorBuilder},
+};
 use morph_evm::MorphEvmConfig;
 use morph_primitives::{Block, MorphHeader, MorphReceipt};
 use morph_rpc::MorphEthApiBuilder;
@@ -8,8 +11,8 @@ use reth_node_api::{AddOnsContext, FullNodeComponents, FullNodeTypes, NodeAddOns
 use reth_node_builder::{
     NodeAdapter,
     rpc::{
-        BasicEngineValidatorBuilder, EngineValidatorAddOn, EngineValidatorBuilder, EthApiBuilder,
-        NoopEngineApiBuilder, PayloadValidatorBuilder, RethRpcAddOns, RpcAddOns,
+        EngineValidatorAddOn, EngineValidatorBuilder, EthApiBuilder, NoopEngineApiBuilder,
+        PayloadValidatorBuilder, RethRpcAddOns, RpcAddOns,
     },
 };
 use reth_provider::{
@@ -31,7 +34,7 @@ pub struct MorphAddOns<
     N: FullNodeComponents,
     EthB: EthApiBuilder<N> = MorphEthApiBuilder,
     PVB = MorphEngineValidatorBuilder,
-    EVB = BasicEngineValidatorBuilder<PVB>,
+    EVB = MorphTreeEngineValidatorBuilder<PVB>,
     RpcMiddleware = Identity,
 > {
     /// Inner RPC add-ons from reth.
@@ -58,7 +61,7 @@ where
                 MorphEthApiBuilder::default(),
                 pvb.clone(),
                 NoopEngineApiBuilder::default(),
-                BasicEngineValidatorBuilder::new(pvb),
+                MorphTreeEngineValidatorBuilder::default(),
                 Identity::default(),
             ),
         }

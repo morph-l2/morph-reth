@@ -32,7 +32,9 @@ pub use components::{
     MorphConsensusBuilder, MorphExecutorBuilder, MorphPayloadBuilderBuilder, MorphPoolBuilder,
 };
 pub use node::{MorphNode, MorphPayloadAttributesBuilder};
-pub use validator::{MorphEngineValidator, MorphEngineValidatorBuilder};
+pub use validator::{
+    MorphEngineValidator, MorphEngineValidatorBuilder, MorphTreeEngineValidatorBuilder,
+};
 
 // Re-export morph-rpc for convenience
 pub use morph_rpc as rpc;

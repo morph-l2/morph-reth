@@ -23,6 +23,7 @@ morph-txpool.workspace = true
 
 # Reth dependencies
 reth-db.workspace = true
+reth-chainspec.workspace = true
 reth-engine-local.workspace = true
 reth-engine-tree.workspace = true
 reth-errors.workspace = true
@@ -59,7 +60,6 @@ serde_json.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true
-reth-chainspec.workspace = true
 reth-db = { workspace = true, features = ["test-utils"] }
 reth-node-core.workspace = true
 reth-tasks.workspace = true

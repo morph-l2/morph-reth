@@ -16,6 +16,11 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 : "${KEEP_CONFIG_ARTIFACTS:=0}"
 : "${AUTO_RESET_ON_WRONG_BLOCK:=0}"
 
+# Morph Geth configuration
+: "${GETH_BIN:=../morph/go-ethereum/build/bin/geth}"
+: "${GETH_DATA_DIR:=./local-test/geth-data}"
+: "${GETH_LOG_FILE:=./local-test/geth.log}"
+
 # Morph-Reth configuration
 : "${RETH_BIN:=./target/release/morph-reth}"
 : "${RETH_DATA_DIR:=./local-test/reth-data}"
@@ -28,6 +33,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 : "${MORPH_MAX_TX_PAYLOAD_BYTES:=122880}"
 : "${MORPH_MAX_TX_PER_BLOCK:=}"
 : "${MORPH_GETH_RPC_URL:=http://localhost:8546}"
+: "${RETH_ENGINE_PERSISTENCE_THRESHOLD:=128}"
+: "${RETH_ENGINE_MEMORY_BLOCK_BUFFER_TARGET:=512}"
 
 check_binary() {
   local bin_path="$1"

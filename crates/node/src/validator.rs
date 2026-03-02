@@ -10,16 +10,21 @@ use morph_chainspec::{
 };
 use morph_payload_types::{MorphExecutionData, MorphPayloadTypes};
 use morph_primitives::MorphHeader;
+use reth_chainspec::EthChainSpec;
 use reth_errors::ConsensusError;
 use reth_node_api::{
-    AddOnsContext, FullNodeComponents, InvalidPayloadAttributesError, NewPayloadError,
-    PayloadAttributes, PayloadValidator, StateRootValidationOutcome,
+    AddOnsContext, BlockTy, FullNodeComponents, InvalidPayloadAttributesError, NewPayloadError,
+    NodeTypes, PayloadAttributes, PayloadTypes, PayloadValidator, StateRootDecisionInput,
+    StateRootValidator,
 };
-use reth_node_builder::rpc::PayloadValidatorBuilder;
+use reth_node_builder::{
+    invalid_block_hook::InvalidBlockHookExt,
+    rpc::{BasicEngineValidator, ChangesetCache, EngineValidatorBuilder, PayloadValidatorBuilder},
+};
 use reth_primitives_traits::{GotExpected, RecoveredBlock, SealedBlock};
 use reth_provider::ChainSpecProvider;
-use std::{collections::VecDeque, sync::Arc, sync::Mutex};
 use reth_tracing::tracing;
+use std::{collections::VecDeque, sync::Arc, sync::Mutex};
 
 /// Builder for Morph engine validator (payload validation).
 ///
@@ -52,6 +57,77 @@ where
             validator = validator.with_geth_rpc_url(url);
         }
         Ok(validator)
+    }
+}
+
+/// Builder for Morph tree engine validator.
+///
+/// This wires [`MorphEngineValidator`] into both payload validation and state-root
+/// decision/validation hooks.
+#[derive(Debug, Clone)]
+pub struct MorphTreeEngineValidatorBuilder<PVB = MorphEngineValidatorBuilder> {
+    payload_validator_builder: PVB,
+}
+
+impl<PVB> MorphTreeEngineValidatorBuilder<PVB> {
+    /// Creates a new instance with the given payload validator builder.
+    pub const fn new(payload_validator_builder: PVB) -> Self {
+        Self {
+            payload_validator_builder,
+        }
+    }
+}
+
+impl<PVB> Default for MorphTreeEngineValidatorBuilder<PVB>
+where
+    PVB: Default,
+{
+    fn default() -> Self {
+        Self::new(PVB::default())
+    }
+}
+
+impl<Node, PVB> EngineValidatorBuilder<Node> for MorphTreeEngineValidatorBuilder<PVB>
+where
+    Node: FullNodeComponents<
+        Evm: reth_node_api::ConfigureEngineEvm<
+            <<Node::Types as NodeTypes>::Payload as PayloadTypes>::ExecutionData,
+        >,
+    >,
+    PVB: PayloadValidatorBuilder<Node>,
+    PVB::Validator: reth_node_api::PayloadValidator<
+            <Node::Types as NodeTypes>::Payload,
+            Block = BlockTy<Node::Types>,
+        > + StateRootValidator<<Node::Types as NodeTypes>::Primitives>
+        + Clone,
+{
+    type EngineValidator =
+        BasicEngineValidator<Node::Provider, Node::Evm, PVB::Validator, PVB::Validator>;
+
+    async fn build_tree_validator(
+        self,
+        ctx: &AddOnsContext<'_, Node>,
+        tree_config: reth_node_api::TreeConfig,
+        changeset_cache: ChangesetCache,
+    ) -> eyre::Result<Self::EngineValidator> {
+        let validator = self.payload_validator_builder.build(ctx).await?;
+        let data_dir = ctx
+            .config
+            .datadir
+            .clone()
+            .resolve_datadir(ctx.config.chain.chain());
+        let invalid_block_hook = ctx.create_invalid_block_hook(&data_dir).await?;
+
+        Ok(BasicEngineValidator::new(
+            ctx.node.provider().clone(),
+            Arc::new(ctx.node.consensus().clone()),
+            ctx.node.evm_config().clone(),
+            validator.clone(),
+            tree_config,
+            invalid_block_hook,
+            changeset_cache,
+        )
+        .with_state_root_validator(validator))
     }
 }
 
@@ -207,54 +283,68 @@ impl PayloadValidator<MorphPayloadTypes> for MorphEngineValidator {
         Ok(())
     }
 
-    fn validate_computed_state_root(
+    fn validate_payload_attributes_against_header(
         &self,
-        block: &RecoveredBlock<Self::Block>,
+        attr: &<MorphPayloadTypes as reth_node_api::PayloadTypes>::PayloadAttributes,
+        header: &MorphHeader,
+    ) -> Result<(), InvalidPayloadAttributesError> {
+        // Ensure that payload attributes timestamp is not in the past
+        if attr.timestamp() < header.timestamp() {
+            return Err(InvalidPayloadAttributesError::InvalidTimestamp);
+        }
+        Ok(())
+    }
+}
+
+impl StateRootValidator<morph_primitives::MorphPrimitives> for MorphEngineValidator {
+    fn should_compute_state_root(&self, input: &StateRootDecisionInput) -> bool {
+        // Long-term behavior: always compute after MPTFork.
+        // Temporary behavior: if geth RPC is configured, also compute before MPTFork
+        // so we can cross-check against geth's `morph_diskRoot`.
+        self.chain_spec
+            .is_mpt_fork_active_at_timestamp(input.timestamp)
+            || self.geth_rpc_url.is_some()
+    }
+
+    fn validate_state_root(
+        &self,
+        block: &RecoveredBlock<morph_primitives::Block>,
         computed_state_root: B256,
-    ) -> Result<StateRootValidationOutcome, ConsensusError> {
+    ) -> Result<(), ConsensusError> {
         let block_number = block.header().number();
-        tracing::info!(
-            target: "morph::validator",
-            block_number,
-            ?computed_state_root,
-            geth_rpc_configured = self.geth_rpc_url.is_some(),
-            mpt_fork_active = self.chain_spec.is_mpt_fork_active_at_timestamp(block.header().timestamp()),
-            "validate_computed_state_root called"
-        );
-        if self
+        let mpt_fork_active = self
             .chain_spec
-            .is_mpt_fork_active_at_timestamp(block.header().timestamp())
-        {
-            let header_state_root = block.header().state_root();
-            return if computed_state_root == header_state_root {
-                Ok(StateRootValidationOutcome::Valid)
-            } else {
-                Err(ConsensusError::BodyStateRootDiff(
+            .is_mpt_fork_active_at_timestamp(block.header().timestamp());
+
+        // Always enforce canonical state-root equality in MPT mode.
+        if mpt_fork_active {
+            let expected_state_root = block.header().state_root();
+            if computed_state_root != expected_state_root {
+                return Err(ConsensusError::BodyStateRootDiff(
                     GotExpected {
                         got: computed_state_root,
-                        expected: header_state_root,
+                        expected: expected_state_root,
                     }
                     .into(),
-                ))
-            };
+                ));
+            }
         }
 
-        // Before MPTFork: cross-validate via geth's morph_diskRoot RPC if configured.
-        let Some(ref geth_url) = self.geth_rpc_url else {
-            return Ok(StateRootValidationOutcome::Skipped);
+        // Temporary cross-validation path: compare with geth's diskRoot when configured.
+        let Some(geth_url) = self.geth_rpc_url.as_deref() else {
+            return Ok(());
         };
 
-        let block_number = block.header().number();
         match fetch_geth_disk_root(geth_url, block_number) {
             Ok(disk_root) => {
                 if computed_state_root == disk_root {
-                    tracing::info!(
+                    tracing::debug!(
                         target: "morph::validator",
                         block_number,
                         ?computed_state_root,
                         "State root cross-validation passed"
                     );
-                    Ok(StateRootValidationOutcome::Valid)
+                    Ok(())
                 } else {
                     tracing::error!(
                         target: "morph::validator",
@@ -279,21 +369,9 @@ impl PayloadValidator<MorphPayloadTypes> for MorphEngineValidator {
                     %err,
                     "Failed to fetch diskRoot from geth, skipping state root validation"
                 );
-                Ok(StateRootValidationOutcome::Skipped)
+                Ok(())
             }
         }
-    }
-
-    fn validate_payload_attributes_against_header(
-        &self,
-        attr: &<MorphPayloadTypes as reth_node_api::PayloadTypes>::PayloadAttributes,
-        header: &MorphHeader,
-    ) -> Result<(), InvalidPayloadAttributesError> {
-        // Ensure that payload attributes timestamp is not in the past
-        if attr.timestamp() < header.timestamp() {
-            return Err(InvalidPayloadAttributesError::InvalidTimestamp);
-        }
-        Ok(())
     }
 }
 
@@ -324,10 +402,11 @@ impl std::fmt::Display for JsonRpcError {
     }
 }
 
-/// Fetch the MPT state root from a geth node via `morph_diskRoot` RPC.
+/// Fetches the MPT state root from a geth node via `morph_diskRoot` RPC.
 ///
 /// This calls geth's `morph_diskRoot` method with the given block number to obtain
-/// the MPT-format state root (diskRoot) for cross-validation against reth's computed root.
+/// the MPT-format state root (`diskRoot`) for cross-validation against reth's
+/// computed root.
 fn fetch_geth_disk_root(geth_url: &str, block_number: u64) -> Result<B256, String> {
     let block_hex = format!("0x{block_number:x}");
     let body = serde_json::json!({
@@ -352,8 +431,9 @@ fn fetch_geth_disk_root(geth_url: &str, block_number: u64) -> Result<B256, Strin
         return Err(format!("HTTP {} from geth", resp.status()));
     }
 
-    let rpc_resp: JsonRpcResponse<DiskAndHeaderRoot> =
-        resp.json().map_err(|e| format!("failed to parse response: {e}"))?;
+    let rpc_resp: JsonRpcResponse<DiskAndHeaderRoot> = resp
+        .json()
+        .map_err(|e| format!("failed to parse response: {e}"))?;
 
     if let Some(err) = rpc_resp.error {
         return Err(err.to_string());
