@@ -60,14 +60,13 @@ struct InMemoryHead {
     timestamp: u64,
 }
 
-/// Tracks engine-visible head/forkchoice state for the custom Morph engine API.
+/// Tracks engine-visible canonical head for the custom Morph engine API.
 ///
-/// This is updated from consensus engine events (canonical commits, FCU updates), and can also be
-/// updated optimistically on successful local FCU calls to reduce latency before event delivery.
+/// Updated from `CanonicalChainCommitted` consensus engine events and optimistically
+/// on successful local FCU calls to reduce latency before event delivery.
 #[derive(Debug, Default)]
 pub struct EngineStateTracker {
     head: RwLock<Option<InMemoryHead>>,
-    last_valid_forkchoice: RwLock<Option<alloy_rpc_types_engine::ForkchoiceState>>,
 }
 
 impl EngineStateTracker {
@@ -80,48 +79,20 @@ impl EngineStateTracker {
         });
     }
 
-    /// Records a locally successful forkchoice state hint.
-    pub fn record_local_forkchoice(&self, state: alloy_rpc_types_engine::ForkchoiceState) {
-        *self.last_valid_forkchoice.write() = Some(state);
-    }
-
     /// Updates the tracker from a consensus engine event stream item.
     pub fn on_consensus_engine_event(
         &self,
         event: &reth_node_api::ConsensusEngineEvent<MorphPrimitives>,
     ) {
-        use reth_node_api::{ConsensusEngineEvent, ForkchoiceStatus};
+        use reth_node_api::ConsensusEngineEvent;
 
-        match event {
-            ConsensusEngineEvent::ForkchoiceUpdated(state, status) => {
-                if matches!(status, ForkchoiceStatus::Valid) {
-                    self.record_local_forkchoice(*state);
-                }
-            }
-            ConsensusEngineEvent::CanonicalChainCommitted(header, _) => {
-                self.record_local_head(header.number(), header.hash(), header.timestamp());
-            }
-            _ => {}
+        if let ConsensusEngineEvent::CanonicalChainCommitted(header, _) = event {
+            self.record_local_head(header.number(), header.hash(), header.timestamp());
         }
     }
 
     fn current_head(&self) -> Option<InMemoryHead> {
         *self.head.read()
-    }
-
-    fn current_forkchoice_state(&self) -> Option<alloy_rpc_types_engine::ForkchoiceState> {
-        *self.last_valid_forkchoice.read()
-    }
-
-    /// Returns a snapshot of the currently tracked head (number, hash, timestamp).
-    pub fn head_snapshot(&self) -> Option<(u64, B256, u64)> {
-        self.current_head()
-            .map(|head| (head.number, head.hash, head.timestamp))
-    }
-
-    /// Returns the last valid forkchoice state snapshot tracked by this instance.
-    pub fn forkchoice_snapshot(&self) -> Option<alloy_rpc_types_engine::ForkchoiceState> {
-        self.current_forkchoice_state()
     }
 }
 
@@ -591,8 +562,6 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
             .set_canonical_head(SealedHeader::new(header.clone(), data.hash));
 
         self.engine_state_tracker
-            .record_local_forkchoice(forkchoice);
-        self.engine_state_tracker
             .record_local_head(header.number(), data.hash, header.timestamp());
 
         tracing::info!(
@@ -812,9 +781,8 @@ mod tests {
     use super::*;
     use alloy_consensus::Header;
     use alloy_primitives::{Address, Bloom, Bytes};
-    use alloy_rpc_types_engine::ForkchoiceState;
     use morph_primitives::BlockBody;
-    use reth_node_api::{ConsensusEngineEvent, ForkchoiceStatus};
+    use reth_node_api::ConsensusEngineEvent;
     use reth_primitives_traits::SealedHeader;
     use std::time::Duration;
 
@@ -824,44 +792,8 @@ mod tests {
     }
 
     #[test]
-    fn test_engine_state_tracker_updates_forkchoice_only_on_valid_events() {
-        let tracker = EngineStateTracker::default();
-        let valid_state = ForkchoiceState {
-            head_block_hash: B256::from([0x11; 32]),
-            safe_block_hash: B256::from([0x22; 32]),
-            finalized_block_hash: B256::from([0x33; 32]),
-        };
-        tracker.on_consensus_engine_event(&ConsensusEngineEvent::ForkchoiceUpdated(
-            valid_state,
-            ForkchoiceStatus::Valid,
-        ));
-        assert_eq!(tracker.current_forkchoice_state(), Some(valid_state));
-
-        let invalid_state = ForkchoiceState {
-            head_block_hash: B256::from([0xaa; 32]),
-            safe_block_hash: B256::from([0xbb; 32]),
-            finalized_block_hash: B256::from([0xcc; 32]),
-        };
-        tracker.on_consensus_engine_event(&ConsensusEngineEvent::ForkchoiceUpdated(
-            invalid_state,
-            ForkchoiceStatus::Invalid,
-        ));
-        assert_eq!(tracker.current_forkchoice_state(), Some(valid_state));
-    }
-
-    #[test]
     fn test_engine_state_tracker_updates_head_on_canonical_chain_commit() {
         let tracker = EngineStateTracker::default();
-        assert!(tracker.current_head().is_none());
-
-        tracker.on_consensus_engine_event(&ConsensusEngineEvent::ForkchoiceUpdated(
-            ForkchoiceState {
-                head_block_hash: B256::from([0x01; 32]),
-                safe_block_hash: B256::from([0x02; 32]),
-                finalized_block_hash: B256::from([0x03; 32]),
-            },
-            ForkchoiceStatus::Valid,
-        ));
         assert!(tracker.current_head().is_none());
 
         let header = MorphHeader {
