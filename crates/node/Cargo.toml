@@ -51,6 +51,7 @@ alloy-rpc-types-eth.workspace = true
 eyre.workspace = true
 clap.workspace = true
 dashmap.workspace = true
+parking_lot.workspace = true
 tokio-stream.workspace = true
 
 # HTTP (for geth diskRoot RPC cross-validation)

@@ -10,6 +10,7 @@ use morph_chainspec::{
 };
 use morph_payload_types::{MorphExecutionData, MorphPayloadTypes};
 use morph_primitives::MorphHeader;
+use parking_lot::Mutex;
 use reth_chainspec::EthChainSpec;
 use reth_errors::ConsensusError;
 use reth_node_api::{
@@ -24,7 +25,7 @@ use reth_node_builder::{
 use reth_primitives_traits::{GotExpected, RecoveredBlock, SealedBlock};
 use reth_provider::ChainSpecProvider;
 use reth_tracing::tracing;
-use std::{collections::VecDeque, sync::Arc, sync::Mutex};
+use std::{collections::VecDeque, sync::Arc};
 
 /// Builder for Morph engine validator (payload validation).
 ///
@@ -182,10 +183,7 @@ impl MorphEngineValidator {
             .is_none();
 
         if is_new_entry {
-            let mut order = self
-                .expected_withdraw_trie_root_order
-                .lock()
-                .expect("withdraw trie root expectation order mutex poisoned");
+            let mut order = self.expected_withdraw_trie_root_order.lock();
             order.push_back(block_hash);
 
             while self.expected_withdraw_trie_roots.len() > Self::MAX_EXPECTED_WITHDRAW_TRIE_ROOTS {
@@ -206,10 +204,10 @@ impl MorphEngineValidator {
             .remove(&block_hash)
             .map(|(_, expected)| expected);
 
-        if removed.is_some()
-            && let Ok(mut order) = self.expected_withdraw_trie_root_order.lock()
-        {
-            order.retain(|hash| *hash != block_hash);
+        if removed.is_some() {
+            self.expected_withdraw_trie_root_order
+                .lock()
+                .retain(|hash| *hash != block_hash);
         }
 
         removed

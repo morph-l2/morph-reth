@@ -4812,6 +4812,7 @@ dependencies = [
  "morph-primitives",
  "morph-rpc",
  "morph-txpool",
+ "parking_lot",
  "reqwest",
  "reth-chainspec",
  "reth-db",

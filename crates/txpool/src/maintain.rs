@@ -46,58 +46,61 @@ struct SenderBudget {
     token_balances: HashMap<u16, U256>,
 }
 
-/// Applies cumulative sender-budget checks and consumes budget on success.
+/// Applies cumulative sender-budget check for the ETH-fee path and consumes budget on success.
 ///
-/// Returns `true` if the transaction can be afforded under the current rolling budget.
-#[allow(clippy::too_many_arguments)]
-fn consume_sender_budget(
+/// Returns `true` if the transaction can be afforded under the current rolling ETH budget.
+fn consume_eth_budget(
     budget: &mut SenderBudget,
-    uses_token_fee: bool,
     tx_value: U256,
     gas_limit: u64,
     max_fee_per_gas: u128,
     l1_data_fee: U256,
-    token_id: Option<u16>,
-    fee_limit: Option<U256>,
-    required_token_amount: U256,
-    state_token_balance: Option<U256>,
 ) -> bool {
-    if uses_token_fee {
-        let (token_id, fee_limit) = match (token_id, fee_limit) {
-            (Some(token_id), Some(fee_limit)) => (token_id, fee_limit),
-            _ => return false,
-        };
-
-        let token_budget = budget
-            .token_balances
-            .entry(token_id)
-            .or_insert(state_token_balance.unwrap_or(U256::ZERO));
-
-        // Match REVM semantics with rolling sender budget:
-        // - fee_limit == 0 => use remaining token budget
-        // - fee_limit > remaining => cap by remaining token budget
-        let effective_limit = if fee_limit.is_zero() || fee_limit > *token_budget {
-            *token_budget
-        } else {
-            fee_limit
-        };
-
-        if effective_limit < required_token_amount || tx_value > budget.eth_balance {
-            return false;
-        }
-
-        *token_budget = (*token_budget).saturating_sub(required_token_amount);
-        budget.eth_balance = budget.eth_balance.saturating_sub(tx_value);
-        return true;
-    }
-
-    // ETH-fee path: consume full tx ETH cost (value + gas fee + l1_data_fee).
     let gas_fee = U256::from(gas_limit).saturating_mul(U256::from(max_fee_per_gas));
     let total_eth_cost = gas_fee.saturating_add(l1_data_fee).saturating_add(tx_value);
     if total_eth_cost > budget.eth_balance {
         return false;
     }
     budget.eth_balance = budget.eth_balance.saturating_sub(total_eth_cost);
+    true
+}
+
+/// Applies cumulative sender-budget check for the token-fee path and consumes budget on success.
+///
+/// Returns `true` if the transaction can be afforded under the current rolling token/ETH budget.
+fn consume_token_budget(
+    budget: &mut SenderBudget,
+    tx_value: U256,
+    token_id: Option<u16>,
+    fee_limit: Option<U256>,
+    required_token_amount: U256,
+    state_token_balance: Option<U256>,
+) -> bool {
+    let (token_id, fee_limit) = match (token_id, fee_limit) {
+        (Some(token_id), Some(fee_limit)) => (token_id, fee_limit),
+        _ => return false,
+    };
+
+    let token_budget = budget
+        .token_balances
+        .entry(token_id)
+        .or_insert(state_token_balance.unwrap_or(U256::ZERO));
+
+    // Match REVM semantics with rolling sender budget:
+    // - fee_limit == 0 => use remaining token budget
+    // - fee_limit > remaining => cap by remaining token budget
+    let effective_limit = if fee_limit.is_zero() || fee_limit > *token_budget {
+        *token_budget
+    } else {
+        fee_limit
+    };
+
+    if effective_limit < required_token_amount || tx_value > budget.eth_balance {
+        return false;
+    }
+
+    *token_budget = (*token_budget).saturating_sub(required_token_amount);
+    budget.eth_balance = budget.eth_balance.saturating_sub(tx_value);
     true
 }
 
@@ -263,18 +266,25 @@ where
                 let token_id = fields.as_ref().map(|f| f.fee_token_id);
                 let fee_limit = fields.as_ref().map(|f| f.fee_limit);
 
-                if !consume_sender_budget(
-                    &mut budget,
-                    validation.uses_token_fee,
-                    consensus_tx.value(),
-                    consensus_tx.gas_limit(),
-                    consensus_tx.max_fee_per_gas(),
-                    l1_data_fee,
-                    token_id,
-                    fee_limit,
-                    validation.required_token_amount,
-                    state_token_balance,
-                ) {
+                let affordable = if validation.uses_token_fee {
+                    consume_token_budget(
+                        &mut budget,
+                        consensus_tx.value(),
+                        token_id,
+                        fee_limit,
+                        validation.required_token_amount,
+                        state_token_balance,
+                    )
+                } else {
+                    consume_eth_budget(
+                        &mut budget,
+                        consensus_tx.value(),
+                        consensus_tx.gas_limit(),
+                        consensus_tx.max_fee_per_gas(),
+                        l1_data_fee,
+                    )
+                };
+                if !affordable {
                     tracing::debug!(
                         target: "morph_txpool::maintain",
                         tx_hash = ?tx.hash(),
@@ -316,34 +326,12 @@ mod tests {
             token_balances: HashMap::new(),
         };
 
-        let first = consume_sender_budget(
-            &mut budget,
-            false,
-            U256::from(20u64),
-            10,
-            3,
-            U256::from(5u64),
-            None,
-            None,
-            U256::ZERO,
-            None,
-        );
+        let first = consume_eth_budget(&mut budget, U256::from(20u64), 10, 3, U256::from(5u64));
         assert!(first);
         // total cost = value(20) + gas(30) + l1(5) = 55
         assert_eq!(budget.eth_balance, U256::from(45u64));
 
-        let second = consume_sender_budget(
-            &mut budget,
-            false,
-            U256::from(20u64),
-            10,
-            3,
-            U256::from(5u64),
-            None,
-            None,
-            U256::ZERO,
-            None,
-        );
+        let second = consume_eth_budget(&mut budget, U256::from(20u64), 10, 3, U256::from(5u64));
         assert!(!second);
         assert_eq!(budget.eth_balance, U256::from(45u64));
     }
@@ -355,12 +343,8 @@ mod tests {
             token_balances: HashMap::new(),
         };
 
-        let first = consume_sender_budget(
+        let first = consume_token_budget(
             &mut budget,
-            true,
-            U256::ZERO,
-            1,
-            1,
             U256::ZERO,
             Some(7),
             Some(U256::ZERO), // fee_limit=0 => use full remaining budget
@@ -373,12 +357,8 @@ mod tests {
             Some(U256::from(40u64))
         );
 
-        let second = consume_sender_budget(
+        let second = consume_token_budget(
             &mut budget,
-            true,
-            U256::ZERO,
-            1,
-            1,
             U256::ZERO,
             Some(7),
             Some(U256::ZERO),
@@ -400,12 +380,8 @@ mod tests {
         };
 
         // fee_limit caps the payment below required amount => reject
-        let limited = consume_sender_budget(
+        let limited = consume_token_budget(
             &mut budget,
-            true,
-            U256::ZERO,
-            1,
-            1,
             U256::ZERO,
             Some(9),
             Some(U256::from(30u64)),
@@ -415,13 +391,9 @@ mod tests {
         assert!(!limited);
 
         // Enough token, but ETH value exceeds remaining ETH budget => reject
-        let eth_value_fail = consume_sender_budget(
+        let eth_value_fail = consume_token_budget(
             &mut budget,
-            true,
             U256::from(6u64),
-            1,
-            1,
-            U256::ZERO,
             Some(9),
             Some(U256::from(100u64)),
             U256::from(10u64),
@@ -438,13 +410,9 @@ mod tests {
         };
 
         // Tx1: token-fee path, consumes token only for fee and ETH for value.
-        let tx1 = consume_sender_budget(
+        let tx1 = consume_token_budget(
             &mut budget,
-            true,
             U256::from(10u64), // value in ETH
-            1,
-            1,
-            U256::ZERO,
             Some(3),
             Some(U256::ZERO), // unlimited by tx field => bounded by remaining token budget
             U256::from(70u64),
@@ -458,29 +426,20 @@ mod tests {
         );
 
         // Tx2: ETH-fee path, consumes full ETH cost.
-        let tx2 = consume_sender_budget(
+        let tx2 = consume_eth_budget(
             &mut budget,
-            false,
             U256::from(20u64), // value
             5,                 // gas_limit
             4,                 // max_fee_per_gas => gas fee = 20
             U256::from(10u64), // l1 fee
-            None,
-            None,
-            U256::ZERO,
-            None,
         );
         assert!(tx2);
         // total eth cost = 20(value) + 20(gas) + 10(l1) = 50
         assert_eq!(budget.eth_balance, U256::from(40u64));
 
         // Tx3: token-fee path should now fail because remaining token budget is only 30.
-        let tx3 = consume_sender_budget(
+        let tx3 = consume_token_budget(
             &mut budget,
-            true,
-            U256::ZERO,
-            1,
-            1,
             U256::ZERO,
             Some(3),
             Some(U256::ZERO),
