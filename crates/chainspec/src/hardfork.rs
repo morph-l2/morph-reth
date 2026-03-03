@@ -164,14 +164,19 @@ pub trait MorphHardforks: EthereumHardforks {
 }
 
 impl From<MorphHardfork> for SpecId {
+    /// Maps a [`MorphHardfork`] to the closest standard [`SpecId`].
+    ///
+    /// The mapping must match go-ethereum Morph's EVM instruction sets:
+    /// - Bernoulli/Curie/Morph203 = CANCUN gas tables (MCOPY, TSTORE/TLOAD, transient storage)
+    /// - Viridian = PRAGUE (adds EIP-7702 delegation designator)
+    /// - Emerald/Jade = OSAKA (adds EIP-7939 CLZ opcode)
     fn from(value: MorphHardfork) -> Self {
         match value {
-            MorphHardfork::Bernoulli => Self::OSAKA,
-            MorphHardfork::Curie => Self::OSAKA,
-            MorphHardfork::Morph203 => Self::OSAKA,
-            MorphHardfork::Viridian => Self::OSAKA,
-            MorphHardfork::Emerald => Self::OSAKA,
-            MorphHardfork::Jade => Self::OSAKA,
+            MorphHardfork::Bernoulli | MorphHardfork::Curie | MorphHardfork::Morph203 => {
+                Self::CANCUN
+            }
+            MorphHardfork::Viridian => Self::PRAGUE,
+            MorphHardfork::Emerald | MorphHardfork::Jade => Self::OSAKA,
         }
     }
 }
@@ -179,22 +184,17 @@ impl From<MorphHardfork> for SpecId {
 impl From<SpecId> for MorphHardfork {
     /// Maps a [`SpecId`] to the *latest compatible* [`MorphHardfork`].
     ///
-    /// Note: this is intentionally not a strict inverse of
-    /// `From<MorphHardfork> for SpecId`, because multiple Morph
-    /// hardforks may share the same underlying EVM spec.
+    /// Since multiple Morph hardforks share the same SpecId (e.g.
+    /// Bernoulli/Curie/Morph203 all map to CANCUN), this returns the
+    /// latest hardfork for the given spec level.
     fn from(spec: SpecId) -> Self {
-        if spec.is_enabled_in(SpecId::from(Self::Jade)) {
+        if spec.is_enabled_in(SpecId::OSAKA) {
             Self::Jade
-        } else if spec.is_enabled_in(SpecId::from(Self::Emerald)) {
-            Self::Emerald
-        } else if spec.is_enabled_in(SpecId::from(Self::Viridian)) {
+        } else if spec.is_enabled_in(SpecId::PRAGUE) {
             Self::Viridian
-        } else if spec.is_enabled_in(SpecId::from(Self::Morph203)) {
-            Self::Morph203
-        } else if spec.is_enabled_in(SpecId::from(Self::Curie)) {
-            Self::Curie
         } else {
-            Self::Bernoulli
+            // CANCUN or below → Morph203 (latest CANCUN-level hardfork)
+            Self::Morph203
         }
     }
 }
@@ -279,5 +279,22 @@ mod tests {
         assert!(!MorphHardfork::Viridian.is_jade());
         assert!(!MorphHardfork::Emerald.is_jade());
         assert!(MorphHardfork::Jade.is_jade());
+    }
+
+    #[test]
+    fn test_morph_hardfork_to_specid_mapping() {
+        assert_eq!(SpecId::from(MorphHardfork::Bernoulli), SpecId::CANCUN);
+        assert_eq!(SpecId::from(MorphHardfork::Curie), SpecId::CANCUN);
+        assert_eq!(SpecId::from(MorphHardfork::Morph203), SpecId::CANCUN);
+        assert_eq!(SpecId::from(MorphHardfork::Viridian), SpecId::PRAGUE);
+        assert_eq!(SpecId::from(MorphHardfork::Emerald), SpecId::OSAKA);
+        assert_eq!(SpecId::from(MorphHardfork::Jade), SpecId::OSAKA);
+    }
+
+    #[test]
+    fn test_specid_to_morph_hardfork_mapping() {
+        assert_eq!(MorphHardfork::from(SpecId::CANCUN), MorphHardfork::Morph203);
+        assert_eq!(MorphHardfork::from(SpecId::PRAGUE), MorphHardfork::Viridian);
+        assert_eq!(MorphHardfork::from(SpecId::OSAKA), MorphHardfork::Jade);
     }
 }
