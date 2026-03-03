@@ -5,6 +5,7 @@
 //! by the sequencer to produce new blocks.
 
 use crate::EngineApiResult;
+use alloy_primitives::B256;
 use morph_payload_types::{AssembleL2BlockParams, ExecutableL2Data, GenericResponse, SafeL2Data};
 use morph_primitives::MorphHeader;
 

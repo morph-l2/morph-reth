@@ -4,6 +4,7 @@
 //! allowing the sequencer to interact with the execution layer via RPC.
 
 use crate::{EngineApiResult, api::MorphL2EngineApi};
+use alloy_primitives::B256;
 use jsonrpsee::{RpcModule, core::RpcResult, proc_macros::rpc};
 use morph_payload_types::{AssembleL2BlockParams, ExecutableL2Data, GenericResponse, SafeL2Data};
 use morph_primitives::MorphHeader;
@@ -117,11 +118,11 @@ where
     }
 
     async fn new_l2_block(&self, data: ExecutableL2Data) -> RpcResult<()> {
-        tracing::info!(
+        tracing::debug!(
             target: "morph::engine",
             block_number = data.number,
             block_hash = %data.hash,
-            "importing new L2 block"
+            "RPC newL2Block called"
         );
 
         self.inner.new_l2_block(data).await.map_err(|e| {
@@ -131,10 +132,10 @@ where
     }
 
     async fn new_safe_l2_block(&self, data: SafeL2Data) -> RpcResult<MorphHeader> {
-        tracing::info!(
+        tracing::debug!(
             target: "morph::engine",
             block_number = data.number,
-            "importing safe L2 block"
+            "RPC newSafeL2Block called"
         );
 
         self.inner.new_safe_l2_block(data).await.map_err(|e| {
