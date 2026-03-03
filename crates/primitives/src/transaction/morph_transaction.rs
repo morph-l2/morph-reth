@@ -816,11 +816,11 @@ impl Decodable for TxMorph {
         if first_byte == MORPH_TX_VERSION_1 {
             // V1: skip version byte, then decode RLP
             *buf = &buf[1..];
-        } else if first_byte != 0 && first_byte < 0xC0 {
+        } else if first_byte < 0xC0 {
             // Invalid: not a version we support and not an RLP list
             return Err(alloy_rlp::Error::Custom("unsupported morph tx version"));
         }
-        // V0: first_byte is 0 or >= 0xC0 (RLP list prefix)
+        // V0: first_byte is RLP list prefix (>= 0xC0)
 
         let header = Header::decode(buf)?;
         if !header.list {
