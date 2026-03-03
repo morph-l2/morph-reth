@@ -348,9 +348,9 @@ impl TxMorph {
         let first_byte = buf[0];
 
         // Check first byte to determine version:
-        // - V0 format (legacy AltFeeTx): first byte is 0 or RLP list prefix (0xC0-0xFF)
+        // - V0 format (legacy AltFeeTx): first byte is RLP list prefix (0xC0-0xFF), no version prefix
         // - V1+ format: first byte is version (0x01, 0x02, ...) followed by RLP
-        if first_byte == 0 || first_byte >= 0xC0 {
+        if first_byte >= 0xC0 {
             // V0 format: direct RLP decode (legacy compatible)
             Self::decode_fields_v0(buf)
         } else if first_byte == MORPH_TX_VERSION_1 {
@@ -716,11 +716,11 @@ impl RlpEcdsaDecodableTx for TxMorph {
 
         // Detect version:
         // - V1: first byte is version byte (0x01), skip it
-        // - V0: first byte is RLP list prefix (>= 0xC0) or 0x00
+        // - V0: first byte is RLP list prefix (>= 0xC0), no version prefix
         let version = if first_byte == MORPH_TX_VERSION_1 {
             *buf = &buf[1..]; // skip version byte
             MORPH_TX_VERSION_1
-        } else if first_byte == 0 || first_byte >= 0xC0 {
+        } else if first_byte >= 0xC0 {
             MORPH_TX_VERSION_0
         } else {
             return Err(alloy_rlp::Error::Custom("unsupported morph tx version"));
