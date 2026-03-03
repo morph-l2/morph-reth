@@ -21,6 +21,7 @@ use morph_primitives::MorphHeader;
 /// - `validate_l2_block`: Validate an L2 block without importing it
 /// - `new_l2_block`: Import and finalize a new L2 block
 /// - `new_safe_l2_block`: Import a safe L2 block from derivation
+/// - `set_block_tags`: Update safe/finalized block tags without importing a block
 #[async_trait::async_trait]
 #[auto_impl::auto_impl(Arc, &, Box)]
 pub trait MorphL2EngineApi: Send + Sync {
