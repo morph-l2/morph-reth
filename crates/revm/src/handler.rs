@@ -235,9 +235,11 @@ where
         // against basefee — the same rule that applies to EIP-1559 transactions.
         // Token-fee MorphTx (fee_token_id > 0) intentionally skips this check because
         // fees are paid in ERC20 tokens.
+        // Skip for simulation contexts (eth_call / eth_estimateGas) where fee charge
+        // is disabled, matching go-ethereum's NoBaseFee behaviour.
         if evm.ctx_ref().tx().is_morph_tx()
             && !evm.ctx_ref().tx().uses_token_fee()
-            && !evm.ctx_ref().cfg().is_base_fee_check_disabled()
+            && !evm.ctx_ref().cfg().is_fee_charge_disabled()
         {
             let base_fee = Some(evm.ctx_ref().block().basefee() as u128);
             validation::validate_priority_fee_tx(
