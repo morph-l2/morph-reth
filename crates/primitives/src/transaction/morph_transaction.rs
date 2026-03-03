@@ -662,14 +662,95 @@ impl RlpEcdsaEncodableTx for TxMorph {
     fn rlp_encode_fields(&self, out: &mut dyn BufMut) {
         self.encode_fields(out);
     }
+
+    /// Override: For V1, include the version byte prefix before the RLP list.
+    ///
+    /// Wire format:
+    /// - V0: `RLP([fields..., V, R, S])`
+    /// - V1: `version_byte(0x01) + RLP([fields..., V, R, S])`
+    fn rlp_encode_signed(&self, signature: &Signature, out: &mut dyn BufMut) {
+        if !self.is_v0() {
+            out.put_u8(self.version);
+        }
+        self.rlp_header_signed(signature).encode(out);
+        self.rlp_encode_fields(out);
+        signature.write_rlp_vrs(out, signature.v());
+    }
+
+    /// Override: Account for the version byte prefix in V1 length calculation.
+    fn rlp_encoded_length_with_signature(&self, signature: &Signature) -> usize {
+        let base = self.rlp_header_signed(signature).length_with_payload();
+        if self.is_v0() {
+            base
+        } else {
+            base + 1 // version byte
+        }
+    }
 }
 
 impl RlpEcdsaDecodableTx for TxMorph {
     const DEFAULT_TX_TYPE: u8 = { Self::tx_type() };
 
-    /// Decodes the inner [TxEip1559] fields from RLP bytes.
+    /// Decodes the inner TxMorph fields from RLP bytes.
+    ///
+    /// Note: This is only used as a fallback; the primary decode path goes through
+    /// the overridden `rlp_decode_with_signature` which handles the V1 version byte.
     fn rlp_decode_fields(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
         Self::decode_fields(buf)
+    }
+
+    /// Override: Handle the V1 version byte before the RLP list.
+    ///
+    /// Wire format (after txType byte is consumed):
+    /// - V0: `RLP([fields_v0..., V, R, S])`
+    /// - V1: `version_byte(0x01) + RLP([fields_v1..., V, R, S])`
+    ///
+    /// The default implementation assumes the buffer starts with an RLP list header,
+    /// which fails for V1 because the first byte is the version byte (0x01).
+    fn rlp_decode_with_signature(buf: &mut &[u8]) -> alloy_rlp::Result<(Self, Signature)> {
+        if buf.is_empty() {
+            return Err(alloy_rlp::Error::InputTooShort);
+        }
+
+        let first_byte = buf[0];
+
+        // Detect version:
+        // - V1: first byte is version byte (0x01), skip it
+        // - V0: first byte is RLP list prefix (>= 0xC0) or 0x00
+        let version = if first_byte == MORPH_TX_VERSION_1 {
+            *buf = &buf[1..]; // skip version byte
+            MORPH_TX_VERSION_1
+        } else if first_byte == 0 || first_byte >= 0xC0 {
+            MORPH_TX_VERSION_0
+        } else {
+            return Err(alloy_rlp::Error::Custom("unsupported morph tx version"));
+        };
+
+        // Now decode: RLP([fields..., V, R, S])
+        let header = Header::decode(buf)?;
+        if !header.list {
+            return Err(alloy_rlp::Error::UnexpectedString);
+        }
+
+        let remaining = buf.len();
+
+        // Decode fields based on version
+        let tx = if version == MORPH_TX_VERSION_1 {
+            Self::decode_fields_v1_inner(buf)?
+        } else {
+            Self::decode_fields_v0_inner(buf)?
+        };
+
+        let signature = Signature::decode_rlp_vrs(buf, bool::decode)?;
+
+        if buf.len() + header.payload_length != remaining {
+            return Err(alloy_rlp::Error::ListLengthMismatch {
+                expected: header.payload_length,
+                got: remaining - buf.len(),
+            });
+        }
+
+        Ok((tx, signature))
     }
 }
 
@@ -1819,5 +1900,174 @@ mod tests {
         let result = TxMorph::decode_fields_v1(&mut rlp_buf.as_slice());
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), alloy_rlp::Error::Custom(_)));
+    }
+
+    #[test]
+    fn test_morph_signed_v1_decode_2718_roundtrip() {
+        use alloy_consensus::Signed;
+        use alloy_consensus::transaction::RlpEcdsaDecodableTx;
+        use alloy_consensus::transaction::RlpEcdsaEncodableTx;
+        use alloy_eips::eip2718::Decodable2718;
+
+        let reference = B256::from([0xab; 32]);
+        let memo = Bytes::from(vec![0xca, 0xfe]);
+        let tx = TxMorph {
+            chain_id: 1,
+            nonce: 42,
+            gas_limit: 21_000,
+            max_fee_per_gas: 100_000_000_000,
+            max_priority_fee_per_gas: 2_000_000_000,
+            to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
+            value: U256::from(1_000_000_000_000_000_000u128),
+            access_list: AccessList::default(),
+            input: Bytes::from(vec![0x12, 0x34]),
+            version: 1, // V1
+            fee_token_id: 0,
+            fee_limit: U256::ZERO,
+            reference: Some(reference),
+            memo: Some(memo.clone()),
+        };
+
+        // Create a dummy signature for testing
+        let signature = Signature::new(U256::from(1u64), U256::from(2u64), false);
+
+        // Test rlp_encode_signed → rlp_decode_with_signature roundtrip
+        let mut signed_buf = Vec::new();
+        tx.rlp_encode_signed(&signature, &mut signed_buf);
+
+        // First byte should be version byte for V1
+        assert_eq!(
+            signed_buf[0], MORPH_TX_VERSION_1,
+            "First byte should be version byte (0x01) for V1"
+        );
+        // Second byte should be RLP list prefix
+        assert!(
+            signed_buf[1] >= 0xC0,
+            "Second byte should be RLP list prefix, got 0x{:02x}",
+            signed_buf[1]
+        );
+
+        // Verify length consistency
+        let expected_len = tx.rlp_encoded_length_with_signature(&signature);
+        assert_eq!(
+            signed_buf.len(),
+            expected_len,
+            "Encoded length should match rlp_encoded_length_with_signature"
+        );
+
+        // Decode
+        let (decoded_tx, decoded_sig) =
+            TxMorph::rlp_decode_with_signature(&mut signed_buf.as_slice())
+                .expect("Should decode V1 signed tx");
+
+        assert_eq!(decoded_tx.version, MORPH_TX_VERSION_1);
+        assert_eq!(decoded_tx.chain_id, tx.chain_id);
+        assert_eq!(decoded_tx.nonce, tx.nonce);
+        assert_eq!(decoded_tx.gas_limit, tx.gas_limit);
+        assert_eq!(decoded_tx.max_fee_per_gas, tx.max_fee_per_gas);
+        assert_eq!(
+            decoded_tx.max_priority_fee_per_gas,
+            tx.max_priority_fee_per_gas
+        );
+        assert_eq!(decoded_tx.to, tx.to);
+        assert_eq!(decoded_tx.value, tx.value);
+        assert_eq!(decoded_tx.input, tx.input);
+        assert_eq!(decoded_tx.fee_token_id, tx.fee_token_id);
+        assert_eq!(decoded_tx.fee_limit, tx.fee_limit);
+        assert_eq!(decoded_tx.reference, Some(reference));
+        assert_eq!(decoded_tx.memo, Some(memo.clone()));
+        assert_eq!(decoded_sig, signature);
+
+        // Test full EIP-2718 roundtrip: encode_2718 → decode_2718
+        // This is the path used by MorphTxEnvelope::decode_2718
+        let signed_tx = Signed::new_unhashed(tx.clone(), signature);
+        let mut eip2718_buf = Vec::new();
+        signed_tx.encode_2718(&mut eip2718_buf);
+
+        // First byte should be txType (0x7F)
+        assert_eq!(eip2718_buf[0], MORPH_TX_TYPE_ID);
+        // Second byte should be version (0x01) for V1
+        assert_eq!(eip2718_buf[1], MORPH_TX_VERSION_1);
+        // Third byte should be RLP list prefix
+        assert!(
+            eip2718_buf[2] >= 0xC0,
+            "Third byte should be RLP list prefix, got 0x{:02x}",
+            eip2718_buf[2]
+        );
+
+        // Decode via decode_2718
+        let decoded_signed = Signed::<TxMorph>::decode_2718(&mut eip2718_buf.as_slice())
+            .expect("Should decode V1 signed tx via decode_2718");
+
+        assert_eq!(decoded_signed.tx().version, MORPH_TX_VERSION_1);
+        assert_eq!(decoded_signed.tx().chain_id, 1);
+        assert_eq!(decoded_signed.tx().nonce, 42);
+        assert_eq!(decoded_signed.tx().reference, Some(reference));
+        assert_eq!(decoded_signed.tx().memo, Some(memo));
+        assert!(decoded_signed.tx().is_v1());
+    }
+
+    #[test]
+    fn test_morph_signed_v0_decode_2718_roundtrip() {
+        use alloy_consensus::Signed;
+        use alloy_consensus::transaction::RlpEcdsaEncodableTx;
+        use alloy_eips::eip2718::Decodable2718;
+
+        let tx = TxMorph {
+            chain_id: 1,
+            nonce: 10,
+            gas_limit: 21_000,
+            max_fee_per_gas: 100_000_000_000,
+            max_priority_fee_per_gas: 2_000_000_000,
+            to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
+            value: U256::from(100u64),
+            access_list: AccessList::default(),
+            input: Bytes::new(),
+            version: 0, // V0
+            fee_token_id: 1,
+            fee_limit: U256::from(1000u64),
+            reference: None,
+            memo: None,
+        };
+
+        let signature = Signature::new(U256::from(1u64), U256::from(2u64), false);
+
+        // Test rlp_encode_signed for V0 (no version byte prefix)
+        let mut signed_buf = Vec::new();
+        tx.rlp_encode_signed(&signature, &mut signed_buf);
+
+        // First byte should be RLP list prefix (no version byte for V0)
+        assert!(
+            signed_buf[0] >= 0xC0,
+            "First byte should be RLP list prefix for V0, got 0x{:02x}",
+            signed_buf[0]
+        );
+
+        // Full EIP-2718 roundtrip
+        let signed_tx = Signed::new_unhashed(tx.clone(), signature);
+        let mut eip2718_buf = Vec::new();
+        signed_tx.encode_2718(&mut eip2718_buf);
+
+        // First byte should be txType (0x7F)
+        assert_eq!(eip2718_buf[0], MORPH_TX_TYPE_ID);
+        // Second byte should be RLP list prefix (NO version byte for V0)
+        assert!(
+            eip2718_buf[1] >= 0xC0,
+            "Second byte should be RLP list prefix for V0, got 0x{:02x}",
+            eip2718_buf[1]
+        );
+
+        // Decode via decode_2718
+        let decoded_signed = Signed::<TxMorph>::decode_2718(&mut eip2718_buf.as_slice())
+            .expect("Should decode V0 signed tx via decode_2718");
+
+        assert_eq!(decoded_signed.tx().version, MORPH_TX_VERSION_0);
+        assert_eq!(decoded_signed.tx().chain_id, 1);
+        assert_eq!(decoded_signed.tx().nonce, 10);
+        assert_eq!(decoded_signed.tx().fee_token_id, 1);
+        assert_eq!(decoded_signed.tx().fee_limit, U256::from(1000u64));
+        assert_eq!(decoded_signed.tx().reference, None);
+        assert_eq!(decoded_signed.tx().memo, None);
+        assert!(decoded_signed.tx().is_v0());
     }
 }
