@@ -112,11 +112,12 @@ fn build_hardforks(genesis: &Genesis, chain_info: &MorphGenesisInfo) -> ChainHar
     // Merge all Morph hardforks into the base hardforks
     hardforks.extend(block_forks.chain(time_forks));
 
-    // Activate Prague at Emerald time to enable EIP-7702 support
-    if let Some(emerald_time) = hardfork_info.emerald_time {
+    // Activate Prague at Viridian time to align with go-ethereum's
+    // EIP-7702 (SetCode tx) activation point.
+    if let Some(viridian_time) = hardfork_info.viridian_time {
         hardforks.insert(
             EthereumHardfork::Prague,
-            ForkCondition::Timestamp(emerald_time),
+            ForkCondition::Timestamp(viridian_time),
         );
     }
 
@@ -713,8 +714,8 @@ mod tests {
     }
 
     #[test]
-    fn test_prague_activated_with_emerald() {
-        // Prague should be activated at the same time as Emerald
+    fn test_prague_activated_with_viridian() {
+        // Prague should be activated at the same time as Viridian
         // This enables EIP-7702 in the transaction pool validator
         let genesis_json = json!({
             "config": {
@@ -748,23 +749,23 @@ mod tests {
             serde_json::from_value(genesis_json).expect("genesis should be valid");
         let chainspec = MorphChainSpec::from(genesis);
 
-        // Prague should not be active before Emerald
-        assert!(!chainspec.is_prague_active_at_timestamp(2999));
+        // Prague should not be active before Viridian
+        assert!(!chainspec.is_prague_active_at_timestamp(1999));
 
-        // Prague should be active at Emerald time
-        assert!(chainspec.is_prague_active_at_timestamp(3000));
+        // Prague should be active at Viridian time
+        assert!(chainspec.is_prague_active_at_timestamp(2000));
 
-        // Prague should remain active after Emerald
+        // Prague should remain active after Viridian
         assert!(chainspec.is_prague_active_at_timestamp(5000));
 
         // Verify the fork condition is set correctly
         let prague_activation = chainspec.ethereum_fork_activation(EthereumHardfork::Prague);
-        assert_eq!(prague_activation, ForkCondition::Timestamp(3000));
+        assert_eq!(prague_activation, ForkCondition::Timestamp(2000));
     }
 
     #[test]
-    fn test_prague_not_activated_without_emerald() {
-        // If Emerald is not configured, Prague should not be activated
+    fn test_prague_not_activated_without_viridian() {
+        // If Viridian is not configured, Prague should not be activated
         let genesis_json = json!({
             "config": {
                 "chainId": 1337,
@@ -786,7 +787,6 @@ mod tests {
                 "bernoulliBlock": 0,
                 "curieBlock": 0,
                 "morph203Time": 1000,
-                "viridianTime": 2000,
                 "morph": {}
             },
             "alloc": {}
@@ -796,7 +796,7 @@ mod tests {
             serde_json::from_value(genesis_json).expect("genesis should be valid");
         let chainspec = MorphChainSpec::from(genesis);
 
-        // Prague should not be active since Emerald is not configured
+        // Prague should not be active since Viridian is not configured
         assert!(!chainspec.is_prague_active_at_timestamp(0));
         assert!(!chainspec.is_prague_active_at_timestamp(5000));
     }
