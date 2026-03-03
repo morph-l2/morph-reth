@@ -1,6 +1,5 @@
 use crate::{MorphBlockAssembler, MorphEvmConfig, MorphEvmError, MorphNextBlockEnvAttributes};
 use alloy_consensus::BlockHeader;
-use alloy_primitives::Address;
 use morph_chainspec::hardfork::{MorphHardfork, MorphHardforks};
 use morph_primitives::Block;
 use morph_primitives::{MorphHeader, MorphPrimitives};
@@ -12,21 +11,6 @@ use revm::context::{BlockEnv, CfgEnv};
 use revm::context_interface::block::BlobExcessGasAndPrice;
 use revm::primitives::U256;
 use std::borrow::Cow;
-
-impl MorphEvmConfig {
-    /// Resolves who receives execution-layer fee rewards.
-    ///
-    /// When fee vault is configured, Morph routes fees to the vault regardless of
-    /// the header/suggested beneficiary. This keeps execution accounting aligned
-    /// with Morph's fee vault model while consensus still enforces header coinbase rules.
-    fn resolve_fee_recipient(&self, fallback: Address) -> Address {
-        let chain_spec = self.chain_spec();
-        chain_spec
-            .fee_vault_address()
-            .filter(|_| chain_spec.is_fee_vault_enabled())
-            .unwrap_or(fallback)
-    }
-}
 
 impl ConfigureEvm for MorphEvmConfig {
     type Primitives = MorphPrimitives;
@@ -57,7 +41,7 @@ impl ConfigureEvm for MorphEvmConfig {
         // Morph allows transactions with gas limit > 16777216 (EIP-7825 cap)
         cfg_env.tx_gas_limit_cap = Some(header.gas_limit());
 
-        let fee_recipient = self.resolve_fee_recipient(header.beneficiary());
+        let fee_recipient = self.chain_spec().fee_vault_address().unwrap_or_else(|| header.beneficiary());
 
         // Morph doesn't support EIP-4844 blob transactions, but when SpecId >= CANCUN,
         // revm requires `blob_excess_gas_and_price` to be set. We provide a placeholder
@@ -103,7 +87,7 @@ impl ConfigureEvm for MorphEvmConfig {
         // Morph allows transactions with gas limit > 16777216 (EIP-7825 cap)
         cfg_env.tx_gas_limit_cap = Some(attributes.gas_limit);
 
-        let fee_recipient = self.resolve_fee_recipient(attributes.suggested_fee_recipient);
+        let fee_recipient = self.chain_spec().fee_vault_address().unwrap_or(attributes.suggested_fee_recipient);
 
         // Morph doesn't support EIP-4844 blob transactions, but when SpecId >= CANCUN,
         // revm requires `blob_excess_gas_and_price` to be set. We provide a placeholder
@@ -159,71 +143,5 @@ impl ConfigureEvm for MorphEvmConfig {
             withdrawals: attributes.inner.withdrawals.map(Cow::Owned),
             extra_data: attributes.inner.extra_data,
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use alloy_primitives::address;
-    use serde_json::json;
-    use std::sync::Arc;
-
-    fn create_test_chainspec(with_fee_vault: bool) -> Arc<morph_chainspec::MorphChainSpec> {
-        let morph_cfg = if with_fee_vault {
-            json!({
-                "feeVaultAddress": "0x530000000000000000000000000000000000000a"
-            })
-        } else {
-            json!({})
-        };
-
-        let genesis_json = json!({
-            "config": {
-                "chainId": 1337,
-                "homesteadBlock": 0,
-                "eip150Block": 0,
-                "eip155Block": 0,
-                "eip158Block": 0,
-                "byzantiumBlock": 0,
-                "constantinopleBlock": 0,
-                "petersburgBlock": 0,
-                "istanbulBlock": 0,
-                "berlinBlock": 0,
-                "londonBlock": 0,
-                "mergeNetsplitBlock": 0,
-                "terminalTotalDifficulty": 0,
-                "terminalTotalDifficultyPassed": true,
-                "shanghaiTime": 0,
-                "cancunTime": 0,
-                "bernoulliBlock": 0,
-                "curieBlock": 0,
-                "morph203Time": 0,
-                "viridianTime": 0,
-                "morph": morph_cfg
-            },
-            "alloc": {}
-        });
-
-        let genesis: alloy_genesis::Genesis =
-            serde_json::from_value(genesis_json).expect("genesis should be valid");
-        Arc::new(morph_chainspec::MorphChainSpec::from(genesis))
-    }
-
-    #[test]
-    fn test_resolve_fee_recipient_uses_fee_vault_when_enabled() {
-        let config = MorphEvmConfig::new_with_default_factory(create_test_chainspec(true));
-        let fallback = address!("1111111111111111111111111111111111111111");
-        let expected_vault = address!("530000000000000000000000000000000000000a");
-
-        assert_eq!(config.resolve_fee_recipient(fallback), expected_vault);
-    }
-
-    #[test]
-    fn test_resolve_fee_recipient_falls_back_when_fee_vault_disabled() {
-        let config = MorphEvmConfig::new_with_default_factory(create_test_chainspec(false));
-        let fallback = address!("2222222222222222222222222222222222222222");
-
-        assert_eq!(config.resolve_fee_recipient(fallback), fallback);
     }
 }
