@@ -493,10 +493,12 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
             .send_new_payload(builder_attrs)
             .await
             .map_err(|_| {
-                MorphEngineApiError::BlockBuildError("failed to receive build response".to_string())
+                MorphEngineApiError::BlockBuildError("failed to send build request".to_string())
             })?
             .map_err(|e| {
-                MorphEngineApiError::BlockBuildError(format!("failed to send build request: {e}"))
+                MorphEngineApiError::BlockBuildError(format!(
+                    "failed to receive build response: {e}"
+                ))
             })?;
 
         self.payload_builder
