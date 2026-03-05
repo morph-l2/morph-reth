@@ -22,12 +22,24 @@ fi
 # Ensure log directory exists
 mkdir -p "$(dirname "${NODE_LOG_FILE}")"
 
-# Start morphnode with pm2
-pm2 start "${MORPHNODE_BIN}" --name morph-node -- \
+# Build node args
+args=(
   --home "${NODE_HOME}" \
   --l2.jwt-secret "${JWT_SECRET}" \
   --l2.eth "http://${RETH_HTTP_ADDR}:${RETH_HTTP_PORT}" \
   --l2.engine "http://${RETH_AUTHRPC_ADDR}:${RETH_AUTHRPC_PORT}" \
+  --l1.rpc "${MORPH_NODE_L1_RPC}" \
+  --sync.depositContractAddr "${MORPH_NODE_DEPOSIT_CONTRACT}" \
   --log.filename "${NODE_LOG_FILE}"
+)
+
+if [[ -n "${MORPH_NODE_EXTRA_FLAGS}" ]]; then
+  # shellcheck disable=SC2206
+  extra_flags=(${MORPH_NODE_EXTRA_FLAGS})
+  args+=("${extra_flags[@]}")
+fi
+
+# Start morphnode with pm2
+pm2 start "${MORPHNODE_BIN}" --name morph-node -- "${args[@]}"
 
 echo "Logs: pm2 logs morph-node"
