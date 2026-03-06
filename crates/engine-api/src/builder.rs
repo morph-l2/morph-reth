@@ -310,19 +310,21 @@ where
             });
         }
 
-        let imported_header = self.import_l2_block_via_engine(data).await?;
+        let block_hash = data.hash;
+        let block_number = data.number;
+        self.import_l2_block_via_engine(data).await?;
 
         tracing::debug!(
             target: "morph::engine",
-            block_hash = %imported_header.hash_slow(),
-            block_number = imported_header.number(),
+            block_hash = %block_hash,
+            block_number,
             "L2 block accepted via engine tree"
         );
 
         Ok(())
     }
 
-    async fn new_safe_l2_block(&self, data: SafeL2Data) -> EngineApiResult<MorphHeader> {
+    async fn new_safe_l2_block(&self, mut data: SafeL2Data) -> EngineApiResult<MorphHeader> {
         tracing::debug!(
             target: "morph::engine",
             block_number = data.number,
@@ -342,29 +344,32 @@ where
         // 2. Assemble the block from SafeL2Data inputs.
         let assemble_params = AssembleL2BlockParams {
             number: data.number,
-            transactions: data.transactions.clone(),
+            // Move transactions out of data to avoid cloning the full Vec<Bytes>.
+            transactions: std::mem::take(&mut data.transactions),
             timestamp: Some(data.timestamp),
         };
 
         let built_payload = self
             .build_l2_payload(assemble_params, Some(data.gas_limit), data.base_fee_per_gas)
             .await?;
-        let executable_data = built_payload.executable_data.clone();
+        let executable_data = built_payload.executable_data;
+        // Save hash before moving executable_data into the import call.
+        let block_hash = executable_data.hash;
 
         // 3. Import the block through reth engine tree and return the in-path header
         // (do not rely on immediate DB visibility after FCU).
         let header = self
-            .import_l2_block_via_engine(executable_data.clone())
+            .import_l2_block_via_engine(executable_data)
             .await?;
 
         // Update safe block tag separately, matching geth's decoupled design.
         // Best-effort: block import already succeeded, so don't fail the whole
         // call if only the tag update encounters an issue. The tag can be
         // corrected later via engine_setBlockTags.
-        if let Err(e) = self.set_block_tags(executable_data.hash, B256::ZERO).await {
+        if let Err(e) = self.set_block_tags(block_hash, B256::ZERO).await {
             tracing::warn!(
                 target: "morph::engine",
-                block_hash = %executable_data.hash,
+                block_hash = %block_hash,
                 error = %e,
                 "failed to update safe tag after block import; tag can be set later via setBlockTags"
             );
@@ -372,7 +377,7 @@ where
 
         tracing::debug!(
             target: "morph::engine",
-            block_hash = %header.hash_slow(),
+            block_hash = %block_hash,
             "safe L2 block imported successfully"
         );
 
@@ -483,7 +488,7 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
                 withdrawals: Some(Vec::new()),
                 parent_beacon_block_root: None,
             },
-            transactions: Some(params.transactions.clone()),
+            transactions: Some(params.transactions),
             gas_limit: gas_limit_override,
             base_fee_per_gas: base_fee_override,
         };
@@ -568,11 +573,10 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
         // canonical_in_memory_state asynchronously; without this call, morph-node
         // would see eth_blockNumber return the old block number and reject the next
         // block as ErrWrongBlockNumber.
+        self.engine_state_tracker
+            .record_local_head(data.number, data.hash, data.timestamp);
         self.provider
             .set_canonical_head(SealedHeader::new(header.clone(), data.hash));
-
-        self.engine_state_tracker
-            .record_local_head(header.number(), data.hash, header.timestamp());
 
         tracing::info!(
             target: "morph::engine",
@@ -676,15 +680,20 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
             ommers: Default::default(),
             withdrawals: None,
         };
-        let sealed_block = SealedBlock::seal_slow(Block::new(header.clone(), body));
 
-        if sealed_block.hash() != data.hash {
+        // Compute header hash once and verify against expected hash before
+        // constructing the sealed block. This avoids the clone + re-hash that
+        // seal_slow would perform, saving one keccak256 + one MorphHeader clone
+        // per block import.
+        let computed_hash = header.hash_slow();
+        if computed_hash != data.hash {
             return Err(MorphEngineApiError::ValidationFailed(format!(
                 "block hash mismatch: expected {}, computed {}",
-                data.hash,
-                sealed_block.hash()
+                data.hash, computed_hash
             )));
         }
+        let sealed_block =
+            SealedBlock::new_unchecked(Block::new(header.clone(), body), computed_hash);
 
         Ok((
             MorphExecutionData::with_expected_withdraw_trie_root(

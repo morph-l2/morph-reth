@@ -135,15 +135,8 @@ impl MorphTxEnvelope {
     /// Encode the transaction according to [EIP-2718] rules. First a 1-byte
     /// type flag in the range 0x0-0x7f, then the body of the transaction.
     pub fn rlp(&self) -> Bytes {
-        let mut bytes = BytesMut::new();
-        match self {
-            Self::Legacy(tx) => tx.encode_2718(&mut bytes),
-            Self::Eip2930(tx) => tx.encode_2718(&mut bytes),
-            Self::Eip1559(tx) => tx.encode_2718(&mut bytes),
-            Self::Eip7702(tx) => tx.encode_2718(&mut bytes),
-            Self::L1Msg(tx) => tx.encode_2718(&mut bytes),
-            Self::Morph(tx) => tx.encode_2718(&mut bytes),
-        }
+        let mut bytes = BytesMut::with_capacity(self.encode_2718_len());
+        self.encode_2718(&mut bytes);
         Bytes(bytes.freeze())
     }
 }
@@ -378,6 +371,14 @@ mod codec {
         // For backwards compatibility purposes only 2 bits of the type are encoded in the identifier
         // parameter. In the case of a [`COMPACT_EXTENDED_IDENTIFIER_FLAG`], the full transaction type
         // is read from the buffer as a single byte.
+        /// Decodes `MorphTxType` from its compact (database) representation.
+        ///
+        /// # Panics
+        ///
+        /// Panics on unknown identifiers. The `Compact` trait is infallible by design
+        /// (reth convention) — compact encoding is only used for internal DB storage,
+        /// never for untrusted network data (which goes through RLP and returns `Result`).
+        /// An unknown identifier here indicates database corruption, which is unrecoverable.
         fn from_compact(mut buf: &[u8], identifier: usize) -> (Self, &[u8]) {
             use bytes::Buf;
             (
@@ -391,10 +392,16 @@ mod codec {
                             EIP7702_TX_TYPE_ID => Self::Eip7702,
                             crate::transaction::L1_TX_TYPE_ID => Self::L1Msg,
                             crate::transaction::MORPH_TX_TYPE_ID => Self::Morph,
-                            _ => panic!("Unsupported TxType identifier: {extended_identifier}"),
+                            _ => panic!(
+                                "Unsupported MorphTxType compact identifier: {extended_identifier} \
+                                 (database corruption — compact encoding is only used for DB storage)"
+                            ),
                         }
                     }
-                    _ => panic!("Unknown identifier for TxType: {identifier}"),
+                    _ => panic!(
+                        "Unknown MorphTxType compact identifier: {identifier} \
+                         (database corruption — compact encoding is only used for DB storage)"
+                    ),
                 },
                 buf,
             )

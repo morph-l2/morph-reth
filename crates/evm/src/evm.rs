@@ -71,7 +71,8 @@ impl<DB: Database> MorphEvm<DB> {
             .with_db(db)
             .with_block(input.block_env)
             .with_cfg(input.cfg_env)
-            .with_tx(Default::default());
+            .with_tx(Default::default())
+            .with_chain(morph_revm::L1BlockInfo::default());
 
         // Create precompiles for the hardfork and wrap in PrecompilesMap
         let morph_precompiles = MorphPrecompiles::new_with_spec(spec);
@@ -107,14 +108,34 @@ impl<DB: Database, I> MorphEvm<DB, I> {
 
     /// Takes the inner EVM's revert logs.
     ///
-    /// This is used as a work around to allow logs to be
-    /// included for reverting transactions.
+    /// Morph requires logs from reverted transactions to be included in receipts
+    /// (matching go-ethereum's `morph-l2/go-ethereum` behavior). Standard revm
+    /// discards logs on revert, so we capture them from the EVM's internal log
+    /// buffer before they are cleared.
     ///
-    /// TODO: remove once revm supports emitting logs for reverted transactions
-    ///
+    /// This workaround is needed until revm natively supports emitting logs for
+    /// reverted transactions. Tracked in:
     /// <https://github.com/morphxyz/morph/pull/729>
     pub fn take_revert_logs(&mut self) -> Vec<Log> {
         std::mem::take(&mut self.inner.logs)
+    }
+
+    /// Returns the cached token fee info from the handler's validation phase.
+    ///
+    /// Avoids redundant DB reads when the block executor needs token fee
+    /// parameters (e.g., for receipt construction).
+    #[inline]
+    pub fn cached_token_fee_info(&self) -> Option<morph_revm::TokenFeeInfo> {
+        self.inner.cached_token_fee_info()
+    }
+
+    /// Returns the L1 data fee cached during handler validation.
+    ///
+    /// Avoids re-encoding the full transaction RLP in the block executor's
+    /// receipt-building path.
+    #[inline]
+    pub fn cached_l1_data_fee(&self) -> alloy_primitives::U256 {
+        self.inner.cached_l1_data_fee()
     }
 }
 

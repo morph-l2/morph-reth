@@ -17,7 +17,6 @@ use crate::{
     MorphEvm, MorphInvalidTransaction,
     error::MorphHaltReason,
     evm::MorphContext,
-    l1block::L1BlockInfo,
     token_fee::{TokenFeeInfo, compute_mapping_slot_for_address, query_erc20_balance},
     tx::MorphTxExt,
 };
@@ -95,6 +94,10 @@ where
         &self,
         evm: &mut Self::Evm,
     ) -> Result<(), Self::Error> {
+        // Reset per-transaction caches from the previous iteration.
+        evm.cached_l1_data_fee = U256::ZERO;
+        evm.cached_token_fee_info = None;
+
         let (_, tx, _, journal, _, _) = evm.ctx().all_mut();
 
         // L1 message - skip fee validation
@@ -180,7 +183,12 @@ where
         evm: &mut Self::Evm,
         exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
     ) -> Result<(), Self::Error> {
-        let (block, tx, cfg, journal, _, _) = evm.ctx().all_mut();
+        // Reuse the L1 data fee cached during validate_and_deduct_eth_fee /
+        // validate_and_deduct_token_fee, avoiding a redundant calculate_tx_l1_cost call.
+        // Read before ctx().all_mut() borrows evm.
+        let l1_data_fee = evm.cached_l1_data_fee;
+
+        let (block, tx, _, journal, _, _) = evm.ctx().all_mut();
 
         // L1 messages skip all reward.
         // Token-fee MorphTx rewards are already applied when token fee is deducted.
@@ -192,23 +200,6 @@ where
 
         let basefee = block.basefee() as u128;
         let effective_gas_price = tx.effective_gas_price(basefee);
-
-        // Get the current hardfork for L1 fee calculation
-        let hardfork = cfg.spec();
-
-        // Fetch L1 block info from the L1 Gas Price Oracle contract
-        let l1_block_info = L1BlockInfo::try_fetch(journal.db_mut(), *hardfork)?;
-
-        // Get RLP-encoded transaction bytes for L1 fee calculation
-        // This represents the full transaction data posted to L1 for data availability
-        let rlp_bytes = tx
-            .rlp_bytes
-            .as_ref()
-            .map(|b| b.as_ref())
-            .unwrap_or_default();
-
-        // Calculate L1 data fee based on full RLP-encoded transaction
-        let l1_data_fee = l1_block_info.calculate_tx_l1_cost(rlp_bytes, *hardfork);
 
         let gas_used = exec_result.gas().used();
 
@@ -328,18 +319,14 @@ where
     DB: alloy_evm::Database,
 {
     /// Validate and deduct ETH-based gas fees.
+    #[inline]
     fn validate_and_deduct_eth_fee(
         &self,
         evm: &mut MorphEvm<DB, I>,
     ) -> Result<(), EVMError<DB::Error, MorphInvalidTransaction>> {
-        // Get the current hardfork for L1 fee calculation
         let hardfork = *evm.ctx_ref().cfg().spec();
 
-        // Fetch L1 block info from the L1 Gas Price Oracle contract
-        let l1_block_info = L1BlockInfo::try_fetch(evm.ctx_mut().db_mut(), hardfork)?;
-
         // Get RLP-encoded transaction bytes for L1 fee calculation
-        // This represents the full transaction data posted to L1 for data availability
         let rlp_bytes = evm
             .ctx_ref()
             .tx()
@@ -348,8 +335,9 @@ where
             .map(|b| b.as_ref())
             .unwrap_or_default();
 
-        // Calculate L1 data fee based on full RLP-encoded transaction
-        let l1_data_fee = l1_block_info.calculate_tx_l1_cost(rlp_bytes, hardfork);
+        // Calculate L1 data fee using the cached L1BlockInfo from context chain field.
+        let l1_data_fee = evm.ctx_ref().chain.calculate_tx_l1_cost(rlp_bytes, hardfork);
+        evm.cached_l1_data_fee = l1_data_fee;
 
         // Get mutable access to context components
         let (block, tx, cfg, journal, _, _) = evm.ctx().all_mut();
@@ -385,6 +373,7 @@ where
     ///
     /// Uses the cached `TokenFeeInfo` from the deduction phase to ensure
     /// consistent price_ratio/scale, matching go-ethereum's `st.feeRate`/`st.tokenScale`.
+    #[inline]
     fn reimburse_caller_token_fee(
         &self,
         evm: &mut MorphEvm<DB, I>,
@@ -408,8 +397,9 @@ where
 
         // Use cached token fee info from the deduction phase (set in validate_and_deduct_token_fee).
         // This ensures the same price_ratio/scale is used for both deduction and reimbursement.
-        // `take()` since reimburse is called once per tx and the cache is no longer needed.
-        let token_fee_info = evm.cached_token_fee_info.take().ok_or(
+        // The cache is kept populated (not taken) so the block executor's receipt builder
+        // can also read it without re-querying the DB.
+        let token_fee_info = evm.cached_token_fee_info.ok_or(
             MorphInvalidTransaction::TokenTransferFailed {
                 reason: "cached_token_fee_info not set by validate_and_deduct_token_fee".into(),
             },
@@ -491,7 +481,7 @@ where
             return Ok(());
         }
 
-        let (block, tx, cfg, journal, _, _) = evm.ctx_mut().all_mut();
+        let (block, tx, cfg, journal, chain, _) = evm.ctx_mut().all_mut();
         let caller_addr = tx.caller();
         let beneficiary = block.beneficiary();
         let hardfork = *cfg.spec();
@@ -527,24 +517,23 @@ where
             return Err(MorphInvalidTransaction::TokenNotActive(token_id).into());
         }
 
-        // Fetch L1 block info from the L1 Gas Price Oracle contract
-        let l1_block_info = L1BlockInfo::try_fetch(journal.db_mut(), hardfork)?;
-
         // Get RLP-encoded transaction bytes for L1 fee calculation
-        // This represents the full transaction data posted to L1 for data availability
         let rlp_bytes = tx
             .rlp_bytes
             .as_ref()
             .map(|b| b.as_ref())
             .unwrap_or_default();
 
-        // Calculate L1 data fee (in ETH) based on full RLP-encoded transaction
-        let l1_data_fee = l1_block_info.calculate_tx_l1_cost(rlp_bytes, hardfork);
+        // Calculate L1 data fee using the cached L1BlockInfo from context chain field.
+        let l1_data_fee = chain.calculate_tx_l1_cost(rlp_bytes, hardfork);
 
-        // Calculate L2 gas fee (in ETH)
+        // Calculate L2 gas fee using effective_gas_price (= min(gasTipCap + baseFee, gasFeeCap)),
+        // matching go-ethereum's buyAltTokenGas() which uses st.gasPrice (effective gas price).
+        // tx.gas_price() returns max_fee_per_gas and would overcharge when tip + basefee < feeCap.
         let gas_limit = tx.gas_limit();
-        let gas_price = tx.gas_price();
-        let l2_gas_fee = U256::from(gas_limit).saturating_mul(U256::from(gas_price));
+        let basefee = block.basefee() as u128;
+        let effective_gas_price = tx.effective_gas_price(basefee);
+        let l2_gas_fee = U256::from(gas_limit).saturating_mul(U256::from(effective_gas_price));
 
         // Total fee in ETH
         let total_eth_fee = l2_gas_fee.saturating_add(l1_data_fee);
@@ -643,6 +632,7 @@ where
         // Cache token fee info for the reimburse phase, ensuring consistent
         // price_ratio/scale between deduction and reimbursement.
         evm.cached_token_fee_info = Some(token_fee_info);
+        evm.cached_l1_data_fee = l1_data_fee;
 
         Ok(())
     }
@@ -650,6 +640,7 @@ where
 
 /// Performs an ERC20 balance transfer by directly `sload`/`sstore`-ing the token contract storage
 /// using the known `balance` mapping base slot, returning the computed storage slots for `from`/`to`.
+#[inline]
 fn transfer_erc20_with_slot<DB>(
     journal: &mut revm::Journal<DB>,
     from: Address,
@@ -706,7 +697,9 @@ fn transfer_erc20_with_evm<DB, I>(
 where
     DB: alloy_evm::Database,
 {
-    let tx_origin = evm.tx.clone();
+    // Save the original tx by swapping in a default, avoiding a full clone of
+    // MorphTxEnv (which contains Bytes, AccessList, etc.).
+    let tx_origin = std::mem::take(&mut evm.tx);
 
     // Read sender balance before transfer if not provided
     let from_balance_before = match from_balance_before {
@@ -759,7 +752,14 @@ where
     // ERC20 transfer subtracts then adds the same amount to the same account.
     // Only check the balance decrease when sender and recipient are different.
     if from != to {
-        let expected_balance = from_balance_before.saturating_sub(token_amount);
+        let expected_balance =
+            from_balance_before.checked_sub(token_amount).ok_or_else(|| {
+                EVMError::Transaction(MorphInvalidTransaction::TokenTransferFailed {
+                    reason: format!(
+                        "sender balance {from_balance_before} less than token amount {token_amount}"
+                    ),
+                })
+            })?;
         if from_balance_after != expected_balance {
             return Err(MorphInvalidTransaction::TokenTransferFailed {
                 reason: format!(
@@ -776,6 +776,7 @@ where
 /// Build the calldata for ERC20 transfer(address,amount) call.
 ///
 /// Method signature: `transfer(address,amount) -> 0xa9059cbb`
+#[inline]
 fn build_transfer_calldata(to: Address, token_amount: alloy_primitives::Uint<256, 4>) -> Bytes {
     let method_id = [0xa9u8, 0x05, 0x9c, 0xbb];
     // Encode calldata: method_id + padded to address + amount
@@ -802,6 +803,7 @@ fn build_transfer_calldata(to: Address, token_amount: alloy_primitives::Uint<256
 ///
 /// # Returns
 /// The new balance after deducting all fees, or an error if balance is insufficient.
+#[inline]
 fn calculate_caller_fee_with_l1_cost(
     balance: U256,
     tx: impl Transaction,
@@ -814,29 +816,33 @@ fn calculate_caller_fee_with_l1_cost(
     let is_balance_check_disabled = cfg.is_balance_check_disabled();
     let is_fee_charge_disabled = cfg.is_fee_charge_disabled();
 
-    // Calculate L2 effective balance spending (gas + value + blob fees)
-    let effective_balance_spending = tx.effective_balance_spending(basefee, blob_price)?;
-
-    // Total spending = L2 fees + L1 data fee
-    let total_spending = effective_balance_spending.saturating_add(l1_data_fee);
-
-    // Skip balance check if either:
-    // - Balance check is explicitly disabled (for special scenarios)
-    // - Fee charge is disabled (eth_call simulation - no point checking balance if fees won't be charged)
-    if !is_balance_check_disabled && !is_fee_charge_disabled && balance < total_spending {
-        return Err(InvalidTransaction::LackOfFundForMaxFee {
-            fee: Box::new(total_spending),
-            balance: Box::new(balance),
-        });
+    // Validate balance against max possible spending using max_fee_per_gas (not effective_gas_price).
+    // go-eth's buyGas() checks: balance >= gasFeeCap * gas + value + l1DataFee.
+    // This ensures the sender can afford the worst-case gas cost before deducting the actual cost.
+    if !is_balance_check_disabled && !is_fee_charge_disabled {
+        let max_gas_spending = U256::from(
+            (tx.gas_limit() as u128)
+                .checked_mul(tx.max_fee_per_gas())
+                .ok_or(InvalidTransaction::OverflowPaymentInTransaction)?,
+        );
+        let max_spending = max_gas_spending
+            .checked_add(tx.value())
+            .and_then(|v| v.checked_add(l1_data_fee))
+            .ok_or(InvalidTransaction::OverflowPaymentInTransaction)?;
+        if balance < max_spending {
+            return Err(InvalidTransaction::LackOfFundForMaxFee {
+                fee: Box::new(max_spending),
+                balance: Box::new(balance),
+            });
+        }
     }
 
-    // Calculate gas balance spending (excluding value transfer)
+    // Deduct using effective_gas_price (not max_fee_per_gas).
+    // go-eth's buyGas(): SubBalance(from, gasPrice * gas + l1DataFee)
+    let effective_balance_spending = tx.effective_balance_spending(basefee, blob_price)?;
     let gas_balance_spending = effective_balance_spending - tx.value();
-
-    // Total fee deduction = L2 gas fees + L1 data fee (value is transferred separately)
     let total_fee_deduction = gas_balance_spending.saturating_add(l1_data_fee);
 
-    // New balance after fee deduction
     let mut new_balance = balance.saturating_sub(total_fee_deduction);
 
     if is_balance_check_disabled {

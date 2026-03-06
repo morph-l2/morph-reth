@@ -306,8 +306,10 @@ impl Consensus<Block> for MorphConsensus {
         // messages within this block are internally consistent with the header's
         // next_l1_msg_index. The cross-block monotonicity check (ensuring
         // next_l1_msg_index >= parent's value) is in validate_header_against_parent.
-        let txs: Vec<_> = block.body().transactions().collect();
-        validate_l1_messages_in_block(&txs, block.header().next_l1_msg_index)?;
+        validate_l1_messages_in_block(
+            &block.body().transactions,
+            block.header().next_l1_msg_index,
+        )?;
 
         Ok(())
     }
@@ -501,7 +503,7 @@ fn validate_against_parent_gas_limit<H: BlockHeader>(
 /// ```
 #[inline]
 fn validate_l1_messages_in_block(
-    txs: &[&MorphTxEnvelope],
+    txs: &[MorphTxEnvelope],
     header_next_l1_msg_index: u64,
 ) -> Result<(), ConsensusError> {
     let mut l1_msg_count = 0u64;
@@ -556,7 +558,11 @@ fn validate_l1_messages_in_block(
     // For blocks with no L1 messages, this check is skipped — the cross-block
     // monotonicity check in validate_header_against_parent handles that case.
     if l1_msg_count > 0 {
-        let last_queue_index = prev_queue_index.expect("l1_msg_count > 0 implies prev is Some");
+        let last_queue_index = prev_queue_index.ok_or_else(|| {
+            ConsensusError::Other(
+                "internal error: l1_msg_count > 0 but prev_queue_index is None".to_string(),
+            )
+        })?;
         let expected_next = last_queue_index.checked_add(1).ok_or_else(|| {
             ConsensusError::Other(
                 MorphConsensusError::InvalidNextL1MessageIndex {
@@ -710,9 +716,9 @@ mod tests {
             create_l1_msg_tx(1),
             create_regular_tx(),
         ];
-        let txs_refs: Vec<_> = txs.iter().collect();
+
         // L1 msgs: 0, 1 → last+1=2==header_next
-        assert!(validate_l1_messages_in_block(&txs_refs, 2).is_ok());
+        assert!(validate_l1_messages_in_block(&txs, 2).is_ok());
     }
 
     #[test]
@@ -722,8 +728,8 @@ mod tests {
             create_regular_tx(),
             create_l1_msg_tx(1),
         ];
-        let txs_refs: Vec<_> = txs.iter().collect();
-        assert!(validate_l1_messages_in_block(&txs_refs, 2).is_err());
+
+        assert!(validate_l1_messages_in_block(&txs, 2).is_err());
     }
 
     #[test]
@@ -845,13 +851,13 @@ mod tests {
     #[test]
     fn test_validate_l1_messages_in_block_empty_block() {
         let txs: [MorphTxEnvelope; 0] = [];
-        let txs_refs: Vec<_> = txs.iter().collect();
+
         // Empty block: no L1 messages → internal check always passes.
         // Any header_next value is accepted because the cross-block
         // monotonicity check is in validate_header_against_parent.
-        assert!(validate_l1_messages_in_block(&txs_refs, 0).is_ok());
-        assert!(validate_l1_messages_in_block(&txs_refs, 5).is_ok());
-        assert!(validate_l1_messages_in_block(&txs_refs, 100).is_ok());
+        assert!(validate_l1_messages_in_block(&txs, 0).is_ok());
+        assert!(validate_l1_messages_in_block(&txs, 5).is_ok());
+        assert!(validate_l1_messages_in_block(&txs, 100).is_ok());
     }
 
     #[test]
@@ -861,9 +867,9 @@ mod tests {
             create_l1_msg_tx(1),
             create_l1_msg_tx(2),
         ];
-        let txs_refs: Vec<_> = txs.iter().collect();
+
         // last=2, 2+1=3==header_next
-        assert!(validate_l1_messages_in_block(&txs_refs, 3).is_ok());
+        assert!(validate_l1_messages_in_block(&txs, 3).is_ok());
     }
 
     #[test]
@@ -873,17 +879,17 @@ mod tests {
             create_regular_tx(),
             create_regular_tx(),
         ];
-        let txs_refs: Vec<_> = txs.iter().collect();
+
         // No L1 messages → internal check passes (header_next not checked)
-        assert!(validate_l1_messages_in_block(&txs_refs, 0).is_ok());
+        assert!(validate_l1_messages_in_block(&txs, 0).is_ok());
     }
 
     #[test]
     fn test_validate_l1_messages_in_block_skipped_index() {
         // Block has 0 then 2 (skipping 1) — caught by sequential check
         let txs = [create_l1_msg_tx(0), create_l1_msg_tx(2)];
-        let txs_refs: Vec<_> = txs.iter().collect();
-        let result = validate_l1_messages_in_block(&txs_refs, 3);
+
+        let result = validate_l1_messages_in_block(&txs, 3);
         assert!(result.is_err());
         let err_str = result.unwrap_err().to_string();
         assert!(err_str.contains("expected 1"));
@@ -898,17 +904,17 @@ mod tests {
             create_l1_msg_tx(101),
             create_regular_tx(),
         ];
-        let txs_refs: Vec<_> = txs.iter().collect();
+
         // last=101, 101+1=102==header_next
-        assert!(validate_l1_messages_in_block(&txs_refs, 102).is_ok());
+        assert!(validate_l1_messages_in_block(&txs, 102).is_ok());
     }
 
     #[test]
     fn test_validate_l1_messages_in_block_duplicate_index() {
         // Duplicate index: 0, 0 — caught by sequential check (prev=0, expected 1, got 0)
         let txs = [create_l1_msg_tx(0), create_l1_msg_tx(0)];
-        let txs_refs: Vec<_> = txs.iter().collect();
-        let result = validate_l1_messages_in_block(&txs_refs, 1);
+
+        let result = validate_l1_messages_in_block(&txs, 1);
         assert!(result.is_err());
         let err_str = result.unwrap_err().to_string();
         assert!(err_str.contains("expected 1"));
@@ -919,8 +925,8 @@ mod tests {
     fn test_validate_l1_messages_in_block_out_of_order() {
         // Block has 1 then 0 — caught by sequential check (prev=1, expected 2, got 0)
         let txs = [create_l1_msg_tx(1), create_l1_msg_tx(0)];
-        let txs_refs: Vec<_> = txs.iter().collect();
-        let result = validate_l1_messages_in_block(&txs_refs, 2);
+
+        let result = validate_l1_messages_in_block(&txs, 2);
         assert!(result.is_err());
     }
 
@@ -933,9 +939,9 @@ mod tests {
             create_l1_msg_tx(2),
             create_regular_tx(),
         ];
-        let txs_refs: Vec<_> = txs.iter().collect();
+
         // Header says 100 but should be 3 (last=2, 2+1=3)
-        let result = validate_l1_messages_in_block(&txs_refs, 100);
+        let result = validate_l1_messages_in_block(&txs, 100);
         assert!(result.is_err());
         let err_str = result.unwrap_err().to_string();
         assert!(err_str.contains("expected 3"));
@@ -951,8 +957,8 @@ mod tests {
             create_l1_msg_tx(1),
             create_l1_msg_tx(2),
         ];
-        let txs_refs: Vec<_> = txs.iter().collect();
-        assert!(validate_l1_messages_in_block(&txs_refs, 3).is_err());
+
+        assert!(validate_l1_messages_in_block(&txs, 3).is_err());
     }
 
     // ========================================================================
