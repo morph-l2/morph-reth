@@ -38,7 +38,7 @@ use crate::MorphConsensusError;
 use alloy_consensus::{BlockHeader as _, EMPTY_OMMER_ROOT_HASH, TxReceipt};
 use alloy_evm::block::BlockExecutionResult;
 use alloy_primitives::{B256, Bloom};
-use morph_chainspec::MorphChainSpec;
+use morph_chainspec::{MorphChainSpec, MorphHardforks};
 use morph_primitives::{Block, BlockBody, MorphHeader, MorphReceipt, MorphTxEnvelope};
 use reth_consensus::{Consensus, ConsensusError, FullConsensus, HeaderValidator};
 use reth_consensus_common::validation::{
@@ -74,6 +74,25 @@ const GAS_LIMIT_BOUND_DIVISOR: u64 = 1024;
 ///
 /// Validates Morph L2 blocks according to the L2 consensus rules.
 /// See module-level documentation for detailed validation rules.
+///
+/// # L1 Message Validation Architecture
+///
+/// L1 message ordering requires both body data (transactions) and parent header data.
+/// Since reth's `Consensus` trait methods provide these separately — `validate_block_pre_execution`
+/// has the block body but not the parent header, while `validate_header_against_parent` has
+/// both headers but not the body — the validation is split into two independent checks:
+///
+/// 1. **Internal consistency** (`validate_block_pre_execution`): L1 messages are at the block
+///    start, have sequential queue indices, and are consistent with `header.next_l1_msg_index`.
+/// 2. **Cross-block monotonicity** (`validate_header_against_parent`): `header.next_l1_msg_index`
+///    is monotonically non-decreasing relative to the parent.
+///
+/// These two methods have no ordering dependency and share no mutable state. The strict
+/// cross-block equality check (`header.next == parent.next + l1_count`) requires simultaneous
+/// access to both parent header and block body, which reth's trait API does not provide in
+/// any single method. In Morph's single-sequencer model, the remaining gap (queue index
+/// skipping) is prevented by the trusted sequencer and verified by the L1 message queue
+/// contract.
 #[derive(Debug, Clone)]
 pub struct MorphConsensus {
     /// Chain specification containing hardfork information and chain config.
@@ -82,7 +101,7 @@ pub struct MorphConsensus {
 
 impl MorphConsensus {
     /// Creates a new [`MorphConsensus`] instance.
-    pub const fn new(chain_spec: Arc<MorphChainSpec>) -> Self {
+    pub fn new(chain_spec: Arc<MorphChainSpec>) -> Self {
         Self { chain_spec }
     }
 
@@ -198,11 +217,27 @@ impl HeaderValidator<MorphHeader> for MorphConsensus {
         // Validate parent hash and block number
         validate_against_parent_hash_number(header.header(), parent)?;
 
-        // Validate timestamp against parent
-        validate_against_parent_timestamp(header.header(), parent.header())?;
+        // Validate timestamp against parent (pre-Emerald: strict >, post-Emerald: >=)
+        let is_emerald = self
+            .chain_spec
+            .is_emerald_active_at_timestamp(header.timestamp());
+        validate_against_parent_timestamp(header.header(), parent.header(), is_emerald)?;
 
         // Validate gas limit change
         validate_against_parent_gas_limit(header.header(), parent.header())?;
+
+        // Cross-block L1 message index monotonicity: next_l1_msg_index must never
+        // decrease across blocks. This is the header-only half of L1 message
+        // validation; the body-level half is in validate_block_pre_execution.
+        if header.next_l1_msg_index < parent.next_l1_msg_index {
+            return Err(ConsensusError::Other(
+                MorphConsensusError::InvalidNextL1MessageIndex {
+                    expected: parent.next_l1_msg_index,
+                    actual: header.next_l1_msg_index,
+                }
+                .to_string(),
+            ));
+        }
 
         Ok(())
     }
@@ -266,9 +301,13 @@ impl Consensus<Block> for MorphConsensus {
             ));
         }
 
-        // Validate L1 messages ordering
+        // Validate L1 messages ordering and internal consistency with header.
+        // This is the body-level half of L1 validation; it verifies that the L1
+        // messages within this block are internally consistent with the header's
+        // next_l1_msg_index. The cross-block monotonicity check (ensuring
+        // next_l1_msg_index >= parent's value) is in validate_header_against_parent.
         let txs: Vec<_> = block.body().transactions().collect();
-        validate_l1_messages(&txs)?;
+        validate_l1_messages_in_block(&txs, block.header().next_l1_msg_index)?;
 
         Ok(())
     }
@@ -322,22 +361,28 @@ impl FullConsensus<morph_primitives::MorphPrimitives> for MorphConsensus {
     }
 }
 
-/// Validates that the header's timestamp is not before the parent's timestamp.
+/// Validates that the header's timestamp is valid relative to the parent's timestamp.
+///
+/// # Hardfork Behavior
+///
+/// - **Pre-Emerald**: Timestamp must be strictly greater than parent's timestamp.
+/// - **Post-Emerald**: Timestamp must be greater than or equal to parent's timestamp.
+///
+/// This matches go-ethereum's `consensus/l2/consensus.go:155-157`.
 ///
 /// # Errors
 ///
 /// Returns [`ConsensusError::TimestampIsInPast`] if the header's timestamp
-/// is less than the parent's timestamp.
-///
-/// # Note
-///
-/// Equal timestamps are allowed - only strictly less than is rejected.
+/// violates the hardfork-specific constraint.
 #[inline]
 fn validate_against_parent_timestamp<H: BlockHeader>(
     header: &H,
     parent: &H,
+    is_emerald: bool,
 ) -> Result<(), ConsensusError> {
-    if header.timestamp() < parent.timestamp() {
+    if header.timestamp() < parent.timestamp()
+        || (header.timestamp() == parent.timestamp() && !is_emerald)
+    {
         return Err(ConsensusError::TimestampIsInPast {
             parent_timestamp: parent.timestamp(),
             timestamp: header.timestamp(),
@@ -365,7 +410,7 @@ fn validate_against_parent_gas_limit<H: BlockHeader>(
 ) -> Result<(), ConsensusError> {
     let diff = header.gas_limit().abs_diff(parent.gas_limit());
     let limit = parent.gas_limit() / GAS_LIMIT_BOUND_DIVISOR;
-    if diff > limit {
+    if diff >= limit {
         return if header.gas_limit() > parent.gas_limit() {
             Err(ConsensusError::GasLimitInvalidIncrease {
                 parent_gas_limit: parent.gas_limit(),
@@ -392,30 +437,34 @@ fn validate_against_parent_gas_limit<H: BlockHeader>(
 // L1 Message Validation
 // ============================================================================
 
-/// Validates L1 message ordering in a block's transactions.
+/// Validates L1 message ordering and internal consistency within a single block.
 ///
-/// L1 messages are special transactions that originate from L1 (deposits, etc.).
-/// They must follow strict ordering rules to ensure deterministic block execution.
+/// This is a **stateless** validation that uses only the block's own transactions
+/// and header — it does not require the parent header or any shared mutable state.
 ///
-/// # Rules
+/// # Checks Performed
 ///
 /// 1. **Position**: All L1 messages must appear at the beginning of the block.
 ///    Once a regular (L2) transaction appears, no more L1 messages are allowed.
 ///
 /// 2. **Sequential Queue Index**: L1 messages must have strictly sequential
-///    `queue_index` values. If the first L1 message has `queue_index = N`,
-///    the next must have `queue_index = N+1`, and so on.
+///    `queue_index` values (each = previous + 1).
 ///
-/// # Errors
+/// 3. **Header Consistency**: If L1 messages are present, the last L1 message's
+///    `queue_index + 1` must equal `header.next_l1_msg_index`. This ensures the
+///    header correctly reflects the transactions in the body.
 ///
-/// - [`MorphConsensusError::MalformedL1Message`] if an L1 message is missing its queue_index
-/// - [`MorphConsensusError::L1MessagesNotInOrder`] if queue indices are not sequential
-/// - [`MorphConsensusError::InvalidL1MessageOrder`] if L1 message appears after L2 transaction
+/// # Cross-Block Validation
+///
+/// The cross-block check (ensuring `next_l1_msg_index >= parent.next_l1_msg_index`)
+/// is performed separately in `validate_header_against_parent`, which has access to
+/// the parent header. See the [`MorphConsensus`] doc comment for the full architecture.
 ///
 /// # Example (Valid)
 ///
 /// ```text
-/// [L1Msg(queue=0), L1Msg(queue=1), L1Msg(queue=2), RegularTx, RegularTx]
+/// [L1Msg(queue=5), L1Msg(queue=6), L1Msg(queue=7), RegularTx]
+/// // header.next_l1_msg_index = 8 ✓
 /// ```
 ///
 /// # Example (Invalid - L1 after L2)
@@ -424,41 +473,63 @@ fn validate_against_parent_gas_limit<H: BlockHeader>(
 /// [L1Msg(queue=0), RegularTx, L1Msg(queue=1)]  // ❌ L1 after L2
 /// ```
 #[inline]
-fn validate_l1_messages(txs: &[&MorphTxEnvelope]) -> Result<(), ConsensusError> {
-    // Find the starting queue index from the first L1 message
-    let mut queue_index = txs
-        .iter()
-        .find(|tx| tx.is_l1_msg())
-        .and_then(|tx| tx.queue_index())
-        .unwrap_or_default();
-
+fn validate_l1_messages_in_block(
+    txs: &[&MorphTxEnvelope],
+    header_next_l1_msg_index: u64,
+) -> Result<(), ConsensusError> {
+    let mut l1_msg_count = 0u64;
     let mut saw_l2_transaction = false;
+    let mut prev_queue_index: Option<u64> = None;
 
     for tx in txs {
-        // Check queue index is strictly sequential
         if tx.is_l1_msg() {
+            // Check L1 messages are only at the start of the block (before any L2 tx)
+            if saw_l2_transaction {
+                return Err(ConsensusError::Other(
+                    MorphConsensusError::InvalidL1MessageOrder.to_string(),
+                ));
+            }
+
             let tx_queue_index = tx.queue_index().ok_or_else(|| {
                 ConsensusError::Other(MorphConsensusError::MalformedL1Message.to_string())
             })?;
-            if tx_queue_index != queue_index {
+
+            // Check queue indices are strictly sequential (each = previous + 1)
+            if let Some(prev) = prev_queue_index
+                && tx_queue_index != prev + 1
+            {
                 return Err(ConsensusError::Other(
                     MorphConsensusError::L1MessagesNotInOrder {
-                        expected: queue_index,
+                        expected: prev + 1,
                         actual: tx_queue_index,
                     }
                     .to_string(),
                 ));
             }
-            queue_index = tx_queue_index + 1;
-        }
 
-        // Check L1 messages are only at the start of the block
-        if tx.is_l1_msg() && saw_l2_transaction {
+            prev_queue_index = Some(tx_queue_index);
+            l1_msg_count += 1;
+        } else {
+            saw_l2_transaction = true;
+        }
+    }
+
+    // Validate header consistency: header.next_l1_msg_index must equal
+    // last_queue_index + 1 (i.e., first_queue_index + l1_msg_count).
+    // For blocks with no L1 messages, this check is skipped — the cross-block
+    // monotonicity check in validate_header_against_parent handles that case.
+    if l1_msg_count > 0 {
+        let last_queue_index = prev_queue_index.expect("l1_msg_count > 0 implies prev is Some");
+        let expected_next = last_queue_index + 1;
+        if header_next_l1_msg_index != expected_next {
             return Err(ConsensusError::Other(
-                MorphConsensusError::InvalidL1MessageOrder.to_string(),
+                MorphConsensusError::InvalidNextL1MessageIndex {
+                    expected: expected_next,
+                    actual: header_next_l1_msg_index,
+                }
+                .to_string(),
             ));
         }
-        saw_l2_transaction = !tx.is_l1_msg();
     }
 
     Ok(())
@@ -588,25 +659,26 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_l1_messages_valid() {
+    fn test_validate_l1_messages_in_block_valid() {
         let txs = [
             create_l1_msg_tx(0),
             create_l1_msg_tx(1),
             create_regular_tx(),
         ];
         let txs_refs: Vec<_> = txs.iter().collect();
-        assert!(validate_l1_messages(&txs_refs).is_ok());
+        // L1 msgs: 0, 1 → last+1=2==header_next
+        assert!(validate_l1_messages_in_block(&txs_refs, 2).is_ok());
     }
 
     #[test]
-    fn test_validate_l1_messages_after_regular() {
+    fn test_validate_l1_messages_in_block_after_regular() {
         let txs = [
             create_l1_msg_tx(0),
             create_regular_tx(),
             create_l1_msg_tx(1),
         ];
         let txs_refs: Vec<_> = txs.iter().collect();
-        assert!(validate_l1_messages(&txs_refs).is_err());
+        assert!(validate_l1_messages_in_block(&txs_refs, 2).is_err());
     }
 
     #[test]
@@ -726,40 +798,47 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn test_validate_l1_messages_empty_block() {
+    fn test_validate_l1_messages_in_block_empty_block() {
         let txs: [MorphTxEnvelope; 0] = [];
         let txs_refs: Vec<_> = txs.iter().collect();
-        assert!(validate_l1_messages(&txs_refs).is_ok());
+        // Empty block: no L1 messages → internal check always passes.
+        // Any header_next value is accepted because the cross-block
+        // monotonicity check is in validate_header_against_parent.
+        assert!(validate_l1_messages_in_block(&txs_refs, 0).is_ok());
+        assert!(validate_l1_messages_in_block(&txs_refs, 5).is_ok());
+        assert!(validate_l1_messages_in_block(&txs_refs, 100).is_ok());
     }
 
     #[test]
-    fn test_validate_l1_messages_only_l1_messages() {
+    fn test_validate_l1_messages_in_block_only_l1_messages() {
         let txs = [
             create_l1_msg_tx(0),
             create_l1_msg_tx(1),
             create_l1_msg_tx(2),
         ];
         let txs_refs: Vec<_> = txs.iter().collect();
-        assert!(validate_l1_messages(&txs_refs).is_ok());
+        // last=2, 2+1=3==header_next
+        assert!(validate_l1_messages_in_block(&txs_refs, 3).is_ok());
     }
 
     #[test]
-    fn test_validate_l1_messages_only_regular_txs() {
+    fn test_validate_l1_messages_in_block_only_regular_txs() {
         let txs = [
             create_regular_tx(),
             create_regular_tx(),
             create_regular_tx(),
         ];
         let txs_refs: Vec<_> = txs.iter().collect();
-        assert!(validate_l1_messages(&txs_refs).is_ok());
+        // No L1 messages → internal check passes (header_next not checked)
+        assert!(validate_l1_messages_in_block(&txs_refs, 0).is_ok());
     }
 
     #[test]
-    fn test_validate_l1_messages_skipped_index() {
-        // Skip index 1: 0, 2
+    fn test_validate_l1_messages_in_block_skipped_index() {
+        // Block has 0 then 2 (skipping 1) — caught by sequential check
         let txs = [create_l1_msg_tx(0), create_l1_msg_tx(2)];
         let txs_refs: Vec<_> = txs.iter().collect();
-        let result = validate_l1_messages(&txs_refs);
+        let result = validate_l1_messages_in_block(&txs_refs, 3);
         assert!(result.is_err());
         let err_str = result.unwrap_err().to_string();
         assert!(err_str.contains("expected 1"));
@@ -767,23 +846,24 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_l1_messages_non_zero_start_index() {
-        // Starting from index 100 is valid
+    fn test_validate_l1_messages_in_block_non_zero_start_index() {
+        // Block starts L1 messages at queue_index 100
         let txs = [
             create_l1_msg_tx(100),
             create_l1_msg_tx(101),
             create_regular_tx(),
         ];
         let txs_refs: Vec<_> = txs.iter().collect();
-        assert!(validate_l1_messages(&txs_refs).is_ok());
+        // last=101, 101+1=102==header_next
+        assert!(validate_l1_messages_in_block(&txs_refs, 102).is_ok());
     }
 
     #[test]
-    fn test_validate_l1_messages_duplicate_index() {
-        // Duplicate index: 0, 0
+    fn test_validate_l1_messages_in_block_duplicate_index() {
+        // Duplicate index: 0, 0 — caught by sequential check (prev=0, expected 1, got 0)
         let txs = [create_l1_msg_tx(0), create_l1_msg_tx(0)];
         let txs_refs: Vec<_> = txs.iter().collect();
-        let result = validate_l1_messages(&txs_refs);
+        let result = validate_l1_messages_in_block(&txs_refs, 1);
         assert!(result.is_err());
         let err_str = result.unwrap_err().to_string();
         assert!(err_str.contains("expected 1"));
@@ -791,16 +871,34 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_l1_messages_out_of_order() {
-        // Reversed order: 1, 0
+    fn test_validate_l1_messages_in_block_out_of_order() {
+        // Block has 1 then 0 — caught by sequential check (prev=1, expected 2, got 0)
         let txs = [create_l1_msg_tx(1), create_l1_msg_tx(0)];
         let txs_refs: Vec<_> = txs.iter().collect();
-        let result = validate_l1_messages(&txs_refs);
+        let result = validate_l1_messages_in_block(&txs_refs, 2);
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_validate_l1_messages_multiple_l1_after_regular() {
+    fn test_validate_l1_messages_in_block_wrong_next_l1_msg_index() {
+        // Valid sequential L1 messages (0, 1, 2) but wrong next_l1_msg_index in header
+        let txs = [
+            create_l1_msg_tx(0),
+            create_l1_msg_tx(1),
+            create_l1_msg_tx(2),
+            create_regular_tx(),
+        ];
+        let txs_refs: Vec<_> = txs.iter().collect();
+        // Header says 100 but should be 3 (last=2, 2+1=3)
+        let result = validate_l1_messages_in_block(&txs_refs, 100);
+        assert!(result.is_err());
+        let err_str = result.unwrap_err().to_string();
+        assert!(err_str.contains("expected 3"));
+        assert!(err_str.contains("got 100"));
+    }
+
+    #[test]
+    fn test_validate_l1_messages_in_block_multiple_l1_after_regular() {
         // Multiple L1 messages after regular tx
         let txs = [
             create_l1_msg_tx(0),
@@ -809,7 +907,7 @@ mod tests {
             create_l1_msg_tx(2),
         ];
         let txs_refs: Vec<_> = txs.iter().collect();
-        assert!(validate_l1_messages(&txs_refs).is_err());
+        assert!(validate_l1_messages_in_block(&txs_refs, 3).is_err());
     }
 
     // ========================================================================
@@ -968,6 +1066,50 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_header_against_parent_l1_msg_index_monotonicity() {
+        let chain_spec = create_test_chainspec();
+        let consensus = MorphConsensus::new(chain_spec);
+
+        // Parent has next_l1_msg_index = 10
+        let mut parent = create_valid_morph_header(1000, 30_000_000, 100);
+        parent.next_l1_msg_index = 10;
+        let parent_sealed = SealedHeader::seal_slow(parent);
+
+        // Child with next_l1_msg_index = 15 (increased, valid)
+        let mut child = create_valid_morph_header(1001, 30_000_000, 101);
+        child.inner.parent_hash = parent_sealed.hash();
+        child.next_l1_msg_index = 15;
+        let child_sealed = SealedHeader::seal_slow(child);
+        assert!(
+            consensus
+                .validate_header_against_parent(&child_sealed, &parent_sealed)
+                .is_ok()
+        );
+
+        // Child with next_l1_msg_index = 10 (unchanged, valid — no L1 msgs in block)
+        let mut child_same = create_valid_morph_header(1001, 30_000_000, 101);
+        child_same.inner.parent_hash = parent_sealed.hash();
+        child_same.next_l1_msg_index = 10;
+        let child_same_sealed = SealedHeader::seal_slow(child_same);
+        assert!(
+            consensus
+                .validate_header_against_parent(&child_same_sealed, &parent_sealed)
+                .is_ok()
+        );
+
+        // Child with next_l1_msg_index = 5 (decreased, INVALID)
+        let mut child_dec = create_valid_morph_header(1001, 30_000_000, 101);
+        child_dec.inner.parent_hash = parent_sealed.hash();
+        child_dec.next_l1_msg_index = 5;
+        let child_dec_sealed = SealedHeader::seal_slow(child_dec);
+        let result = consensus.validate_header_against_parent(&child_dec_sealed, &parent_sealed);
+        assert!(result.is_err());
+        let err_str = result.unwrap_err().to_string();
+        assert!(err_str.contains("expected 10"));
+        assert!(err_str.contains("got 5"));
+    }
+
+    #[test]
     fn test_validate_header_against_parent_timestamp_less_than_parent() {
         let chain_spec = create_test_chainspec();
         let consensus = MorphConsensus::new(chain_spec);
@@ -1060,13 +1202,30 @@ mod tests {
         let parent = create_valid_morph_header(1000, parent_gas_limit, 100);
         let parent_sealed = SealedHeader::seal_slow(parent);
 
-        // Increase by exactly the allowed amount (valid)
-        let mut child = create_valid_morph_header(1001, parent_gas_limit + max_change, 101);
-        child.inner.parent_hash = parent_sealed.hash();
-        let child_sealed = SealedHeader::seal_slow(child);
+        // Increase by exactly the boundary (diff == limit) should be REJECTED,
+        // matching go-ethereum's `diff >= limit` check.
+        let mut child_at_boundary =
+            create_valid_morph_header(1001, parent_gas_limit + max_change, 101);
+        child_at_boundary.inner.parent_hash = parent_sealed.hash();
+        let child_sealed = SealedHeader::seal_slow(child_at_boundary);
 
         let result = consensus.validate_header_against_parent(&child_sealed, &parent_sealed);
-        assert!(result.is_ok());
+        assert!(
+            matches!(result, Err(ConsensusError::GasLimitInvalidIncrease { .. })),
+            "gas limit change exactly at boundary should be rejected"
+        );
+
+        // Increase by one less than the boundary should be ACCEPTED
+        let mut child_within =
+            create_valid_morph_header(1001, parent_gas_limit + max_change - 1, 101);
+        child_within.inner.parent_hash = parent_sealed.hash();
+        let child_sealed = SealedHeader::seal_slow(child_within);
+
+        let result = consensus.validate_header_against_parent(&child_sealed, &parent_sealed);
+        assert!(
+            result.is_ok(),
+            "gas limit change within boundary should be accepted"
+        );
     }
 
     #[test]
@@ -1199,17 +1358,32 @@ mod tests {
         let parent = create_valid_header(1000, 30_000_000, 100);
         let child = create_valid_header(1001, 30_000_000, 101);
 
-        let result = validate_against_parent_timestamp(&child, &parent);
-        assert!(result.is_ok());
+        // Both pre-Emerald and post-Emerald: strictly greater is always ok
+        assert!(validate_against_parent_timestamp(&child, &parent, false).is_ok());
+        assert!(validate_against_parent_timestamp(&child, &parent, true).is_ok());
     }
 
     #[test]
-    fn test_validate_against_parent_timestamp_equal() {
+    fn test_validate_against_parent_timestamp_equal_pre_emerald() {
         let parent = create_valid_header(1000, 30_000_000, 100);
         let child = create_valid_header(1000, 30_000_000, 101); // Same timestamp
 
-        let result = validate_against_parent_timestamp(&child, &parent);
-        assert!(result.is_ok()); // Equal timestamp is allowed
+        // Pre-Emerald: equal timestamp is rejected
+        let result = validate_against_parent_timestamp(&child, &parent, false);
+        assert!(matches!(
+            result,
+            Err(ConsensusError::TimestampIsInPast { .. })
+        ));
+    }
+
+    #[test]
+    fn test_validate_against_parent_timestamp_equal_post_emerald() {
+        let parent = create_valid_header(1000, 30_000_000, 100);
+        let child = create_valid_header(1000, 30_000_000, 101); // Same timestamp
+
+        // Post-Emerald: equal timestamp is allowed
+        let result = validate_against_parent_timestamp(&child, &parent, true);
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -1217,9 +1391,13 @@ mod tests {
         let parent = create_valid_header(1000, 30_000_000, 100);
         let child = create_valid_header(999, 30_000_000, 101); // Earlier timestamp
 
-        let result = validate_against_parent_timestamp(&child, &parent);
+        // Both pre-Emerald and post-Emerald: strictly less is always rejected
         assert!(matches!(
-            result,
+            validate_against_parent_timestamp(&child, &parent, false),
+            Err(ConsensusError::TimestampIsInPast { .. })
+        ));
+        assert!(matches!(
+            validate_against_parent_timestamp(&child, &parent, true),
             Err(ConsensusError::TimestampIsInPast { .. })
         ));
     }

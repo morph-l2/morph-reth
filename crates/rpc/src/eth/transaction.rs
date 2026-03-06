@@ -267,7 +267,7 @@ fn try_build_morph_tx_from_request(
     let chain_id = req
         .chain_id
         .ok_or("missing chain_id for morph transaction")?;
-    let gas_limit = req.gas.unwrap_or_default() as u128;
+    let gas_limit = req.gas.unwrap_or_default();
     let nonce = req.nonce.unwrap_or_default();
     let max_fee_per_gas = req.max_fee_per_gas.or(req.gas_price).unwrap_or_default();
     let max_priority_fee_per_gas = req.max_priority_fee_per_gas.unwrap_or_default();
@@ -275,7 +275,7 @@ fn try_build_morph_tx_from_request(
     let input = req.input.clone().into_input().unwrap_or_default();
     let to = req.to.unwrap_or(TxKind::Create);
 
-    Ok(Some(TxMorph {
+    let morph_tx = TxMorph {
         chain_id,
         nonce,
         gas_limit,
@@ -290,7 +290,13 @@ fn try_build_morph_tx_from_request(
         version,
         reference,
         memo,
-    }))
+    };
+
+    // Validate all MorphTx constraints: version-specific rules, gas fee ordering,
+    // and memo length. This catches invalid combinations early at the RPC layer.
+    morph_tx.validate()?;
+
+    Ok(Some(morph_tx))
 }
 
 #[cfg(test)]

@@ -77,8 +77,9 @@ pub struct TxMorph {
     /// A scalar value equal to the maximum amount of gas that should be used
     /// in executing this transaction. This is paid up-front, before any
     /// computation is done and may not be increased later.
+    /// Matches go-ethereum's `AltFeeTx.Gas` (uint64).
     #[cfg_attr(feature = "serde", serde(with = "alloy_serde::quantity"))]
-    pub gas_limit: u128,
+    pub gas_limit: u64,
 
     /// A scalar value equal to the maximum amount of gas that should be used
     /// in executing this transaction. This is paid up-front, before any
@@ -244,7 +245,7 @@ impl TxMorph {
     pub fn size(&self) -> usize {
         mem::size_of::<ChainId>() + // chain_id
         mem::size_of::<u64>() + // nonce
-        mem::size_of::<u128>() + // gas_limit
+        mem::size_of::<u64>() + // gas_limit
         mem::size_of::<u128>() + // max_fee_per_gas
         mem::size_of::<u128>() + // max_priority_fee_per_gas
         self.to.size() + // to
@@ -598,7 +599,7 @@ impl Transaction for TxMorph {
     }
 
     fn gas_limit(&self) -> u64 {
-        self.gas_limit as u64
+        self.gas_limit
     }
 
     fn gas_price(&self) -> Option<u128> {
@@ -898,7 +899,7 @@ impl reth_codecs::Compact for TxMorph {
     fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
         let (chain_id, buf) = ChainId::from_compact(buf, len);
         let (nonce, buf) = u64::from_compact(buf, len);
-        let (gas_limit, buf) = u128::from_compact(buf, len);
+        let (gas_limit, buf) = u64::from_compact(buf, len);
         let (max_fee_per_gas, buf) = u128::from_compact(buf, len);
         let (max_priority_fee_per_gas, buf) = u128::from_compact(buf, len);
         let (to, buf) = TxKind::from_compact(buf, len);
@@ -1881,7 +1882,7 @@ mod tests {
         0u64.encode(&mut inner_buf); // nonce
         0u128.encode(&mut inner_buf); // max_priority_fee_per_gas
         1000u128.encode(&mut inner_buf); // max_fee_per_gas
-        21000u128.encode(&mut inner_buf); // gas_limit
+        21000u64.encode(&mut inner_buf); // gas_limit
         alloy_primitives::TxKind::Create.encode(&mut inner_buf); // to
         U256::ZERO.encode(&mut inner_buf); // value
         Bytes::new().encode(&mut inner_buf); // input

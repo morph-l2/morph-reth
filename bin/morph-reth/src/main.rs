@@ -18,7 +18,9 @@ fn main() {
     // Install signal handler for segmentation faults
     sigsegv_handler::install();
 
-    // Enable backtraces by default
+    // Enable backtraces by default.
+    // SAFETY: Called at process startup before any other threads are spawned,
+    // so there are no concurrent readers of the environment.
     if std::env::var_os("RUST_BACKTRACE").is_none() {
         unsafe { std::env::set_var("RUST_BACKTRACE", "1") };
     }

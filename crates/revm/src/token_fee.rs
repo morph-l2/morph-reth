@@ -9,7 +9,7 @@ use alloy_evm::Database;
 use alloy_primitives::{Address, Bytes, U256, address, keccak256};
 use morph_chainspec::hardfork::MorphHardfork;
 use revm::SystemCallEvm;
-use revm::{Inspector, context_interface::result::EVMError, inspector::NoOpInspector};
+use revm::{context_interface::result::EVMError, inspector::NoOpInspector};
 
 use crate::evm::MorphContext;
 use crate::{MorphEvm, MorphInvalidTransaction};
@@ -98,8 +98,10 @@ impl TokenFeeInfo {
     ///
     /// Uses the price ratio and scale to convert ETH value to token amount.
     pub fn eth_to_token_amount(&self, eth_amount: U256) -> U256 {
+        // If price_ratio or scale is zero (misconfigured token), return MAX to prevent
+        // free-ride transactions. The caller's balance check will reject the tx.
         if self.price_ratio.is_zero() || self.scale.is_zero() {
-            return U256::ZERO;
+            return U256::MAX;
         }
 
         // token_amount = eth_amount * scale / price_ratio
@@ -250,7 +252,6 @@ fn query_balance_via_system_call<DB, I>(
 ) -> Result<U256, EVMError<DB::Error, MorphInvalidTransaction>>
 where
     DB: Database,
-    I: Inspector<MorphContext<DB>>,
 {
     let calldata = encode_balance_of_calldata(account);
     match evm.system_call_one(token, calldata) {
@@ -277,7 +278,6 @@ pub fn query_erc20_balance<DB, I>(
 ) -> Result<U256, EVMError<DB::Error, MorphInvalidTransaction>>
 where
     DB: Database,
-    I: Inspector<MorphContext<DB>>,
 {
     query_balance_via_system_call(evm, token, account)
 }
@@ -353,7 +353,8 @@ mod tests {
 
         let eth_amount = U256::from(1_000_000_000_000_000_000u128);
         let token_amount = info.eth_to_token_amount(eth_amount);
-        assert_eq!(token_amount, U256::ZERO);
+        // Misconfigured token returns MAX to prevent free-ride transactions
+        assert_eq!(token_amount, U256::MAX);
     }
 
     #[test]

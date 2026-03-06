@@ -1,6 +1,5 @@
 //! Morph payload builder error types.
 
-use alloy_primitives::B256;
 use reth_evm::execute::ProviderError;
 
 /// Errors that can occur during Morph payload building.
@@ -36,27 +35,9 @@ pub enum MorphPayloadBuilderError {
     #[error("failed to decode transaction: {0}")]
     TransactionDecodeError(#[from] alloy_rlp::Error),
 
-    /// Invalid L1 message queue index.
-    #[error("invalid L1 message queue index: expected {expected}, got {actual}")]
-    InvalidL1MessageQueueIndex {
-        /// Expected queue index.
-        expected: u64,
-        /// Actual queue index.
-        actual: u64,
-    },
-
     /// L1 message appears after regular transaction.
     #[error("L1 message appears after regular transaction")]
     L1MessageAfterRegularTx,
-
-    /// Invalid transaction hash.
-    #[error("invalid transaction hash: expected {expected}, got {actual}")]
-    InvalidTransactionHash {
-        /// Expected hash.
-        expected: B256,
-        /// Actual hash.
-        actual: B256,
-    },
 
     /// Database error when reading contract storage.
     #[error("database error: {0}")]
