@@ -103,6 +103,10 @@ pub const INITIAL_BLOB_SCALAR: U256 = U256::from_limbs([417565260, 0, 0, 0]);
 /// Curie hardfork flag value (1 = true).
 pub const IS_CURIE: U256 = U256::from_limbs([1, 0, 0, 0]);
 
+/// Maximum L1 data fee cap for circuit compatibility.
+/// Matches go-ethereum's `CalculateL1DataFee` cap in `rollup/fees/rollup_fee.go`.
+const L1_FEE_CAP: U256 = U256::from_limbs([u64::MAX, 0, 0, 0]);
+
 /// Storage updates for L1 gas price oracle Curie hardfork initialization.
 ///
 /// These storage slots are initialized when the Curie hardfork activates:
@@ -234,12 +238,17 @@ impl L1BlockInfo {
     ///
     /// This is the cost of posting the transaction data to L1 for data availability.
     /// The calculation method differs based on whether the Curie hardfork is active.
+    ///
+    /// The result is capped to `u64::MAX` for circuit compatibility, matching go-ethereum's
+    /// `CalculateL1DataFee` behavior in `rollup/fees/rollup_fee.go`.
     pub fn calculate_tx_l1_cost(&self, input: &[u8], hardfork: MorphHardfork) -> U256 {
-        if !hardfork.is_curie() {
+        let fee = if !hardfork.is_curie() {
             self.calculate_tx_l1_cost_pre_curie(input, hardfork)
         } else {
             self.calculate_tx_l1_cost_curie(input, hardfork)
-        }
+        };
+        // Cap to u64::MAX for circuit compatibility (go-ethereum: rollup_fee.go:248-249)
+        fee.min(L1_FEE_CAP)
     }
 }
 

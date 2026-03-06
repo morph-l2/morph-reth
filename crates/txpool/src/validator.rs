@@ -9,7 +9,7 @@
 
 use crate::MorphTxError;
 use alloy_consensus::{BlockHeader, Transaction};
-use alloy_eips::Encodable2718;
+use alloy_eips::{Encodable2718, Typed2718};
 use alloy_primitives::{Address, U256};
 use morph_chainspec::hardfork::MorphHardforks;
 use morph_primitives::MorphTxEnvelope;
@@ -442,19 +442,13 @@ where
 }
 
 /// Helper function to check if a transaction is an L1 message.
-fn is_l1_message<Tx>(tx: &Tx) -> bool
-where
-    Tx: EthPoolTransaction<Consensus = MorphTxEnvelope>,
-{
-    tx.clone_into_consensus().is_l1_msg()
+fn is_l1_message(tx: &impl Typed2718) -> bool {
+    tx.ty() == morph_primitives::L1_TX_TYPE_ID
 }
 
 /// Helper function to check if a transaction is a MorphTx (0x7F).
-fn is_morph_tx<Tx>(tx: &Tx) -> bool
-where
-    Tx: EthPoolTransaction<Consensus = MorphTxEnvelope>,
-{
-    tx.clone_into_consensus().is_morph_tx()
+fn is_morph_tx(tx: &impl Typed2718) -> bool {
+    tx.ty() == morph_primitives::MORPH_TX_TYPE_ID
 }
 
 #[cfg(test)]

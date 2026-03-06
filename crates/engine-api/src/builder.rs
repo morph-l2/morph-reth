@@ -170,6 +170,8 @@ where
         );
 
         // 1. Enforce canonical continuity against the current head.
+        //    Matching go-ethereum: returns error (not GenericResponse{false}) for
+        //    discontinuous block number or parent hash mismatch.
         let current_head = self.current_head()?;
         if data.number != current_head.number + 1 {
             tracing::warn!(
@@ -178,7 +180,10 @@ where
                 actual = data.number,
                 "cannot validate block with discontinuous block number"
             );
-            return Ok(GenericResponse { success: false });
+            return Err(MorphEngineApiError::DiscontinuousBlockNumber {
+                expected: current_head.number + 1,
+                actual: data.number,
+            });
         }
 
         if data.parent_hash != current_head.hash {
@@ -188,7 +193,10 @@ where
                 actual = %data.parent_hash,
                 "parent hash mismatch"
             );
-            return Ok(GenericResponse { success: false });
+            return Err(MorphEngineApiError::WrongParentHash {
+                expected: current_head.hash,
+                actual: data.parent_hash,
+            });
         }
 
         // 2. Convert and forward to reth engine tree (`newPayload` path).
@@ -630,12 +638,19 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
         let cancun_active = self
             .chain_spec
             .is_cancun_active_at_timestamp(data.timestamp);
+        // Override coinbase to empty address when FeeVault is enabled,
+        // matching go-ethereum's executableDataToBlock (l2_api.go:292-293).
+        let beneficiary = if self.chain_spec.is_fee_vault_enabled() {
+            Address::ZERO
+        } else {
+            data.miner
+        };
         let header = MorphHeader {
             next_l1_msg_index: data.next_l1_message_index,
             inner: Header {
                 parent_hash: data.parent_hash,
                 ommers_hash: EMPTY_OMMER_ROOT_HASH,
-                beneficiary: data.miner,
+                beneficiary,
                 state_root: data.state_root,
                 transactions_root: calculate_transaction_root(&txs),
                 receipts_root: data.receipts_root,

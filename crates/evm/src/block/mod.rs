@@ -22,7 +22,7 @@ use alloy_evm::{
     Database, Evm,
     block::{BlockExecutionError, BlockExecutionResult, BlockExecutor, ExecutableTx, OnStateHook},
 };
-use alloy_primitives::U256;
+use alloy_primitives::{Address, U256};
 use curie::apply_curie_hard_fork;
 use morph_chainspec::{MorphChainSpec, MorphHardfork, MorphHardforks};
 use morph_primitives::{MorphReceipt, MorphTxEnvelope};
@@ -32,7 +32,6 @@ use morph_revm::{
 use reth_chainspec::EthereumHardforks;
 use reth_revm::{DatabaseCommit, Inspector, State, context::result::ResultAndState};
 use revm::context::Block;
-use std::marker::PhantomData;
 
 /// Block executor for Morph L2 blocks.
 ///
@@ -71,8 +70,6 @@ pub(crate) struct MorphBlockExecutor<'a, DB: Database, I> {
     receipts: Vec<MorphReceipt>,
     /// Total gas used by executed transactions
     gas_used: u64,
-    /// Phantom data for inspector type
-    _phantom: PhantomData<I>,
 }
 
 impl<'a, DB, I> MorphBlockExecutor<'a, DB, I>
@@ -97,7 +94,6 @@ where
             receipt_builder,
             receipts: Vec::new(),
             gas_used: 0,
-            _phantom: PhantomData,
         }
     }
 
@@ -170,11 +166,11 @@ where
     /// # Errors
     /// Returns error if:
     /// - MorphTx is missing `fee_token_id` or `fee_limit`
-    /// - Transaction sender cannot be extracted
     /// - L2TokenRegistry contract cannot be queried
     fn get_morph_tx_fields(
         &mut self,
         tx: &MorphTxEnvelope,
+        sender: Address,
         hardfork: MorphHardfork,
     ) -> Result<Option<MorphReceiptTxFields>, BlockExecutionError> {
         // Only MorphTx transactions have these fields
@@ -194,13 +190,21 @@ where
         let reference = tx.reference();
         let memo = tx.memo();
 
-        // Fetch token fee info from L2TokenRegistry contract
-        // Note: We use the transaction sender as the caller address
-        // This is needed to check token balance when validating MorphTx
-        let sender = tx
-            .signer_unchecked()
-            .map_err(|_| BlockExecutionError::msg("Failed to extract signer from MorphTx"))?;
+        // For fee_token_id==0 (ETH fee MorphTx, V1 only), no token registry lookup needed.
+        // Still preserve version/reference/memo in the receipt.
+        if fee_token_id == 0 {
+            return Ok(Some(MorphReceiptTxFields {
+                version,
+                fee_token_id: 0,
+                fee_rate: U256::ZERO,
+                token_scale: U256::ZERO,
+                fee_limit,
+                reference,
+                memo,
+            }));
+        }
 
+        // Fetch token fee info from L2TokenRegistry contract using the already-recovered sender
         let token_info =
             TokenFeeInfo::load_for_caller(self.evm.db_mut(), fee_token_id, sender, hardfork)
                 .map_err(|e| {
@@ -349,7 +353,7 @@ where
         let l1_fee = self.calculate_l1_fee(tx.tx(), hardfork)?;
 
         // Get MorphTx-specific fields for MorphTx transactions
-        let morph_tx_fields = self.get_morph_tx_fields(tx.tx(), hardfork)?;
+        let morph_tx_fields = self.get_morph_tx_fields(tx.tx(), *tx.signer(), hardfork)?;
 
         // Update cumulative gas used
         let gas_used = result.gas_used();

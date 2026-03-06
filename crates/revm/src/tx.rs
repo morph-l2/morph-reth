@@ -140,7 +140,7 @@ impl MorphTxEnv {
         Some(TxMorph {
             chain_id: self.chain_id().unwrap_or(fallback_chain_id),
             nonce: self.inner.nonce,
-            gas_limit: self.gas_limit() as u128,
+            gas_limit: self.gas_limit(),
             max_fee_per_gas: self.max_fee_per_gas(),
             max_priority_fee_per_gas: self.max_priority_fee_per_gas().unwrap_or_default(),
             to: self.kind(),

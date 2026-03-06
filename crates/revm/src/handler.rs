@@ -18,7 +18,7 @@ use crate::{
     error::MorphHaltReason,
     evm::MorphContext,
     l1block::L1BlockInfo,
-    token_fee::{TokenFeeInfo, compute_mapping_slot_for_address},
+    token_fee::{TokenFeeInfo, compute_mapping_slot_for_address, query_erc20_balance},
     tx::MorphTxExt,
 };
 
@@ -138,7 +138,12 @@ where
         if tx.is_morph_tx() {
             let token_id = tx.fee_token_id.unwrap_or_default();
             if token_id > 0 {
-                return self.reimburse_caller_token_fee(evm, exec_result.gas(), token_id);
+                // When fee charge was disabled (eth_call), no token was deducted and
+                // cached_token_fee_info was not set — skip reimbursement entirely.
+                if evm.cached_token_fee_info.is_none() {
+                    return Ok(());
+                }
+                return self.reimburse_caller_token_fee(evm, exec_result.gas());
             }
             // fee_token_id == 0 follows standard ETH reimbursement flow
             post_execution::reimburse_caller(evm.ctx(), exec_result.gas(), U256::ZERO)?;
@@ -376,14 +381,14 @@ where
         Ok(())
     }
 
-    /// Validate and deduct token-based gas fees.
+    /// Reimburse unused gas fees in ERC20 tokens.
     ///
-    /// This handles gas payment using ERC20 tokens instead of ETH.
+    /// Uses the cached `TokenFeeInfo` from the deduction phase to ensure
+    /// consistent price_ratio/scale, matching go-ethereum's `st.feeRate`/`st.tokenScale`.
     fn reimburse_caller_token_fee(
         &self,
         evm: &mut MorphEvm<DB, I>,
         gas: &Gas,
-        token_id: u16,
     ) -> Result<(), EVMError<DB::Error, MorphInvalidTransaction>> {
         // Get caller address
         let caller = evm.ctx_ref().tx().caller();
@@ -400,16 +405,14 @@ where
             return Ok(());
         }
 
-        // Fetch token fee info from Token Registry
-        let spec = *evm.ctx_ref().cfg().spec();
-        let token_fee_info =
-            TokenFeeInfo::load_for_caller(evm.ctx_mut().db_mut(), token_id, caller, spec)?
-                .ok_or(MorphInvalidTransaction::TokenNotRegistered(token_id))?;
-
-        // Check if token is active
-        if !token_fee_info.is_active {
-            return Err(MorphInvalidTransaction::TokenNotActive(token_id).into());
-        }
+        // Use cached token fee info from the deduction phase (set in validate_and_deduct_token_fee).
+        // This ensures the same price_ratio/scale is used for both deduction and reimbursement.
+        // `take()` since reimburse is called once per tx and the cache is no longer needed.
+        let token_fee_info = evm.cached_token_fee_info.take().ok_or(
+            MorphInvalidTransaction::TokenTransferFailed {
+                reason: "cached_token_fee_info not set by validate_and_deduct_token_fee".into(),
+            },
+        )?;
 
         // Calculate token amount required for total fee
         let token_amount_required = token_fee_info.eth_to_token_amount(reimburse_eth);
@@ -428,13 +431,14 @@ where
                 balance_slot,
             )?;
         } else {
-            // Transfer with evm call.
+            // Transfer with evm call (from=beneficiary, balance not pre-fetched).
             transfer_erc20_with_evm(
                 evm,
                 beneficiary,
-                token_fee_info.caller,
+                caller,
                 token_fee_info.token_address,
                 token_amount_required,
+                None,
             )?;
         }
         Ok(())
@@ -453,14 +457,44 @@ where
             return Err(MorphInvalidTransaction::TokenIdZeroNotSupported.into());
         }
 
-        let (block, tx, cfg, journal, _, _) = evm.ctx_mut().all_mut();
+        {
+            let (_, tx, cfg, journal, _, _) = evm.ctx_mut().all_mut();
+            let caller_addr = tx.caller();
+            let nonce = tx.nonce();
 
-        // Get caller address
+            // Validate account nonce and code (EIP-3607) BEFORE any state mutations,
+            // matching the order used in validate_and_deduct_eth_fee.
+            let caller = journal.load_account_with_code_mut(caller_addr)?.data;
+            pre_execution::validate_account_nonce_and_code(
+                &caller.account().info,
+                nonce,
+                cfg.is_eip3607_disabled(),
+                cfg.is_nonce_check_disabled(),
+            )?;
+        }
+
+        let (_, tx, cfg, journal, _, _) = evm.ctx_mut().all_mut();
         let caller_addr = tx.caller();
-        // Get coinbase address
+        let is_call = tx.kind().is_call();
+
+        // eth_call (disable_fee_charge): skip token fee deduction entirely.
+        // Only nonce/code validation (above) and nonce bump are needed.
+        // This matches the ETH path's disable_fee_charge semantics and ensures
+        // eth_call is a pure simulation without token registry lookups, balance
+        // checks, or ERC20 transfers.
+        if cfg.is_fee_charge_disabled() {
+            if is_call {
+                let mut caller = journal.load_account_with_code_mut(caller_addr)?.data;
+                caller.bump_nonce();
+            }
+            return Ok(());
+        }
+
+        let (block, tx, cfg, journal, _, _) = evm.ctx_mut().all_mut();
+        let caller_addr = tx.caller();
         let beneficiary = block.beneficiary();
-        // Get the current hardfork for L1 fee calculation
         let hardfork = *cfg.spec();
+        let is_call = tx.kind().is_call();
 
         // Fetch token fee info from Token Registry
         let token_fee_info =
@@ -557,58 +591,37 @@ where
                 }
             }
         } else {
-            // Transfer with evm call.
+            // Transfer with evm call (from=caller, balance known from token registry).
             transfer_erc20_with_evm(
                 evm,
-                token_fee_info.caller,
+                caller_addr,
                 beneficiary,
                 token_fee_info.token_address,
                 token_amount_required,
+                Some(token_fee_info.balance),
             )?;
 
             // State changes should be marked cold to avoid warm access in the main tx execution.
-            // Also save original_value for changed slots (see workaround above).
             let mut state = evm.finalize();
-            state.iter_mut().for_each(|(addr, acc)| {
+            state.iter_mut().for_each(|(_, acc)| {
                 acc.mark_cold();
-                acc.storage.iter_mut().for_each(|(key, slot)| {
-                    if slot.original_value != slot.present_value {
-                        fee_slot_saves.push((*addr, *key, slot.original_value));
-                    }
-                    slot.mark_cold();
-                });
+                acc.storage
+                    .iter_mut()
+                    .for_each(|(_, slot)| slot.mark_cold());
             });
             evm.ctx_mut().journal_mut().state.extend(state);
         }
 
-        // Store the saved original values in the tx env. We access the `tx` field
-        // directly because `ContextTr::all_mut()` returns tx as `&Self::Tx` (immutable).
-        if !fee_slot_saves.is_empty() {
-            evm.inner.ctx.tx.fee_slot_original_values = fee_slot_saves;
-        }
-
-        let (_, tx, cfg, journal, _, _) = evm.ctx().all_mut();
-
-        // Extract the required tx fields (Copy) before mutating accounts.
-        let caller_addr = tx.caller();
-        let nonce = tx.nonce();
-        let is_call = tx.kind().is_call();
-
-        // Load caller's account for nonce/code validation
-        let mut caller = journal.load_account_with_code_mut(caller_addr)?.data;
-
-        // Validate account nonce and code (EIP-3607)
-        pre_execution::validate_account_nonce_and_code(
-            &caller.account().info,
-            nonce,
-            cfg.is_eip3607_disabled(),
-            cfg.is_nonce_check_disabled(),
-        )?;
-
         // Bump nonce for calls (CREATE nonce is bumped in make_create_frame)
         if is_call {
+            let (_, _, _, journal, _, _) = evm.ctx().all_mut();
+            let mut caller = journal.load_account_with_code_mut(caller_addr)?.data;
             caller.bump_nonce();
         }
+
+        // Cache token fee info for the reimburse phase, ensuring consistent
+        // price_ratio/scale between deduction and reimbursement.
+        evm.cached_token_fee_info = Some(token_fee_info);
 
         Ok(())
     }
@@ -627,14 +640,17 @@ fn transfer_erc20_with_slot<DB>(
 where
     DB: alloy_evm::Database,
 {
-    // Sub amount
+    // Sub amount (checked: reject if insufficient, matching go-ethereum's
+    // changeAltTokenBalanceByState which returns an error on underflow)
     let from_storage_slot = compute_mapping_slot_for_address(token_balance_slot, from);
-    let balance = journal.sload(token, from_storage_slot)?;
-    journal.sstore(
-        token,
-        from_storage_slot,
-        balance.saturating_sub(token_amount),
+    let balance = *journal.sload(token, from_storage_slot)?;
+    let new_balance = balance.checked_sub(token_amount).ok_or(
+        MorphInvalidTransaction::InsufficientTokenBalance {
+            required: token_amount,
+            available: balance,
+        },
     )?;
+    journal.sstore(token, from_storage_slot, new_balance)?;
 
     // Add amount
     let to_storage_slot = compute_mapping_slot_for_address(token_balance_slot, to);
@@ -644,40 +660,85 @@ where
 }
 
 /// Transfers ERC20 tokens by executing a `transfer(address,uint256)` call via the EVM.
+///
+/// Matches go-ethereum's `transferAltTokenByEVM` validation:
+/// 1. Checks EVM call succeeded (no revert)
+/// 2. Validates ABI-decoded bool return value (supports old tokens with no return data)
+/// 3. Verifies sender balance changed by the expected amount
+///
+/// `from_balance_before` is the sender's balance before the transfer. If `None`,
+/// the balance is queried via EVM call (matching go-eth's nil `userBalanceBefore`).
 fn transfer_erc20_with_evm<DB, I>(
     evm: &mut MorphEvm<DB, I>,
-    caller: Address,
+    from: Address,
     to: Address,
     token_address: Address,
     token_amount: U256,
+    from_balance_before: Option<U256>,
 ) -> Result<(), EVMError<DB::Error, MorphInvalidTransaction>>
 where
     DB: alloy_evm::Database,
 {
     let tx_origin = evm.tx.clone();
 
-    let calldata = build_transfer_calldata(to, token_amount);
-    let res = match evm.system_call_one_with_caller(caller, token_address, calldata) {
-        Ok(result) => {
-            if result.is_success() {
-                Ok(())
-            } else {
-                Err(MorphInvalidTransaction::TokenTransferFailed {
-                    reason: format!("{result:?}"),
-                }
-                .into())
-            }
-        }
-        Err(e) => Err(MorphInvalidTransaction::TokenTransferFailed {
-            reason: format!("Error: {e:?}"),
-        }
-        .into()),
+    // Read sender balance before transfer if not provided
+    let from_balance_before = match from_balance_before {
+        Some(b) => b,
+        None => query_erc20_balance(evm, token_address, from).unwrap_or(U256::ZERO),
     };
 
-    // restore the original transaction
+    let calldata = build_transfer_calldata(to, token_amount);
+    match evm.system_call_one_with_caller(from, token_address, calldata) {
+        Ok(result) => {
+            if !result.is_success() {
+                evm.tx = tx_origin;
+                return Err(MorphInvalidTransaction::TokenTransferFailed {
+                    reason: format!("{result:?}"),
+                }
+                .into());
+            }
+
+            // Validate ABI bool return value, matching go-ethereum behavior:
+            // - No return data: accepted (old tokens that don't return bool)
+            // - 32+ bytes with last byte == 1: accepted (standard ERC20)
+            // - Otherwise: rejected
+            if let Some(output) = result.output()
+                && !output.is_empty()
+                && (output.len() < 32 || output[31] != 1)
+            {
+                evm.tx = tx_origin;
+                return Err(MorphInvalidTransaction::TokenTransferFailed {
+                    reason: "alt token transfer returned failure".to_string(),
+                }
+                .into());
+            }
+        }
+        Err(e) => {
+            evm.tx = tx_origin;
+            return Err(MorphInvalidTransaction::TokenTransferFailed {
+                reason: format!("Error: {e:?}"),
+            }
+            .into());
+        }
+    };
+
+    // Verify sender balance changed by the expected amount, matching go-ethereum.
+    let from_balance_after = query_erc20_balance(evm, token_address, from).unwrap_or(U256::ZERO);
+
+    // Restore the original transaction
     evm.tx = tx_origin;
 
-    res
+    let expected_balance = from_balance_before.saturating_sub(token_amount);
+    if from_balance_after != expected_balance {
+        return Err(MorphInvalidTransaction::TokenTransferFailed {
+            reason: format!(
+                "sender balance mismatch: expected {expected_balance}, got {from_balance_after}"
+            ),
+        }
+        .into());
+    }
+
+    Ok(())
 }
 
 /// Build the calldata for ERC20 transfer(address,amount) call.

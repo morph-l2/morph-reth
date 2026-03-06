@@ -1,4 +1,4 @@
-use crate::{MorphBlockEnv, MorphTxEnv, precompiles::MorphPrecompiles};
+use crate::{MorphBlockEnv, MorphTxEnv, precompiles::MorphPrecompiles, token_fee::TokenFeeInfo};
 use alloy_evm::Database;
 use alloy_primitives::{Log, U256, keccak256};
 use morph_chainspec::hardfork::MorphHardfork;
@@ -167,6 +167,10 @@ pub struct MorphEvm<DB: Database, I> {
     >,
     /// Preserved logs from the last transaction
     pub logs: Vec<Log>,
+    /// Cached token fee info from the validation/deduction phase.
+    /// Ensures consistent price_ratio/scale between deduct and reimburse,
+    /// matching go-ethereum's `st.feeRate`/`st.tokenScale` caching pattern.
+    pub(crate) cached_token_fee_info: Option<TokenFeeInfo>,
 }
 
 impl<DB: Database, I> MorphEvm<DB, I> {
@@ -222,6 +226,7 @@ impl<DB: Database, I> MorphEvm<DB, I> {
         Self {
             inner,
             logs: Vec::new(),
+            cached_token_fee_info: None,
         }
     }
 }

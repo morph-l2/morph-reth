@@ -82,7 +82,7 @@ impl<T> MorphReceiptEnvelope<T> {
 
     /// Returns the success status of the receipt's transaction.
     pub const fn status(&self) -> bool {
-        self.as_receipt().unwrap().status.coerce_status()
+        self.as_receipt().status.coerce_status()
     }
 
     /// Return true if the transaction was successful.
@@ -92,12 +92,12 @@ impl<T> MorphReceiptEnvelope<T> {
 
     /// Returns the cumulative gas used at this receipt.
     pub const fn cumulative_gas_used(&self) -> u64 {
-        self.as_receipt().unwrap().cumulative_gas_used
+        self.as_receipt().cumulative_gas_used
     }
 
     /// Return the receipt logs.
     pub fn logs(&self) -> &[T] {
-        &self.as_receipt().unwrap().logs
+        &self.as_receipt().logs
     }
 
     /// Return the receipt's bloom.
@@ -128,16 +128,15 @@ impl<T> MorphReceiptEnvelope<T> {
         }
     }
 
-    /// Return the inner receipt. Currently this is infallible, however, future
-    /// receipt types may be added.
-    pub const fn as_receipt(&self) -> Option<&Receipt<T>> {
+    /// Return the inner receipt.
+    pub const fn as_receipt(&self) -> &Receipt<T> {
         match self {
             Self::Legacy(t)
             | Self::Eip2930(t)
             | Self::Eip1559(t)
             | Self::Eip7702(t)
             | Self::L1Message(t)
-            | Self::Morph(t) => Some(&t.receipt),
+            | Self::Morph(t) => &t.receipt,
         }
     }
 }
@@ -172,11 +171,11 @@ where
     type Log = T;
 
     fn status_or_post_state(&self) -> Eip658Value {
-        self.as_receipt().unwrap().status
+        self.as_receipt().status
     }
 
     fn status(&self) -> bool {
-        self.as_receipt().unwrap().status.coerce_status()
+        self.as_receipt().status.coerce_status()
     }
 
     fn bloom(&self) -> Bloom {
@@ -188,11 +187,11 @@ where
     }
 
     fn cumulative_gas_used(&self) -> u64 {
-        self.as_receipt().unwrap().cumulative_gas_used
+        self.as_receipt().cumulative_gas_used
     }
 
     fn logs(&self) -> &[T] {
-        &self.as_receipt().unwrap().logs
+        &self.as_receipt().logs
     }
 }
 
