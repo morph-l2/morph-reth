@@ -429,7 +429,10 @@ mod tests {
         input[63] = 32; // exp_len = 32
         input[95] = 32; // mod_len = 32
         let result = modexp.execute(&input, 100_000);
-        assert!(result.is_err(), "modexp with base_len=33 should be rejected");
+        assert!(
+            result.is_err(),
+            "modexp with base_len=33 should be rejected"
+        );
 
         // base_len=32, exp_len=32, mod_len=32 — should succeed
         input[31] = 32;
@@ -481,7 +484,10 @@ mod tests {
         let input = vec![0u8; 4 * 192];
         let result = pairing.execute(&input, 1_000_000);
         // Zero-input pairing is valid and returns true
-        assert!(result.is_ok(), "pairing with 4 pairs should not be rejected for size");
+        assert!(
+            result.is_ok(),
+            "pairing with 4 pairs should not be rejected for size"
+        );
     }
 
     #[test]
@@ -560,7 +566,10 @@ mod tests {
         assert!(morph203_p.contains(&addresses::RIPEMD160));
         assert!(morph203_p.contains(&addresses::BLAKE2F));
         assert!(!morph203_p.contains(&addresses::P256_VERIFY));
-        assert_eq!(morph203_p.precompiles().len(), viridian_p.precompiles().len());
+        assert_eq!(
+            morph203_p.precompiles().len(),
+            viridian_p.precompiles().len()
+        );
 
         // Emerald: full set with BLS12-381 + P256verify, no KZG
         assert!(emerald_p.contains(&addresses::P256_VERIFY));

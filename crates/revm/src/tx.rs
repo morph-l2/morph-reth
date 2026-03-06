@@ -9,7 +9,6 @@ use alloy_eips::eip2718::Encodable2718;
 use alloy_eips::eip2930::AccessList;
 use alloy_eips::eip7702::RecoveredAuthority;
 use alloy_primitives::{Address, B256, Bytes, Signature, TxKind, U256};
-use alloy_rlp::Decodable;
 use morph_primitives::{L1_TX_TYPE_ID, MORPH_TX_TYPE_ID, MorphTxEnvelope, TxMorph};
 use reth_evm::{FromRecoveredTx, FromTxWithEncoded, ToTxEnv, TransactionEnv};
 use revm::context::{Transaction, TxEnv};
@@ -153,7 +152,7 @@ impl MorphTxEnv {
                 // If version is missing (e.g. from an older transaction type), we fallback to V1
                 // to safely overestimate the L1 fee, ensuring we don't underprice the transaction.
                 tracing::debug!(
-                    target: "morph::revm",
+                    target: "morph::evm",
                     "MorphTx version not set, falling back to V1 for L1 fee calculation to safely overestimate"
                 );
                 morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_1
@@ -240,11 +239,20 @@ impl MorphTxEnv {
     fn from_tx_with_rlp_bytes(tx: &MorphTxEnvelope, signer: Address, rlp_bytes: Bytes) -> Self {
         let tx_type: u8 = tx.tx_type().into();
 
-        // Extract MorphTx fields for TxMorph (type 0x7F)
-        let morph_tx_info = if tx_type == MORPH_TX_TYPE_ID {
-            extract_morph_tx_fields_from_rlp(&rlp_bytes)
-        } else {
-            None
+        // Extract MorphTx fields directly from the typed envelope — avoids an
+        // unnecessary encode→decode RLP roundtrip that the old helper performed.
+        let morph_tx_info = match tx {
+            MorphTxEnvelope::Morph(signed) => {
+                let morph = signed.tx();
+                Some(DecodedMorphTxFields {
+                    version: morph.version,
+                    fee_token_id: morph.fee_token_id,
+                    fee_limit: morph.fee_limit,
+                    reference: morph.reference,
+                    memo: morph.memo.clone(),
+                })
+            }
+            _ => None,
         };
 
         // Build TxEnv from the transaction
@@ -307,28 +315,6 @@ struct DecodedMorphTxFields {
     fee_limit: U256,
     reference: Option<alloy_primitives::B256>,
     memo: Option<Bytes>,
-}
-
-/// Extract all MorphTx fields from RLP-encoded TxMorph bytes.
-///
-/// The bytes should be EIP-2718 encoded (type byte + RLP payload).
-/// Returns None if decoding fails.
-fn extract_morph_tx_fields_from_rlp(rlp_bytes: &Bytes) -> Option<DecodedMorphTxFields> {
-    if rlp_bytes.is_empty() {
-        return None;
-    }
-
-    // Skip the type byte (0x7F) and decode the TxMorph
-    let payload = &rlp_bytes[1..];
-    TxMorph::decode(&mut &payload[..])
-        .map(|tx| DecodedMorphTxFields {
-            version: tx.version,
-            fee_token_id: tx.fee_token_id,
-            fee_limit: tx.fee_limit,
-            reference: tx.reference,
-            memo: tx.memo,
-        })
-        .ok()
 }
 
 impl Deref for MorphTxEnv {

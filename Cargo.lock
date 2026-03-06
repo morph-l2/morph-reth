@@ -4934,7 +4934,6 @@ dependencies = [
  "alloy-eips",
  "alloy-evm",
  "alloy-primitives",
- "alloy-rlp",
  "alloy-sol-types",
  "auto_impl",
  "derive_more",

@@ -167,7 +167,7 @@ impl MorphEngineValidator {
 
     /// Sets the geth RPC URL for cross-validating MPT state root.
     pub fn with_geth_rpc_url(mut self, url: String) -> Self {
-        tracing::info!(target: "morph::validator", %url, "Enabled state root cross-validation via geth diskRoot RPC");
+        tracing::info!(target: "engine::validator", %url, "Enabled state root cross-validation via geth diskRoot RPC");
         self.geth_rpc_url = Some(url);
         self
     }
@@ -335,7 +335,7 @@ impl StateRootValidator<morph_primitives::MorphPrimitives> for MorphEngineValida
             Ok(disk_root) => {
                 if computed_state_root == disk_root {
                     tracing::debug!(
-                        target: "morph::validator",
+                        target: "engine::validator",
                         block_number,
                         ?computed_state_root,
                         "State root cross-validation passed"
@@ -343,7 +343,7 @@ impl StateRootValidator<morph_primitives::MorphPrimitives> for MorphEngineValida
                     Ok(())
                 } else {
                     tracing::error!(
-                        target: "morph::validator",
+                        target: "engine::validator",
                         block_number,
                         ?computed_state_root,
                         ?disk_root,
@@ -360,7 +360,7 @@ impl StateRootValidator<morph_primitives::MorphPrimitives> for MorphEngineValida
             }
             Err(err) => {
                 tracing::warn!(
-                    target: "morph::validator",
+                    target: "engine::validator",
                     block_number,
                     %err,
                     "Failed to fetch diskRoot from geth, skipping state root validation"

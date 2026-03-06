@@ -218,8 +218,11 @@ mod tests {
             memo: None,
             input: Default::default(),
         };
-        let envelope =
-            MorphTxEnvelope::Morph(Signed::new_unchecked(tx, Signature::test_signature(), B256::ZERO));
+        let envelope = MorphTxEnvelope::Morph(Signed::new_unchecked(
+            tx,
+            Signature::test_signature(),
+            B256::ZERO,
+        ));
         let input = MorphTxValidationInput {
             consensus_tx: &envelope,
             sender,
@@ -234,8 +237,7 @@ mod tests {
         assert_eq!(
             err,
             MorphTxError::InvalidFormat {
-                reason: "version 1 MorphTx cannot have FeeLimit when FeeTokenID is 0"
-                    .to_string(),
+                reason: "version 1 MorphTx cannot have FeeLimit when FeeTokenID is 0".to_string(),
             }
         );
     }
