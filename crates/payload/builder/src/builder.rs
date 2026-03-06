@@ -516,7 +516,7 @@ impl MorphPayloadBuilderCtx {
             info.total_fees += U256::from(effective_tip) * U256::from(gas_used);
 
             // Store the transaction bytes for ExecutableL2Data
-            let mut tx_bytes = Vec::new();
+            let mut tx_bytes = Vec::with_capacity(tx.encode_2718_len());
             tx.encode_2718(&mut tx_bytes);
             executed_txs.push(Bytes::from(tx_bytes));
         }

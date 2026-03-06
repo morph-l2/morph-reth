@@ -23,6 +23,7 @@
 
 use alloy_consensus::Transaction;
 use alloy_eips::eip2718::Encodable2718;
+use alloy_consensus::Typed2718;
 use alloy_primitives::{Address, TxHash, U256};
 use futures::StreamExt;
 use morph_chainspec::hardfork::MorphHardforks;
@@ -153,7 +154,7 @@ where
             .pending
             .iter()
             .chain(all_txs.queued.iter())
-            .filter(|tx| tx.transaction.clone_into_consensus().is_morph_tx())
+            .filter(|tx| tx.transaction.ty() == morph_primitives::MORPH_TX_TYPE_ID)
             .collect();
 
         if morph_txs.is_empty() {
@@ -206,7 +207,7 @@ where
 
         for (sender, mut sender_txs) in txs_by_sender {
             sender_txs
-                .sort_by_key(|pooled_tx| pooled_tx.transaction.clone_into_consensus().nonce());
+                .sort_by_key(|pooled_tx| pooled_tx.transaction.nonce());
 
             // Initialize sender ETH budget once.
             let eth_balance = match db.basic(sender) {

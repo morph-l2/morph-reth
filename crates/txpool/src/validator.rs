@@ -51,7 +51,7 @@ impl MorphL1BlockInfo {
 
     /// Returns the current L1 block info.
     pub fn l1_block_info(&self) -> L1BlockInfo {
-        self.l1_block_info.read().clone()
+        *self.l1_block_info.read()
     }
 
     /// Updates the L1 block info.
@@ -254,12 +254,13 @@ where
             authorities,
         } = outcome
         {
-            let l1_block_info = self.block_info.l1_block_info.read().clone();
+            let l1_block_info = *self.block_info.l1_block_info.read();
             let hardfork = self
                 .chain_spec()
                 .morph_hardfork_at(self.block_number(), self.block_timestamp());
 
-            // Calculate L1 data fee (always calculated for all transactions)
+            // Calculate L1 data fee (always calculated for all transactions).
+            // Clone consensus tx once — reused for both L1 fee encoding and MorphTx validation.
             let consensus_tx = valid_tx.transaction().clone_into_consensus();
             let mut encoded = Vec::with_capacity(consensus_tx.encode_2718_len());
             consensus_tx.encode_2718(&mut encoded);
@@ -268,9 +269,10 @@ where
             if is_morph_tx {
                 // MorphTx: validate structural rules and ERC20 token balance via
                 // the shared helper used by both admission and maintenance.
+                // Pass &MorphTxEnvelope directly to avoid a second clone_into_consensus().
                 let sender = valid_tx.transaction().sender();
                 let validation = match self.validate_morph_tx_balance(
-                    valid_tx.transaction(),
+                    &consensus_tx,
                     sender,
                     balance,
                     l1_data_fee,
@@ -336,6 +338,9 @@ where
 
     /// Validates MorphTx (0x7F) ERC20 token balance and fee_limit.
     ///
+    /// Accepts `&Recovered<MorphTxEnvelope>` directly (already cloned by the caller)
+    /// to avoid a redundant second `clone_into_consensus()`.
+    ///
     /// This method performs the following checks (reference: go-ethereum tx_pool.go:727-791):
     /// 1. `fee_token_id == 0`: ETH-fee path, require ETH affordability for `cost + l1_fee`
     /// 2. `fee_token_id > 0`: token must be registered and active in L2TokenRegistry
@@ -344,14 +349,12 @@ where
     /// 5. ETH balance must be >= transaction value (value is still in ETH)
     fn validate_morph_tx_balance(
         &self,
-        tx: &Tx,
+        consensus_tx: &reth_primitives_traits::Recovered<MorphTxEnvelope>,
         sender: Address,
         eth_balance: U256,
         l1_data_fee: U256,
         hardfork: morph_chainspec::hardfork::MorphHardfork,
     ) -> Result<crate::MorphTxValidationResult, MorphTxError> {
-        let consensus_tx = tx.clone_into_consensus();
-
         // Get state provider for token info lookup
         let provider = self
             .client()
@@ -365,7 +368,7 @@ where
 
         // Use shared validation logic with unified API (includes ETH balance check)
         let input = crate::MorphTxValidationInput {
-            consensus_tx: &consensus_tx,
+            consensus_tx,
             sender,
             eth_balance,
             l1_data_fee,

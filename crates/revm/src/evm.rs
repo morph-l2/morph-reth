@@ -1,10 +1,10 @@
-use crate::{MorphBlockEnv, MorphTxEnv, precompiles::MorphPrecompiles, token_fee::TokenFeeInfo};
+use crate::{MorphBlockEnv, MorphTxEnv, l1block::L1BlockInfo, precompiles::MorphPrecompiles, token_fee::TokenFeeInfo};
 use alloy_evm::Database;
 use alloy_primitives::{Log, U256, keccak256};
 use morph_chainspec::hardfork::MorphHardfork;
 use revm::{
     Context, Inspector,
-    context::{CfgEnv, ContextError, Evm, FrameStack},
+    context::{CfgEnv, ContextError, Evm, FrameStack, Journal},
     handler::{
         EthFrame, EvmTr, FrameInitOrResult, FrameTr, ItemOrResult, instructions::EthInstructions,
     },
@@ -17,7 +17,11 @@ use revm::{
 };
 
 /// The Morph EVM context type.
-pub type MorphContext<DB> = Context<MorphBlockEnv, MorphTxEnv, CfgEnv<MorphHardfork>, DB>;
+///
+/// Uses [`L1BlockInfo`] as the `CHAIN` parameter so that L1 fee parameters
+/// are fetched once per block and shared across all transactions, avoiding
+/// repeated storage reads in the handler hot path.
+pub type MorphContext<DB> = Context<MorphBlockEnv, MorphTxEnv, CfgEnv<MorphHardfork>, DB, Journal<DB>, L1BlockInfo>;
 
 #[inline]
 fn as_u64_saturated(value: U256) -> u64 {
@@ -89,6 +93,11 @@ pub struct MorphEvm<DB: Database, I> {
     /// Ensures consistent price_ratio/scale between deduct and reimburse,
     /// matching go-ethereum's `st.feeRate`/`st.tokenScale` caching pattern.
     pub(crate) cached_token_fee_info: Option<TokenFeeInfo>,
+    /// Cached L1 data fee calculated during handler validation.
+    /// Avoids re-encoding the full transaction RLP in the block executor's
+    /// receipt-building path (the handler already has the encoded bytes via
+    /// `MorphTxEnv.rlp_bytes`).
+    pub(crate) cached_l1_data_fee: U256,
 }
 
 impl<DB: Database, I> MorphEvm<DB, I> {
@@ -135,6 +144,7 @@ impl<DB: Database, I> MorphEvm<DB, I> {
             inner,
             logs: Vec::new(),
             cached_token_fee_info: None,
+            cached_l1_data_fee: U256::ZERO,
         }
     }
 }
@@ -159,6 +169,26 @@ impl<DB: Database, I> MorphEvm<DB, I> {
     #[inline]
     pub fn take_logs(&mut self) -> Vec<Log> {
         std::mem::take(&mut self.logs)
+    }
+
+    /// Returns the cached token fee info set during handler validation.
+    ///
+    /// The cache is populated by `validate_and_deduct_token_fee` and persists
+    /// through the handler lifecycle so that post-execution code (e.g., the
+    /// block executor's receipt builder) can reuse it without re-reading the DB.
+    #[inline]
+    pub fn cached_token_fee_info(&self) -> Option<TokenFeeInfo> {
+        self.cached_token_fee_info
+    }
+
+    /// Returns the L1 data fee cached during handler validation.
+    ///
+    /// Set in `validate_and_deduct_eth_fee` / `validate_and_deduct_token_fee` and
+    /// reused by `reward_beneficiary` and the block executor's receipt builder,
+    /// avoiding redundant `calculate_tx_l1_cost` calls and RLP re-encoding.
+    #[inline]
+    pub fn cached_l1_data_fee(&self) -> U256 {
+        self.cached_l1_data_fee
     }
 }
 

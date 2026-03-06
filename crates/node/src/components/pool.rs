@@ -42,6 +42,12 @@ where
             .with_additional_tasks(ctx.config().txpool.additional_validation_tasks)
             // Register MorphTx (0x7F) type for ERC20 gas payment
             .with_custom_tx_type(morph_primitives::MORPH_TX_TYPE_ID)
+            // Disable the inner EthTransactionValidator's balance check.
+            // MorphTx (fee_token_id > 0) users may have zero ETH but pay gas in ERC20 tokens.
+            // Without this, the inner validator rejects them before reaching MorphTransactionValidator's
+            // token fee validation. The MorphTransactionValidator already performs its own balance
+            // checks for all tx types (including L1 data fee), so this is safe.
+            .disable_balance_check()
             // Note: L1Message (0x7E) is NOT registered - it will be rejected by
             // EthTransactionValidator as TxTypeNotSupported, which is correct since
             // L1 messages should only be included by the sequencer during block building
