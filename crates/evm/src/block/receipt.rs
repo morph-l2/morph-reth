@@ -197,7 +197,7 @@ impl MorphReceiptBuilder for DefaultMorphReceiptBuilder {
                     ))
                 } else {
                     warn!(
-                        target: "morph::receipt",
+                        target: "morph::evm",
                         tx_hash = ?tx.tx_hash(),
                         "MorphTx missing token fee fields - receipt will not include fee token info. \
                          This may indicate an unregistered/inactive token or a bug."

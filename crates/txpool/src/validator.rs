@@ -185,7 +185,7 @@ where
         {
             Ok(provider) => provider,
             Err(err) => {
-                tracing::warn!(target: "morph_txpool", %err, "Failed to get state provider for L1 block info update");
+                tracing::warn!(target: "morph::txpool", %err, "Failed to get state provider for L1 block info update");
                 return;
             }
         };
@@ -200,7 +200,7 @@ where
                 *self.block_info.l1_block_info.write() = l1_block_info;
             }
             Err(err) => {
-                tracing::warn!(target: "morph_txpool", ?err, "Failed to fetch L1 block info");
+                tracing::warn!(target: "morph::txpool", ?err, "Failed to fetch L1 block info");
             }
         }
     }
@@ -240,7 +240,7 @@ where
 
         let outcome = self.inner.validate_one(origin, transaction);
         if outcome.is_invalid() || outcome.is_error() {
-            tracing::trace!(target: "morph_txpool", ?outcome, "tx pool validation failed");
+            tracing::trace!(target: "morph::txpool", ?outcome, "tx pool validation failed");
             return outcome;
         }
 
@@ -383,7 +383,7 @@ where
             .unwrap_or_default();
 
         tracing::trace!(
-            target: "morph_txpool",
+            target: "morph::txpool",
             fee_token_id = ?consensus_tx.fee_token_id(),
             fee_limit = ?consensus_tx.fee_limit(),
             uses_token_fee = result.uses_token_fee,

@@ -1,4 +1,7 @@
-use crate::{MorphBlockEnv, MorphTxEnv, l1block::L1BlockInfo, precompiles::MorphPrecompiles, token_fee::TokenFeeInfo};
+use crate::{
+    MorphBlockEnv, MorphTxEnv, l1block::L1BlockInfo, precompiles::MorphPrecompiles,
+    token_fee::TokenFeeInfo,
+};
 use alloy_evm::Database;
 use alloy_primitives::{Log, U256, keccak256};
 use morph_chainspec::hardfork::MorphHardfork;
@@ -21,7 +24,8 @@ use revm::{
 /// Uses [`L1BlockInfo`] as the `CHAIN` parameter so that L1 fee parameters
 /// are fetched once per block and shared across all transactions, avoiding
 /// repeated storage reads in the handler hot path.
-pub type MorphContext<DB> = Context<MorphBlockEnv, MorphTxEnv, CfgEnv<MorphHardfork>, DB, Journal<DB>, L1BlockInfo>;
+pub type MorphContext<DB> =
+    Context<MorphBlockEnv, MorphTxEnv, CfgEnv<MorphHardfork>, DB, Journal<DB>, L1BlockInfo>;
 
 #[inline]
 fn as_u64_saturated(value: U256) -> u64 {

@@ -21,13 +21,12 @@
 //! and `demoteUnexecutables` (tx_pool.go), but implemented as a separate
 //! maintenance task since we cannot modify reth's internal pool logic.
 
+use crate::MorphPooledTransaction;
 use alloy_consensus::Transaction;
-use alloy_eips::eip2718::Encodable2718;
 use alloy_consensus::Typed2718;
 use alloy_primitives::{Address, TxHash, U256};
 use futures::StreamExt;
 use morph_chainspec::hardfork::MorphHardforks;
-use morph_primitives::MorphTxEnvelope;
 use morph_revm::L1BlockInfo;
 use reth_chainspec::ChainSpecProvider;
 use reth_primitives_traits::AlloyBlockHeader;
@@ -35,8 +34,8 @@ use reth_provider::CanonStateSubscriptions;
 use reth_revm::Database;
 use reth_revm::database::StateProviderDatabase;
 use reth_storage_api::StateProviderFactory;
-use reth_transaction_pool::{EthPoolTransaction, PoolTransaction, TransactionPool};
-use std::collections::{HashMap, HashSet};
+use reth_transaction_pool::{PoolTransaction, TransactionPool};
+use std::collections::HashMap;
 
 /// Sender-level rolling affordability budget used during maintenance revalidation.
 #[derive(Debug, Clone, Default)]
@@ -114,8 +113,7 @@ fn consume_token_budget(
 ///
 pub async fn maintain_morph_pool<Pool, Client>(pool: Pool, client: Client)
 where
-    Pool: TransactionPool + Clone,
-    Pool::Transaction: EthPoolTransaction<Consensus = MorphTxEnvelope>,
+    Pool: TransactionPool<Transaction = MorphPooledTransaction> + Clone,
     Client: ChainSpecProvider<ChainSpec: MorphHardforks>
         + StateProviderFactory
         + CanonStateSubscriptions
@@ -124,12 +122,12 @@ where
 {
     let mut chain_events = client.canonical_state_stream();
 
-    tracing::info!(target: "morph_txpool::maintain", "Starting MorphTx maintenance task");
+    tracing::info!(target: "morph::txpool::maintain", "Starting MorphTx maintenance task");
 
     loop {
         // Wait for the next canonical state change
         let Some(event) = chain_events.next().await else {
-            tracing::debug!(target: "morph_txpool::maintain", "Chain event stream ended");
+            tracing::debug!(target: "morph::txpool::maintain", "Chain event stream ended");
             break;
         };
 
@@ -138,7 +136,7 @@ where
         let block_timestamp = new_tip.timestamp();
 
         tracing::trace!(
-            target: "morph_txpool::maintain",
+            target: "morph::txpool::maintain",
             block_number,
             "Processing new block for MorphTx validation"
         );
@@ -166,7 +164,7 @@ where
             Ok(provider) => provider,
             Err(err) => {
                 tracing::warn!(
-                    target: "morph_txpool::maintain",
+                    target: "morph::txpool::maintain",
                     %err,
                     "Failed to get state provider for MorphTx revalidation"
                 );
@@ -181,7 +179,7 @@ where
             Ok(info) => info,
             Err(err) => {
                 tracing::warn!(
-                    target: "morph_txpool::maintain",
+                    target: "morph::txpool::maintain",
                     ?err,
                     "Failed to fetch L1 block info for MorphTx revalidation"
                 );
@@ -190,7 +188,7 @@ where
         };
 
         tracing::trace!(
-            target: "morph_txpool::maintain",
+            target: "morph::txpool::maintain",
             count = morph_txs.len(),
             "Revalidating MorphTx transactions"
         );
@@ -203,11 +201,10 @@ where
         }
 
         // Revalidate each sender's MorphTx set and collect invalid ones
-        let mut to_remove: HashSet<TxHash> = HashSet::new();
+        let mut to_remove: Vec<TxHash> = Vec::new();
 
         for (sender, mut sender_txs) in txs_by_sender {
-            sender_txs
-                .sort_by_key(|pooled_tx| pooled_tx.transaction.nonce());
+            sender_txs.sort_by_key(|pooled_tx| pooled_tx.transaction.nonce());
 
             // Initialize sender ETH budget once.
             let eth_balance = match db.basic(sender) {
@@ -215,7 +212,7 @@ where
                 Ok(None) => U256::ZERO,
                 Err(err) => {
                     tracing::warn!(
-                        target: "morph_txpool::maintain",
+                        target: "morph::txpool::maintain",
                         ?sender,
                         ?err,
                         "Failed to get account balance"
@@ -231,16 +228,15 @@ where
 
             for pooled_tx in sender_txs {
                 let tx = &pooled_tx.transaction;
-                let consensus_tx = tx.clone_into_consensus();
+                // Access the consensus tx by reference (via Deref chain) instead of
+                // cloning. Use the pool tx's cached EIP-2718 encoding for L1 fee.
+                let consensus_tx = tx.transaction();
 
-                // Calculate L1 data fee for this transaction.
-                let mut encoded = Vec::with_capacity(consensus_tx.encode_2718_len());
-                consensus_tx.encode_2718(&mut encoded);
-                let l1_data_fee = l1_block_info.calculate_tx_l1_cost(&encoded, hardfork);
+                let l1_data_fee = l1_block_info.calculate_tx_l1_cost(tx.encoded_2718(), hardfork);
 
                 // Use shared validation logic first with current sender ETH budget.
                 let input = crate::MorphTxValidationInput {
-                    consensus_tx: &consensus_tx,
+                    consensus_tx,
                     sender,
                     eth_balance: budget.eth_balance,
                     l1_data_fee,
@@ -251,13 +247,13 @@ where
                     Ok(v) => v,
                     Err(err) => {
                         tracing::debug!(
-                            target: "morph_txpool::maintain",
+                            target: "morph::txpool::maintain",
                             tx_hash = ?tx.hash(),
                             ?sender,
                             ?err,
                             "Removing MorphTx: validation failed"
                         );
-                        to_remove.insert(*tx.hash());
+                        to_remove.push(*tx.hash());
                         break;
                     }
                 };
@@ -287,7 +283,7 @@ where
                 };
                 if !affordable {
                     tracing::debug!(
-                        target: "morph_txpool::maintain",
+                        target: "morph::txpool::maintain",
                         tx_hash = ?tx.hash(),
                         ?sender,
                         uses_token_fee = validation.uses_token_fee,
@@ -295,7 +291,7 @@ where
                         required_token_amount = ?validation.required_token_amount,
                         "Removing MorphTx: insufficient cumulative sender budget"
                     );
-                    to_remove.insert(*tx.hash());
+                    to_remove.push(*tx.hash());
                     break;
                 }
             }
@@ -304,10 +300,9 @@ where
         // Remove invalid transactions
         if !to_remove.is_empty() {
             let count = to_remove.len();
-            let hashes: Vec<_> = to_remove.into_iter().collect();
-            pool.remove_transactions(hashes);
+            pool.remove_transactions(to_remove);
             tracing::info!(
-                target: "morph_txpool::maintain",
+                target: "morph::txpool::maintain",
                 count,
                 block_number,
                 "Removed invalid MorphTx transactions"

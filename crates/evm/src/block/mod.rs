@@ -80,6 +80,10 @@ where
     DB: Database,
     I: Inspector<MorphContext<&'a mut State<DB>>>,
 {
+    /// Default capacity hint for the receipts Vec — avoids reallocations for
+    /// typical L2 blocks (which usually contain tens to low-hundreds of txs).
+    const RECEIPT_CAPACITY_HINT: usize = 128;
+
     /// Creates a new [`MorphBlockExecutor`].
     ///
     /// # Arguments
@@ -95,7 +99,7 @@ where
             evm,
             spec,
             receipt_builder,
-            receipts: Vec::new(),
+            receipts: Vec::with_capacity(Self::RECEIPT_CAPACITY_HINT),
             gas_used: 0,
             hardfork: MorphHardfork::default(),
         }
@@ -159,7 +163,7 @@ where
         // Extract version, reference, and memo from the transaction
         let version = tx.version().unwrap_or(0);
         let reference = tx.reference();
-        let memo = tx.memo();
+        let memo = tx.memo().cloned();
 
         // For fee_token_id==0 (ETH fee MorphTx, V1 only), no token registry lookup needed.
         // Still preserve version/reference/memo in the receipt.
@@ -182,9 +186,7 @@ where
             None => {
                 TokenFeeInfo::load_for_caller(self.evm.db_mut(), fee_token_id, sender, hardfork)
                     .map_err(|e| {
-                        BlockExecutionError::msg(format!(
-                            "Failed to fetch token fee info: {e:?}"
-                        ))
+                        BlockExecutionError::msg(format!("Failed to fetch token fee info: {e:?}"))
                     })?
             }
         };
@@ -246,10 +248,9 @@ where
             .spec
             .morph_hardfork_at(block_number, self.evm.block().timestamp.to::<u64>());
         self.hardfork = hardfork;
-        let l1_block_info =
-            L1BlockInfo::try_fetch(self.evm.db_mut(), hardfork).map_err(|e| {
-                BlockExecutionError::msg(format!("Failed to fetch L1 block info: {e:?}"))
-            })?;
+        let l1_block_info = L1BlockInfo::try_fetch(self.evm.db_mut(), hardfork).map_err(|e| {
+            BlockExecutionError::msg(format!("Failed to fetch L1 block info: {e:?}"))
+        })?;
         self.evm.ctx_mut().chain = l1_block_info;
 
         // 3. Apply Curie hardfork at the transition block
@@ -340,8 +341,7 @@ where
 
         // Get MorphTx-specific fields for MorphTx transactions.
         // Uses the hardfork cached in apply_pre_execution_changes (constant per block).
-        let morph_tx_fields =
-            self.get_morph_tx_fields(tx.tx(), *tx.signer(), self.hardfork)?;
+        let morph_tx_fields = self.get_morph_tx_fields(tx.tx(), *tx.signer(), self.hardfork)?;
 
         // Update cumulative gas used
         let gas_used = result.gas_used();

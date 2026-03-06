@@ -38,7 +38,7 @@ impl FromConsensusTx<MorphTxEnvelope> for MorphRpcTransaction {
         let fee_token_id = tx.fee_token_id().map(U64::from);
         let fee_limit = tx.fee_limit();
         let reference = tx.reference();
-        let memo = tx.memo();
+        let memo = tx.memo().cloned();
 
         let effective_gas_price = tx_info.base_fee.map(|base_fee| {
             tx.effective_tip_per_gas(base_fee)

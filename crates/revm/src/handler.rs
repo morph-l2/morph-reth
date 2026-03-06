@@ -332,7 +332,10 @@ where
             .unwrap_or_default();
 
         // Calculate L1 data fee using the cached L1BlockInfo from context chain field.
-        let l1_data_fee = evm.ctx_ref().chain.calculate_tx_l1_cost(rlp_bytes, hardfork);
+        let l1_data_fee = evm
+            .ctx_ref()
+            .chain
+            .calculate_tx_l1_cost(rlp_bytes, hardfork);
         evm.cached_l1_data_fee = l1_data_fee;
 
         // Get mutable access to context components
@@ -382,7 +385,7 @@ where
         let basefee = evm.ctx.block().basefee() as u128;
         let effective_gas_price = evm.ctx.tx().effective_gas_price(basefee);
 
-        let refunded = gas.refunded() as u64;
+        let refunded = gas.refunded().max(0) as u64;
         let reimburse_eth = U256::from(
             effective_gas_price.saturating_mul(gas.remaining().saturating_add(refunded) as u128),
         );
@@ -395,11 +398,11 @@ where
         // This ensures the same price_ratio/scale is used for both deduction and reimbursement.
         // The cache is kept populated (not taken) so the block executor's receipt builder
         // can also read it without re-querying the DB.
-        let token_fee_info = evm.cached_token_fee_info.ok_or(
-            MorphInvalidTransaction::TokenTransferFailed {
-                reason: "cached_token_fee_info not set by validate_and_deduct_token_fee".into(),
-            },
-        )?;
+        let token_fee_info =
+            evm.cached_token_fee_info
+                .ok_or(MorphInvalidTransaction::TokenTransferFailed {
+                    reason: "cached_token_fee_info not set by validate_and_deduct_token_fee".into(),
+                })?;
 
         // Calculate token amount required for total fee
         let token_amount_required = token_fee_info.eth_to_token_amount(reimburse_eth);
@@ -407,18 +410,20 @@ where
         // Get mutable access to journal components
         let journal = evm.ctx().journal_mut();
 
-        if let Some(balance_slot) = token_fee_info.balance_slot {
-            // Transfer with token slot.
-            let _ = transfer_erc20_with_slot(
+        // Attempt token refund. Matches go-ethereum's refundGas() which silently logs
+        // and continues on failure: "Continue execution even if refund fails - refund
+        // should not cause transaction to fail" (state_transition.go:698).
+        let refund_result = if let Some(balance_slot) = token_fee_info.balance_slot {
+            transfer_erc20_with_slot(
                 journal,
                 beneficiary,
                 caller,
                 token_fee_info.token_address,
                 token_amount_required,
                 balance_slot,
-            )?;
+            )
+            .map(|_| ())
         } else {
-            // Transfer with evm call (from=beneficiary, balance not pre-fetched).
             transfer_erc20_with_evm(
                 evm,
                 beneficiary,
@@ -426,8 +431,18 @@ where
                 token_fee_info.token_address,
                 token_amount_required,
                 None,
-            )?;
+            )
+        };
+
+        if let Err(err) = refund_result {
+            tracing::error!(
+                target: "morph::evm",
+                token_id = ?evm.ctx_ref().tx().fee_token_id,
+                %err,
+                "failed to refund alt token gas, continuing execution"
+            );
         }
+
         Ok(())
     }
 
@@ -645,11 +660,12 @@ where
     // matching go-ethereum's big.Int Add which is unbounded)
     let to_storage_slot = compute_mapping_slot_for_address(token_balance_slot, to);
     let balance = journal.sload(token, to_storage_slot)?;
-    let new_to_balance = balance.checked_add(token_amount).ok_or(
-        MorphInvalidTransaction::TokenTransferFailed {
-            reason: "recipient token balance overflow".into(),
-        },
-    )?;
+    let new_to_balance =
+        balance
+            .checked_add(token_amount)
+            .ok_or(MorphInvalidTransaction::TokenTransferFailed {
+                reason: "recipient token balance overflow".into(),
+            })?;
     journal.sstore(token, to_storage_slot, new_to_balance)?;
     Ok((from_storage_slot, to_storage_slot))
 }
@@ -729,8 +745,9 @@ where
     // ERC20 transfer subtracts then adds the same amount to the same account.
     // Only check the balance decrease when sender and recipient are different.
     if from != to {
-        let expected_balance =
-            from_balance_before.checked_sub(token_amount).ok_or_else(|| {
+        let expected_balance = from_balance_before
+            .checked_sub(token_amount)
+            .ok_or_else(|| {
                 EVMError::Transaction(MorphInvalidTransaction::TokenTransferFailed {
                     reason: format!(
                         "sender balance {from_balance_before} less than token amount {token_amount}"

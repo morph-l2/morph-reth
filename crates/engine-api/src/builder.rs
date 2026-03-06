@@ -358,9 +358,7 @@ where
 
         // 3. Import the block through reth engine tree and return the in-path header
         // (do not rely on immediate DB visibility after FCU).
-        let header = self
-            .import_l2_block_via_engine(executable_data)
-            .await?;
+        let header = self.import_l2_block_via_engine(executable_data).await?;
 
         // Update safe block tag separately, matching geth's decoupled design.
         // Best-effort: block import already succeeded, so don't fail the whole

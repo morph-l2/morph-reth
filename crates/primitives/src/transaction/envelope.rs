@@ -100,9 +100,9 @@ impl MorphTxEnvelope {
     }
 
     /// Returns the memo for MorphTx, or `None` for other transaction types.
-    pub fn memo(&self) -> Option<alloy_primitives::Bytes> {
+    pub fn memo(&self) -> Option<&alloy_primitives::Bytes> {
         match self {
-            Self::Morph(tx) => tx.tx().memo.clone(),
+            Self::Morph(tx) => tx.tx().memo.as_ref(),
             _ => None,
         }
     }
