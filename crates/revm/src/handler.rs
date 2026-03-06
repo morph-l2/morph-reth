@@ -397,8 +397,9 @@ where
         let basefee = evm.ctx.block().basefee() as u128;
         let effective_gas_price = evm.ctx.tx().effective_gas_price(basefee);
 
+        let refunded = gas.refunded() as u64;
         let reimburse_eth = U256::from(
-            effective_gas_price.saturating_mul((gas.remaining() + gas.refunded() as u64) as u128),
+            effective_gas_price.saturating_mul(gas.remaining().saturating_add(refunded) as u128),
         );
 
         if reimburse_eth.is_zero() {
@@ -495,6 +496,26 @@ where
         let beneficiary = block.beneficiary();
         let hardfork = *cfg.spec();
         let is_call = tx.kind().is_call();
+
+        // Check that caller has enough ETH to cover the value transfer.
+        // This matches go-ethereum's buyAltTokenGas() which checks
+        // state.GetBalance(from) >= value before proceeding.
+        // Without this, the tx would proceed to EVM execution and fail there
+        // (consuming gas), whereas go-ethereum rejects at the preCheck stage
+        // (not consuming gas).
+        let tx_value = tx.value();
+        if !tx_value.is_zero() {
+            let caller_eth_balance = *journal.load_account_mut(caller_addr)?.data.balance();
+            if caller_eth_balance < tx_value {
+                return Err(MorphInvalidTransaction::EthInvalidTransaction(
+                    InvalidTransaction::LackOfFundForMaxFee {
+                        fee: Box::new(tx_value),
+                        balance: Box::new(caller_eth_balance),
+                    },
+                )
+                .into());
+            }
+        }
 
         // Fetch token fee info from Token Registry
         let token_fee_info =
@@ -652,10 +673,16 @@ where
     )?;
     journal.sstore(token, from_storage_slot, new_balance)?;
 
-    // Add amount
+    // Add amount (checked: reject on overflow to maintain token conservation,
+    // matching go-ethereum's big.Int Add which is unbounded)
     let to_storage_slot = compute_mapping_slot_for_address(token_balance_slot, to);
     let balance = journal.sload(token, to_storage_slot)?;
-    journal.sstore(token, to_storage_slot, balance.saturating_add(token_amount))?;
+    let new_to_balance = balance.checked_add(token_amount).ok_or(
+        MorphInvalidTransaction::TokenTransferFailed {
+            reason: "recipient token balance overflow".into(),
+        },
+    )?;
+    journal.sstore(token, to_storage_slot, new_to_balance)?;
     Ok((from_storage_slot, to_storage_slot))
 }
 
@@ -728,14 +755,19 @@ where
     // Restore the original transaction
     evm.tx = tx_origin;
 
-    let expected_balance = from_balance_before.saturating_sub(token_amount);
-    if from_balance_after != expected_balance {
-        return Err(MorphInvalidTransaction::TokenTransferFailed {
-            reason: format!(
-                "sender balance mismatch: expected {expected_balance}, got {from_balance_after}"
-            ),
+    // When from == to (self-transfer), the net balance change is zero because the
+    // ERC20 transfer subtracts then adds the same amount to the same account.
+    // Only check the balance decrease when sender and recipient are different.
+    if from != to {
+        let expected_balance = from_balance_before.saturating_sub(token_amount);
+        if from_balance_after != expected_balance {
+            return Err(MorphInvalidTransaction::TokenTransferFailed {
+                reason: format!(
+                    "sender balance mismatch: expected {expected_balance}, got {from_balance_after}"
+                ),
+            }
+            .into());
         }
-        .into());
     }
 
     Ok(())
@@ -783,9 +815,7 @@ fn calculate_caller_fee_with_l1_cost(
     let is_fee_charge_disabled = cfg.is_fee_charge_disabled();
 
     // Calculate L2 effective balance spending (gas + value + blob fees)
-    let effective_balance_spending = tx
-        .effective_balance_spending(basefee, blob_price)
-        .expect("effective balance is always smaller than max balance so it can't overflow");
+    let effective_balance_spending = tx.effective_balance_spending(basefee, blob_price)?;
 
     // Total spending = L2 fees + L1 data fee
     let total_spending = effective_balance_spending.saturating_add(l1_data_fee);

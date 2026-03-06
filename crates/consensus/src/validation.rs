@@ -521,17 +521,27 @@ fn validate_l1_messages_in_block(
                 ConsensusError::Other(MorphConsensusError::MalformedL1Message.to_string())
             })?;
 
-            // Check queue indices are strictly sequential (each = previous + 1)
-            if let Some(prev) = prev_queue_index
-                && tx_queue_index != prev + 1
-            {
-                return Err(ConsensusError::Other(
-                    MorphConsensusError::L1MessagesNotInOrder {
-                        expected: prev + 1,
-                        actual: tx_queue_index,
-                    }
-                    .to_string(),
-                ));
+            // Check queue indices are strictly sequential (each = previous + 1).
+            // Use checked_add to prevent overflow at u64::MAX.
+            if let Some(prev) = prev_queue_index {
+                let expected = prev.checked_add(1).ok_or_else(|| {
+                    ConsensusError::Other(
+                        MorphConsensusError::L1MessagesNotInOrder {
+                            expected: u64::MAX,
+                            actual: tx_queue_index,
+                        }
+                        .to_string(),
+                    )
+                })?;
+                if tx_queue_index != expected {
+                    return Err(ConsensusError::Other(
+                        MorphConsensusError::L1MessagesNotInOrder {
+                            expected,
+                            actual: tx_queue_index,
+                        }
+                        .to_string(),
+                    ));
+                }
             }
 
             prev_queue_index = Some(tx_queue_index);
@@ -547,7 +557,15 @@ fn validate_l1_messages_in_block(
     // monotonicity check in validate_header_against_parent handles that case.
     if l1_msg_count > 0 {
         let last_queue_index = prev_queue_index.expect("l1_msg_count > 0 implies prev is Some");
-        let expected_next = last_queue_index + 1;
+        let expected_next = last_queue_index.checked_add(1).ok_or_else(|| {
+            ConsensusError::Other(
+                MorphConsensusError::InvalidNextL1MessageIndex {
+                    expected: u64::MAX,
+                    actual: header_next_l1_msg_index,
+                }
+                .to_string(),
+            )
+        })?;
         if header_next_l1_msg_index != expected_next {
             return Err(ConsensusError::Other(
                 MorphConsensusError::InvalidNextL1MessageIndex {

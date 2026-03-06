@@ -266,7 +266,8 @@ where
             let l1_data_fee = l1_block_info.calculate_tx_l1_cost(&encoded, hardfork);
 
             if is_morph_tx {
-                // MorphTx: validate ERC20 token balance
+                // MorphTx: validate structural rules and ERC20 token balance via
+                // the shared helper used by both admission and maintenance.
                 let sender = valid_tx.transaction().sender();
                 let validation = match self.validate_morph_tx_balance(
                     valid_tx.transaction(),
