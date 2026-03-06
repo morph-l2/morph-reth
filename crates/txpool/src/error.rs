@@ -61,6 +61,12 @@ pub enum MorphTxError {
         /// Error message.
         message: String,
     },
+
+    /// MorphTx format validation failed (version, memo length, gas fee ordering).
+    InvalidFormat {
+        /// Reason for the validation failure.
+        reason: String,
+    },
 }
 
 impl fmt::Display for MorphTxError {
@@ -102,6 +108,9 @@ impl fmt::Display for MorphTxError {
             Self::TokenInfoFetchFailed { token_id, message } => {
                 write!(f, "failed to fetch token info for ID {token_id}: {message}")
             }
+            Self::InvalidFormat { reason } => {
+                write!(f, "invalid MorphTx format: {reason}")
+            }
         }
     }
 }
@@ -115,6 +124,8 @@ impl PoolTransactionError for MorphTxError {
         match self {
             // Missing/invalid MorphTx fee fields indicate malformed transaction input.
             Self::InvalidTokenId => true,
+            // Format violations (bad version, memo too long, etc.) are malformed input.
+            Self::InvalidFormat { .. } => true,
             // Token not found or not active - could be due to temporary state, not penalizable
             Self::TokenNotFound { .. } | Self::TokenNotActive { .. } => false,
             // Invalid price ratio - configuration issue, not penalizable
