@@ -297,10 +297,12 @@ where
             }
         }
 
-        // Remove invalid transactions
+        // Remove invalid transactions and all higher-nonce descendants from the same sender.
+        // Using remove_transactions_and_descendants ensures that nonce-dependent txs are cleaned
+        // up immediately rather than becoming orphans that are re-validated every block.
         if !to_remove.is_empty() {
             let count = to_remove.len();
-            pool.remove_transactions(to_remove);
+            pool.remove_transactions_and_descendants(to_remove);
             tracing::info!(
                 target: "morph::txpool::maintain",
                 count,

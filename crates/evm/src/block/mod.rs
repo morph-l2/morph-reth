@@ -80,9 +80,6 @@ where
     DB: Database,
     I: Inspector<MorphContext<&'a mut State<DB>>>,
 {
-    /// Default capacity hint for the receipts Vec — avoids reallocations for
-    /// typical L2 blocks (which usually contain tens to low-hundreds of txs).
-    const RECEIPT_CAPACITY_HINT: usize = 128;
 
     /// Creates a new [`MorphBlockExecutor`].
     ///
@@ -99,7 +96,7 @@ where
             evm,
             spec,
             receipt_builder,
-            receipts: Vec::with_capacity(Self::RECEIPT_CAPACITY_HINT),
+            receipts: Vec::new(),
             gas_used: 0,
             hardfork: MorphHardfork::default(),
         }

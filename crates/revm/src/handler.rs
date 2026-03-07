@@ -741,27 +741,26 @@ where
     // Restore the original transaction
     evm.tx = tx_origin;
 
-    // When from == to (self-transfer), the net balance change is zero because the
-    // ERC20 transfer subtracts then adds the same amount to the same account.
-    // Only check the balance decrease when sender and recipient are different.
-    if from != to {
-        let expected_balance = from_balance_before
-            .checked_sub(token_amount)
-            .ok_or_else(|| {
-                EVMError::Transaction(MorphInvalidTransaction::TokenTransferFailed {
-                    reason: format!(
-                        "sender balance {from_balance_before} less than token amount {token_amount}"
-                    ),
-                })
-            })?;
-        if from_balance_after != expected_balance {
-            return Err(MorphInvalidTransaction::TokenTransferFailed {
+    // Verify sender balance decreased by exactly the transfer amount.
+    // Matches go-ethereum's transferAltTokenByEVM which always checks this,
+    // even for self-transfers (from == to), where it would fail because the
+    // net balance change is zero but the expected decrease is `token_amount`.
+    let expected_balance = from_balance_before
+        .checked_sub(token_amount)
+        .ok_or_else(|| {
+            EVMError::Transaction(MorphInvalidTransaction::TokenTransferFailed {
                 reason: format!(
-                    "sender balance mismatch: expected {expected_balance}, got {from_balance_after}"
+                    "sender balance {from_balance_before} less than token amount {token_amount}"
                 ),
-            }
-            .into());
+            })
+        })?;
+    if from_balance_after != expected_balance {
+        return Err(MorphInvalidTransaction::TokenTransferFailed {
+            reason: format!(
+                "sender balance mismatch: expected {expected_balance}, got {from_balance_after}"
+            ),
         }
+        .into());
     }
 
     Ok(())
