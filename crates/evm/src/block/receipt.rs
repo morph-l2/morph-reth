@@ -28,7 +28,7 @@
 use alloy_consensus::Receipt;
 use alloy_consensus::transaction::TxHashRef;
 use alloy_evm::Evm;
-use alloy_primitives::{B256, Bytes, U256};
+use alloy_primitives::{B256, Bytes, Log, U256};
 use morph_primitives::{MorphReceipt, MorphTransactionReceipt, MorphTxEnvelope, MorphTxType};
 use revm::context::result::ExecutionResult;
 use tracing::warn;
@@ -57,6 +57,11 @@ pub(crate) struct MorphReceiptBuilderCtx<'a, E: Evm> {
     pub l1_fee: U256,
     /// MorphTx-specific fields (token fee info, version, reference, memo)
     pub morph_tx_fields: Option<MorphReceiptTxFields>,
+    /// Transfer event logs from token fee deduction (before main tx execution).
+    /// Managed separately from the handler pipeline to survive main tx revert.
+    pub pre_fee_logs: Vec<Log>,
+    /// Transfer event logs from token fee reimbursement (after main tx execution).
+    pub post_fee_logs: Vec<Log>,
 }
 
 /// MorphTx (0x7F) specific fields for receipts.
@@ -148,12 +153,23 @@ impl MorphReceiptBuilder for DefaultMorphReceiptBuilder {
             cumulative_gas_used,
             l1_fee,
             morph_tx_fields,
+            pre_fee_logs,
+            post_fee_logs,
         } = ctx;
 
+        // Assemble logs in chronological order matching go-ethereum:
+        //   [deduct Transfer] + [main tx logs] + [refund Transfer]
+        // Fee logs are cached separately from the journal so they survive
+        // main tx revert (revm's ExecutionResult::Revert carries no logs).
+        let is_success = result.is_success();
+        let mut logs = pre_fee_logs;
+        logs.extend(result.into_logs());
+        logs.extend(post_fee_logs);
+
         let inner = Receipt {
-            status: result.is_success().into(),
+            status: is_success.into(),
             cumulative_gas_used,
-            logs: result.into_logs(),
+            logs,
         };
 
         // Create the appropriate receipt variant based on transaction type
