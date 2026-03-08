@@ -343,13 +343,19 @@ where
         let gas_used = result.gas_used();
         self.gas_used += gas_used;
 
-        // Build receipt
+        // Build receipt.
+        // Fee Transfer logs are cached separately by the handler (pre_fee_logs /
+        // post_fee_logs) so they survive main tx revert.
+        let pre_fee_logs = self.evm.take_pre_fee_logs();
+        let post_fee_logs = self.evm.take_post_fee_logs();
         let ctx: MorphReceiptBuilderCtx<'_, Self::Evm> = MorphReceiptBuilderCtx {
             tx: tx.tx(),
             result,
             cumulative_gas_used: self.gas_used,
             l1_fee,
             morph_tx_fields,
+            pre_fee_logs,
+            post_fee_logs,
         };
         self.receipts.push(self.receipt_builder.build_receipt(ctx));
 

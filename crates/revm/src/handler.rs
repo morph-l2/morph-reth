@@ -92,6 +92,8 @@ where
         // Reset per-transaction caches from the previous iteration.
         evm.cached_l1_data_fee = U256::ZERO;
         evm.cached_token_fee_info = None;
+        evm.pre_fee_logs.clear();
+        evm.post_fee_logs.clear();
 
         let (_, tx, _, journal, _, _) = evm.ctx().all_mut();
 
@@ -423,14 +425,21 @@ where
             )
             .map(|_| ())
         } else {
-            transfer_erc20_with_evm(
+            // Cache refund Transfer logs separately, matching the pre_fee_logs
+            // pattern from validate_and_deduct_token_fee.
+            let log_count_before = evm.ctx_mut().journal_mut().logs.len();
+            let result = transfer_erc20_with_evm(
                 evm,
                 beneficiary,
                 caller,
                 token_fee_info.token_address,
                 token_amount_required,
                 None,
-            )
+            );
+            let refund_logs: Vec<_> =
+                evm.ctx_mut().journal_mut().logs.drain(log_count_before..).collect();
+            evm.post_fee_logs.extend(refund_logs);
+            result
         };
 
         if let Err(err) = refund_result {
@@ -621,11 +630,16 @@ where
                 Some(token_fee_info.balance),
             )?;
 
-            // Preserve logs emitted during the ERC20 transfer (e.g., Transfer events).
-            // go-ethereum keeps these in the receipt; finalize() would drop them.
-            let saved_logs = std::mem::take(&mut evm.ctx_mut().journal_mut().logs);
+            // Cache fee Transfer logs separately from the journal.
+            //
+            // go-ethereum's StateDB.logs is independent of the state snapshot/revert
+            // mechanism — fee logs survive regardless of main tx result. revm's
+            // ExecutionResult::Revert has no logs field, so we keep fee logs out of
+            // the handler pipeline entirely and merge them in the receipt builder.
+            evm.pre_fee_logs = std::mem::take(&mut evm.ctx_mut().journal_mut().logs);
 
             // State changes should be marked cold to avoid warm access in the main tx execution.
+            // finalize() clears journal state (including logs, which we already took above).
             let mut state = evm.finalize();
             state.iter_mut().for_each(|(_, acc)| {
                 acc.mark_cold();
@@ -634,9 +648,6 @@ where
                     .for_each(|(_, slot)| slot.mark_cold());
             });
             evm.ctx_mut().journal_mut().state.extend(state);
-
-            // Restore the logs so they appear in the transaction receipt.
-            evm.ctx_mut().journal_mut().logs = saved_logs;
         }
 
         // Bump nonce for calls (CREATE nonce is bumped in make_create_frame)

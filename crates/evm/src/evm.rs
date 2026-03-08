@@ -105,8 +105,6 @@ impl<DB: Database, I> MorphEvm<DB, I> {
         }
     }
 
-    /// Takes the inner EVM's revert logs.
-    ///
     /// Returns the cached token fee info from the handler's validation phase.
     ///
     /// Avoids redundant DB reads when the block executor needs token fee
@@ -123,6 +121,18 @@ impl<DB: Database, I> MorphEvm<DB, I> {
     #[inline]
     pub fn cached_l1_data_fee(&self) -> alloy_primitives::U256 {
         self.inner.cached_l1_data_fee()
+    }
+
+    /// Takes the cached pre-execution fee logs (token fee deduction Transfer events).
+    #[inline]
+    pub fn take_pre_fee_logs(&mut self) -> Vec<alloy_primitives::Log> {
+        self.inner.take_pre_fee_logs()
+    }
+
+    /// Takes the cached post-execution fee logs (token fee reimbursement Transfer events).
+    #[inline]
+    pub fn take_post_fee_logs(&mut self) -> Vec<alloy_primitives::Log> {
+        self.inner.take_post_fee_logs()
     }
 }
 
