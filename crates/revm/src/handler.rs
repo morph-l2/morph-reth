@@ -2,7 +2,7 @@
 
 use alloy_primitives::{Address, Bytes, U256};
 use revm::{
-    ExecuteEvm, SystemCallEvm,
+    ExecuteEvm,
     context::{
         Cfg, ContextTr, JournalTr, Transaction,
         result::{EVMError, ExecutionResult, InvalidTransaction},
@@ -14,10 +14,10 @@ use revm::{
 };
 
 use crate::{
-    MorphEvm, MorphInvalidTransaction,
+    MorphEvm, MorphInvalidTransaction, MorphTxEnv,
     error::MorphHaltReason,
     evm::MorphContext,
-    token_fee::{TokenFeeInfo, compute_mapping_slot_for_address, query_erc20_balance},
+    token_fee::{TokenFeeInfo, compute_mapping_slot_for_address, encode_balance_of_calldata},
     tx::MorphTxExt,
 };
 
@@ -74,11 +74,6 @@ where
         evm: &mut Self::Evm,
         result: <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
     ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
-        evm.logs.clear();
-        if !result.instruction_result().is_ok() {
-            evm.logs = evm.journal_mut().take_logs();
-        }
-
         MainnetHandler::default()
             .execution_result(evm, result)
             .map(|result| result.map_haltreason(Into::into))
@@ -626,6 +621,10 @@ where
                 Some(token_fee_info.balance),
             )?;
 
+            // Preserve logs emitted during the ERC20 transfer (e.g., Transfer events).
+            // go-ethereum keeps these in the receipt; finalize() would drop them.
+            let saved_logs = std::mem::take(&mut evm.ctx_mut().journal_mut().logs);
+
             // State changes should be marked cold to avoid warm access in the main tx execution.
             let mut state = evm.finalize();
             state.iter_mut().for_each(|(_, acc)| {
@@ -635,6 +634,9 @@ where
                     .for_each(|(_, slot)| slot.mark_cold());
             });
             evm.ctx_mut().journal_mut().state.extend(state);
+
+            // Restore the logs so they appear in the transaction receipt.
+            evm.ctx_mut().journal_mut().logs = saved_logs;
         }
 
         // Bump nonce for calls (CREATE nonce is bumped in make_create_frame)
@@ -695,10 +697,69 @@ where
 
 /// Transfers ERC20 tokens by executing a `transfer(address,uint256)` call via the EVM.
 ///
+/// Gas limit for internal EVM calls (ERC20 transfer, balanceOf).
+const EVM_CALL_GAS_LIMIT: u64 = 200_000;
+
+/// Execute an internal EVM call, matching go-ethereum's `evm.Call()` semantics.
+///
+/// Unlike `system_call_one_with_caller`, this only runs the handler's `execution()`
+/// phase — NOT `execution_result()`. This means:
+/// - Logs emitted during the call (e.g., ERC20 Transfer events) remain in the journal
+/// - State changes remain in the journal
+///
+/// **Caller is responsible for saving/restoring `evm.tx` if needed.**
+fn evm_call<DB, I>(
+    evm: &mut MorphEvm<DB, I>,
+    caller: Address,
+    target: Address,
+    calldata: Bytes,
+) -> Result<revm::handler::FrameResult, EVMError<DB::Error, MorphInvalidTransaction>>
+where
+    DB: alloy_evm::Database,
+{
+    evm.tx = MorphTxEnv {
+        inner: revm::context::TxEnv {
+            caller,
+            kind: target.into(),
+            data: calldata,
+            gas_limit: EVM_CALL_GAS_LIMIT,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut h = MorphEvmHandler::<DB, I>::new();
+    h.execution(evm, &InitialAndFloorGas::new(0, 0))
+}
+
+/// Query ERC20 `balanceOf(address)` via an internal EVM call.
+///
+/// Uses [`evm_call`] so that journal logs are not drained.
+fn evm_call_balance_of<DB, I>(evm: &mut MorphEvm<DB, I>, token: Address, account: Address) -> U256
+where
+    DB: alloy_evm::Database,
+{
+    let calldata = encode_balance_of_calldata(account);
+    match evm_call(evm, Address::ZERO, token, calldata) {
+        Ok(ref result) if result.instruction_result().is_ok() => {
+            let output = &result.interpreter_result().output;
+            if output.len() >= 32 {
+                U256::from_be_slice(&output[..32])
+            } else {
+                U256::ZERO
+            }
+        }
+        _ => U256::ZERO,
+    }
+}
+
 /// Matches go-ethereum's `transferAltTokenByEVM` validation:
 /// 1. Checks EVM call succeeded (no revert)
 /// 2. Validates ABI-decoded bool return value (supports old tokens with no return data)
 /// 3. Verifies sender balance changed by the expected amount
+///
+/// Uses [`evm_call`] instead of `system_call_one_with_caller` so that event logs
+/// (e.g., ERC20 Transfer) naturally remain in the journal and appear in the
+/// transaction receipt, matching go-ethereum's `evm.Call()` behavior.
 ///
 /// `from_balance_before` is the sender's balance before the transfer. If `None`,
 /// the balance is queried via EVM call (matching go-eth's nil `userBalanceBefore`).
@@ -720,35 +781,12 @@ where
     // Read sender balance before transfer if not provided
     let from_balance_before = match from_balance_before {
         Some(b) => b,
-        None => query_erc20_balance(evm, token_address, from).unwrap_or(U256::ZERO),
+        None => evm_call_balance_of(evm, token_address, from),
     };
 
     let calldata = build_transfer_calldata(to, token_amount);
-    match evm.system_call_one_with_caller(from, token_address, calldata) {
-        Ok(result) => {
-            if !result.is_success() {
-                evm.tx = tx_origin;
-                return Err(MorphInvalidTransaction::TokenTransferFailed {
-                    reason: format!("{result:?}"),
-                }
-                .into());
-            }
-
-            // Validate ABI bool return value, matching go-ethereum behavior:
-            // - No return data: accepted (old tokens that don't return bool)
-            // - 32+ bytes with last byte == 1: accepted (standard ERC20)
-            // - Otherwise: rejected
-            if let Some(output) = result.output()
-                && !output.is_empty()
-                && (output.len() < 32 || output[31] != 1)
-            {
-                evm.tx = tx_origin;
-                return Err(MorphInvalidTransaction::TokenTransferFailed {
-                    reason: "alt token transfer returned failure".to_string(),
-                }
-                .into());
-            }
-        }
+    let frame_result = match evm_call(evm, from, token_address, calldata) {
+        Ok(result) => result,
         Err(e) => {
             evm.tx = tx_origin;
             return Err(MorphInvalidTransaction::TokenTransferFailed {
@@ -758,8 +796,29 @@ where
         }
     };
 
+    if !frame_result.instruction_result().is_ok() {
+        evm.tx = tx_origin;
+        return Err(MorphInvalidTransaction::TokenTransferFailed {
+            reason: format!("{:?}", frame_result.interpreter_result()),
+        }
+        .into());
+    }
+
+    // Validate ABI bool return value, matching go-ethereum behavior:
+    // - No return data: accepted (old tokens that don't return bool)
+    // - 32+ bytes with last byte == 1: accepted (standard ERC20)
+    // - Otherwise: rejected
+    let output = &frame_result.interpreter_result().output;
+    if !output.is_empty() && (output.len() < 32 || output[31] != 1) {
+        evm.tx = tx_origin;
+        return Err(MorphInvalidTransaction::TokenTransferFailed {
+            reason: "alt token transfer returned failure".to_string(),
+        }
+        .into());
+    }
+
     // Verify sender balance changed by the expected amount, matching go-ethereum.
-    let from_balance_after = query_erc20_balance(evm, token_address, from).unwrap_or(U256::ZERO);
+    let from_balance_after = evm_call_balance_of(evm, token_address, from);
 
     // Restore the original transaction
     evm.tx = tx_origin;
