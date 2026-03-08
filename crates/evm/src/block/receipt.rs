@@ -163,7 +163,8 @@ impl MorphReceiptBuilder for DefaultMorphReceiptBuilder {
         // main tx revert (revm's ExecutionResult::Revert carries no logs).
         let is_success = result.is_success();
         let main_logs = result.into_logs();
-        let mut logs = Vec::with_capacity(pre_fee_logs.len() + main_logs.len() + post_fee_logs.len());
+        let mut logs =
+            Vec::with_capacity(pre_fee_logs.len() + main_logs.len() + post_fee_logs.len());
         logs.extend(pre_fee_logs);
         logs.extend(main_logs);
         logs.extend(post_fee_logs);
