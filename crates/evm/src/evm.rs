@@ -7,7 +7,7 @@ use alloy_evm::{
         inspector::NoOpInspector,
     },
 };
-use alloy_primitives::{Address, Bytes, Log};
+use alloy_primitives::{Address, Bytes};
 use morph_chainspec::hardfork::MorphHardfork;
 use morph_revm::{MorphHaltReason, MorphInvalidTransaction, MorphTxEnv, evm::MorphContext};
 use reth_revm::MainContext;
@@ -107,18 +107,6 @@ impl<DB: Database, I> MorphEvm<DB, I> {
 
     /// Takes the inner EVM's revert logs.
     ///
-    /// Morph requires logs from reverted transactions to be included in receipts
-    /// (matching go-ethereum's `morph-l2/go-ethereum` behavior). Standard revm
-    /// discards logs on revert, so we capture them from the EVM's internal log
-    /// buffer before they are cleared.
-    ///
-    /// This workaround is needed until revm natively supports emitting logs for
-    /// reverted transactions. Tracked in:
-    /// <https://github.com/morphxyz/morph/pull/729>
-    pub fn take_revert_logs(&mut self) -> Vec<Log> {
-        std::mem::take(&mut self.inner.logs)
-    }
-
     /// Returns the cached token fee info from the handler's validation phase.
     ///
     /// Avoids redundant DB reads when the block executor needs token fee

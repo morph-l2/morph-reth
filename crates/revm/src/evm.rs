@@ -3,7 +3,7 @@ use crate::{
     token_fee::TokenFeeInfo,
 };
 use alloy_evm::Database;
-use alloy_primitives::{Log, U256, keccak256};
+use alloy_primitives::{U256, keccak256};
 use morph_chainspec::hardfork::MorphHardfork;
 use revm::{
     Context, Inspector,
@@ -91,8 +91,6 @@ pub struct MorphEvm<DB: Database, I> {
         MorphPrecompiles,
         EthFrame<EthInterpreter>,
     >,
-    /// Preserved logs from the last transaction
-    pub logs: Vec<Log>,
     /// Cached token fee info from the validation/deduction phase.
     /// Ensures consistent price_ratio/scale between deduct and reimburse,
     /// matching go-ethereum's `st.feeRate`/`st.tokenScale` caching pattern.
@@ -132,7 +130,6 @@ impl<DB: Database, I> MorphEvm<DB, I> {
         })
     }
 
-    /// Inner helper function to create a new Morph EVM with empty logs.
     #[inline]
     #[expect(clippy::type_complexity)]
     fn new_inner(
@@ -146,7 +143,6 @@ impl<DB: Database, I> MorphEvm<DB, I> {
     ) -> Self {
         Self {
             inner,
-            logs: Vec::new(),
             cached_token_fee_info: None,
             cached_l1_data_fee: U256::ZERO,
         }
@@ -167,12 +163,6 @@ impl<DB: Database, I> MorphEvm<DB, I> {
     /// Consumes self and returns the inner Inspector.
     pub fn into_inspector(self) -> I {
         self.inner.into_inspector()
-    }
-
-    /// Take logs from the EVM.
-    #[inline]
-    pub fn take_logs(&mut self) -> Vec<Log> {
-        std::mem::take(&mut self.logs)
     }
 
     /// Returns the cached token fee info set during handler validation.

@@ -80,7 +80,6 @@ where
     DB: Database,
     I: Inspector<MorphContext<&'a mut State<DB>>>,
 {
-
     /// Creates a new [`MorphBlockExecutor`].
     ///
     /// # Arguments
