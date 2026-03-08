@@ -41,7 +41,7 @@ use alloy_primitives::{B256, Bloom};
 use morph_chainspec::{MorphChainSpec, MorphHardforks};
 use morph_primitives::{
     Block, BlockBody, MorphHeader, MorphReceipt, MorphTxEnvelope,
-    transaction::morph_transaction::{MAX_MEMO_LENGTH, MORPH_TX_VERSION_0, MORPH_TX_VERSION_1},
+    transaction::morph_transaction::{MAX_MEMO_LENGTH, MORPH_TX_VERSION_1},
 };
 use reth_consensus::{Consensus, ConsensusError, FullConsensus, HeaderValidator, ReceiptRootBloom};
 use reth_consensus_common::validation::{
@@ -309,7 +309,7 @@ impl Consensus<Block> for MorphConsensus {
         let is_jade = self
             .chain_spec
             .is_jade_active_at_timestamp(block.header().timestamp());
-        validate_morph_tx_versions(&block.body().transactions, is_jade)?;
+        validate_morph_txs(&block.body().transactions, is_jade)?;
 
         // Validate L1 messages ordering and internal consistency with header.
         // This is the body-level half of L1 validation; it verifies that the L1
@@ -569,31 +569,26 @@ fn validate_l1_messages_in_block(
     Ok(())
 }
 
-/// Validates MorphTx version and field constraints for all transactions in a block.
+/// Validates all MorphTx (0x7F) transactions in a block.
 ///
-/// Matches go-ethereum's `BlockValidator.ValidateBody()` which:
-/// 1. Rejects MorphTx V1 before the Jade fork is active
-/// 2. Validates version-specific field constraints via `ValidateMorphTxVersion()`
+/// Performs two checks per MorphTx:
+/// 1. **Hardfork gate**: rejects V1 transactions before the Jade fork is active
+/// 2. **Field validation**: delegates to [`TxMorph::validate()`] for version-specific
+///    field constraints, memo length, and gas price ordering
 ///
-/// # Rules
-///
-/// - **Version 0**: `fee_token_id` must be > 0; `reference` and `memo` must not be set
-/// - **Version 1**: If `fee_token_id` is 0, `fee_limit` must be zero; `memo` must not
-///   exceed [`MAX_MEMO_LENGTH`] bytes
-/// - **Other versions**: rejected as unsupported
-fn validate_morph_tx_versions(
+/// See [`TxMorph::validate()`] for the detailed per-version rules.
+fn validate_morph_txs(
     txs: &[MorphTxEnvelope],
     is_jade: bool,
 ) -> Result<(), ConsensusError> {
     for tx in txs {
-        if !tx.is_morph_tx() {
-            continue;
-        }
+        let morph_tx = match tx {
+            MorphTxEnvelope::Morph(signed) => signed.tx(),
+            _ => continue,
+        };
 
-        let version = tx.version().unwrap_or(0);
-
-        // Reject MorphTx V1 before Jade fork
-        if !is_jade && version == MORPH_TX_VERSION_1 {
+        // Reject MorphTx V1 before Jade fork (hardfork-gated, consensus-only check).
+        if !is_jade && morph_tx.version == MORPH_TX_VERSION_1 {
             return Err(ConsensusError::Other(
                 MorphConsensusError::InvalidBody(
                     "MorphTx version 1 is not yet active (jade fork not reached)".into(),
@@ -602,59 +597,12 @@ fn validate_morph_tx_versions(
             ));
         }
 
-        match version {
-            MORPH_TX_VERSION_0 => {
-                // V0 requires fee_token_id > 0 and no reference/memo
-                let fee_token_id = tx.fee_token_id().unwrap_or(0);
-                let has_reference = tx
-                    .reference()
-                    .is_some_and(|r| r != alloy_primitives::B256::ZERO);
-                let has_memo = tx.memo().is_some_and(|m| !m.is_empty());
-
-                if fee_token_id == 0 || has_reference || has_memo {
-                    return Err(ConsensusError::Other(
-                        MorphConsensusError::InvalidBody(
-                            "illegal extra parameters of version 0 MorphTx".into(),
-                        )
-                        .to_string(),
-                    ));
-                }
-            }
-            MORPH_TX_VERSION_1 => {
-                let fee_token_id = tx.fee_token_id().unwrap_or(0);
-                let fee_limit = tx.fee_limit().unwrap_or(alloy_primitives::U256::ZERO);
-
-                // If fee_token_id is 0, fee_limit must not be set (must be zero)
-                if fee_token_id == 0 && !fee_limit.is_zero() {
-                    return Err(ConsensusError::Other(
-                        MorphConsensusError::InvalidBody(
-                            "illegal extra parameters of version 1 MorphTx".into(),
-                        )
-                        .to_string(),
-                    ));
-                }
-
-                // Validate memo length
-                if let Some(memo) = tx.memo()
-                    && memo.len() > MAX_MEMO_LENGTH
-                {
-                    return Err(ConsensusError::Other(
-                        MorphConsensusError::InvalidBody(format!(
-                            "memo exceeds maximum length of {MAX_MEMO_LENGTH} bytes, got {}",
-                            memo.len()
-                        ))
-                        .to_string(),
-                    ));
-                }
-            }
-            _ => {
-                return Err(ConsensusError::Other(
-                    MorphConsensusError::InvalidBody(format!(
-                        "unsupported MorphTx version: {version}"
-                    ))
-                    .to_string(),
-                ));
-            }
+        // Reuse primitive-layer validation (version, fee_token_id, reference,
+        // memo length, fee_limit constraints, gas price ordering).
+        if let Err(reason) = morph_tx.validate() {
+            return Err(ConsensusError::Other(
+                MorphConsensusError::InvalidBody(reason.to_string()).to_string(),
+            ));
         }
     }
 
