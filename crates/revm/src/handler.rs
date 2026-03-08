@@ -706,8 +706,6 @@ where
     Ok((from_storage_slot, to_storage_slot))
 }
 
-/// Transfers ERC20 tokens by executing a `transfer(address,uint256)` call via the EVM.
-///
 /// Gas limit for internal EVM calls (ERC20 transfer, balanceOf).
 const EVM_CALL_GAS_LIMIT: u64 = 200_000;
 
@@ -749,8 +747,14 @@ fn evm_call_balance_of<DB, I>(evm: &mut MorphEvm<DB, I>, token: Address, account
 where
     DB: alloy_evm::Database,
 {
+    // Record log count so we can discard any logs emitted during the call.
+    // go-ethereum uses evm.StaticCall() for balanceOf which cannot emit events;
+    // we truncate to match that read-only semantic.
+    let log_count_before = evm.ctx_mut().journal_mut().logs.len();
     let calldata = encode_balance_of_calldata(account);
-    match evm_call(evm, Address::ZERO, token, calldata) {
+    let result = evm_call(evm, Address::ZERO, token, calldata);
+    evm.ctx_mut().journal_mut().logs.truncate(log_count_before);
+    match result {
         Ok(ref result) if result.instruction_result().is_ok() => {
             let output = &result.interpreter_result().output;
             if output.len() >= 32 {
