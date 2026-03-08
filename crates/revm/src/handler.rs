@@ -434,7 +434,7 @@ where
             );
             let refund_logs: Vec<_> =
                 evm.ctx_mut().journal_mut().logs.drain(log_count_before..).collect();
-            evm.post_fee_logs.extend(refund_logs);
+            evm.post_fee_logs = refund_logs;
             result
         };
 

@@ -162,8 +162,10 @@ impl MorphReceiptBuilder for DefaultMorphReceiptBuilder {
         // Fee logs are cached separately from the journal so they survive
         // main tx revert (revm's ExecutionResult::Revert carries no logs).
         let is_success = result.is_success();
-        let mut logs = pre_fee_logs;
-        logs.extend(result.into_logs());
+        let main_logs = result.into_logs();
+        let mut logs = Vec::with_capacity(pre_fee_logs.len() + main_logs.len() + post_fee_logs.len());
+        logs.extend(pre_fee_logs);
+        logs.extend(main_logs);
         logs.extend(post_fee_logs);
 
         let inner = Receipt {
