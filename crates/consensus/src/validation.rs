@@ -41,7 +41,7 @@ use alloy_primitives::{B256, Bloom};
 use morph_chainspec::{MorphChainSpec, MorphHardforks};
 use morph_primitives::{
     Block, BlockBody, MorphHeader, MorphReceipt, MorphTxEnvelope,
-    transaction::morph_transaction::{MAX_MEMO_LENGTH, MORPH_TX_VERSION_1},
+    transaction::morph_transaction::MORPH_TX_VERSION_1,
 };
 use reth_consensus::{Consensus, ConsensusError, FullConsensus, HeaderValidator, ReceiptRootBloom};
 use reth_consensus_common::validation::{
@@ -604,10 +604,7 @@ fn validate_l1_messages_in_block(
 ///    field constraints, memo length, and gas price ordering
 ///
 /// See [`TxMorph::validate()`] for the detailed per-version rules.
-fn validate_morph_txs(
-    txs: &[MorphTxEnvelope],
-    is_jade: bool,
-) -> Result<(), ConsensusError> {
+fn validate_morph_txs(txs: &[MorphTxEnvelope], is_jade: bool) -> Result<(), ConsensusError> {
     for tx in txs {
         let morph_tx = match tx {
             MorphTxEnvelope::Morph(signed) => signed.tx(),

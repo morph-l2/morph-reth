@@ -436,8 +436,12 @@ where
                 token_amount_required,
                 None,
             );
-            let refund_logs: Vec<_> =
-                evm.ctx_mut().journal_mut().logs.drain(log_count_before..).collect();
+            let refund_logs: Vec<_> = evm
+                .ctx_mut()
+                .journal_mut()
+                .logs
+                .drain(log_count_before..)
+                .collect();
             evm.post_fee_logs = refund_logs;
             result
         };
