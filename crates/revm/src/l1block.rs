@@ -145,6 +145,14 @@ pub struct L1BlockInfo {
     pub l1_blob_scalar: U256,
     /// The current call data gas: `l1_commit_scalar * l1_base_fee` (zero if before Curie).
     pub calldata_gas: U256,
+    /// Set when token fee deduction occurred in the current transaction.
+    ///
+    /// Token fee deduction calls `mark_cold()` on modified storage slots. The
+    /// main tx's first SLOAD then triggers `mark_warm_with_transaction_id()`
+    /// which incorrectly resets `original_value = present_value`. This flag
+    /// tells `sload_morph` to restore the true DB-committed original value,
+    /// scoping the fix to only transactions that need it.
+    pub had_token_fee_deduction: bool,
 }
 
 impl L1BlockInfo {
@@ -185,6 +193,7 @@ impl L1BlockInfo {
                 l1_commit_scalar,
                 l1_blob_scalar,
                 calldata_gas,
+                had_token_fee_deduction: false,
             })
         }
     }

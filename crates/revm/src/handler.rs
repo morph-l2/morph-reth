@@ -95,7 +95,8 @@ where
         evm.pre_fee_logs.clear();
         evm.post_fee_logs.clear();
 
-        let (_, tx, _, journal, _, _) = evm.ctx().all_mut();
+        let (_, tx, _, journal, chain, _) = evm.ctx().all_mut();
+        chain.had_token_fee_deduction = false;
 
         // L1 message - skip fee validation
         if tx.is_l1_msg() {
@@ -665,6 +666,13 @@ where
         // price_ratio/scale between deduction and reimbursement.
         evm.cached_token_fee_info = Some(token_fee_info);
         evm.cached_l1_data_fee = l1_data_fee;
+
+        // Signal to sload_morph that token fee deduction with mark_cold() occurred,
+        // so it should fix original_value corruption from mark_warm_with_transaction_id.
+        {
+            let (_, _, _, _, chain, _) = evm.ctx().all_mut();
+            chain.had_token_fee_deduction = true;
+        }
 
         Ok(())
     }

@@ -166,14 +166,17 @@ fn blockhash_morph<DB: Database>(
 ///
 /// Fixes `original_value` corruption caused by revm's `mark_warm_with_transaction_id()`.
 ///
-/// When token fee deduction marks storage slots cold, the main tx's first SLOAD
-/// triggers `mark_warm_with_transaction_id()` which resets `original_value = present_value`,
-/// losing the true DB-committed original. This makes SSTORE see "clean" slots (2900 gas)
-/// instead of "dirty" (100 gas), causing a 2800 gas mismatch vs go-eth.
+/// When token fee deduction marks storage slots cold via `mark_cold()`, the main
+/// tx's first SLOAD triggers `mark_warm_with_transaction_id()` which resets
+/// `original_value = present_value` (the fee-modified value), losing the true
+/// pre-fee original. This makes SSTORE see "clean" slots (2900 gas) instead of
+/// "dirty" (100 gas), causing a 2800 gas mismatch vs go-eth.
 ///
-/// Fix: after the default SLOAD logic runs (which handles cold gas charging correctly),
-/// read the true original from DB and restore it. The DB read hits the State cache (O(1))
-/// and only triggers on cold SLOADs.
+/// Fix: save the slot's `original_value` from journal state **before**
+/// `sload_skip_cold_load` corrupts it, then restore after. This is correct for
+/// multi-tx blocks because the journal's `original_value` at that point reflects
+/// the post-previous-tx committed value (set by `mark_warm` during fee deduction's
+/// own SLOAD), matching go-eth's `originStorage` semantics.
 fn sload_morph<DB: Database>(
     context: InstructionContext<'_, MorphContext<DB>, EthInterpreter>,
 ) {
@@ -185,6 +188,31 @@ fn sload_morph<DB: Database>(
     let target = context.interpreter.input.target_address;
     let key = *index; // Save key before it gets overwritten with the loaded value
 
+    // When token fee deduction occurred, save original_value BEFORE sload_skip_cold_load.
+    //
+    // Token fee deduction calls mark_cold() on slots it touched. The subsequent
+    // sload_skip_cold_load → mark_warm_with_transaction_id() sees is_cold=true and
+    // resets original_value = present_value (the fee-modified value), losing the true
+    // pre-fee original. We save it here and restore after the call.
+    //
+    // This is superior to reading database.storage() because DB returns the beginning-
+    // of-block value, which is wrong when a previous transaction in the same block
+    // modified the same slot. The journal state's original_value at this point correctly
+    // reflects the post-previous-tx committed value (set by mark_warm during fee
+    // deduction's own SLOAD).
+    let saved_original = if context.host.chain.had_token_fee_deduction {
+        context
+            .host
+            .journaled_state
+            .inner
+            .state
+            .get(&target)
+            .and_then(|acc| acc.storage.get(&key))
+            .map(|slot| slot.original_value)
+    } else {
+        None
+    };
+
     let additional_cold_cost = context.host.gas_params().cold_storage_additional_cost();
     let skip_cold = context.interpreter.gas.remaining() < additional_cold_cost;
     let res = context.host.sload_skip_cold_load(target, key, skip_cold);
@@ -192,19 +220,19 @@ fn sload_morph<DB: Database>(
     match res {
         Ok(storage) => {
             if storage.is_cold {
-                // Fix original_value corruption from mark_warm_with_transaction_id.
-                // Read the true committed value from DB (hits State<DB> cache, O(1)).
-                // This matches go-eth's GetCommittedState() which returns originStorage
-                // — the DB value unmodified by fee deduction.
-                let db_original =
-                    context.host.journaled_state.database.storage(target, key);
-                if let Ok(db_original) = db_original
+                // Restore original_value that mark_warm_with_transaction_id corrupted.
+                // saved_original is Some only when:
+                //   1. Token fee deduction occurred (had_token_fee_deduction = true)
+                //   2. The slot was already in journal state (touched by fee deduction)
+                // For slots first loaded here (not in state before), saved_original is
+                // None and sload_skip_cold_load already set original_value correctly
+                // from the DB load.
+                if let Some(saved) = saved_original
                     && let Some(acc) =
                         context.host.journaled_state.inner.state.get_mut(&target)
                     && let Some(slot) = acc.storage.get_mut(&key)
-                    && slot.original_value != db_original
                 {
-                    slot.original_value = db_original;
+                    slot.original_value = saved;
                 }
 
                 // Charge cold SLOAD gas (same as default SLOAD)
