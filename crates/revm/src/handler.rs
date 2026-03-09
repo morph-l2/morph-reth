@@ -512,6 +512,15 @@ where
             .into());
         }
 
+        // Collect original DB values for fee-deducted slots (revm-state 9.0.0 workaround).
+        //
+        // revm-state 9.0.0's `mark_warm_with_transaction_id` resets
+        // `original_value = present_value` when a cold slot becomes warm. This
+        // breaks EIP-2200 gas for slots modified during pre-tx fee deduction.
+        // We save the true DB values here; the custom SLOAD instruction in
+        // `sload_morph` restores them after the cold→warm transition.
+        let mut fee_slot_saves: Vec<(Address, U256, U256)> = Vec::new();
+
         if let Some(balance_slot) = token_fee_info.balance_slot {
             // Transfer with token slot.
             // Ensure token account is loaded into the journal state, because `sload`/`sstore`
@@ -531,9 +540,19 @@ where
             if let Some(token_acc) = journal.state.get_mut(&token_fee_info.token_address) {
                 token_acc.mark_cold();
                 if let Some(slot) = token_acc.storage.get_mut(&from_storage_slot) {
+                    fee_slot_saves.push((
+                        token_fee_info.token_address,
+                        from_storage_slot,
+                        slot.original_value,
+                    ));
                     slot.mark_cold();
                 }
                 if let Some(slot) = token_acc.storage.get_mut(&to_storage_slot) {
+                    fee_slot_saves.push((
+                        token_fee_info.token_address,
+                        to_storage_slot,
+                        slot.original_value,
+                    ));
                     slot.mark_cold();
                 }
             }
@@ -547,15 +566,25 @@ where
                 token_amount_required,
             )?;
 
-            // State changs should be marked cold to avoid warm access in the main tx execution.
+            // State changes should be marked cold to avoid warm access in the main tx execution.
+            // Also save original_value for changed slots (see workaround above).
             let mut state = evm.finalize();
-            state.iter_mut().for_each(|(_, acc)| {
+            state.iter_mut().for_each(|(addr, acc)| {
                 acc.mark_cold();
-                acc.storage
-                    .iter_mut()
-                    .for_each(|(_, slot)| slot.mark_cold());
+                acc.storage.iter_mut().for_each(|(key, slot)| {
+                    if slot.original_value != slot.present_value {
+                        fee_slot_saves.push((*addr, *key, slot.original_value));
+                    }
+                    slot.mark_cold();
+                });
             });
             evm.ctx_mut().journal_mut().state.extend(state);
+        }
+
+        // Store the saved original values in the tx env. We access the `tx` field
+        // directly because `ContextTr::all_mut()` returns tx as `&Self::Tx` (immutable).
+        if !fee_slot_saves.is_empty() {
+            evm.inner.ctx.tx.fee_slot_original_values = fee_slot_saves;
         }
 
         let (_, tx, cfg, journal, _, _) = evm.ctx().all_mut();
