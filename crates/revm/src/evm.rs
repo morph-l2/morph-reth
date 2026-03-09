@@ -112,20 +112,19 @@ fn sload_morph<DB: Database>(context: InstructionContext<'_, MorphContext<DB>, E
     // Morph fix: restore original_value for slots modified by token fee deduction.
     // After mark_warm_with_transaction_id reset original_value = present_value,
     // we set it back to the true DB value so SSTORE sees the slot as dirty.
-    if !context.host.tx.fee_slot_original_values.is_empty() {
-        if let Some(pos) = context
+    if !context.host.tx.fee_slot_original_values.is_empty()
+        && let Some(pos) = context
             .host
             .tx
             .fee_slot_original_values
             .iter()
             .position(|(addr, slot_key, _)| *addr == target && *slot_key == key)
+    {
+        let (_, _, original_db_value) = context.host.tx.fee_slot_original_values.remove(pos);
+        if let Some(acc) = context.host.journaled_state.state.get_mut(&target)
+            && let Some(slot) = acc.storage.get_mut(&key)
         {
-            let (_, _, original_db_value) = context.host.tx.fee_slot_original_values.remove(pos);
-            if let Some(acc) = context.host.journaled_state.state.get_mut(&target) {
-                if let Some(slot) = acc.storage.get_mut(&key) {
-                    slot.original_value = original_db_value;
-                }
-            }
+            slot.original_value = original_db_value;
         }
     }
 }
