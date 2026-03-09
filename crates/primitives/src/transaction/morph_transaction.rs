@@ -867,73 +867,103 @@ impl reth_primitives_traits::InMemorySize for TxMorph {
 }
 
 #[cfg(feature = "reth-codec")]
-impl reth_codecs::Compact for TxMorph {
-    fn to_compact<B>(&self, buf: &mut B) -> usize
-    where
-        B: BufMut + AsMut<[u8]>,
-    {
-        let mut len = 0;
-        len += self.chain_id.to_compact(buf);
-        len += self.nonce.to_compact(buf);
-        len += self.gas_limit.to_compact(buf);
-        len += self.max_fee_per_gas.to_compact(buf);
-        len += self.max_priority_fee_per_gas.to_compact(buf);
-        len += self.to.to_compact(buf);
-        len += self.value.to_compact(buf);
-        len += self.access_list.to_compact(buf);
-        len += (self.version as u64).to_compact(buf);
-        len += (self.fee_token_id as u64).to_compact(buf);
-        len += self.fee_limit.to_compact(buf);
-        len += self.reference.to_compact(buf);
-        // Memo is Option<Bytes>, convert to Bytes for Compact
-        let memo_bytes = self.memo.clone().unwrap_or_default();
-        len += memo_bytes.to_compact(buf);
-        len += self.input.to_compact(buf);
-        len
+mod compact_txmorph {
+    use super::*;
+    use alloy_eips::eip2930::AccessList;
+    use alloy_primitives::{Bytes, ChainId, TxKind, U256};
+    use reth_codecs::Compact;
+
+    /// Helper struct for deriving `Compact` instead of manually managing bitfields.
+    ///
+    /// Follows the same pattern as reth's `TxEip1559` compact helper
+    /// (see `reth-codecs/src/alloy/transaction/eip1559.rs`).
+    ///
+    /// - `version` and `fee_token_id` are stored as `u64` because `u8`/`u16` don't
+    ///   implement `Compact` in reth_codecs. The conversion is lossless.
+    /// - `memo` and `input` are packed into a single `Bytes` field (`data`) because
+    ///   the derive macro only allows one `Bytes` field and it must be last.
+    ///   Format: `[memo_len: u8][memo_bytes][input_bytes]`.
+    #[derive(Debug, Clone, PartialEq, Eq, Hash, Compact)]
+    #[reth_codecs(crate = "reth_codecs")]
+    struct TxMorphCompact {
+        chain_id: ChainId,
+        nonce: u64,
+        gas_limit: u64,
+        max_fee_per_gas: u128,
+        max_priority_fee_per_gas: u128,
+        to: TxKind,
+        value: U256,
+        access_list: AccessList,
+        /// Stored as u64 for Compact compatibility (u8 doesn't implement Compact)
+        version: u64,
+        /// Stored as u64 for Compact compatibility (u16 doesn't implement Compact)
+        fee_token_id: u64,
+        fee_limit: U256,
+        reference: Option<B256>,
+        /// Packed: `[memo_len: u8][memo_bytes][input_bytes]` (must be last)
+        data: Bytes,
     }
 
-    fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
-        let (chain_id, buf) = ChainId::from_compact(buf, len);
-        let (nonce, buf) = u64::from_compact(buf, len);
-        let (gas_limit, buf) = u64::from_compact(buf, len);
-        let (max_fee_per_gas, buf) = u128::from_compact(buf, len);
-        let (max_priority_fee_per_gas, buf) = u128::from_compact(buf, len);
-        let (to, buf) = TxKind::from_compact(buf, len);
-        let (value, buf) = U256::from_compact(buf, len);
-        let (access_list, buf) = AccessList::from_compact(buf, len);
-        let (version, buf) = u64::from_compact(buf, len);
-        let (fee_token_id, buf) = u64::from_compact(buf, len);
-        let (fee_limit, buf) = U256::from_compact(buf, len);
-        let (reference, buf) = Option::<B256>::from_compact(buf, len);
-        let (memo_bytes, buf) = Bytes::from_compact(buf, len);
-        let (input, buf) = Bytes::from_compact(buf, len);
+    impl Compact for TxMorph {
+        fn to_compact<B>(&self, buf: &mut B) -> usize
+        where
+            B: bytes::BufMut + AsMut<[u8]>,
+        {
+            // Pack memo + input into a single Bytes field
+            let memo_slice = self.memo.as_deref().map_or(&[] as &[u8], |v| v);
+            let mut data = Vec::with_capacity(1 + memo_slice.len() + self.input.len());
+            data.push(memo_slice.len() as u8); // memo max 64 bytes, fits in u8
+            data.extend_from_slice(memo_slice);
+            data.extend_from_slice(&self.input);
 
-        // Convert Bytes to Option<Bytes> (empty = None)
-        let memo = if memo_bytes.is_empty() {
-            None
-        } else {
-            Some(memo_bytes)
-        };
+            let helper = TxMorphCompact {
+                chain_id: self.chain_id,
+                nonce: self.nonce,
+                gas_limit: self.gas_limit,
+                max_fee_per_gas: self.max_fee_per_gas,
+                max_priority_fee_per_gas: self.max_priority_fee_per_gas,
+                to: self.to,
+                value: self.value,
+                access_list: self.access_list.clone(),
+                version: u64::from(self.version),
+                fee_token_id: u64::from(self.fee_token_id),
+                fee_limit: self.fee_limit,
+                reference: self.reference,
+                data: data.into(),
+            };
+            helper.to_compact(buf)
+        }
 
-        (
-            Self {
-                chain_id,
-                nonce,
-                gas_limit,
-                max_fee_per_gas,
-                max_priority_fee_per_gas,
-                to,
-                value,
-                access_list,
-                version: version as u8,
-                fee_token_id: fee_token_id as u16,
-                fee_limit,
-                reference,
+        fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
+            let (helper, remaining) = TxMorphCompact::from_compact(buf, len);
+
+            // Unpack memo + input from the combined data field
+            let memo_len = helper.data[0] as usize;
+            let memo = if memo_len == 0 {
+                None
+            } else {
+                Some(Bytes::copy_from_slice(&helper.data[1..1 + memo_len]))
+            };
+            let input = Bytes::copy_from_slice(&helper.data[1 + memo_len..]);
+
+            let tx = Self {
+                chain_id: helper.chain_id,
+                nonce: helper.nonce,
+                gas_limit: helper.gas_limit,
+                max_fee_per_gas: helper.max_fee_per_gas,
+                max_priority_fee_per_gas: helper.max_priority_fee_per_gas,
+                to: helper.to,
+                value: helper.value,
+                access_list: helper.access_list,
+                version: helper.version as u8,
+                fee_token_id: helper.fee_token_id as u16,
+                fee_limit: helper.fee_limit,
+                reference: helper.reference,
                 memo,
                 input,
-            },
-            buf,
-        )
+            };
+            (tx, remaining)
+        }
     }
 }
 
@@ -2070,5 +2100,65 @@ mod tests {
         assert_eq!(decoded_signed.tx().reference, None);
         assert_eq!(decoded_signed.tx().memo, None);
         assert!(decoded_signed.tx().is_v0());
+    }
+
+    #[cfg(feature = "reth-codec")]
+    #[test]
+    fn test_compact_roundtrip_v1_with_memo() {
+        use reth_codecs::Compact;
+
+        let tx = TxMorph {
+            chain_id: 2818,
+            nonce: 42,
+            gas_limit: 21_000,
+            max_fee_per_gas: 100_000_000_000,
+            max_priority_fee_per_gas: 2_000_000_000,
+            to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
+            value: U256::from(1_000_000_000_000_000_000u128),
+            access_list: AccessList::default(),
+            version: 1,
+            fee_token_id: 7,
+            fee_limit: U256::from(999u64),
+            reference: Some(B256::from([0xab; 32])),
+            memo: Some(Bytes::from(vec![0xca, 0xfe, 0xba, 0xbe])),
+            input: Bytes::from(vec![0x12, 0x34, 0x56]),
+        };
+
+        let mut buf = Vec::new();
+        tx.to_compact(&mut buf);
+        let (decoded, remaining) = TxMorph::from_compact(&buf, buf.len());
+
+        assert!(remaining.is_empty());
+        assert_eq!(tx, decoded);
+    }
+
+    #[cfg(feature = "reth-codec")]
+    #[test]
+    fn test_compact_roundtrip_v0_no_memo() {
+        use reth_codecs::Compact;
+
+        let tx = TxMorph {
+            chain_id: 2818,
+            nonce: 0,
+            gas_limit: 100_000,
+            max_fee_per_gas: 50_000_000_000,
+            max_priority_fee_per_gas: 1_000_000_000,
+            to: TxKind::Create,
+            value: U256::ZERO,
+            access_list: AccessList::default(),
+            version: 0,
+            fee_token_id: 1,
+            fee_limit: U256::from(500u64),
+            reference: None,
+            memo: None,
+            input: Bytes::from(vec![0x60, 0x80, 0x60, 0x40]),
+        };
+
+        let mut buf = Vec::new();
+        tx.to_compact(&mut buf);
+        let (decoded, remaining) = TxMorph::from_compact(&buf, buf.len());
+
+        assert!(remaining.is_empty());
+        assert_eq!(tx, decoded);
     }
 }
