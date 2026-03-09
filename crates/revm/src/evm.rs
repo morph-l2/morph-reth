@@ -98,9 +98,7 @@ fn blockhash_morph<DB: Database>(
 /// multi-tx blocks because the journal's `original_value` at that point reflects
 /// the post-previous-tx committed value (set by `mark_warm` during fee deduction's
 /// own SLOAD), matching go-eth's `originStorage` semantics.
-fn sload_morph<DB: Database>(
-    context: InstructionContext<'_, MorphContext<DB>, EthInterpreter>,
-) {
+fn sload_morph<DB: Database>(context: InstructionContext<'_, MorphContext<DB>, EthInterpreter>) {
     let Some(([], index)) = StackTr::popn_top::<0>(&mut context.interpreter.stack) else {
         context.interpreter.halt_underflow();
         return;
@@ -149,8 +147,7 @@ fn sload_morph<DB: Database>(
                 // None and sload_skip_cold_load already set original_value correctly
                 // from the DB load.
                 if let Some(saved) = saved_original
-                    && let Some(acc) =
-                        context.host.journaled_state.inner.state.get_mut(&target)
+                    && let Some(acc) = context.host.journaled_state.inner.state.get_mut(&target)
                     && let Some(slot) = acc.storage.get_mut(&key)
                 {
                     slot.original_value = saved;
@@ -219,8 +216,10 @@ impl<DB: Database, I> MorphEvm<DB, I> {
         // Morph custom BLOCKHASH implementation (matches Morph geth).
         instructions.insert_instruction(0x40, Instruction::new(blockhash_morph::<DB>, BLOCKHASH));
         // Morph custom SLOAD: fixes original_value corruption from token fee deduction.
-        instructions
-            .insert_instruction(0x54, Instruction::new(sload_morph::<DB>, WARM_STORAGE_READ_COST));
+        instructions.insert_instruction(
+            0x54,
+            Instruction::new(sload_morph::<DB>, WARM_STORAGE_READ_COST),
+        );
         // SELFDESTRUCT is disabled in Morph
         instructions.insert_instruction(0xff, Instruction::unknown());
         // BLOBHASH is disabled in Morph
