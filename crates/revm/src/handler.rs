@@ -17,6 +17,7 @@ use crate::{
     MorphEvm, MorphInvalidTransaction, MorphTxEnv,
     error::MorphHaltReason,
     evm::MorphContext,
+    l1block::L1BlockInfo,
     token_fee::{TokenFeeInfo, compute_mapping_slot_for_address, encode_balance_of_calldata},
     tx::MorphTxExt,
 };
@@ -324,6 +325,13 @@ where
     ) -> Result<(), EVMError<DB::Error, MorphInvalidTransaction>> {
         let hardfork = *evm.ctx_ref().cfg().spec();
 
+        // Fetch L1 block info from the L1 Gas Price Oracle contract per-tx.
+        // Must NOT use a per-block cache because the oracle can be updated by a
+        // regular transaction (from the external gas-oracle service) within the
+        // same block.  Subsequent user txs must see the updated fee parameters,
+        // matching go-ethereum's per-tx L1BlockInfo read.
+        let l1_block_info = L1BlockInfo::try_fetch(evm.ctx_mut().db_mut(), hardfork)?;
+
         // Get RLP-encoded transaction bytes for L1 fee calculation
         let rlp_bytes = evm
             .ctx_ref()
@@ -333,11 +341,8 @@ where
             .map(|b| b.as_ref())
             .unwrap_or_default();
 
-        // Calculate L1 data fee using the cached L1BlockInfo from context chain field.
-        let l1_data_fee = evm
-            .ctx_ref()
-            .chain
-            .calculate_tx_l1_cost(rlp_bytes, hardfork);
+        // Calculate L1 data fee based on full RLP-encoded transaction
+        let l1_data_fee = l1_block_info.calculate_tx_l1_cost(rlp_bytes, hardfork);
         evm.cached_l1_data_fee = l1_data_fee;
 
         // Get mutable access to context components
@@ -505,7 +510,7 @@ where
             return Ok(());
         }
 
-        let (block, tx, cfg, journal, chain, _) = evm.ctx_mut().all_mut();
+        let (block, tx, cfg, journal, _chain, _) = evm.ctx_mut().all_mut();
         let caller_addr = tx.caller();
         let beneficiary = block.beneficiary();
         let hardfork = *cfg.spec();
@@ -548,8 +553,9 @@ where
             .map(|b| b.as_ref())
             .unwrap_or_default();
 
-        // Calculate L1 data fee using the cached L1BlockInfo from context chain field.
-        let l1_data_fee = chain.calculate_tx_l1_cost(rlp_bytes, hardfork);
+        // Fetch L1 block info per-tx (same rationale as validate_and_deduct_eth_fee).
+        let l1_block_info = L1BlockInfo::try_fetch(journal.db_mut(), hardfork)?;
+        let l1_data_fee = l1_block_info.calculate_tx_l1_cost(rlp_bytes, hardfork);
 
         // Calculate L2 gas fee using effective_gas_price (= min(gasTipCap + baseFee, gasFeeCap)),
         // matching go-ethereum's buyAltTokenGas() which uses st.gasPrice (effective gas price).

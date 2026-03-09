@@ -27,7 +27,7 @@ use curie::apply_curie_hard_fork;
 use morph_chainspec::{MorphChainSpec, MorphHardfork, MorphHardforks};
 use morph_primitives::{MorphReceipt, MorphTxEnvelope};
 use morph_revm::{
-    L1_GAS_PRICE_ORACLE_ADDRESS, L1BlockInfo, MorphHaltReason, TokenFeeInfo, evm::MorphContext,
+    L1_GAS_PRICE_ORACLE_ADDRESS, MorphHaltReason, TokenFeeInfo, evm::MorphContext,
 };
 use reth_chainspec::EthereumHardforks;
 use reth_revm::{DatabaseCommit, Inspector, State, context::result::ResultAndState};
@@ -231,9 +231,11 @@ where
         let state_clear_flag = self.spec.is_spurious_dragon_active_at_block(block_number);
         self.evm.db_mut().set_state_clear_flag(state_clear_flag);
 
-        // 2. Load L1 gas oracle contract into cache and fetch L1BlockInfo once per block.
-        // The fetched L1BlockInfo is stored in the context's chain field so that
-        // all transactions in this block can access it without repeated DB reads.
+        // 2. Load L1 gas oracle contract into cache so that subsequent per-tx
+        // L1BlockInfo reads in the handler are fast (avoid cold DB hits).
+        // NOTE: We do NOT cache L1BlockInfo here because the oracle can be
+        // updated by a regular transaction (from the external gas-oracle service)
+        // within the same block.  The handler reads it per-tx instead.
         let _ = self
             .evm
             .db_mut()
@@ -244,10 +246,6 @@ where
             .spec
             .morph_hardfork_at(block_number, self.evm.block().timestamp.to::<u64>());
         self.hardfork = hardfork;
-        let l1_block_info = L1BlockInfo::try_fetch(self.evm.db_mut(), hardfork).map_err(|e| {
-            BlockExecutionError::msg(format!("Failed to fetch L1 block info: {e:?}"))
-        })?;
-        self.evm.ctx_mut().chain = l1_block_info;
 
         // 3. Apply Curie hardfork at the transition block
         // Only executes once at the exact block where Curie activates
