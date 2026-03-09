@@ -26,9 +26,7 @@ use alloy_primitives::{Address, U256};
 use curie::apply_curie_hard_fork;
 use morph_chainspec::{MorphChainSpec, MorphHardfork, MorphHardforks};
 use morph_primitives::{MorphReceipt, MorphTxEnvelope};
-use morph_revm::{
-    L1_GAS_PRICE_ORACLE_ADDRESS, MorphHaltReason, TokenFeeInfo, evm::MorphContext,
-};
+use morph_revm::{L1_GAS_PRICE_ORACLE_ADDRESS, MorphHaltReason, TokenFeeInfo, evm::MorphContext};
 use reth_chainspec::EthereumHardforks;
 use reth_revm::{DatabaseCommit, Inspector, State, context::result::ResultAndState};
 use revm::context::Block;
