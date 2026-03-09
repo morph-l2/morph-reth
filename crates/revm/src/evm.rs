@@ -21,9 +21,11 @@ use revm::{
 
 /// The Morph EVM context type.
 ///
-/// Uses [`L1BlockInfo`] as the `CHAIN` parameter so that L1 fee parameters
-/// are fetched once per block and shared across all transactions, avoiding
-/// repeated storage reads in the handler hot path.
+/// Uses [`L1BlockInfo`] as the `CHAIN` parameter.  Only the
+/// `had_token_fee_deduction` flag is used from the chain field (to signal
+/// `sload_morph` when original_value restoration is needed).  L1 fee
+/// parameters are fetched per-tx in the handler to reflect mid-block
+/// oracle updates from the external gas-oracle service.
 pub type MorphContext<DB> =
     Context<MorphBlockEnv, MorphTxEnv, CfgEnv<MorphHardfork>, DB, Journal<DB>, L1BlockInfo>;
 
