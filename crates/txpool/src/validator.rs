@@ -51,7 +51,7 @@ impl MorphL1BlockInfo {
 
     /// Returns the current L1 block info.
     pub fn l1_block_info(&self) -> L1BlockInfo {
-        self.l1_block_info.read().clone()
+        *self.l1_block_info.read()
     }
 
     /// Updates the L1 block info.
@@ -254,7 +254,7 @@ where
             authorities,
         } = outcome
         {
-            let l1_block_info = self.block_info.l1_block_info.read().clone();
+            let l1_block_info = *self.block_info.l1_block_info.read();
             let hardfork = self
                 .chain_spec()
                 .morph_hardfork_at(self.block_number(), self.block_timestamp());
