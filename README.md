@@ -161,14 +161,14 @@ Morph Transaction (`0x7f`) is Morph's EVM+ transaction type, extending standard 
 
 Bernoulli and Curie use block-based activation; Morph203, Viridian, Emerald, and Jade use timestamp-based activation.
 
-| Hardfork | Activation | EVM Spec | Description |
-|----------|------------|----------|-------------|
-| Bernoulli | Block | Cancun | Initial L2 launch with disabled ripemd160 and blake2f precompiles |
-| Curie | Block | Cancun | EIP-1559 fee market activation with blob-based L1 data fee |
-| Morph203 | Timestamp | Cancun | Re-enable ripemd160 and blake2f precompiles |
-| Viridian | Timestamp | Prague | EIP-7702 EOA delegation support |
-| Emerald | Timestamp | Osaka | BLS12-381 and P256verify precompiles |
-| Jade | Timestamp | Osaka | MPT state root validation, MorphTx V1 with reference and memo fields |
+| Hardfork | Activation | Description |
+|----------|------------|-------------|
+| Bernoulli | Block | Initial L2 launch with disabled ripemd160 and blake2f precompiles |
+| Curie | Block | EIP-1559 fee market activation with blob-based L1 data fee |
+| Morph203 | Timestamp | Re-enable ripemd160 and blake2f precompiles |
+| Viridian | Timestamp | EIP-7702 EOA delegation support |
+| Emerald | Timestamp | BLS12-381 and P256verify precompiles |
+| Jade | Timestamp | MPT state root validation, MorphTx V1 with reference and memo fields |
 
 ### Engine API
 
