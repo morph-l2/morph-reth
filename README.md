@@ -3,7 +3,7 @@
 [![Build](https://github.com/morph-l2/morph-reth/actions/workflows/build.yml/badge.svg)](https://github.com/morph-l2/morph-reth/actions/workflows/build.yml)
 [![Test](https://github.com/morph-l2/morph-reth/actions/workflows/test.yml/badge.svg)](https://github.com/morph-l2/morph-reth/actions/workflows/test.yml)
 [![Lint](https://github.com/morph-l2/morph-reth/actions/workflows/lint.yml/badge.svg)](https://github.com/morph-l2/morph-reth/actions/workflows/lint.yml)
-[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)](LICENSE-MIT)
+[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)](#license)
 
 ## Overview
 
