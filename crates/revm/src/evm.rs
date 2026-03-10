@@ -257,7 +257,7 @@ impl<DB: Database, I> MorphEvm<DB, I> {
 }
 
 impl<DB: Database, I> MorphEvm<DB, I> {
-    /// Consumed self and returns a new Evm type with given Inspector.
+    /// Consumes self and returns a new Evm type with given Inspector.
     pub fn with_inspector<OINSP>(self, inspector: OINSP) -> MorphEvm<DB, OINSP> {
         MorphEvm::new_inner(self.inner.with_inspector(inspector))
     }

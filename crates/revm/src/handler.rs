@@ -99,12 +99,10 @@ where
         let (_, tx, _, journal, chain, _) = evm.ctx().all_mut();
         chain.had_token_fee_deduction = false;
 
-        // L1 message - skip fee validation
         if tx.is_l1_msg() {
-            // Load caller's account
             let mut caller = journal.load_account_with_code_mut(tx.caller())?.data;
 
-            // Bump nonce for calls (CREATE nonce is bumped in make_create_frame)
+            // CREATE nonce is bumped later in make_create_frame
             if tx.kind().is_call() {
                 caller.bump_nonce();
             }
@@ -131,7 +129,7 @@ where
     ) -> Result<(), Self::Error> {
         let (_, tx, _, _, _, _) = evm.ctx().all_mut();
 
-        // For L1 message transactions & system transactions, no reimbursement is needed
+        // L1 message gas is prepaid on L1, no reimbursement needed.
         if tx.is_l1_msg() {
             return Ok(());
         }
@@ -204,7 +202,6 @@ where
 
         let execution_fee = U256::from(effective_gas_price).saturating_mul(U256::from(gas_used));
 
-        // reward beneficiary
         let mut beneficiary_account = journal.load_account_mut(beneficiary)?;
         beneficiary_account
             .data
@@ -332,7 +329,6 @@ where
         // matching go-ethereum's per-tx L1BlockInfo read.
         let l1_block_info = L1BlockInfo::try_fetch(evm.ctx_mut().db_mut(), hardfork)?;
 
-        // Get RLP-encoded transaction bytes for L1 fee calculation
         let rlp_bytes = evm
             .ctx_ref()
             .tx()
@@ -341,17 +337,13 @@ where
             .map(|b| b.as_ref())
             .unwrap_or_default();
 
-        // Calculate L1 data fee based on full RLP-encoded transaction
         let l1_data_fee = l1_block_info.calculate_tx_l1_cost(rlp_bytes, hardfork);
         evm.cached_l1_data_fee = l1_data_fee;
 
-        // Get mutable access to context components
         let (block, tx, cfg, journal, _, _) = evm.ctx().all_mut();
 
-        // Load caller's account
         let mut caller = journal.load_account_with_code_mut(tx.caller())?.data;
 
-        // Validate account nonce and code (EIP-3607)
         pre_execution::validate_account_nonce_and_code(
             &caller.account().info,
             tx.nonce(),
@@ -359,15 +351,12 @@ where
             cfg.is_nonce_check_disabled(),
         )?;
 
-        // Calculate L2 fee and validate balance
-        // This includes: gas_limit * gas_price + value + blob_fee
         let new_balance_after_l2_fee =
             calculate_caller_fee_with_l1_cost(*caller.balance(), tx, block, cfg, l1_data_fee)?;
 
-        // Set the new balance (deducting L2 fee + L1 data fee)
         caller.set_balance(new_balance_after_l2_fee);
 
-        // Bump nonce for calls (CREATE nonce is bumped in make_create_frame)
+        // CREATE nonce is bumped later in make_create_frame
         if tx.kind().is_call() {
             caller.bump_nonce();
         }
@@ -385,9 +374,7 @@ where
         evm: &mut MorphEvm<DB, I>,
         gas: &Gas,
     ) -> Result<(), EVMError<DB::Error, MorphInvalidTransaction>> {
-        // Get caller address
         let caller = evm.ctx_ref().tx().caller();
-        // Get coinbase address
         let beneficiary = evm.ctx_ref().block().beneficiary();
         let basefee = evm.ctx.block().basefee() as u128;
         let effective_gas_price = evm.ctx.tx().effective_gas_price(basefee);
@@ -472,7 +459,7 @@ where
         evm: &mut MorphEvm<DB, I>,
         token_id: u16,
     ) -> Result<(), EVMError<DB::Error, MorphInvalidTransaction>> {
-        // Token ID 0 not supported for gas payment.
+        // Token ID 0 means ETH — routed through validate_and_deduct_eth_fee instead.
         if token_id == 0 {
             return Err(MorphInvalidTransaction::TokenIdZeroNotSupported.into());
         }
@@ -536,17 +523,14 @@ where
             }
         }
 
-        // Fetch token fee info from Token Registry
         let token_fee_info =
             TokenFeeInfo::load_for_caller(journal.db_mut(), token_id, caller_addr, hardfork)?
                 .ok_or(MorphInvalidTransaction::TokenNotRegistered(token_id))?;
 
-        // Check if token is active
         if !token_fee_info.is_active {
             return Err(MorphInvalidTransaction::TokenNotActive(token_id).into());
         }
 
-        // Get RLP-encoded transaction bytes for L1 fee calculation
         let rlp_bytes = tx
             .rlp_bytes
             .as_ref()
@@ -642,7 +626,7 @@ where
             evm.ctx_mut().journal_mut().state.extend(state);
         }
 
-        // Bump nonce for calls (CREATE nonce is bumped in make_create_frame)
+        // CREATE nonce is bumped later in make_create_frame
         if is_call {
             let (_, _, _, journal, _, _) = evm.ctx().all_mut();
             let mut caller = journal.load_account_with_code_mut(caller_addr)?.data;
@@ -691,8 +675,8 @@ where
     )?;
     journal.sstore(token, from_storage_slot, new_balance)?;
 
-    // Add amount (checked: reject on overflow to maintain token conservation,
-    // matching go-ethereum's big.Int Add which is unbounded)
+    // Add amount (checked: unlike go-ethereum's unbounded big.Int Add,
+    // we reject on overflow to maintain token conservation)
     let to_storage_slot = compute_mapping_slot_for_address(token_balance_slot, to);
     let balance = journal.sload(token, to_storage_slot)?;
     let new_to_balance =
@@ -862,9 +846,9 @@ where
     Ok(())
 }
 
-/// Build the calldata for ERC20 transfer(address,amount) call.
+/// Build the calldata for ERC20 `transfer(address,uint256)` call.
 ///
-/// Method signature: `transfer(address,amount) -> 0xa9059cbb`
+/// Method selector: `0xa9059cbb`
 #[inline]
 fn build_transfer_calldata(to: Address, token_amount: alloy_primitives::Uint<256, 4>) -> Bytes {
     let method_id = [0xa9u8, 0x05, 0x9c, 0xbb];
