@@ -81,16 +81,32 @@ cargo build --release
 
 ### Running the Node
 
+Morph Reth is a sequencer-driven L2 execution client. It does **not** sync blocks via P2P — blocks are delivered through the custom L2 Engine API by an external sequencer or derivation pipeline.
+
 ```bash
+# Generate a JWT secret for Engine API authentication
+openssl rand -hex 32 > jwt.hex
+
 # Run on Morph mainnet
-./target/release/morph-reth node --chain mainnet
+./target/release/morph-reth node \
+  --chain mainnet \
+  --http \
+  --authrpc.jwtsecret jwt.hex
 
 # Run on Hoodi testnet
-./target/release/morph-reth node --chain hoodi
+./target/release/morph-reth node \
+  --chain hoodi \
+  --http \
+  --authrpc.jwtsecret jwt.hex
 
 # Run with a custom genesis file
-./target/release/morph-reth node --chain /path/to/genesis.json
+./target/release/morph-reth node \
+  --chain /path/to/genesis.json \
+  --http \
+  --authrpc.jwtsecret jwt.hex
 ```
+
+> **Note:** The node requires a sequencer or derivation pipeline to call the Engine API (`engine_assembleL2Block`, `engine_newL2Block`, etc.) for block production and import. See [Morph Documentation](https://docs.morph.network/) for full deployment guides.
 
 #### Morph-Specific CLI Flags
 
