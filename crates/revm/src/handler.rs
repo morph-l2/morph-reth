@@ -414,12 +414,10 @@ where
         // Calculate token amount required for total fee
         let token_amount_required = token_fee_info.eth_to_token_amount(reimburse_eth);
 
-        // Get mutable access to journal components
-        let journal = evm.ctx().journal_mut();
-
         if let Some(balance_slot) = token_fee_info.balance_slot {
             // Transfer with token slot.
-            let _ = transfer_erc20_with_slot(
+            let (_, tx, _, journal, _, _) = evm.ctx().all_mut();
+            let (from_storage_slot, to_storage_slot) = transfer_erc20_with_slot(
                 journal,
                 beneficiary,
                 caller,
@@ -427,6 +425,12 @@ where
                 token_amount_required,
                 balance_slot,
             )?;
+            restore_saved_original_values(
+                tx,
+                &mut journal.state,
+                token_fee_info.token_address,
+                [from_storage_slot, to_storage_slot],
+            );
         } else {
             // Transfer with evm call.
             transfer_erc20_with_evm(
@@ -614,6 +618,26 @@ where
     }
 }
 
+#[inline]
+fn restore_saved_original_values(
+    tx: &crate::MorphTxEnv,
+    state: &mut revm::state::EvmState,
+    address: Address,
+    slots: impl IntoIterator<Item = U256>,
+) {
+    slots.into_iter().for_each(|slot_key| {
+        if let Some(&(_, _, original_db_value)) = tx
+            .fee_slot_original_values
+            .iter()
+            .find(|(saved_address, saved_slot, _)| *saved_address == address && *saved_slot == slot_key)
+            && let Some(account) = state.get_mut(&address)
+            && let Some(slot) = account.storage.get_mut(&slot_key)
+        {
+            slot.original_value = original_db_value;
+        }
+    });
+}
+
 /// Performs an ERC20 balance transfer by directly `sload`/`sstore`-ing the token contract storage
 /// using the known `balance` mapping base slot, returning the computed storage slots for `from`/`to`.
 fn transfer_erc20_with_slot<DB>(
@@ -754,4 +778,162 @@ fn calculate_caller_fee_with_l1_cost(
     }
 
     Ok(new_balance)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        MorphBlockEnv, MorphTxEnv, compute_mapping_slot, token_fee::L2_TOKEN_REGISTRY_ADDRESS,
+    };
+    use alloy_primitives::address;
+    use morph_chainspec::hardfork::MorphHardfork;
+    use revm::{
+        database::{CacheDB, EmptyDB},
+        inspector::NoOpInspector,
+        state::AccountInfo,
+    };
+
+    fn insert_registry_entry(
+        db: &mut CacheDB<EmptyDB>,
+        token_id: u16,
+        token: Address,
+        balance_slot: U256,
+    ) {
+        let mut token_id_bytes = [0u8; 32];
+        token_id_bytes[30..32].copy_from_slice(&token_id.to_be_bytes());
+        let base = compute_mapping_slot(U256::from(151), token_id_bytes.to_vec());
+        let price_ratio_slot = compute_mapping_slot(U256::from(153), token_id_bytes.to_vec());
+
+        let mut token_word = [0u8; 32];
+        token_word[12..32].copy_from_slice(token.as_slice());
+
+        let mut active_and_decimals = [0u8; 32];
+        active_and_decimals[30] = 8;
+        active_and_decimals[31] = 1;
+
+        db.insert_account_info(L2_TOKEN_REGISTRY_ADDRESS, AccountInfo::default());
+        db.insert_account_storage(
+            L2_TOKEN_REGISTRY_ADDRESS,
+            base,
+            U256::from_be_bytes(token_word),
+        )
+        .unwrap();
+        db.insert_account_storage(
+            L2_TOKEN_REGISTRY_ADDRESS,
+            base + U256::from(1),
+            balance_slot + U256::from(1),
+        )
+        .unwrap();
+        db.insert_account_storage(
+            L2_TOKEN_REGISTRY_ADDRESS,
+            base + U256::from(2),
+            U256::from_be_bytes(active_and_decimals),
+        )
+        .unwrap();
+        db.insert_account_storage(
+            L2_TOKEN_REGISTRY_ADDRESS,
+            base + U256::from(3),
+            U256::from(1),
+        )
+        .unwrap();
+        db.insert_account_storage(L2_TOKEN_REGISTRY_ADDRESS, price_ratio_slot, U256::from(1))
+            .unwrap();
+    }
+
+    #[test]
+    fn reimburse_token_fee_preserves_original_values_for_touched_slots() {
+        let caller = address!("1000000000000000000000000000000000000001");
+        let beneficiary = address!("2000000000000000000000000000000000000002");
+        let token = address!("3000000000000000000000000000000000000003");
+        let token_id = 5;
+        let balance_slot = U256::from(7);
+        let caller_slot = compute_mapping_slot_for_address(balance_slot, caller);
+        let beneficiary_slot = compute_mapping_slot_for_address(balance_slot, beneficiary);
+
+        let caller_balance = U256::from(100);
+        let beneficiary_balance = U256::from(50);
+        let deducted = U256::from(10);
+        let refunded = U256::from(4);
+
+        let mut db = CacheDB::new(EmptyDB::default());
+        insert_registry_entry(&mut db, token_id, token, balance_slot);
+        db.insert_account_info(token, AccountInfo::default());
+        db.insert_account_storage(token, caller_slot, caller_balance)
+            .unwrap();
+        db.insert_account_storage(token, beneficiary_slot, beneficiary_balance)
+            .unwrap();
+
+        let mut evm = MorphEvm::new(MorphContext::new(db, MorphHardfork::default()), NoOpInspector);
+        evm.tx = MorphTxEnv {
+            inner: revm::context::TxEnv {
+                caller,
+                gas_price: 1,
+                gas_limit: 100_000,
+                ..Default::default()
+            },
+            fee_token_id: Some(token_id),
+            fee_slot_original_values: vec![
+                (token, caller_slot, caller_balance),
+                (token, beneficiary_slot, beneficiary_balance),
+            ],
+            ..Default::default()
+        };
+        evm.block = MorphBlockEnv {
+            inner: revm::context::BlockEnv {
+                beneficiary,
+                ..Default::default()
+            },
+        };
+
+        {
+            let journal = evm.ctx().journal_mut();
+            let _ = journal.load_account_mut(token).unwrap();
+            journal.touch(token);
+            let (from_storage_slot, to_storage_slot) = transfer_erc20_with_slot(
+                journal,
+                caller,
+                beneficiary,
+                token,
+                deducted,
+                balance_slot,
+            )
+            .unwrap();
+
+            let token_account = journal.state.get_mut(&token).unwrap();
+            token_account.mark_cold();
+            token_account
+                .storage
+                .get_mut(&from_storage_slot)
+                .unwrap()
+                .mark_cold();
+            token_account
+                .storage
+                .get_mut(&to_storage_slot)
+                .unwrap()
+                .mark_cold();
+        }
+
+        let mut gas = Gas::new(10);
+        gas.set_spent(6);
+
+        MorphEvmHandler::<CacheDB<EmptyDB>, NoOpInspector>::new()
+            .reimburse_caller_token_fee(&mut evm, &gas, token_id)
+            .unwrap();
+
+        let token_account = evm.ctx_ref().journal().state.get(&token).unwrap();
+        let caller_slot_state = token_account.storage.get(&caller_slot).unwrap();
+        let beneficiary_slot_state = token_account.storage.get(&beneficiary_slot).unwrap();
+
+        assert_eq!(caller_slot_state.original_value, caller_balance);
+        assert_eq!(
+            caller_slot_state.present_value,
+            caller_balance - deducted + refunded
+        );
+        assert_eq!(beneficiary_slot_state.original_value, beneficiary_balance);
+        assert_eq!(
+            beneficiary_slot_state.present_value,
+            beneficiary_balance + deducted - refunded
+        );
+    }
 }
