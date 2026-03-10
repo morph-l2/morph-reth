@@ -563,8 +563,13 @@ fn validate_l1_messages_in_block(
         }
     }
 
-    // Validate header consistency: header.next_l1_msg_index must equal
-    // last_queue_index + 1 (i.e., first_queue_index + l1_msg_count).
+    // Validate header consistency: header.next_l1_msg_index must be at least
+    // last_queue_index + 1 (cannot go backwards relative to included messages).
+    // It may be strictly greater because Morph allows L1 messages to be
+    // "skipped" — the sequencer can advance past queue indices that are not
+    // included in the block body (e.g., messages that failed on L1 relay).
+    // go-eth's NumL1MessagesProcessed() comment: "This count includes both
+    // skipped and included messages."
     // For blocks with no L1 messages, this check is skipped — the cross-block
     // monotonicity check in validate_header_against_parent handles that case.
     if l1_msg_count > 0 {
@@ -573,7 +578,7 @@ fn validate_l1_messages_in_block(
                 "internal error: l1_msg_count > 0 but prev_queue_index is None".to_string(),
             )
         })?;
-        let expected_next = last_queue_index.checked_add(1).ok_or_else(|| {
+        let min_expected = last_queue_index.checked_add(1).ok_or_else(|| {
             ConsensusError::Other(
                 MorphConsensusError::InvalidNextL1MessageIndex {
                     expected: u64::MAX,
@@ -582,10 +587,10 @@ fn validate_l1_messages_in_block(
                 .to_string(),
             )
         })?;
-        if header_next_l1_msg_index != expected_next {
+        if header_next_l1_msg_index < min_expected {
             return Err(ConsensusError::Other(
                 MorphConsensusError::InvalidNextL1MessageIndex {
-                    expected: expected_next,
+                    expected: min_expected,
                     actual: header_next_l1_msg_index,
                 }
                 .to_string(),
@@ -978,8 +983,8 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_l1_messages_in_block_wrong_next_l1_msg_index() {
-        // Valid sequential L1 messages (0, 1, 2) but wrong next_l1_msg_index in header
+    fn test_validate_l1_messages_in_block_next_index_too_low() {
+        // Valid sequential L1 messages (0, 1, 2) but header.next_l1_msg_index < last+1
         let txs = [
             create_l1_msg_tx(0),
             create_l1_msg_tx(1),
@@ -987,12 +992,31 @@ mod tests {
             create_regular_tx(),
         ];
 
-        // Header says 100 but should be 3 (last=2, 2+1=3)
-        let result = validate_l1_messages_in_block(&txs, 100);
+        // Header says 2 but minimum is 3 (last=2, 2+1=3) — INVALID
+        let result = validate_l1_messages_in_block(&txs, 2);
         assert!(result.is_err());
         let err_str = result.unwrap_err().to_string();
         assert!(err_str.contains("expected 3"));
-        assert!(err_str.contains("got 100"));
+        assert!(err_str.contains("got 2"));
+    }
+
+    #[test]
+    fn test_validate_l1_messages_in_block_skipped_messages_allowed() {
+        // L1 messages 0, 1, 2 but header says next=5 (messages 3, 4 were skipped).
+        // This is valid — Morph allows the sequencer to skip L1 messages.
+        let txs = [
+            create_l1_msg_tx(0),
+            create_l1_msg_tx(1),
+            create_l1_msg_tx(2),
+            create_regular_tx(),
+        ];
+
+        // header_next=5 > last+1=3 — valid (2 messages skipped)
+        assert!(validate_l1_messages_in_block(&txs, 5).is_ok());
+        // header_next=3 == last+1=3 — valid (no messages skipped)
+        assert!(validate_l1_messages_in_block(&txs, 3).is_ok());
+        // header_next=100 > last+1=3 — valid (many messages skipped)
+        assert!(validate_l1_messages_in_block(&txs, 100).is_ok());
     }
 
     #[test]
