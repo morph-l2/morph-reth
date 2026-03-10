@@ -14,7 +14,7 @@
 //! - Coinbase must be zero when FeeVault is enabled
 //! - Timestamp cannot be in the future
 //! - Gas limit must be within bounds
-//! - Base fee must be set after Curie hardfork
+//! - Base fee must always be set (EIP-1559 is always active)
 //!
 //! ## L1 Message Rules
 //!
@@ -131,7 +131,7 @@ impl HeaderValidator<MorphHeader> for MorphConsensus {
     /// 6. **Timestamp**: Must not be in the future
     /// 7. **Gas Limit**: Must be <= MAX_GAS_LIMIT
     /// 8. **Gas Used**: Must be <= gas limit
-    /// 9. **Base Fee**: Must be set after Curie hardfork and <= 10 Gwei
+    /// 9. **Base Fee**: Must always be set (EIP-1559 is always active) and <= 10 Gwei
     fn validate_header(&self, header: &SealedHeader<MorphHeader>) -> Result<(), ConsensusError> {
         // Extra data must be empty (Morph L2 specific - stricter than max length)
         if !header.extra_data().is_empty() {
@@ -462,9 +462,10 @@ fn validate_against_parent_gas_limit<H: BlockHeader>(
 /// 2. **Sequential Queue Index**: L1 messages must have strictly sequential
 ///    `queue_index` values (each = previous + 1).
 ///
-/// 3. **Header Consistency**: If L1 messages are present, the last L1 message's
-///    `queue_index + 1` must equal `header.next_l1_msg_index`. This ensures the
-///    header correctly reflects the transactions in the body.
+/// 3. **Header Consistency**: If L1 messages are present,
+///    `header.next_l1_msg_index` must be >= `last_queue_index + 1`. It may be
+///    strictly greater because Morph allows L1 messages to be "skipped" — the
+///    sequencer can advance past queue indices not included in the block body.
 ///
 /// # Cross-Block Validation
 ///
@@ -476,7 +477,8 @@ fn validate_against_parent_gas_limit<H: BlockHeader>(
 ///
 /// ```text
 /// [L1Msg(queue=5), L1Msg(queue=6), L1Msg(queue=7), RegularTx]
-/// // header.next_l1_msg_index = 8 ✓
+/// // header.next_l1_msg_index = 8  ✓ (exact match)
+/// // header.next_l1_msg_index = 10 ✓ (skipped queue indices 8, 9)
 /// ```
 ///
 /// # Example (Invalid - L1 after L2)

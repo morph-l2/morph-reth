@@ -44,7 +44,9 @@ use tracing::warn;
 /// - `result`: EVM execution result (success/failure, logs, gas used)
 /// - `cumulative_gas_used`: Running total of gas used in the block
 /// - `l1_fee`: Pre-calculated L1 data fee for this transaction
-/// - `token_fee_info`: Token fee details for MorphTx transactions
+/// - `morph_tx_fields`: MorphTx-specific fields (token fee info, version, reference, memo)
+/// - `pre_fee_logs`: Transfer event logs from token fee deduction (survives tx revert)
+/// - `post_fee_logs`: Transfer event logs from token fee reimbursement
 #[derive(Debug)]
 pub(crate) struct MorphReceiptBuilderCtx<'a, E: Evm> {
     /// The executed transaction

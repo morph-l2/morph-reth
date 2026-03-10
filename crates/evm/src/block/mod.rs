@@ -125,6 +125,7 @@ where
     ///
     /// # Arguments
     /// * `tx` - The transaction to extract fields from
+    /// * `sender` - Transaction sender (used for token registry balance queries)
     /// * `hardfork` - The current Morph hardfork (affects token registry behavior)
     ///
     /// # Returns
