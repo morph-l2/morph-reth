@@ -103,6 +103,10 @@ pub const INITIAL_BLOB_SCALAR: U256 = U256::from_limbs([417565260, 0, 0, 0]);
 /// Curie hardfork flag value (1 = true).
 pub const IS_CURIE: U256 = U256::from_limbs([1, 0, 0, 0]);
 
+/// Maximum L1 data fee cap for circuit compatibility.
+/// Matches go-ethereum's `CalculateL1DataFee` cap in `rollup/fees/rollup_fee.go`.
+const L1_FEE_CAP: U256 = U256::from_limbs([u64::MAX, 0, 0, 0]);
+
 /// Storage updates for L1 gas price oracle Curie hardfork initialization.
 ///
 /// These storage slots are initialized when the Curie hardfork activates:
@@ -125,7 +129,7 @@ pub const CURIE_L1_GAS_PRICE_ORACLE_STORAGE: [(U256, U256); 4] = [
 ///
 /// Contains the fee parameters fetched from the L1 Gas Price Oracle contract.
 /// These parameters are used to calculate the L1 data fee for transactions.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct L1BlockInfo {
     /// The base fee of the L1 origin block.
     pub l1_base_fee: U256,
@@ -133,14 +137,14 @@ pub struct L1BlockInfo {
     pub l1_fee_overhead: U256,
     /// The current L1 fee scalar.
     pub l1_base_fee_scalar: U256,
-    /// The current L1 blob base fee, None if before Curie.
-    pub l1_blob_base_fee: Option<U256>,
-    /// The current L1 commit scalar, None if before Curie.
-    pub l1_commit_scalar: Option<U256>,
-    /// The current L1 blob scalar, None if before Curie.
-    pub l1_blob_scalar: Option<U256>,
-    /// The current call data gas (l1_commit_scalar * l1_base_fee), None if before Curie.
-    pub calldata_gas: Option<U256>,
+    /// The current L1 blob base fee (zero if before Curie).
+    pub l1_blob_base_fee: U256,
+    /// The current L1 commit scalar (zero if before Curie).
+    pub l1_commit_scalar: U256,
+    /// The current L1 blob scalar (zero if before Curie).
+    pub l1_blob_scalar: U256,
+    /// The current call data gas: `l1_commit_scalar * l1_base_fee` (zero if before Curie).
+    pub calldata_gas: U256,
 }
 
 impl L1BlockInfo {
@@ -177,10 +181,10 @@ impl L1BlockInfo {
                 l1_base_fee,
                 l1_fee_overhead,
                 l1_base_fee_scalar,
-                l1_blob_base_fee: Some(l1_blob_base_fee),
-                l1_commit_scalar: Some(l1_commit_scalar),
-                l1_blob_scalar: Some(l1_blob_scalar),
-                calldata_gas: Some(calldata_gas),
+                l1_blob_base_fee,
+                l1_commit_scalar,
+                l1_blob_scalar,
+                calldata_gas,
             })
         }
     }
@@ -204,8 +208,8 @@ impl L1BlockInfo {
             .saturating_add(TX_L1_COMMIT_EXTRA_COST)
         } else {
             U256::from(input.len())
-                .saturating_mul(self.l1_blob_base_fee.unwrap_or_default())
-                .saturating_mul(self.l1_blob_scalar.unwrap_or_default())
+                .saturating_mul(self.l1_blob_base_fee)
+                .saturating_mul(self.l1_blob_scalar)
         }
     }
 
@@ -225,7 +229,6 @@ impl L1BlockInfo {
         let blob_gas = self.data_gas(input, hardfork);
 
         self.calldata_gas
-            .unwrap_or_default()
             .saturating_add(blob_gas)
             .wrapping_div(TX_L1_FEE_PRECISION)
     }
@@ -234,12 +237,17 @@ impl L1BlockInfo {
     ///
     /// This is the cost of posting the transaction data to L1 for data availability.
     /// The calculation method differs based on whether the Curie hardfork is active.
+    ///
+    /// The result is capped to `u64::MAX` for circuit compatibility, matching go-ethereum's
+    /// `CalculateL1DataFee` behavior in `rollup/fees/rollup_fee.go`.
     pub fn calculate_tx_l1_cost(&self, input: &[u8], hardfork: MorphHardfork) -> U256 {
-        if !hardfork.is_curie() {
+        let fee = if !hardfork.is_curie() {
             self.calculate_tx_l1_cost_pre_curie(input, hardfork)
         } else {
             self.calculate_tx_l1_cost_curie(input, hardfork)
-        }
+        };
+        // Cap to u64::MAX for circuit compatibility (go-ethereum: rollup_fee.go:248-249)
+        fee.min(L1_FEE_CAP)
     }
 }
 
@@ -253,10 +261,10 @@ mod tests {
         assert_eq!(info.l1_base_fee, U256::ZERO);
         assert_eq!(info.l1_fee_overhead, U256::ZERO);
         assert_eq!(info.l1_base_fee_scalar, U256::ZERO);
-        assert!(info.l1_blob_base_fee.is_none());
-        assert!(info.l1_commit_scalar.is_none());
-        assert!(info.l1_blob_scalar.is_none());
-        assert!(info.calldata_gas.is_none());
+        assert_eq!(info.l1_blob_base_fee, U256::ZERO);
+        assert_eq!(info.l1_commit_scalar, U256::ZERO);
+        assert_eq!(info.l1_blob_scalar, U256::ZERO);
+        assert_eq!(info.calldata_gas, U256::ZERO);
     }
 
     #[test]
@@ -276,8 +284,8 @@ mod tests {
     #[test]
     fn test_data_gas_curie() {
         let info = L1BlockInfo {
-            l1_blob_base_fee: Some(U256::from(10)),
-            l1_blob_scalar: Some(U256::from(2)),
+            l1_blob_base_fee: U256::from(10),
+            l1_blob_scalar: U256::from(2),
             ..Default::default()
         };
 

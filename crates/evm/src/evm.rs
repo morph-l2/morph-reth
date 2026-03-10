@@ -7,11 +7,9 @@ use alloy_evm::{
         inspector::NoOpInspector,
     },
 };
-use alloy_primitives::{Address, Bytes, Log};
+use alloy_primitives::{Address, Bytes};
 use morph_chainspec::hardfork::MorphHardfork;
-use morph_revm::{
-    MorphHaltReason, MorphInvalidTransaction, MorphPrecompiles, MorphTxEnv, evm::MorphContext,
-};
+use morph_revm::{MorphHaltReason, MorphInvalidTransaction, MorphTxEnv, evm::MorphContext};
 use reth_revm::MainContext;
 use std::ops::{Deref, DerefMut};
 
@@ -66,19 +64,21 @@ pub struct MorphEvm<DB: Database, I = NoOpInspector> {
 impl<DB: Database> MorphEvm<DB> {
     /// Create a new [`MorphEvm`] instance.
     pub fn new(db: DB, input: EvmEnv<MorphHardfork, MorphBlockEnv>) -> Self {
-        let spec = input.cfg_env.spec;
         let ctx = Context::mainnet()
             .with_db(db)
             .with_block(input.block_env)
             .with_cfg(input.cfg_env)
-            .with_tx(Default::default());
+            .with_tx(Default::default())
+            .with_chain(morph_revm::MorphTxRuntime::default());
 
-        // Create precompiles for the hardfork and wrap in PrecompilesMap
-        let morph_precompiles = MorphPrecompiles::new_with_spec(spec);
-        let precompiles_map = PrecompilesMap::from_static(morph_precompiles.precompiles());
+        // Build the inner MorphEvm which creates precompiles once.
+        // Derive the PrecompilesMap from the inner's precompiles to avoid
+        // a second MorphPrecompiles::new_with_spec call.
+        let inner = morph_revm::MorphEvm::new(ctx, NoOpInspector {});
+        let precompiles_map = PrecompilesMap::from_static(inner.precompiles.precompiles());
 
         Self {
-            inner: morph_revm::MorphEvm::new(ctx, NoOpInspector {}),
+            inner,
             precompiles_map,
             inspect: false,
         }
@@ -105,16 +105,34 @@ impl<DB: Database, I> MorphEvm<DB, I> {
         }
     }
 
-    /// Takes the inner EVM's revert logs.
+    /// Returns the cached token fee info from the handler's validation phase.
     ///
-    /// This is used as a work around to allow logs to be
-    /// included for reverting transactions.
+    /// Avoids redundant DB reads when the block executor needs token fee
+    /// parameters (e.g., for receipt construction).
+    #[inline]
+    pub fn cached_token_fee_info(&self) -> Option<morph_revm::TokenFeeInfo> {
+        self.inner.cached_token_fee_info()
+    }
+
+    /// Returns the L1 data fee cached during handler validation.
     ///
-    /// TODO: remove once revm supports emitting logs for reverted transactions
-    ///
-    /// <https://github.com/morphxyz/morph/pull/729>
-    pub fn take_revert_logs(&mut self) -> Vec<Log> {
-        std::mem::take(&mut self.inner.logs)
+    /// Avoids re-encoding the full transaction RLP in the block executor's
+    /// receipt-building path.
+    #[inline]
+    pub fn cached_l1_data_fee(&self) -> alloy_primitives::U256 {
+        self.inner.cached_l1_data_fee()
+    }
+
+    /// Takes the cached pre-execution fee logs (token fee deduction Transfer events).
+    #[inline]
+    pub fn take_pre_fee_logs(&mut self) -> Vec<alloy_primitives::Log> {
+        self.inner.take_pre_fee_logs()
+    }
+
+    /// Takes the cached post-execution fee logs (token fee reimbursement Transfer events).
+    #[inline]
+    pub fn take_post_fee_logs(&mut self) -> Vec<alloy_primitives::Log> {
+        self.inner.take_post_fee_logs()
     }
 }
 
