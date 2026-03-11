@@ -64,9 +64,24 @@ struct InMemoryHead {
 ///
 /// Updated from `CanonicalChainCommitted` consensus engine events and optimistically
 /// on successful local FCU calls to reduce latency before event delivery.
+///
+/// Also caches L1-based safe/finalized block hashes from `set_block_tags` so that
+/// the FCU can pass them to the engine tree, keeping both memory cleanup and
+/// RPC-visible tags consistent.
 #[derive(Debug, Default)]
 pub struct EngineStateTracker {
     head: RwLock<Option<InMemoryHead>>,
+    /// Last L1-based safe/finalized hashes from `set_block_tags`.
+    /// `None` means `set_block_tags` has not yet provided a value (e.g. during
+    /// historical sync when all batches are already finalized on L1).
+    block_tags: RwLock<BlockTagCache>,
+}
+
+/// Cached L1-based block tag hashes from `set_block_tags`.
+#[derive(Debug, Default, Clone, Copy)]
+struct BlockTagCache {
+    safe_hash: Option<B256>,
+    finalized_hash: Option<B256>,
 }
 
 impl EngineStateTracker {
@@ -93,6 +108,27 @@ impl EngineStateTracker {
 
     fn current_head(&self) -> Option<InMemoryHead> {
         *self.head.read()
+    }
+
+    /// Caches L1-based block tag hashes from a successful `set_block_tags` call.
+    pub fn record_block_tags(&self, safe_hash: Option<B256>, finalized_hash: Option<B256>) {
+        let mut tags = self.block_tags.write();
+        if let Some(h) = safe_hash {
+            tags.safe_hash = Some(h);
+        }
+        if let Some(h) = finalized_hash {
+            tags.finalized_hash = Some(h);
+        }
+    }
+
+    /// Returns the last L1-based finalized hash, or `None` if not yet set.
+    fn l1_finalized_hash(&self) -> Option<B256> {
+        self.block_tags.read().finalized_hash
+    }
+
+    /// Returns the last L1-based safe hash, or `None` if not yet set.
+    fn l1_safe_hash(&self) -> Option<B256> {
+        self.block_tags.read().safe_hash
     }
 }
 
@@ -425,6 +461,18 @@ where
             );
         }
 
+        // Cache the L1-based hashes so subsequent FCU calls use them instead of
+        // falling back to head.  This keeps engine-tree finalization and
+        // RPC-visible tags aligned with the actual L1 finalization status.
+        self.engine_state_tracker.record_block_tags(
+            if safe_block_hash != B256::ZERO { Some(safe_block_hash) } else { None },
+            if finalized_block_hash != B256::ZERO {
+                Some(finalized_block_hash)
+            } else {
+                None
+            },
+        );
+
         Ok(())
     }
 }
@@ -547,12 +595,31 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
         let new_payload_elapsed = new_payload_started.elapsed();
         self.ensure_payload_status_acceptable(&payload_status, "newPayload")?;
 
-        // FCU only advances canonical head. Safe/finalized tags are managed
-        // separately via set_block_tags, matching geth's engine_setBlockTags design.
+        // Morph uses Tendermint consensus with instant finality — every committed
+        // block is final and no reorgs are possible.
+        //
+        // The safe/finalized hashes passed here serve two purposes in reth's engine
+        // tree: (1) driving changeset-cache eviction and sidechain pruning (memory
+        // management), and (2) setting the RPC-visible "safe"/"finalized" block tags.
+        //
+        // When BlockTagService has provided L1-based tags via set_block_tags, we
+        // forward those so the engine tree and RPC layer stay consistent with the
+        // actual L1 finalization status.  During historical sync — before
+        // BlockTagService can provide values (all batches are already finalized on
+        // L1, state roots may be deleted) — we fall back to head so the engine tree
+        // still performs memory cleanup.
+        let finalized_hash = self
+            .engine_state_tracker
+            .l1_finalized_hash()
+            .unwrap_or(data.hash);
+        let safe_hash = self
+            .engine_state_tracker
+            .l1_safe_hash()
+            .unwrap_or(data.hash);
         let forkchoice = alloy_rpc_types_engine::ForkchoiceState {
             head_block_hash: data.hash,
-            safe_block_hash: B256::ZERO,
-            finalized_block_hash: B256::ZERO,
+            safe_block_hash: safe_hash,
+            finalized_block_hash: finalized_hash,
         };
 
         self.provider.on_forkchoice_update_received(&forkchoice);
