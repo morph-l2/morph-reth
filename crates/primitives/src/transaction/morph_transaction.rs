@@ -109,16 +109,17 @@ pub struct TxMorph {
 
     /// Version of the Morph transaction format.
     /// Used for future extensibility.
-    #[cfg_attr(feature = "serde", serde(with = "alloy_serde::quantity"))]
+    #[cfg_attr(feature = "serde", serde(default, with = "alloy_serde::quantity"))]
     pub version: u8,
 
     /// Token ID for alternative fee payment.
     /// This corresponds to the token registered in the L2 Token Registry.
     /// 0 means ETH payment, > 0 means ERC20 token payment.
-    #[cfg_attr(feature = "serde", serde(with = "alloy_serde::quantity"))]
+    #[cfg_attr(feature = "serde", serde(default, with = "alloy_serde::quantity"))]
     pub fee_token_id: u16,
 
     /// Maximum amount of tokens the sender is willing to pay as fee.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub fee_limit: U256,
 
     /// Reference key for the transaction (optional, v1 only).
