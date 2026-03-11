@@ -39,7 +39,6 @@ args=(
   --log.file.filter info
   --morph.max-tx-payload-bytes "${MORPH_MAX_TX_PAYLOAD_BYTES}"
   --nat none
-  --engine.legacy-state-root
   --engine.persistence-threshold 256
   --engine.memory-block-buffer-target 16
 )
