@@ -69,7 +69,7 @@ impl<DB: Database> MorphEvm<DB> {
             .with_block(input.block_env)
             .with_cfg(input.cfg_env)
             .with_tx(Default::default())
-            .with_chain(morph_revm::L1BlockInfo::default());
+            .with_chain(morph_revm::MorphTxRuntime::default());
 
         // Build the inner MorphEvm which creates precompiles once.
         // Derive the PrecompilesMap from the inner's precompiles to avoid

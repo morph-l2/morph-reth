@@ -51,6 +51,7 @@ pub mod exec;
 pub mod handler;
 pub mod l1block;
 pub mod precompiles;
+pub mod runtime;
 pub mod token_fee;
 mod tx;
 
@@ -78,6 +79,7 @@ pub use l1block::{
     L1BlockInfo,
 };
 pub use precompiles::MorphPrecompiles;
+pub use runtime::MorphTxRuntime;
 pub use token_fee::{
     L2_TOKEN_REGISTRY_ADDRESS, TokenFeeInfo, compute_mapping_slot,
     compute_mapping_slot_for_address, encode_balance_of_calldata, query_erc20_balance,

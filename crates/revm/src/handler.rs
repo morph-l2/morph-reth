@@ -397,14 +397,14 @@ where
         // Calculate token amount required for total fee
         let token_amount_required = token_fee_info.eth_to_token_amount(reimburse_eth);
 
-        // Get mutable access to journal components
-        let journal = evm.ctx().journal_mut();
-
         // Attempt token refund. Matches go-ethereum's refundGas() which silently logs
         // and continues on failure: "Continue execution even if refund fails - refund
         // should not cause transaction to fail" (state_transition.go:698).
         let refund_result = if let Some(balance_slot) = token_fee_info.balance_slot {
-            transfer_erc20_with_slot(
+            let (_, _, _, journal, runtime, _) = evm.ctx().all_mut();
+            let from_storage_slot = compute_mapping_slot_for_address(balance_slot, beneficiary);
+            let to_storage_slot = compute_mapping_slot_for_address(balance_slot, caller);
+            let result = transfer_erc20_with_slot(
                 journal,
                 beneficiary,
                 caller,
@@ -412,7 +412,14 @@ where
                 token_amount_required,
                 balance_slot,
             )
-            .map(|_| ())
+            .map(|_| ());
+            restore_tracked_original_values(
+                runtime,
+                &mut journal.state,
+                token_fee_info.token_address,
+                [from_storage_slot, to_storage_slot],
+            );
+            result
         } else {
             // Cache refund Transfer logs separately, matching the pre_fee_logs
             // pattern from validate_and_deduct_token_fee.
@@ -476,28 +483,34 @@ where
             )?;
         }
 
-        let (_, tx, cfg, journal, _, _) = evm.ctx_mut().all_mut();
-        let caller_addr = tx.caller();
-        let is_call = tx.kind().is_call();
+        let caller_addr = evm.ctx_ref().tx().caller();
+        let is_call = evm.ctx_ref().tx().kind().is_call();
 
         // eth_call (disable_fee_charge): skip token fee deduction entirely.
         // Only nonce/code validation (above) and nonce bump are needed.
         // This matches the ETH path's disable_fee_charge semantics and ensures
         // eth_call is a pure simulation without token registry lookups, balance
         // checks, or ERC20 transfers.
-        if cfg.is_fee_charge_disabled() {
+        if evm.ctx_ref().cfg().is_fee_charge_disabled() {
             if is_call {
-                let mut caller = journal.load_account_with_code_mut(caller_addr)?.data;
+                let mut caller = evm
+                    .ctx_mut()
+                    .journal_mut()
+                    .load_account_with_code_mut(caller_addr)?
+                    .data;
                 caller.bump_nonce();
             }
             return Ok(());
         }
 
-        let (block, tx, cfg, journal, _chain, _) = evm.ctx_mut().all_mut();
-        let caller_addr = tx.caller();
-        let beneficiary = block.beneficiary();
-        let hardfork = cfg.spec();
-        let is_call = tx.kind().is_call();
+        let beneficiary = evm.ctx_ref().block().beneficiary();
+        let hardfork = evm.ctx_ref().cfg().spec();
+        let tx_value = evm.ctx_ref().tx().value();
+        let rlp_bytes = evm.ctx_ref().tx().rlp_bytes.clone().unwrap_or_default();
+        let gas_limit = evm.ctx_ref().tx().gas_limit();
+        let fee_limit_from_tx = evm.ctx_ref().tx().fee_limit.unwrap_or_default();
+        let basefee = evm.ctx_ref().block().basefee() as u128;
+        let effective_gas_price = evm.ctx_ref().tx().effective_gas_price(basefee);
 
         // Check that caller has enough ETH to cover the value transfer.
         // This matches go-ethereum's buyAltTokenGas() which checks
@@ -505,9 +518,13 @@ where
         // Without this, the tx would proceed to EVM execution and fail there
         // (consuming gas), whereas go-ethereum rejects at the preCheck stage
         // (not consuming gas).
-        let tx_value = tx.value();
         if !tx_value.is_zero() {
-            let caller_eth_balance = *journal.load_account_mut(caller_addr)?.data.balance();
+            let caller_eth_balance = *evm
+                .ctx_mut()
+                .journal_mut()
+                .load_account_mut(caller_addr)?
+                .data
+                .balance();
             if caller_eth_balance < tx_value {
                 return Err(MorphInvalidTransaction::EthInvalidTransaction(
                     InvalidTransaction::LackOfFundForMaxFee {
@@ -519,30 +536,27 @@ where
             }
         }
 
-        let token_fee_info =
-            TokenFeeInfo::load_for_caller(journal.db_mut(), token_id, caller_addr, hardfork)?
-                .ok_or(MorphInvalidTransaction::TokenNotRegistered(token_id))?;
+        // Fetch token fee info from Token Registry
+        let token_fee_info = TokenFeeInfo::load_for_caller(
+            evm.ctx_mut().journal_mut().db_mut(),
+            token_id,
+            caller_addr,
+            hardfork,
+        )?
+        .ok_or(MorphInvalidTransaction::TokenNotRegistered(token_id))?;
 
         if !token_fee_info.is_active {
             return Err(MorphInvalidTransaction::TokenNotActive(token_id).into());
         }
 
-        let rlp_bytes = tx
-            .rlp_bytes
-            .as_ref()
-            .map(|b| b.as_ref())
-            .unwrap_or_default();
-
+        // Get RLP-encoded transaction bytes for L1 fee calculation
         // Fetch L1 block info per-tx (same rationale as validate_and_deduct_eth_fee).
-        let l1_block_info = L1BlockInfo::try_fetch(journal.db_mut(), hardfork)?;
-        let l1_data_fee = l1_block_info.calculate_tx_l1_cost(rlp_bytes, hardfork);
+        let l1_block_info = L1BlockInfo::try_fetch(evm.ctx_mut().journal_mut().db_mut(), hardfork)?;
+        let l1_data_fee = l1_block_info.calculate_tx_l1_cost(rlp_bytes.as_ref(), hardfork);
 
         // Calculate L2 gas fee using effective_gas_price (= min(gasTipCap + baseFee, gasFeeCap)),
         // matching go-ethereum's buyAltTokenGas() which uses st.gasPrice (effective gas price).
         // tx.gas_price() returns max_fee_per_gas and would overcharge when tip + basefee < feeCap.
-        let gas_limit = tx.gas_limit();
-        let basefee = block.basefee() as u128;
-        let effective_gas_price = tx.effective_gas_price(basefee);
         let l2_gas_fee = U256::from(gas_limit).saturating_mul(U256::from(effective_gas_price));
 
         // Total fee in ETH
@@ -552,7 +566,7 @@ where
         let token_amount_required = token_fee_info.eth_to_token_amount(total_eth_fee);
 
         // Determine fee limit
-        let mut fee_limit = tx.fee_limit.unwrap_or_default();
+        let mut fee_limit = fee_limit_from_tx;
         if fee_limit.is_zero() || fee_limit > token_fee_info.balance {
             fee_limit = token_fee_info.balance
         }
@@ -570,6 +584,7 @@ where
             // Transfer with token slot.
             // Ensure token account is loaded into the journal state, because `sload`/`sstore`
             // assume the account is present.
+            let (_, _, _, journal, chain, _) = evm.ctx_mut().all_mut();
             let _ = journal.load_account_mut(token_fee_info.token_address)?;
             journal.touch(token_fee_info.token_address);
             let (from_storage_slot, to_storage_slot) = transfer_erc20_with_slot(
@@ -585,9 +600,19 @@ where
             if let Some(token_acc) = journal.state.get_mut(&token_fee_info.token_address) {
                 token_acc.mark_cold();
                 if let Some(slot) = token_acc.storage.get_mut(&from_storage_slot) {
+                    chain.track_forced_cold_slot(
+                        token_fee_info.token_address,
+                        from_storage_slot,
+                        slot.original_value,
+                    );
                     slot.mark_cold();
                 }
                 if let Some(slot) = token_acc.storage.get_mut(&to_storage_slot) {
+                    chain.track_forced_cold_slot(
+                        token_fee_info.token_address,
+                        to_storage_slot,
+                        slot.original_value,
+                    );
                     slot.mark_cold();
                 }
             }
@@ -613,19 +638,26 @@ where
             // State changes should be marked cold to avoid warm access in the main tx execution.
             // finalize() clears journal state (including logs, which we already took above).
             let mut state = evm.finalize();
-            state.iter_mut().for_each(|(_, acc)| {
+            let (_, _, _, _, chain, _) = evm.ctx_mut().all_mut();
+            state.iter_mut().for_each(|(addr, acc)| {
                 acc.mark_cold();
-                acc.storage
-                    .iter_mut()
-                    .for_each(|(_, slot)| slot.mark_cold());
+                acc.storage.iter_mut().for_each(|(key, slot)| {
+                    if slot.original_value != slot.present_value {
+                        chain.track_forced_cold_slot(*addr, *key, slot.original_value);
+                    }
+                    slot.mark_cold();
+                });
             });
             evm.ctx_mut().journal_mut().state.extend(state);
         }
 
         // CREATE nonce is bumped later in make_create_frame
         if is_call {
-            let (_, _, _, journal, _, _) = evm.ctx().all_mut();
-            let mut caller = journal.load_account_with_code_mut(caller_addr)?.data;
+            let mut caller = evm
+                .ctx_mut()
+                .journal_mut()
+                .load_account_with_code_mut(caller_addr)?
+                .data;
             caller.bump_nonce();
         }
 
@@ -678,6 +710,19 @@ where
     Ok((from_storage_slot, to_storage_slot))
 }
 
+/// Restores tx-original values for tracked slots after direct journal access.
+#[inline]
+fn restore_tracked_original_values(
+    runtime: &crate::MorphTxRuntime,
+    state: &mut revm::state::EvmState,
+    address: Address,
+    slots: impl IntoIterator<Item = U256>,
+) {
+    slots.into_iter().for_each(|slot| {
+        let _ = runtime.restore_tracked_original_value(state, address, slot);
+    });
+}
+
 /// Gas limit for internal EVM calls (ERC20 transfer, balanceOf).
 const EVM_CALL_GAS_LIMIT: u64 = 200_000;
 
@@ -719,14 +764,12 @@ fn evm_call_balance_of<DB, I>(evm: &mut MorphEvm<DB, I>, token: Address, account
 where
     DB: alloy_evm::Database,
 {
-    // Record log count so we can discard any logs emitted during the call.
-    // go-ethereum uses evm.StaticCall() for balanceOf which cannot emit events;
-    // we truncate to match that read-only semantic.
-    let log_count_before = evm.ctx_mut().journal_mut().logs.len();
+    // Snapshot the journal so this helper matches go-ethereum's StaticCall
+    // semantics even though we route through the normal CALL machinery.
+    let checkpoint = evm.ctx_mut().journal_mut().checkpoint();
     let calldata = encode_balance_of_calldata(account);
     let result = evm_call(evm, Address::ZERO, token, calldata);
-    evm.ctx_mut().journal_mut().logs.truncate(log_count_before);
-    match result {
+    let balance = match result {
         Ok(ref result) if result.instruction_result().is_ok() => {
             let output = &result.interpreter_result().output;
             if output.len() >= 32 {
@@ -736,7 +779,9 @@ where
             }
         }
         _ => U256::ZERO,
-    }
+    };
+    evm.ctx_mut().journal_mut().checkpoint_revert(checkpoint);
+    balance
 }
 
 /// Matches go-ethereum's `transferAltTokenByEVM` validation:
@@ -770,11 +815,13 @@ where
         Some(b) => b,
         None => evm_call_balance_of(evm, token_address, from),
     };
+    let checkpoint = evm.ctx_mut().journal_mut().checkpoint();
 
     let calldata = build_transfer_calldata(to, token_amount);
     let frame_result = match evm_call(evm, from, token_address, calldata) {
         Ok(result) => result,
         Err(e) => {
+            evm.ctx_mut().journal_mut().checkpoint_revert(checkpoint);
             evm.tx = tx_origin;
             return Err(MorphInvalidTransaction::TokenTransferFailed {
                 reason: format!("Error: {e:?}"),
@@ -784,6 +831,7 @@ where
     };
 
     if !frame_result.instruction_result().is_ok() {
+        evm.ctx_mut().journal_mut().checkpoint_revert(checkpoint);
         evm.tx = tx_origin;
         return Err(MorphInvalidTransaction::TokenTransferFailed {
             reason: format!("{:?}", frame_result.interpreter_result()),
@@ -797,6 +845,7 @@ where
     // - Otherwise: rejected
     let output = &frame_result.interpreter_result().output;
     if !output.is_empty() && (output.len() < 32 || output[31] != 1) {
+        evm.ctx_mut().journal_mut().checkpoint_revert(checkpoint);
         evm.tx = tx_origin;
         return Err(MorphInvalidTransaction::TokenTransferFailed {
             reason: "alt token transfer returned failure".to_string(),
@@ -824,6 +873,7 @@ where
             })
         })?;
     if from_balance_after != expected_balance {
+        evm.ctx_mut().journal_mut().checkpoint_revert(checkpoint);
         return Err(MorphInvalidTransaction::TokenTransferFailed {
             reason: format!(
                 "sender balance mismatch: expected {expected_balance}, got {from_balance_after}"
@@ -832,6 +882,7 @@ where
         .into());
     }
 
+    evm.ctx_mut().journal_mut().checkpoint_commit();
     Ok(())
 }
 
@@ -913,4 +964,334 @@ fn calculate_caller_fee_with_l1_cost(
     }
 
     Ok(new_balance)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::MorphBlockEnv;
+    use alloy_primitives::{Bytes, address, keccak256};
+    use morph_chainspec::hardfork::MorphHardfork;
+    use revm::{
+        context::{BlockEnv, TxEnv},
+        database::{CacheDB, EmptyDB},
+        inspector::NoOpInspector,
+        state::{AccountInfo, Bytecode},
+    };
+
+    fn sstore_code(slot: U256, value: u8) -> Bytes {
+        let mut code = Vec::with_capacity(1 + 1 + 1 + 32 + 2);
+        code.push(0x60); // PUSH1 value
+        code.push(value);
+        code.push(0x7f); // PUSH32 slot
+        code.extend_from_slice(&slot.to_be_bytes::<32>());
+        code.push(0x55); // SSTORE
+        code.push(0x00); // STOP
+        Bytes::from(code)
+    }
+
+    fn mutating_return_code(write_value: u8, return_value: u8) -> Bytes {
+        Bytes::from(vec![
+            0x60,
+            write_value, // PUSH1 write_value
+            0x60,
+            0x00, // PUSH1 slot 0
+            0x55, // SSTORE
+            0x60,
+            return_value, // PUSH1 return_value
+            0x60,
+            0x00, // PUSH1 offset 0
+            0x52, // MSTORE
+            0x60,
+            0x20, // PUSH1 size 32
+            0x60,
+            0x00, // PUSH1 offset 0
+            0xf3, // RETURN
+        ])
+    }
+
+    #[test]
+    fn forced_cold_slot_sstore_preserves_original_value() {
+        let caller = address!("1000000000000000000000000000000000000001");
+        let token = address!("3000000000000000000000000000000000000003");
+        let balance_slot = U256::from(7);
+        let caller_slot = compute_mapping_slot_for_address(balance_slot, caller);
+
+        let original_balance = U256::from(100);
+        let deducted_balance = U256::from(90);
+        let final_balance = U256::from(80);
+        let contract_code = sstore_code(caller_slot, 80);
+
+        let mut db = CacheDB::new(EmptyDB::default());
+        db.insert_account_info(
+            caller,
+            AccountInfo {
+                balance: U256::from(1_000_000),
+                ..Default::default()
+            },
+        );
+        db.insert_account_info(
+            token,
+            AccountInfo {
+                code_hash: keccak256(contract_code.as_ref()),
+                code: Some(Bytecode::new_raw(contract_code)),
+                ..Default::default()
+            },
+        );
+        db.insert_account_storage(token, caller_slot, original_balance)
+            .unwrap();
+
+        let mut evm = MorphEvm::new(
+            MorphContext::new(db, MorphHardfork::default()),
+            NoOpInspector,
+        );
+        evm.tx = MorphTxEnv {
+            inner: TxEnv {
+                caller,
+                kind: token.into(),
+                gas_limit: 100_000,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        evm.block = MorphBlockEnv {
+            inner: BlockEnv::default(),
+        };
+
+        {
+            let (_, _, _, journal, chain, _) = evm.ctx().all_mut();
+            let _ = journal.load_account_mut(token).unwrap();
+            journal.touch(token);
+            journal
+                .sstore(token, caller_slot, deducted_balance)
+                .unwrap();
+
+            let token_account = journal.state.get_mut(&token).unwrap();
+            token_account.mark_cold();
+            token_account
+                .storage
+                .get_mut(&caller_slot)
+                .unwrap()
+                .mark_cold();
+
+            chain.track_forced_cold_slot(token, caller_slot, original_balance);
+        }
+
+        let frame_result = MorphEvmHandler::<CacheDB<EmptyDB>, NoOpInspector>::new()
+            .execution(&mut evm, &InitialAndFloorGas::new(0, 0))
+            .unwrap();
+        assert!(frame_result.instruction_result().is_ok());
+
+        let slot_state = evm
+            .ctx_ref()
+            .journal()
+            .state
+            .get(&token)
+            .and_then(|account| account.storage.get(&caller_slot))
+            .unwrap();
+
+        assert_eq!(slot_state.present_value, final_balance);
+        assert_eq!(slot_state.original_value, original_balance);
+    }
+
+    #[test]
+    fn reimburse_token_fee_preserves_original_values_for_touched_slots() {
+        let caller = address!("1000000000000000000000000000000000000001");
+        let beneficiary = address!("2000000000000000000000000000000000000002");
+        let token = address!("3000000000000000000000000000000000000003");
+        let balance_slot = U256::from(7);
+        let caller_slot = compute_mapping_slot_for_address(balance_slot, caller);
+        let beneficiary_slot = compute_mapping_slot_for_address(balance_slot, beneficiary);
+
+        let caller_balance = U256::from(100);
+        let beneficiary_balance = U256::from(50);
+        let deducted = U256::from(10);
+        let refunded = U256::from(4);
+
+        let mut db = CacheDB::new(EmptyDB::default());
+        db.insert_account_info(token, AccountInfo::default());
+        db.insert_account_storage(token, caller_slot, caller_balance)
+            .unwrap();
+        db.insert_account_storage(token, beneficiary_slot, beneficiary_balance)
+            .unwrap();
+
+        let mut evm = MorphEvm::new(
+            MorphContext::new(db, MorphHardfork::default()),
+            NoOpInspector,
+        );
+        evm.tx = MorphTxEnv {
+            inner: revm::context::TxEnv {
+                caller,
+                gas_price: 1,
+                gas_limit: 100_000,
+                ..Default::default()
+            },
+            fee_token_id: Some(5),
+            ..Default::default()
+        };
+        evm.block = MorphBlockEnv {
+            inner: BlockEnv {
+                beneficiary,
+                ..Default::default()
+            },
+        };
+        evm.cached_token_fee_info = Some(TokenFeeInfo {
+            token_address: token,
+            price_ratio: U256::from(1),
+            scale: U256::from(1),
+            balance_slot: Some(balance_slot),
+            ..Default::default()
+        });
+
+        {
+            let (_, _, _, journal, chain, _) = evm.ctx().all_mut();
+            let _ = journal.load_account_mut(token).unwrap();
+            journal.touch(token);
+            let (from_storage_slot, to_storage_slot) = transfer_erc20_with_slot(
+                journal,
+                caller,
+                beneficiary,
+                token,
+                deducted,
+                balance_slot,
+            )
+            .unwrap();
+
+            let token_account = journal.state.get_mut(&token).unwrap();
+            token_account.mark_cold();
+            token_account
+                .storage
+                .get_mut(&from_storage_slot)
+                .unwrap()
+                .mark_cold();
+            chain.track_forced_cold_slot(token, from_storage_slot, caller_balance);
+            token_account
+                .storage
+                .get_mut(&to_storage_slot)
+                .unwrap()
+                .mark_cold();
+            chain.track_forced_cold_slot(token, to_storage_slot, beneficiary_balance);
+        }
+
+        let mut gas = Gas::new(10);
+        gas.set_spent(6);
+
+        MorphEvmHandler::<CacheDB<EmptyDB>, NoOpInspector>::new()
+            .reimburse_caller_token_fee(&mut evm, &gas)
+            .unwrap();
+
+        let token_account = evm.ctx_ref().journal().state.get(&token).unwrap();
+        let caller_slot_state = token_account.storage.get(&caller_slot).unwrap();
+        let beneficiary_slot_state = token_account.storage.get(&beneficiary_slot).unwrap();
+
+        assert_eq!(caller_slot_state.original_value, caller_balance);
+        assert_eq!(
+            caller_slot_state.present_value,
+            caller_balance - deducted + refunded
+        );
+        assert_eq!(beneficiary_slot_state.original_value, beneficiary_balance);
+        assert_eq!(
+            beneficiary_slot_state.present_value,
+            beneficiary_balance + deducted - refunded
+        );
+    }
+
+    #[test]
+    fn transfer_erc20_with_evm_reverts_state_on_validation_failure() {
+        let from = address!("1000000000000000000000000000000000000001");
+        let to = address!("2000000000000000000000000000000000000002");
+        let token = address!("3000000000000000000000000000000000000003");
+        let original_balance = U256::from(50);
+        let contract_code = mutating_return_code(1, 0);
+
+        let mut db = CacheDB::new(EmptyDB::default());
+        db.insert_account_info(
+            from,
+            AccountInfo {
+                balance: U256::from(1_000_000),
+                ..Default::default()
+            },
+        );
+        db.insert_account_info(
+            token,
+            AccountInfo {
+                code_hash: keccak256(contract_code.as_ref()),
+                code: Some(Bytecode::new_raw(contract_code)),
+                ..Default::default()
+            },
+        );
+        db.insert_account_storage(token, U256::ZERO, original_balance)
+            .unwrap();
+
+        let mut evm = MorphEvm::new(
+            MorphContext::new(db, MorphHardfork::default()),
+            NoOpInspector,
+        );
+        evm.block = MorphBlockEnv {
+            inner: BlockEnv::default(),
+        };
+
+        let err = transfer_erc20_with_evm(
+            &mut evm,
+            from,
+            to,
+            token,
+            U256::from(4),
+            Some(original_balance),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            EVMError::Transaction(MorphInvalidTransaction::TokenTransferFailed { .. })
+        ));
+        let slot_state = evm
+            .ctx_ref()
+            .journal()
+            .state
+            .get(&token)
+            .and_then(|account| account.storage.get(&U256::ZERO))
+            .unwrap();
+        assert_eq!(slot_state.present_value, original_balance);
+    }
+
+    #[test]
+    fn evm_call_balance_of_is_read_only() {
+        let token = address!("3000000000000000000000000000000000000003");
+        let account = address!("1000000000000000000000000000000000000001");
+        let original_balance = U256::from(50);
+        let contract_code = mutating_return_code(1, 42);
+
+        let mut db = CacheDB::new(EmptyDB::default());
+        db.insert_account_info(
+            token,
+            AccountInfo {
+                code_hash: keccak256(contract_code.as_ref()),
+                code: Some(Bytecode::new_raw(contract_code)),
+                ..Default::default()
+            },
+        );
+        db.insert_account_storage(token, U256::ZERO, original_balance)
+            .unwrap();
+
+        let mut evm = MorphEvm::new(
+            MorphContext::new(db, MorphHardfork::default()),
+            NoOpInspector,
+        );
+        evm.block = MorphBlockEnv {
+            inner: BlockEnv::default(),
+        };
+
+        let balance = evm_call_balance_of(&mut evm, token, account);
+
+        assert_eq!(balance, U256::from(42));
+        let slot_state = evm
+            .ctx_ref()
+            .journal()
+            .state
+            .get(&token)
+            .and_then(|acct| acct.storage.get(&U256::ZERO))
+            .unwrap();
+        assert_eq!(slot_state.present_value, original_balance);
+    }
 }
