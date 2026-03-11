@@ -782,14 +782,12 @@ fn evm_call_balance_of<DB, I>(evm: &mut MorphEvm<DB, I>, token: Address, account
 where
     DB: alloy_evm::Database,
 {
-    // Record log count so we can discard any logs emitted during the call.
-    // go-ethereum uses evm.StaticCall() for balanceOf which cannot emit events;
-    // we truncate to match that read-only semantic.
-    let log_count_before = evm.ctx_mut().journal_mut().logs.len();
+    // Snapshot the journal so this helper matches go-ethereum's StaticCall
+    // semantics even though we route through the normal CALL machinery.
+    let checkpoint = evm.ctx_mut().journal_mut().checkpoint();
     let calldata = encode_balance_of_calldata(account);
     let result = evm_call(evm, Address::ZERO, token, calldata);
-    evm.ctx_mut().journal_mut().logs.truncate(log_count_before);
-    match result {
+    let balance = match result {
         Ok(ref result) if result.instruction_result().is_ok() => {
             let output = &result.interpreter_result().output;
             if output.len() >= 32 {
@@ -799,7 +797,9 @@ where
             }
         }
         _ => U256::ZERO,
-    }
+    };
+    evm.ctx_mut().journal_mut().checkpoint_revert(checkpoint);
+    balance
 }
 
 /// Matches go-ethereum's `transferAltTokenByEVM` validation:
@@ -833,11 +833,13 @@ where
         Some(b) => b,
         None => evm_call_balance_of(evm, token_address, from),
     };
+    let checkpoint = evm.ctx_mut().journal_mut().checkpoint();
 
     let calldata = build_transfer_calldata(to, token_amount);
     let frame_result = match evm_call(evm, from, token_address, calldata) {
         Ok(result) => result,
         Err(e) => {
+            evm.ctx_mut().journal_mut().checkpoint_revert(checkpoint);
             evm.tx = tx_origin;
             return Err(MorphInvalidTransaction::TokenTransferFailed {
                 reason: format!("Error: {e:?}"),
@@ -847,6 +849,7 @@ where
     };
 
     if !frame_result.instruction_result().is_ok() {
+        evm.ctx_mut().journal_mut().checkpoint_revert(checkpoint);
         evm.tx = tx_origin;
         return Err(MorphInvalidTransaction::TokenTransferFailed {
             reason: format!("{:?}", frame_result.interpreter_result()),
@@ -860,6 +863,7 @@ where
     // - Otherwise: rejected
     let output = &frame_result.interpreter_result().output;
     if !output.is_empty() && (output.len() < 32 || output[31] != 1) {
+        evm.ctx_mut().journal_mut().checkpoint_revert(checkpoint);
         evm.tx = tx_origin;
         return Err(MorphInvalidTransaction::TokenTransferFailed {
             reason: "alt token transfer returned failure".to_string(),
@@ -887,6 +891,7 @@ where
             })
         })?;
     if from_balance_after != expected_balance {
+        evm.ctx_mut().journal_mut().checkpoint_revert(checkpoint);
         return Err(MorphInvalidTransaction::TokenTransferFailed {
             reason: format!(
                 "sender balance mismatch: expected {expected_balance}, got {from_balance_after}"
@@ -895,6 +900,7 @@ where
         .into());
     }
 
+    evm.ctx_mut().journal_mut().checkpoint_commit();
     Ok(())
 }
 
@@ -1000,6 +1006,26 @@ mod tests {
         code.push(0x55); // SSTORE
         code.push(0x00); // STOP
         Bytes::from(code)
+    }
+
+    fn mutating_return_code(write_value: u8, return_value: u8) -> Bytes {
+        Bytes::from(vec![
+            0x60,
+            write_value, // PUSH1 write_value
+            0x60,
+            0x00, // PUSH1 slot 0
+            0x55, // SSTORE
+            0x60,
+            return_value, // PUSH1 return_value
+            0x60,
+            0x00, // PUSH1 offset 0
+            0x52, // MSTORE
+            0x60,
+            0x20, // PUSH1 size 32
+            0x60,
+            0x00, // PUSH1 offset 0
+            0xf3, // RETURN
+        ])
     }
 
     #[test]
@@ -1186,5 +1212,104 @@ mod tests {
             beneficiary_slot_state.present_value,
             beneficiary_balance + deducted - refunded
         );
+    }
+
+    #[test]
+    fn transfer_erc20_with_evm_reverts_state_on_validation_failure() {
+        let from = address!("1000000000000000000000000000000000000001");
+        let to = address!("2000000000000000000000000000000000000002");
+        let token = address!("3000000000000000000000000000000000000003");
+        let original_balance = U256::from(50);
+        let contract_code = mutating_return_code(1, 0);
+
+        let mut db = CacheDB::new(EmptyDB::default());
+        db.insert_account_info(
+            from,
+            AccountInfo {
+                balance: U256::from(1_000_000),
+                ..Default::default()
+            },
+        );
+        db.insert_account_info(
+            token,
+            AccountInfo {
+                code_hash: keccak256(contract_code.as_ref()),
+                code: Some(Bytecode::new_raw(contract_code)),
+                ..Default::default()
+            },
+        );
+        db.insert_account_storage(token, U256::ZERO, original_balance)
+            .unwrap();
+
+        let mut evm = MorphEvm::new(
+            MorphContext::new(db, MorphHardfork::default()),
+            NoOpInspector,
+        );
+        evm.block = MorphBlockEnv {
+            inner: BlockEnv::default(),
+        };
+
+        let err = transfer_erc20_with_evm(
+            &mut evm,
+            from,
+            to,
+            token,
+            U256::from(4),
+            Some(original_balance),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            EVMError::Transaction(MorphInvalidTransaction::TokenTransferFailed { .. })
+        ));
+        let slot_state = evm
+            .ctx_ref()
+            .journal()
+            .state
+            .get(&token)
+            .and_then(|account| account.storage.get(&U256::ZERO))
+            .unwrap();
+        assert_eq!(slot_state.present_value, original_balance);
+    }
+
+    #[test]
+    fn evm_call_balance_of_is_read_only() {
+        let token = address!("3000000000000000000000000000000000000003");
+        let account = address!("1000000000000000000000000000000000000001");
+        let original_balance = U256::from(50);
+        let contract_code = mutating_return_code(1, 42);
+
+        let mut db = CacheDB::new(EmptyDB::default());
+        db.insert_account_info(
+            token,
+            AccountInfo {
+                code_hash: keccak256(contract_code.as_ref()),
+                code: Some(Bytecode::new_raw(contract_code)),
+                ..Default::default()
+            },
+        );
+        db.insert_account_storage(token, U256::ZERO, original_balance)
+            .unwrap();
+
+        let mut evm = MorphEvm::new(
+            MorphContext::new(db, MorphHardfork::default()),
+            NoOpInspector,
+        );
+        evm.block = MorphBlockEnv {
+            inner: BlockEnv::default(),
+        };
+
+        let balance = evm_call_balance_of(&mut evm, token, account);
+
+        assert_eq!(balance, U256::from(42));
+        let slot_state = evm
+            .ctx_ref()
+            .journal()
+            .state
+            .get(&token)
+            .and_then(|acct| acct.storage.get(&U256::ZERO))
+            .unwrap();
+        assert_eq!(slot_state.present_value, original_balance);
     }
 }

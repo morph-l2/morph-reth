@@ -32,23 +32,6 @@ impl MorphTxRuntime {
             .or_insert(original_value);
     }
 
-    /// Reads a slot's original value from the current journal state and tracks it.
-    #[inline]
-    pub fn track_forced_cold_slot_from_state(
-        &mut self,
-        state: &EvmState,
-        address: Address,
-        slot: U256,
-    ) -> Option<U256> {
-        let original_value = state
-            .get(&address)
-            .and_then(|account| account.storage.get(&slot))
-            .map(|slot_state| slot_state.original_value)?;
-
-        self.track_forced_cold_slot(address, slot, original_value);
-        Some(original_value)
-    }
-
     /// Returns the tracked tx-original value for a forced-cold slot, if any.
     #[inline]
     pub fn tracked_original_value(&self, address: Address, slot: U256) -> Option<U256> {
