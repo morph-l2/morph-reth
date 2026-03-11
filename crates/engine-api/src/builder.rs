@@ -60,6 +60,12 @@ struct InMemoryHead {
     timestamp: u64,
 }
 
+/// Allow FCU tag fallback to head only while the imported block is clearly historical.
+///
+/// Once imported blocks are close to wall-clock time, we stop synthesizing safe/finalized and
+/// wait for Morph node's real `set_block_tags` updates instead.
+const FCU_TAG_FALLBACK_MAX_AGE_SECS: u64 = 60;
+
 /// Tracks engine-visible canonical head for the custom Morph engine API.
 ///
 /// Updated from `CanonicalChainCommitted` consensus engine events and optimistically
@@ -465,7 +471,11 @@ where
         // falling back to head.  This keeps engine-tree finalization and
         // RPC-visible tags aligned with the actual L1 finalization status.
         self.engine_state_tracker.record_block_tags(
-            if safe_block_hash != B256::ZERO { Some(safe_block_hash) } else { None },
+            if safe_block_hash != B256::ZERO {
+                Some(safe_block_hash)
+            } else {
+                None
+            },
             if finalized_block_hash != B256::ZERO {
                 Some(finalized_block_hash)
             } else {
@@ -604,18 +614,31 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
         //
         // When BlockTagService has provided L1-based tags via set_block_tags, we
         // forward those so the engine tree and RPC layer stay consistent with the
-        // actual L1 finalization status.  During historical sync — before
-        // BlockTagService can provide values (all batches are already finalized on
-        // L1, state roots may be deleted) — we fall back to head so the engine tree
-        // still performs memory cleanup.
-        let finalized_hash = self
-            .engine_state_tracker
-            .l1_finalized_hash()
-            .unwrap_or(data.hash);
-        let safe_hash = self
-            .engine_state_tracker
-            .l1_safe_hash()
-            .unwrap_or(data.hash);
+        // actual L1 finalization status.
+        //
+        // During deep historical sync, BlockTagService may be unable to provide
+        // tags for already-finalized batches. In that case we temporarily fall back
+        // to head so the engine tree can continue evicting old changesets.
+        //
+        // Once imported blocks are close to wall-clock time, we stop synthesizing
+        // safe/finalized and wait for real L1-derived tags to avoid falsely
+        // advertising live blocks as finalized in the catch-up window.
+        let now_timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let finalized_hash = resolve_fcu_block_tag_hash(
+            self.engine_state_tracker.l1_finalized_hash(),
+            data.hash,
+            data.timestamp,
+            now_timestamp,
+        );
+        let safe_hash = resolve_fcu_block_tag_hash(
+            self.engine_state_tracker.l1_safe_hash(),
+            data.hash,
+            data.timestamp,
+            now_timestamp,
+        );
         let forkchoice = alloy_rpc_types_engine::ForkchoiceState {
             head_block_hash: data.hash,
             safe_block_hash: safe_hash,
@@ -867,6 +890,21 @@ fn apply_executable_data_overrides(
     Ok(RecoveredBlock::new_unhashed(block, senders))
 }
 
+fn resolve_fcu_block_tag_hash(
+    l1_tag_hash: Option<B256>,
+    head_hash: B256,
+    block_timestamp: u64,
+    now_timestamp: u64,
+) -> B256 {
+    match l1_tag_hash {
+        Some(hash) => hash,
+        None if now_timestamp.saturating_sub(block_timestamp) > FCU_TAG_FALLBACK_MAX_AGE_SECS => {
+            head_hash
+        }
+        None => B256::ZERO,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -905,6 +943,34 @@ mod tests {
         assert_eq!(current_head.number, sealed_header.number());
         assert_eq!(current_head.hash, sealed_header.hash());
         assert_eq!(current_head.timestamp, sealed_header.timestamp());
+    }
+
+    #[test]
+    fn test_resolve_fcu_block_tag_hash_uses_l1_tag_when_available() {
+        let l1_tag = B256::from([0x11; 32]);
+        let head = B256::from([0x22; 32]);
+
+        let resolved = resolve_fcu_block_tag_hash(Some(l1_tag), head, 1_700_000_000, 1_700_000_030);
+
+        assert_eq!(resolved, l1_tag);
+    }
+
+    #[test]
+    fn test_resolve_fcu_block_tag_hash_falls_back_to_head_for_historical_blocks() {
+        let head = B256::from([0x33; 32]);
+
+        let resolved = resolve_fcu_block_tag_hash(None, head, 1_700_000_000, 1_700_000_000 + 300);
+
+        assert_eq!(resolved, head);
+    }
+
+    #[test]
+    fn test_resolve_fcu_block_tag_hash_returns_zero_near_live_without_l1_tag() {
+        let head = B256::from([0x44; 32]);
+
+        let resolved = resolve_fcu_block_tag_hash(None, head, 1_700_000_000, 1_700_000_000 + 5);
+
+        assert_eq!(resolved, B256::ZERO);
     }
 
     #[test]
