@@ -14,9 +14,8 @@ use parking_lot::Mutex;
 use reth_chainspec::EthChainSpec;
 use reth_errors::ConsensusError;
 use reth_node_api::{
-    AddOnsContext, FullNodeComponents, InvalidPayloadAttributesError, NewPayloadError, NodeTypes,
-    PayloadAttributes, PayloadTypes, PayloadValidator, StateRootDecisionInput,
-    StateRootValidator,
+    AddOnsContext, BlockTy, FullNodeComponents, InvalidPayloadAttributesError, NewPayloadError,
+    NodeTypes, PayloadAttributes, PayloadTypes, PayloadValidator, StateRootValidator,
 };
 use reth_node_builder::{
     invalid_block_hook::InvalidBlockHookExt,
@@ -275,13 +274,6 @@ impl PayloadValidator<MorphPayloadTypes> for MorphEngineValidator {
 }
 
 impl StateRootValidator<morph_primitives::MorphPrimitives> for MorphEngineValidator {
-    fn should_compute_state_root(&self, input: &StateRootDecisionInput) -> bool {
-        // Long-term behavior: always compute after Jade.
-        // Temporary behavior: if geth RPC is configured, also compute before Jade
-        // so we can cross-check against geth's `morph_diskRoot`.
-        self.chain_spec.is_jade_active_at_timestamp(input.timestamp) || self.geth_rpc_url.is_some()
-    }
-
     fn validate_state_root(
         &self,
         block: &RecoveredBlock<morph_primitives::Block>,
@@ -383,7 +375,7 @@ impl std::fmt::Display for JsonRpcError {
 /// This calls geth's `morph_diskRoot` method with the given block number to obtain
 /// the MPT-format state root (`diskRoot`) for cross-validation against reth's
 /// computed root.
-fn fetch_geth_disk_root(geth_url: &str, block_number: u64) -> Result<B256, String> {
+pub fn fetch_geth_disk_root(geth_url: &str, block_number: u64) -> Result<B256, String> {
     let block_hex = format!("0x{block_number:x}");
     let body = serde_json::json!({
         "jsonrpc": "2.0",
