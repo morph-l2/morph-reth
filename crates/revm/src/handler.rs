@@ -7,7 +7,7 @@ use revm::{
         Cfg, ContextTr, JournalTr, Transaction,
         result::{EVMError, ExecutionResult, InvalidTransaction},
     },
-    context_interface::{Block, journaled_state::account::JournaledAccountTr},
+    context_interface::Block,
     handler::{EvmTr, FrameTr, Handler, MainnetHandler, post_execution, pre_execution, validation},
     inspector::{Inspector, InspectorHandler},
     interpreter::{Gas, InitialAndFloorGas, interpreter::EthInterpreter},
@@ -165,7 +165,7 @@ where
             exec_result.gas_mut().set_refund(0);
             return;
         }
-        let spec = (*evm.ctx().cfg().spec()).into();
+        let spec = evm.ctx().cfg().spec().into();
         post_execution::refund(spec, exec_result.gas_mut(), eip7702_refund);
     }
 
@@ -192,7 +192,7 @@ where
         let hardfork = cfg.spec();
 
         // Fetch L1 block info from the L1 Gas Price Oracle contract
-        let l1_block_info = L1BlockInfo::try_fetch(journal.db_mut(), *hardfork)?;
+        let l1_block_info = L1BlockInfo::try_fetch(journal.db_mut(), hardfork)?;
 
         // Get RLP-encoded transaction bytes for L1 fee calculation
         // This represents the full transaction data posted to L1 for data availability
@@ -203,16 +203,15 @@ where
             .unwrap_or_default();
 
         // Calculate L1 data fee based on full RLP-encoded transaction
-        let l1_data_fee = l1_block_info.calculate_tx_l1_cost(rlp_bytes, *hardfork);
+        let l1_data_fee = l1_block_info.calculate_tx_l1_cost(rlp_bytes, hardfork);
 
         let gas_used = exec_result.gas().used();
 
         let execution_fee = U256::from(effective_gas_price).saturating_mul(U256::from(gas_used));
 
         // reward beneficiary
-        let mut beneficiary_account = journal.load_account_mut(beneficiary)?;
-        beneficiary_account
-            .data
+        journal
+            .load_account_mut(beneficiary)?
             .incr_balance(execution_fee.saturating_add(l1_data_fee));
 
         Ok(())
@@ -259,10 +258,10 @@ where
     #[inline]
     fn validate_initial_tx_gas(
         &self,
-        evm: &mut Self::Evm,
+        evm: &Self::Evm,
     ) -> Result<InitialAndFloorGas, Self::Error> {
         let tx = evm.ctx_ref().tx();
-        let spec = (*evm.ctx_ref().cfg().spec()).into();
+        let spec = evm.ctx_ref().cfg().spec().into();
         let disable_eip7623 = evm.ctx_ref().cfg().is_eip7623_disabled();
 
         // For L1 message transactions, handle intrinsic gas specially
@@ -328,7 +327,7 @@ where
         evm: &mut MorphEvm<DB, I>,
     ) -> Result<(), EVMError<DB::Error, MorphInvalidTransaction>> {
         // Get the current hardfork for L1 fee calculation
-        let hardfork = *evm.ctx_ref().cfg().spec();
+        let hardfork = evm.ctx_ref().cfg().spec();
 
         // Fetch L1 block info from the L1 Gas Price Oracle contract
         let l1_block_info = L1BlockInfo::try_fetch(evm.ctx_mut().db_mut(), hardfork)?;
@@ -354,7 +353,7 @@ where
 
         // Validate account nonce and code (EIP-3607)
         pre_execution::validate_account_nonce_and_code(
-            &caller.account().info,
+            &caller.info,
             tx.nonce(),
             cfg.is_eip3607_disabled(),
             cfg.is_nonce_check_disabled(),
@@ -401,7 +400,7 @@ where
         }
 
         // Fetch token fee info from Token Registry
-        let spec = *evm.ctx_ref().cfg().spec();
+        let spec = evm.ctx_ref().cfg().spec();
         let token_fee_info =
             TokenFeeInfo::load_for_caller(evm.ctx_mut().db_mut(), token_id, caller, spec)?
                 .ok_or(MorphInvalidTransaction::TokenNotRegistered(token_id))?;
@@ -460,7 +459,7 @@ where
         // Get coinbase address
         let beneficiary = block.beneficiary();
         // Get the current hardfork for L1 fee calculation
-        let hardfork = *cfg.spec();
+        let hardfork = cfg.spec();
 
         // Fetch token fee info from Token Registry
         let token_fee_info =
@@ -512,15 +511,6 @@ where
             .into());
         }
 
-        // Collect original DB values for fee-deducted slots (revm-state 9.0.0 workaround).
-        //
-        // revm-state 9.0.0's `mark_warm_with_transaction_id` resets
-        // `original_value = present_value` when a cold slot becomes warm. This
-        // breaks EIP-2200 gas for slots modified during pre-tx fee deduction.
-        // We save the true DB values here; the custom SLOAD instruction in
-        // `sload_morph` restores them after the cold→warm transition.
-        let mut fee_slot_saves: Vec<(Address, U256, U256)> = Vec::new();
-
         if let Some(balance_slot) = token_fee_info.balance_slot {
             // Transfer with token slot.
             // Ensure token account is loaded into the journal state, because `sload`/`sstore`
@@ -540,19 +530,9 @@ where
             if let Some(token_acc) = journal.state.get_mut(&token_fee_info.token_address) {
                 token_acc.mark_cold();
                 if let Some(slot) = token_acc.storage.get_mut(&from_storage_slot) {
-                    fee_slot_saves.push((
-                        token_fee_info.token_address,
-                        from_storage_slot,
-                        slot.original_value,
-                    ));
                     slot.mark_cold();
                 }
                 if let Some(slot) = token_acc.storage.get_mut(&to_storage_slot) {
-                    fee_slot_saves.push((
-                        token_fee_info.token_address,
-                        to_storage_slot,
-                        slot.original_value,
-                    ));
                     slot.mark_cold();
                 }
             }
@@ -567,24 +547,14 @@ where
             )?;
 
             // State changes should be marked cold to avoid warm access in the main tx execution.
-            // Also save original_value for changed slots (see workaround above).
             let mut state = evm.finalize();
-            state.iter_mut().for_each(|(addr, acc)| {
+            state.iter_mut().for_each(|(_, acc)| {
                 acc.mark_cold();
-                acc.storage.iter_mut().for_each(|(key, slot)| {
-                    if slot.original_value != slot.present_value {
-                        fee_slot_saves.push((*addr, *key, slot.original_value));
-                    }
+                acc.storage.iter_mut().for_each(|(_, slot)| {
                     slot.mark_cold();
                 });
             });
             evm.ctx_mut().journal_mut().state.extend(state);
-        }
-
-        // Store the saved original values in the tx env. We access the `tx` field
-        // directly because `ContextTr::all_mut()` returns tx as `&Self::Tx` (immutable).
-        if !fee_slot_saves.is_empty() {
-            evm.inner.ctx.tx.fee_slot_original_values = fee_slot_saves;
         }
 
         let (_, tx, cfg, journal, _, _) = evm.ctx().all_mut();
@@ -599,7 +569,7 @@ where
 
         // Validate account nonce and code (EIP-3607)
         pre_execution::validate_account_nonce_and_code(
-            &caller.account().info,
+            &caller.info,
             nonce,
             cfg.is_eip3607_disabled(),
             cfg.is_nonce_check_disabled(),

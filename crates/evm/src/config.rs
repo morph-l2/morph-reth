@@ -34,8 +34,8 @@ impl ConfigureEvm for MorphEvmConfig {
 
         let mut cfg_env = CfgEnv::<MorphHardfork>::default()
             .with_chain_id(self.chain_spec().chain().id())
-            .with_spec_and_mainnet_gas_params(spec)
-            .with_disable_eip7623(true);
+            .with_spec(spec);
+        cfg_env.disable_eip7623 = true;
 
         // Disable EIP-7825 transaction gas limit cap
         // Morph allows transactions with gas limit > 16777216 (EIP-7825 cap)
@@ -83,8 +83,8 @@ impl ConfigureEvm for MorphEvmConfig {
 
         let mut cfg_env = CfgEnv::<MorphHardfork>::default()
             .with_chain_id(self.chain_spec().chain().id())
-            .with_spec_and_mainnet_gas_params(spec)
-            .with_disable_eip7623(true);
+            .with_spec(spec);
+        cfg_env.disable_eip7623 = true;
 
         // Disable EIP-7825 transaction gas limit cap
         // Morph allows transactions with gas limit > 16777216 (EIP-7825 cap)
@@ -127,7 +127,6 @@ impl ConfigureEvm for MorphEvmConfig {
         block: &'a SealedBlock<Block>,
     ) -> Result<EthBlockExecutionCtx<'a>, Self::Error> {
         Ok(EthBlockExecutionCtx {
-            tx_count_hint: Some(block.body().transactions.len()),
             parent_hash: block.header().parent_hash(),
             parent_beacon_block_root: block.header().parent_beacon_block_root(),
             ommers: &[],
@@ -142,7 +141,6 @@ impl ConfigureEvm for MorphEvmConfig {
         attributes: Self::NextBlockEnvCtx,
     ) -> Result<EthBlockExecutionCtx<'_>, Self::Error> {
         Ok(EthBlockExecutionCtx {
-            tx_count_hint: None,
             parent_hash: parent.hash(),
             parent_beacon_block_root: attributes.parent_beacon_block_root,
             ommers: &[],

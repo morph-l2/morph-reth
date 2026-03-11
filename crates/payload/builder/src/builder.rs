@@ -20,7 +20,7 @@ use reth_evm::{
     block::{BlockExecutionError, BlockValidationError},
     execute::{BlockBuilder, BlockBuilderOutcome},
 };
-use reth_execution_types::BlockExecutionOutput;
+use reth_execution_types::ExecutionOutcome;
 use reth_payload_builder::PayloadId;
 use reth_payload_primitives::{
     BuiltPayloadExecutedBlock, PayloadBuilderAttributes, PayloadBuilderError,
@@ -724,10 +724,12 @@ where
         hash: sealed_block.hash(),
     };
 
-    let execution_output = BlockExecutionOutput {
-        state: db.take_bundle(),
-        result: execution_result,
-    };
+    let execution_output = ExecutionOutcome::new(
+        db.take_bundle(),
+        vec![execution_result.receipts],
+        header.number(),
+        vec![execution_result.requests],
+    );
 
     let executed = BuiltPayloadExecutedBlock {
         recovered_block: Arc::new(block),

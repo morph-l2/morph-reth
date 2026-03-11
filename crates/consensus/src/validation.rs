@@ -40,7 +40,7 @@ use alloy_evm::block::BlockExecutionResult;
 use alloy_primitives::{B256, Bloom};
 use morph_chainspec::MorphChainSpec;
 use morph_primitives::{Block, BlockBody, MorphHeader, MorphReceipt, MorphTxEnvelope};
-use reth_consensus::{Consensus, ConsensusError, FullConsensus, HeaderValidator, ReceiptRootBloom};
+use reth_consensus::{Consensus, ConsensusError, FullConsensus, HeaderValidator};
 use reth_consensus_common::validation::{
     validate_against_parent_hash_number, validate_body_against_header,
 };
@@ -291,14 +291,10 @@ impl FullConsensus<morph_primitives::MorphPrimitives> for MorphConsensus {
     /// 2. **Receipts Root**: The computed receipts root must match the header's.
     /// 3. **Logs Bloom**: The combined bloom filter of all receipts must match
     ///    the header's `logs_bloom` field.
-    ///
-    /// If `receipt_root_bloom` is provided, the implementation uses the pre-computed
-    /// receipt root and logs bloom instead of computing them from the receipts.
     fn validate_block_post_execution(
         &self,
         block: &RecoveredBlock<Block>,
         result: &BlockExecutionResult<MorphReceipt>,
-        receipt_root_bloom: Option<ReceiptRootBloom>,
     ) -> Result<(), ConsensusError> {
         // Verify the block gas used
         let cumulative_gas_used = result
@@ -319,31 +315,8 @@ impl FullConsensus<morph_primitives::MorphPrimitives> for MorphConsensus {
             });
         }
 
-        // If pre-computed receipt root and logs bloom are provided, use them directly
-        if let Some((receipts_root, logs_bloom)) = receipt_root_bloom {
-            if receipts_root != block.receipts_root() {
-                return Err(ConsensusError::BodyReceiptRootDiff(
-                    GotExpected {
-                        got: receipts_root,
-                        expected: block.receipts_root(),
-                    }
-                    .into(),
-                ));
-            }
-
-            if logs_bloom != block.logs_bloom() {
-                return Err(ConsensusError::BodyBloomLogDiff(
-                    GotExpected {
-                        got: logs_bloom,
-                        expected: block.logs_bloom(),
-                    }
-                    .into(),
-                ));
-            }
-        } else {
-            // Verify the receipts logs bloom and root
-            verify_receipts(block.receipts_root(), block.logs_bloom(), &result.receipts)?;
-        }
+        // Verify the receipts logs bloom and root
+        verify_receipts(block.receipts_root(), block.logs_bloom(), &result.receipts)?;
 
         Ok(())
     }

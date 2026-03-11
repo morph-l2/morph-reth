@@ -6,7 +6,6 @@ use alloy_primitives::{B256, keccak256};
 use dashmap::DashMap;
 use morph_chainspec::{
     L2_MESSAGE_QUEUE_ADDRESS, L2_MESSAGE_QUEUE_WITHDRAW_TRIE_ROOT_SLOT, MorphChainSpec,
-    MorphHardforks,
 };
 use morph_payload_types::{MorphExecutionData, MorphPayloadTypes};
 use morph_primitives::MorphHeader;
@@ -14,15 +13,14 @@ use parking_lot::Mutex;
 use reth_chainspec::EthChainSpec;
 use reth_errors::ConsensusError;
 use reth_node_api::{
-    AddOnsContext, BlockTy, FullNodeComponents, InvalidPayloadAttributesError, NewPayloadError,
-    NodeTypes, PayloadAttributes, PayloadTypes, PayloadValidator, StateRootDecisionInput,
-    StateRootValidator,
+    AddOnsContext, FullNodeComponents, InvalidPayloadAttributesError, NewPayloadError, NodeTypes,
+    PayloadAttributes, PayloadTypes, PayloadValidator,
 };
 use reth_node_builder::{
     invalid_block_hook::InvalidBlockHookExt,
-    rpc::{BasicEngineValidator, ChangesetCache, EngineValidatorBuilder, PayloadValidatorBuilder},
+    rpc::{BasicEngineValidator, EngineValidatorBuilder, PayloadValidatorBuilder},
 };
-use reth_primitives_traits::{GotExpected, RecoveredBlock, SealedBlock};
+use reth_primitives_traits::{RecoveredBlock, SealedBlock};
 use reth_provider::ChainSpecProvider;
 use reth_tracing::tracing;
 use std::{collections::VecDeque, sync::Arc};
@@ -98,18 +96,16 @@ where
     PVB: PayloadValidatorBuilder<Node>,
     PVB::Validator: reth_node_api::PayloadValidator<
             <Node::Types as NodeTypes>::Payload,
-            Block = BlockTy<Node::Types>,
-        > + StateRootValidator<<Node::Types as NodeTypes>::Primitives>
-        + Clone,
+            Block = reth_node_api::BlockTy<Node::Types>,
+        > + Clone,
 {
     type EngineValidator =
-        BasicEngineValidator<Node::Provider, Node::Evm, PVB::Validator, PVB::Validator>;
+        BasicEngineValidator<Node::Provider, Node::Evm, PVB::Validator>;
 
     async fn build_tree_validator(
         self,
         ctx: &AddOnsContext<'_, Node>,
         tree_config: reth_node_api::TreeConfig,
-        changeset_cache: ChangesetCache,
     ) -> eyre::Result<Self::EngineValidator> {
         let validator = self.payload_validator_builder.build(ctx).await?;
         let data_dir = ctx
@@ -123,12 +119,10 @@ where
             ctx.node.provider().clone(),
             Arc::new(ctx.node.consensus().clone()),
             ctx.node.evm_config().clone(),
-            validator.clone(),
+            validator,
             tree_config,
             invalid_block_hook,
-            changeset_cache,
-        )
-        .with_state_root_validator(validator))
+        ))
     }
 }
 
@@ -139,6 +133,7 @@ where
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct MorphEngineValidator {
+    #[allow(dead_code)]
     chain_spec: Arc<MorphChainSpec>,
     expected_withdraw_trie_roots: Arc<DashMap<B256, WithdrawTrieRootExpectation>>,
     expected_withdraw_trie_root_order: Arc<Mutex<VecDeque<B256>>>,
@@ -261,11 +256,6 @@ impl PayloadValidator<MorphPayloadTypes> for MorphEngineValidator {
         };
 
         // Only validate if the withdraw trie root slot was actually updated in this block.
-        // If the slot is absent from hashed_state, the root is unchanged from the parent —
-        // the consensus layer guarantees the expected value is correct in that case.
-        // Doing a DB read for the parent state here would be expensive (history_by_block_hash
-        // + storage lookup) and would occur while holding the execution cache write lock,
-        // causing lock contention with the next block's cache lookup.
         let Some(actual_withdraw_trie_root) =
             Self::updated_withdraw_trie_root_from_hashed_state(state_updates)
         else {
@@ -294,152 +284,6 @@ impl PayloadValidator<MorphPayloadTypes> for MorphEngineValidator {
     }
 }
 
-impl StateRootValidator<morph_primitives::MorphPrimitives> for MorphEngineValidator {
-    fn should_compute_state_root(&self, input: &StateRootDecisionInput) -> bool {
-        // Long-term behavior: always compute after Jade.
-        // Temporary behavior: if geth RPC is configured, also compute before Jade
-        // so we can cross-check against geth's `morph_diskRoot`.
-        self.chain_spec.is_jade_active_at_timestamp(input.timestamp) || self.geth_rpc_url.is_some()
-    }
-
-    fn validate_state_root(
-        &self,
-        block: &RecoveredBlock<morph_primitives::Block>,
-        computed_state_root: B256,
-    ) -> Result<(), ConsensusError> {
-        let block_number = block.header().number();
-        let jade_active = self
-            .chain_spec
-            .is_jade_active_at_timestamp(block.header().timestamp());
-
-        // Always enforce canonical state-root equality in MPT mode.
-        if jade_active {
-            let expected_state_root = block.header().state_root();
-            if computed_state_root != expected_state_root {
-                return Err(ConsensusError::BodyStateRootDiff(
-                    GotExpected {
-                        got: computed_state_root,
-                        expected: expected_state_root,
-                    }
-                    .into(),
-                ));
-            }
-        }
-
-        // Temporary cross-validation path: compare with geth's diskRoot when configured.
-        let Some(geth_url) = self.geth_rpc_url.as_deref() else {
-            return Ok(());
-        };
-
-        match fetch_geth_disk_root(geth_url, block_number) {
-            Ok(disk_root) => {
-                if computed_state_root == disk_root {
-                    tracing::debug!(
-                        target: "morph::validator",
-                        block_number,
-                        ?computed_state_root,
-                        "State root cross-validation passed"
-                    );
-                    Ok(())
-                } else {
-                    tracing::error!(
-                        target: "morph::validator",
-                        block_number,
-                        ?computed_state_root,
-                        ?disk_root,
-                        "State root cross-validation FAILED"
-                    );
-                    Err(ConsensusError::BodyStateRootDiff(
-                        GotExpected {
-                            got: computed_state_root,
-                            expected: disk_root,
-                        }
-                        .into(),
-                    ))
-                }
-            }
-            Err(err) => {
-                tracing::warn!(
-                    target: "morph::validator",
-                    block_number,
-                    %err,
-                    "Failed to fetch diskRoot from geth, skipping state root validation"
-                );
-                Ok(())
-            }
-        }
-    }
-}
-
-/// Response from geth's `morph_diskRoot` RPC method.
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct DiskAndHeaderRoot {
-    disk_root: B256,
-}
-
-/// JSON-RPC response wrapper.
-#[derive(Debug, serde::Deserialize)]
-struct JsonRpcResponse<T> {
-    result: Option<T>,
-    error: Option<JsonRpcError>,
-}
-
-/// JSON-RPC error object.
-#[derive(Debug, serde::Deserialize)]
-struct JsonRpcError {
-    code: i64,
-    message: String,
-}
-
-impl std::fmt::Display for JsonRpcError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "JSON-RPC error {}: {}", self.code, self.message)
-    }
-}
-
-/// Fetches the MPT state root from a geth node via `morph_diskRoot` RPC.
-///
-/// This calls geth's `morph_diskRoot` method with the given block number to obtain
-/// the MPT-format state root (`diskRoot`) for cross-validation against reth's
-/// computed root.
-fn fetch_geth_disk_root(geth_url: &str, block_number: u64) -> Result<B256, String> {
-    let block_hex = format!("0x{block_number:x}");
-    let body = serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": "morph_diskRoot",
-        "params": [{"blockNumber": block_hex}],
-        "id": 1
-    });
-
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| format!("failed to create HTTP client: {e}"))?;
-
-    let resp = client
-        .post(geth_url)
-        .json(&body)
-        .send()
-        .map_err(|e| format!("HTTP request failed: {e}"))?;
-
-    if !resp.status().is_success() {
-        return Err(format!("HTTP {} from geth", resp.status()));
-    }
-
-    let rpc_resp: JsonRpcResponse<DiskAndHeaderRoot> = resp
-        .json()
-        .map_err(|e| format!("failed to parse response: {e}"))?;
-
-    if let Some(err) = rpc_resp.error {
-        return Err(err.to_string());
-    }
-
-    rpc_resp
-        .result
-        .map(|r| r.disk_root)
-        .ok_or_else(|| "morph_diskRoot returned null result".to_string())
-}
 
 #[cfg(test)]
 mod tests {

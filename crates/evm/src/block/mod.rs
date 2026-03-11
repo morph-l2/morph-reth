@@ -414,7 +414,4 @@ where
         &self.evm
     }
 
-    fn receipts(&self) -> &[Self::Receipt] {
-        &self.receipts
-    }
 }

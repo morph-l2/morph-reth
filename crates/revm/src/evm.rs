@@ -5,14 +5,13 @@ use morph_chainspec::hardfork::MorphHardfork;
 use revm::{
     Context, Inspector,
     context::{CfgEnv, ContextError, Evm, FrameStack},
-    context_interface::{cfg::gas::BLOCKHASH, host::LoadError},
     handler::{
         EthFrame, EvmTr, FrameInitOrResult, FrameTr, ItemOrResult, instructions::EthInstructions,
     },
     inspector::InspectorEvmTr,
     interpreter::{
-        Host, Instruction, InstructionContext, interpreter::EthInterpreter,
-        interpreter_types::StackTr,
+        Host, Instruction, InstructionContext, gas::BLOCKHASH,
+        interpreter::EthInterpreter, interpreter_types::StackTr,
     },
     primitives::BLOCK_HASH_HISTORY,
 };
@@ -47,87 +46,6 @@ fn morph_blockhash_result(chain_id: u64, current_number: u64, requested_number: 
         morph_blockhash_value(chain_id, requested_number)
     } else {
         U256::ZERO
-    }
-}
-
-/// Morph custom SLOAD opcode.
-///
-/// This wraps the standard SLOAD logic and adds a fix for the revm-state 9.0.0
-/// `mark_warm_with_transaction_id` behavior change.
-///
-/// ## Background
-///
-/// In revm-state 9.0.0, `EvmStorageSlot::mark_warm_with_transaction_id` resets
-/// `original_value = present_value` when a cold slot becomes warm. This is
-/// semantically correct for standard per-transaction state, but breaks Morph's
-/// token fee mechanism where storage slots are modified *before* the main
-/// transaction and then marked cold.
-///
-/// When the main transaction SLOADs such a slot, the cold→warm transition
-/// resets `original_value`, making the slot appear "clean" (original == present).
-/// A subsequent SSTORE then uses EIP-2200 "clean" pricing (2900 gas) instead of
-/// "dirty" pricing (100 gas), creating a **2800 gas** discrepancy vs go-ethereum.
-///
-/// ## Fix
-///
-/// After the standard SLOAD completes (including `mark_warm_with_transaction_id`),
-/// this instruction checks whether the loaded slot is one of the fee-deducted
-/// slots whose original DB value was saved in `MorphTxEnv::fee_slot_original_values`.
-/// If so, it restores `original_value` on the `EvmStorageSlot` in journal state
-/// to the true DB value, so that SSTORE gas calculation sees the correct
-/// dirty/clean status.
-fn sload_morph<DB: Database>(context: InstructionContext<'_, MorphContext<DB>, EthInterpreter>) {
-    let Some(([], index)) = StackTr::popn_top::<0>(&mut context.interpreter.stack) else {
-        context.interpreter.halt_underflow();
-        return;
-    };
-
-    let target = context.interpreter.input.target_address;
-    let key = *index;
-
-    // Berlin+ path (Morph is always post-Berlin).
-    // Charge WARM_STORAGE_READ_COST (100) as static gas via the Instruction wrapper,
-    // then charge the additional cold cost (2000) here if the slot is cold.
-    let additional_cold_cost = context.host.gas_params().cold_storage_additional_cost();
-    let skip_cold = context.interpreter.gas.remaining() < additional_cold_cost;
-
-    match context.host.sload_skip_cold_load(target, key, skip_cold) {
-        Ok(storage) => {
-            if storage.is_cold && !context.interpreter.gas.record_cost(additional_cold_cost) {
-                context.interpreter.halt_oog();
-                return;
-            }
-            *index = storage.data;
-        }
-        Err(LoadError::ColdLoadSkipped) => {
-            context.interpreter.halt_oog();
-            return;
-        }
-        Err(LoadError::DBError) => {
-            context.interpreter.halt_fatal();
-            return;
-        }
-    }
-
-    // Morph fix: restore original_value for slots modified by token fee deduction.
-    // After mark_warm_with_transaction_id reset original_value = present_value,
-    // we set it back to the true DB value so SSTORE sees the slot as dirty.
-    //
-    // We use `.iter().find()` instead of `.remove()` so the entry is kept for the
-    // lifetime of the transaction. This is revert-safe: if a sub-call REVERTs,
-    // the journal rolls the slot back to cold, and a later SLOAD to the same slot
-    // would corrupt original_value again — the kept entry ensures every cold→warm
-    // transition is corrected, not just the first one.
-    if let Some(&(_, _, original_db_value)) = context
-        .host
-        .tx
-        .fee_slot_original_values
-        .iter()
-        .find(|(addr, slot_key, _)| *addr == target && *slot_key == key)
-        && let Some(acc) = context.host.journaled_state.state.get_mut(&target)
-        && let Some(slot) = acc.storage.get_mut(&key)
-    {
-        slot.original_value = original_db_value;
     }
 }
 
@@ -180,16 +98,6 @@ impl<DB: Database, I> MorphEvm<DB, I> {
         let precompiles = MorphPrecompiles::new_with_spec(spec);
         let mut instructions = EthInstructions::new_mainnet();
 
-        // Morph custom SLOAD: restores original_value after revm-state 9.0.0's
-        // mark_warm_with_transaction_id resets it, fixing EIP-2200 gas for
-        // token fee deducted slots. Static gas = WARM_STORAGE_READ_COST (100).
-        instructions.insert_instruction(
-            0x54, // SLOAD
-            Instruction::new(
-                sload_morph::<DB>,
-                revm::context_interface::cfg::gas::WARM_STORAGE_READ_COST,
-            ),
-        );
         // Morph custom BLOCKHASH implementation (matches Morph geth).
         instructions.insert_instruction(0x40, Instruction::new(blockhash_morph::<DB>, BLOCKHASH));
         // SELFDESTRUCT is disabled in Morph

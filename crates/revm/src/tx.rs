@@ -49,17 +49,6 @@ pub struct MorphTxEnv {
     pub reference: Option<alloy_primitives::B256>,
     /// Memo field for arbitrary data.
     pub memo: Option<Bytes>,
-    /// Saved original DB values for storage slots modified by token fee deduction.
-    ///
-    /// In revm-state 9.0.0, `EvmStorageSlot::mark_warm_with_transaction_id` resets
-    /// `original_value = present_value` when a cold slot becomes warm. This breaks
-    /// EIP-2200 gas calculation for slots that were modified during pre-transaction
-    /// fee deduction and then marked cold.
-    ///
-    /// We save `(contract_address, storage_key, original_db_value)` here so that
-    /// the custom SLOAD instruction can restore `original_value` after the warm
-    /// transition, preserving the correct dirty/clean determination for SSTORE gas.
-    pub fee_slot_original_values: Vec<(Address, U256, U256)>,
 }
 
 impl MorphTxEnv {
@@ -73,7 +62,6 @@ impl MorphTxEnv {
             fee_limit: None,
             reference: None,
             memo: None,
-            fee_slot_original_values: Vec::new(),
         }
     }
 
