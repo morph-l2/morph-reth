@@ -402,11 +402,21 @@ where
         // (do not rely on immediate DB visibility after FCU).
         let header = self.import_l2_block_via_engine(executable_data).await?;
 
-        // Update safe block tag separately, matching geth's decoupled design.
-        // Best-effort: block import already succeeded, so don't fail the whole
-        // call if only the tag update encounters an issue. The tag can be
-        // corrected later via engine_setBlockTags.
-        if let Err(e) = self.set_block_tags(block_hash, B256::ZERO).await {
+        // Update safe block tag and seed finalized for memory cleanup.
+        //
+        // Validator / derivation mode does not run BlockTagService, so
+        // set_block_tags is never called externally.  Without a cached
+        // finalized hash the FCU falls back to B256::ZERO once blocks are
+        // near wall-clock time, disabling changeset-cache eviction.
+        //
+        // Passing block_hash as finalized here seeds the tracker so the
+        // engine tree can keep evicting.  Once validators adopt
+        // BlockTagService the L1-derived finalized value will naturally
+        // supersede this hint.
+        //
+        // Best-effort: block import already succeeded, so don't fail the
+        // whole call if only the tag update encounters an issue.
+        if let Err(e) = self.set_block_tags(block_hash, block_hash).await {
             tracing::warn!(
                 target: "morph::engine",
                 block_hash = %block_hash,
