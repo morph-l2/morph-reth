@@ -256,10 +256,7 @@ where
     }
 
     #[inline]
-    fn validate_initial_tx_gas(
-        &self,
-        evm: &Self::Evm,
-    ) -> Result<InitialAndFloorGas, Self::Error> {
+    fn validate_initial_tx_gas(&self, evm: &Self::Evm) -> Result<InitialAndFloorGas, Self::Error> {
         let tx = evm.ctx_ref().tx();
         let spec = evm.ctx_ref().cfg().spec().into();
         let disable_eip7623 = evm.ctx_ref().cfg().is_eip7623_disabled();

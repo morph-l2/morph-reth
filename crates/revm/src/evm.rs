@@ -10,8 +10,8 @@ use revm::{
     },
     inspector::InspectorEvmTr,
     interpreter::{
-        Host, Instruction, InstructionContext, gas::BLOCKHASH,
-        interpreter::EthInterpreter, interpreter_types::StackTr,
+        Host, Instruction, InstructionContext, gas::BLOCKHASH, interpreter::EthInterpreter,
+        interpreter_types::StackTr,
     },
     primitives::BLOCK_HASH_HISTORY,
 };

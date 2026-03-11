@@ -99,8 +99,7 @@ where
             Block = reth_node_api::BlockTy<Node::Types>,
         > + Clone,
 {
-    type EngineValidator =
-        BasicEngineValidator<Node::Provider, Node::Evm, PVB::Validator>;
+    type EngineValidator = BasicEngineValidator<Node::Provider, Node::Evm, PVB::Validator>;
 
     async fn build_tree_validator(
         self,
@@ -283,7 +282,6 @@ impl PayloadValidator<MorphPayloadTypes> for MorphEngineValidator {
         Ok(())
     }
 }
-
 
 #[cfg(test)]
 mod tests {
