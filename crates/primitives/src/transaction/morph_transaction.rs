@@ -36,8 +36,11 @@ pub const MAX_MEMO_LENGTH: usize = 64;
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 pub struct MorphTxFields {
+    #[cfg_attr(feature = "serde", serde(default, with = "alloy_serde::quantity"))]
     pub version: u8,
+    #[cfg_attr(feature = "serde", serde(default, with = "alloy_serde::quantity"))]
     pub fee_token_id: u16,
+    #[cfg_attr(feature = "serde", serde(default))]
     pub fee_limit: U256,
     #[cfg_attr(
         feature = "serde",
@@ -2070,5 +2073,41 @@ mod tests {
         assert_eq!(decoded_signed.tx().reference, None);
         assert_eq!(decoded_signed.tx().memo, None);
         assert!(decoded_signed.tx().is_v0());
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_tx_morph_serde_defaults_for_legacy_fields() {
+        // Legacy V0 JSON that omits version, feeTokenId, and feeLimit.
+        let json = r#"{
+            "chainId": "0x1",
+            "nonce": "0x0",
+            "gasLimit": "0x5208",
+            "maxFeePerGas": "0x64",
+            "maxPriorityFeePerGas": "0x1",
+            "to": "0x0000000000000000000000000000000000000002",
+            "value": "0x0",
+            "accessList": [],
+            "input": "0x"
+        }"#;
+
+        let tx: TxMorph = serde_json::from_str(json).unwrap();
+        assert_eq!(tx.version, MORPH_TX_VERSION_0);
+        assert_eq!(tx.fee_token_id, 0);
+        assert_eq!(tx.fee_limit, U256::ZERO);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_morph_tx_fields_serde_defaults_for_legacy_fields() {
+        // MorphTxFields should also accept JSON with omitted fields.
+        let json = r#"{}"#;
+
+        let fields: MorphTxFields = serde_json::from_str(json).unwrap();
+        assert_eq!(fields.version, 0);
+        assert_eq!(fields.fee_token_id, 0);
+        assert_eq!(fields.fee_limit, U256::ZERO);
+        assert_eq!(fields.reference, None);
+        assert_eq!(fields.memo, None);
     }
 }
