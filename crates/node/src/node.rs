@@ -37,6 +37,7 @@ use reth_payload_primitives::PayloadAttributesBuilder;
 use reth_primitives_traits::SealedHeader;
 use reth_provider::{
     BlockWriter, CanonChainTracker, DBProvider, DatabaseProviderFactory, EthStorage,
+    providers::ProviderFactoryBuilder,
 };
 use std::sync::Arc;
 
@@ -58,6 +59,11 @@ impl MorphNode {
     /// Creates a new [`MorphNode`] with the given CLI arguments.
     pub const fn new(args: MorphArgs) -> Self {
         Self { args }
+    }
+
+    /// Instantiates a [`ProviderFactoryBuilder`] for a Morph node.
+    pub fn provider_factory_builder() -> ProviderFactoryBuilder<Self> {
+        ProviderFactoryBuilder::default()
     }
 
     /// Returns a [`ComponentsBuilder`] configured for a Morph node.
