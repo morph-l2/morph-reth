@@ -181,8 +181,9 @@ pyroscope = "0.5.8"
 pyroscope_pprofrs = "0.2.10"
 
 # vergen 9.1.0 switched to vergen-lib 9.x, breaking vergen-git2 1.x (which uses vergen-lib 0.x).
-# Pin vergen to 9.0.6 so both crates share the same vergen-lib 0.1.6.
+# Pin vergen + vergen-lib to 9.0.6 so vergen and vergen-git2 share the same vergen-lib 0.1.6 instance.
 [patch.crates-io]
-vergen = { path = "/tmp/vergen-9.0.6-local" }
+vergen = { git = "https://github.com/rustyhorde/vergen", rev = "a43c276d2b68d05832a429cc4540755541ca4950" }
+vergen-lib = { git = "https://github.com/rustyhorde/vergen", rev = "a43c276d2b68d05832a429cc4540755541ca4950" }
 
 
