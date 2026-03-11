@@ -126,7 +126,7 @@ where
     }
 
     fn add_ons(&self) -> Self::AddOns {
-        MorphAddOns::with_geth_rpc_url(self.args.geth_rpc_url.clone())
+        MorphAddOns::new()
     }
 }
 

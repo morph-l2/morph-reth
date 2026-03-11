@@ -50,12 +50,7 @@ where
 {
     /// Creates a new [`MorphAddOns`] with default configuration.
     pub fn new() -> Self {
-        Self::with_geth_rpc_url(None)
-    }
-
-    /// Creates a new [`MorphAddOns`] with an optional geth RPC URL for state root validation.
-    pub fn with_geth_rpc_url(geth_rpc_url: Option<String>) -> Self {
-        let pvb = MorphEngineValidatorBuilder::default().with_geth_rpc_url(geth_rpc_url);
+        let pvb = MorphEngineValidatorBuilder::default();
         Self {
             inner: RpcAddOns::new(
                 MorphEthApiBuilder::default(),

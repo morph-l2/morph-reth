@@ -22,7 +22,6 @@ use reth_node_builder::{
 };
 use reth_primitives_traits::{RecoveredBlock, SealedBlock};
 use reth_provider::ChainSpecProvider;
-use reth_tracing::tracing;
 use std::{collections::VecDeque, sync::Arc};
 
 /// Builder for Morph engine validator (payload validation).
@@ -30,18 +29,7 @@ use std::{collections::VecDeque, sync::Arc};
 /// Creates a validator for validating engine API payloads.
 #[derive(Debug, Default, Clone)]
 #[non_exhaustive]
-pub struct MorphEngineValidatorBuilder {
-    /// Optional geth RPC URL for cross-validating MPT state root via `morph_diskRoot`.
-    pub geth_rpc_url: Option<String>,
-}
-
-impl MorphEngineValidatorBuilder {
-    /// Sets the geth RPC URL for state root cross-validation.
-    pub fn with_geth_rpc_url(mut self, url: Option<String>) -> Self {
-        self.geth_rpc_url = url;
-        self
-    }
-}
+pub struct MorphEngineValidatorBuilder;
 
 impl<Node> PayloadValidatorBuilder<Node> for MorphEngineValidatorBuilder
 where
@@ -51,11 +39,7 @@ where
     type Validator = MorphEngineValidator;
 
     async fn build(self, ctx: &AddOnsContext<'_, Node>) -> eyre::Result<Self::Validator> {
-        let mut validator = MorphEngineValidator::new(ctx.node.provider().chain_spec());
-        if let Some(url) = self.geth_rpc_url {
-            validator = validator.with_geth_rpc_url(url);
-        }
-        Ok(validator)
+        Ok(MorphEngineValidator::new(ctx.node.provider().chain_spec()))
     }
 }
 
@@ -136,8 +120,6 @@ pub struct MorphEngineValidator {
     chain_spec: Arc<MorphChainSpec>,
     expected_withdraw_trie_roots: Arc<DashMap<B256, WithdrawTrieRootExpectation>>,
     expected_withdraw_trie_root_order: Arc<Mutex<VecDeque<B256>>>,
-    /// Optional geth RPC URL for cross-validating MPT state root via `morph_diskRoot`.
-    geth_rpc_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,15 +137,7 @@ impl MorphEngineValidator {
             chain_spec,
             expected_withdraw_trie_roots: Arc::new(DashMap::new()),
             expected_withdraw_trie_root_order: Arc::new(Mutex::new(VecDeque::new())),
-            geth_rpc_url: None,
         }
-    }
-
-    /// Sets the geth RPC URL for cross-validating MPT state root.
-    pub fn with_geth_rpc_url(mut self, url: String) -> Self {
-        tracing::info!(target: "morph::validator", %url, "Enabled state root cross-validation via geth diskRoot RPC");
-        self.geth_rpc_url = Some(url);
-        self
     }
 
     fn record_withdraw_trie_root_expectation(

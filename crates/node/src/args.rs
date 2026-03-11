@@ -33,15 +33,6 @@ pub struct MorphArgs {
     /// Morph Holesky testnet uses 1000 as the default limit.
     #[arg(long = "morph.max-tx-per-block", value_name = "COUNT")]
     pub max_tx_per_block: Option<u64>,
-
-    /// Geth RPC URL for cross-validating MPT state root via `morph_diskRoot`.
-    ///
-    /// Before MPTFork, reth cannot validate ZK-trie state roots. When this URL
-    /// is set, reth calls the geth node's `morph_diskRoot` RPC to obtain the
-    /// MPT state root for each block and compares it with reth's computed root.
-    /// This catches state divergences that gas_used/receipts_root checks may miss.
-    #[arg(long = "morph.geth-rpc-url", value_name = "URL")]
-    pub geth_rpc_url: Option<String>,
 }
 
 impl Default for MorphArgs {
@@ -49,7 +40,6 @@ impl Default for MorphArgs {
         Self {
             max_tx_payload_bytes: MORPH_DEFAULT_MAX_TX_PAYLOAD_BYTES,
             max_tx_per_block: None,
-            geth_rpc_url: None,
         }
     }
 }
