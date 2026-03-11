@@ -12,7 +12,6 @@ cd "${REPO_ROOT}"
 : "${SAMPLE_INTERVAL:=10}"     # seconds between BPS samples
 : "${SKIP_GETH:=0}"            # set to 1 to skip geth test
 : "${SKIP_RETH:=0}"            # set to 1 to skip reth test
-: "${RETH_DISABLE_GETH_RPC_COMPARE:=1}" # 1: do NOT pass --morph.geth-rpc-url during reth benchmark
 : "${MAINNET_TIP:=21100000}"   # approximate current mainnet tip for ETA calc
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -243,12 +242,7 @@ if [[ "${SKIP_RETH}" != "1" ]]; then
 
   # Start reth
   echo "  Starting morph-reth..."
-  if [[ "${RETH_DISABLE_GETH_RPC_COMPARE}" == "1" ]]; then
-    echo "  Reth benchmark mode: disabling morph.geth-rpc-url"
-    MORPH_GETH_RPC_URL="" "${SCRIPT_DIR}/reth-start.sh"
-  else
-    "${SCRIPT_DIR}/reth-start.sh"
-  fi
+  "${SCRIPT_DIR}/reth-start.sh"
 
   # Wait for reth RPC
   wait_for_rpc "reth"

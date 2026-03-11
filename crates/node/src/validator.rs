@@ -143,13 +143,6 @@ impl MorphEngineValidator {
         }
     }
 
-    /// Sets the geth RPC URL for cross-validating MPT state root.
-    pub fn with_geth_rpc_url(mut self, url: String) -> Self {
-        tracing::info!(target: "engine::validator", %url, "Enabled state root cross-validation via geth diskRoot RPC");
-        self.geth_rpc_url = Some(url);
-        self
-    }
-
     fn record_withdraw_trie_root_expectation(
         &self,
         block_hash: B256,
@@ -279,12 +272,11 @@ impl StateRootValidator<morph_primitives::MorphPrimitives> for MorphEngineValida
         block: &RecoveredBlock<morph_primitives::Block>,
         computed_state_root: B256,
     ) -> Result<(), ConsensusError> {
-        let block_number = block.header().number();
         let jade_active = self
             .chain_spec
             .is_jade_active_at_timestamp(block.header().timestamp());
 
-        // Always enforce canonical state-root equality in MPT mode.
+        // Enforce canonical state-root equality in MPT mode (post-Jade).
         if jade_active {
             let expected_state_root = block.header().state_root();
             if computed_state_root != expected_state_root {
@@ -298,48 +290,7 @@ impl StateRootValidator<morph_primitives::MorphPrimitives> for MorphEngineValida
             }
         }
 
-        // Temporary cross-validation path: compare with geth's diskRoot when configured.
-        let Some(geth_url) = self.geth_rpc_url.as_deref() else {
-            return Ok(());
-        };
-
-        match fetch_geth_disk_root(geth_url, block_number) {
-            Ok(disk_root) => {
-                if computed_state_root == disk_root {
-                    tracing::debug!(
-                        target: "engine::validator",
-                        block_number,
-                        ?computed_state_root,
-                        "State root cross-validation passed"
-                    );
-                    Ok(())
-                } else {
-                    tracing::error!(
-                        target: "engine::validator",
-                        block_number,
-                        ?computed_state_root,
-                        ?disk_root,
-                        "State root cross-validation FAILED"
-                    );
-                    Err(ConsensusError::BodyStateRootDiff(
-                        GotExpected {
-                            got: computed_state_root,
-                            expected: disk_root,
-                        }
-                        .into(),
-                    ))
-                }
-            }
-            Err(err) => {
-                tracing::warn!(
-                    target: "engine::validator",
-                    block_number,
-                    %err,
-                    "Failed to fetch diskRoot from geth, skipping state root validation"
-                );
-                Ok(())
-            }
-        }
+        Ok(())
     }
 }
 

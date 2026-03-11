@@ -217,7 +217,7 @@ if [[ "${SKIP_RETH}" != "1" ]]; then
   "${SCRIPT_DIR}/prepare.sh" 2>/dev/null
 
   echo "  Starting morph-reth..."
-  MORPH_GETH_RPC_URL="" "${SCRIPT_DIR}/reth-start.sh"
+  "${SCRIPT_DIR}/reth-start.sh"
   wait_for_rpc "reth"
 
   echo "  Starting morphnode..."

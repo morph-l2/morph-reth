@@ -36,7 +36,6 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 : "${RETH_BOOTNODES:=}"
 : "${MORPH_MAX_TX_PAYLOAD_BYTES:=122880}"
 : "${MORPH_MAX_TX_PER_BLOCK:=}"
-: "${MORPH_GETH_RPC_URL:=}"
 check_binary() {
   local bin_path="$1"
   local build_hint="$2"
