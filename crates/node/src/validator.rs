@@ -6,6 +6,7 @@ use alloy_primitives::{B256, keccak256};
 use dashmap::DashMap;
 use morph_chainspec::{
     L2_MESSAGE_QUEUE_ADDRESS, L2_MESSAGE_QUEUE_WITHDRAW_TRIE_ROOT_SLOT, MorphChainSpec,
+    MorphHardforks,
 };
 use morph_payload_types::{MorphExecutionData, MorphPayloadTypes};
 use morph_primitives::MorphHeader;
@@ -14,13 +15,13 @@ use reth_chainspec::EthChainSpec;
 use reth_errors::ConsensusError;
 use reth_node_api::{
     AddOnsContext, FullNodeComponents, InvalidPayloadAttributesError, NewPayloadError, NodeTypes,
-    PayloadAttributes, PayloadTypes, PayloadValidator,
+    PayloadAttributes, PayloadTypes, PayloadValidator, StateRootValidator,
 };
 use reth_node_builder::{
     invalid_block_hook::InvalidBlockHookExt,
     rpc::{BasicEngineValidator, EngineValidatorBuilder, PayloadValidatorBuilder},
 };
-use reth_primitives_traits::{RecoveredBlock, SealedBlock};
+use reth_primitives_traits::{GotExpected, RecoveredBlock, SealedBlock};
 use reth_provider::ChainSpecProvider;
 use std::{collections::VecDeque, sync::Arc};
 
@@ -81,9 +82,11 @@ where
     PVB::Validator: reth_node_api::PayloadValidator<
             <Node::Types as NodeTypes>::Payload,
             Block = reth_node_api::BlockTy<Node::Types>,
-        > + Clone,
+        > + StateRootValidator<<Node::Types as NodeTypes>::Primitives>
+        + Clone,
 {
-    type EngineValidator = BasicEngineValidator<Node::Provider, Node::Evm, PVB::Validator>;
+    type EngineValidator =
+        BasicEngineValidator<Node::Provider, Node::Evm, PVB::Validator, PVB::Validator>;
 
     async fn build_tree_validator(
         self,
@@ -102,10 +105,11 @@ where
             ctx.node.provider().clone(),
             Arc::new(ctx.node.consensus().clone()),
             ctx.node.evm_config().clone(),
-            validator,
+            validator.clone(),
             tree_config,
             invalid_block_hook,
-        ))
+        )
+        .with_state_root_validator(validator))
     }
 }
 
@@ -116,7 +120,6 @@ where
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct MorphEngineValidator {
-    #[allow(dead_code)]
     chain_spec: Arc<MorphChainSpec>,
     expected_withdraw_trie_roots: Arc<DashMap<B256, WithdrawTrieRootExpectation>>,
     expected_withdraw_trie_root_order: Arc<Mutex<VecDeque<B256>>>,
@@ -195,6 +198,33 @@ impl MorphEngineValidator {
     }
 }
 
+impl StateRootValidator<morph_primitives::MorphPrimitives> for MorphEngineValidator {
+    // should_compute_state_root: use default (always true).
+    // Always compute MPT roots so the trie stays up-to-date from genesis.
+
+    fn validate_state_root(
+        &self,
+        block: &RecoveredBlock<morph_primitives::Block>,
+        computed_state_root: B256,
+    ) -> Result<(), ConsensusError> {
+        // Before Jade, block headers carry ZK-trie (Poseidon) roots while reth computes
+        // MPT (Keccak) roots — they can never match. We still compute the root above
+        // (to keep the trie current), but skip the comparison against the header.
+        if !self.chain_spec.is_jade_active_at_timestamp(block.header().timestamp()) {
+            return Ok(());
+        }
+
+        // After Jade, enforce strict MPT state root equality.
+        let expected = block.header().state_root();
+        if computed_state_root != expected {
+            return Err(ConsensusError::BodyStateRootDiff(
+                GotExpected { got: computed_state_root, expected }.into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl PayloadValidator<MorphPayloadTypes> for MorphEngineValidator {
     type Block = morph_primitives::Block;
 
@@ -229,6 +259,11 @@ impl PayloadValidator<MorphPayloadTypes> for MorphEngineValidator {
         };
 
         // Only validate if the withdraw trie root slot was actually updated in this block.
+        // If the slot is absent from hashed_state, the root is unchanged from the parent —
+        // the consensus layer guarantees the expected value is correct in that case.
+        // Doing a DB read for the parent state here would be expensive (history_by_block_hash
+        // + storage lookup) and would occur while holding the execution cache write lock,
+        // causing lock contention with the next block's cache lookup.
         let Some(actual_withdraw_trie_root) =
             Self::updated_withdraw_trie_root_from_hashed_state(state_updates)
         else {

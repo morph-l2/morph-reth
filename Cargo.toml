@@ -54,59 +54,59 @@ morph-rpc = { path = "crates/rpc" }
 morph-revm = { path = "crates/revm", default-features = false }
 morph-txpool = { path = "crates/txpool", default-features = false }
 
-reth-basic-payload-builder = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-chain-state = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-chainspec = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-cli = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-cli-commands = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-cli-util = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-codecs = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-codecs-derive = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-consensus = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-consensus-common = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-db = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-db-api = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-e2e-test-utils = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-engine-local = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-engine-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-engine-tree = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-errors = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-eth-wire-types = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-ethereum = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-ethereum-cli = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-ethereum-consensus = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-ethereum-engine-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0", default-features = false }
-reth-evm = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-evm-ethereum = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-execution-types = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-metrics = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-network-peers = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-node-api = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-node-builder = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-node-core = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-node-ethereum = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-node-metrics = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-payload-builder = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-payload-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-payload-util = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-primitives-traits = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0", default-features = false }
-reth-provider = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-rpc = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-rpc-api = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-rpc-builder = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-rpc-convert = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-rpc-eth-api = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-rpc-eth-types = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-rpc-server-types = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-storage-api = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-tasks = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-tracing = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-trie = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-transaction-pool = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-zstd-compressors = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0", default-features = false }
+reth-basic-payload-builder = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-chain-state = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-chainspec = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-cli = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-cli-commands = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-cli-util = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-codecs = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-codecs-derive = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-consensus = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-consensus-common = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-db = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-db-api = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-e2e-test-utils = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-engine-local = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-engine-primitives = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-engine-tree = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-errors = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-eth-wire-types = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-ethereum = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-ethereum-cli = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-ethereum-consensus = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-ethereum-engine-primitives = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-ethereum-primitives = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e", default-features = false }
+reth-evm = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-evm-ethereum = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-execution-types = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-metrics = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-network-peers = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-node-api = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-node-builder = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-node-core = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-node-ethereum = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-node-metrics = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-payload-builder = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-payload-primitives = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-payload-util = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-primitives-traits = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e", default-features = false }
+reth-provider = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-rpc = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-rpc-api = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-rpc-builder = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-rpc-convert = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-rpc-eth-api = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-rpc-eth-types = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-rpc-server-types = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-storage-api = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-tasks = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-tracing = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-trie = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-transaction-pool = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
+reth-zstd-compressors = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e", default-features = false }
 
-reth-revm = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0", features = [
+reth-revm = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e", features = [
   "std",
   "optional-checks",
 ] }
