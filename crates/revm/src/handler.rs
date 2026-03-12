@@ -429,7 +429,11 @@ where
                 .logs
                 .drain(log_count_before..)
                 .collect();
-            evm.post_fee_logs = refund_logs;
+            // Only keep refund Transfer logs when the refund succeeds.
+            // Go-ethereum's refundGas() emits no logs on failure.
+            if result.is_ok() {
+                evm.post_fee_logs = refund_logs;
+            }
             result
         };
 
@@ -887,14 +891,13 @@ where
         // Matches go-ethereum's transferAltTokenByEVM which always checks this,
         // even for self-transfers (from == to), where it would fail because the
         // net balance change is zero but the expected decrease is `token_amount`.
-        let expected_balance =
-            from_balance_before
-                .checked_sub(token_amount)
-                .ok_or(MorphInvalidTransaction::TokenTransferFailed {
-                    reason: format!(
-                        "sender balance {from_balance_before} less than token amount {token_amount}"
-                    ),
-                })?;
+        let expected_balance = from_balance_before.checked_sub(token_amount).ok_or(
+            MorphInvalidTransaction::TokenTransferFailed {
+                reason: format!(
+                    "sender balance {from_balance_before} less than token amount {token_amount}"
+                ),
+            },
+        )?;
         if from_balance_after != expected_balance {
             return Err(MorphInvalidTransaction::TokenTransferFailed {
                 reason: format!(

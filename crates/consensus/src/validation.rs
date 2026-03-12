@@ -19,13 +19,13 @@
 //! ## L1 Message Rules
 //!
 //! - All L1 messages must be at the beginning of the block
-//! - L1 messages must have strictly sequential `queue_index`
-//! - No gaps allowed in the queue index sequence
+//! - Within a block, L1 messages must have strictly sequential `queue_index`
+//! - Cross-block gaps are allowed (the sequencer may skip queue indices)
 //!
 //! ## Block Body Validation
 //!
 //! - No uncle blocks allowed
-//! - Withdrawals must be empty
+//! - Withdrawals field must not be present
 //! - Transaction root must be valid
 //!
 //! ## Post-Execution Validation
