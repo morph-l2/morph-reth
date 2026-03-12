@@ -405,7 +405,7 @@ fn validate_against_parent_timestamp<H: BlockHeader>(
 
 /// Validates gas limit change against parent.
 ///
-/// The gas limit change between consecutive blocks must not exceed
+/// The gas limit change between consecutive blocks must be strictly less than
 /// `parent_gas_limit / GAS_LIMIT_BOUND_DIVISOR` (1/1024 of parent's limit).
 ///
 /// Additionally, the gas limit must be at least [`MINIMUM_GAS_LIMIT`] (5000).

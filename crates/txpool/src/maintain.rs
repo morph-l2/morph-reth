@@ -240,6 +240,7 @@ where
                     sender,
                     eth_balance: budget.eth_balance,
                     l1_data_fee,
+                    base_fee_per_gas: new_tip.base_fee_per_gas(),
                     hardfork,
                 };
 

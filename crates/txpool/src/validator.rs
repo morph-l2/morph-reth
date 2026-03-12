@@ -37,6 +37,8 @@ use std::sync::{
 pub struct MorphL1BlockInfo {
     /// The current L1 block info.
     l1_block_info: RwLock<L1BlockInfo>,
+    /// Current block base fee per gas.
+    base_fee_per_gas: RwLock<Option<u64>>,
     /// Current block timestamp.
     timestamp: AtomicU64,
     /// Current block number.
@@ -55,8 +57,15 @@ impl MorphL1BlockInfo {
     }
 
     /// Updates the L1 block info.
-    pub fn update(&self, info: L1BlockInfo, timestamp: u64, number: u64) {
+    pub fn update(
+        &self,
+        info: L1BlockInfo,
+        timestamp: u64,
+        number: u64,
+        base_fee_per_gas: Option<u64>,
+    ) {
         *self.l1_block_info.write() = info;
+        *self.base_fee_per_gas.write() = base_fee_per_gas;
         self.timestamp.store(timestamp, Ordering::Relaxed);
         self.number.store(number, Ordering::Relaxed);
     }
@@ -69,6 +78,11 @@ impl MorphL1BlockInfo {
     /// Returns the current block number.
     pub fn number(&self) -> u64 {
         self.number.load(Ordering::Relaxed)
+    }
+
+    /// Returns the current block base fee per gas.
+    pub fn base_fee_per_gas(&self) -> Option<u64> {
+        *self.base_fee_per_gas.read()
     }
 }
 
@@ -144,12 +158,6 @@ where
             .client()
             .block_by_number_or_tag(alloy_eips::BlockNumberOrTag::Latest)
         {
-            this.block_info
-                .timestamp
-                .store(block.header().timestamp(), Ordering::Relaxed);
-            this.block_info
-                .number
-                .store(block.header().number(), Ordering::Relaxed);
             this.update_l1_block_info(block.header());
         }
 
@@ -178,6 +186,7 @@ where
         self.block_info
             .number
             .store(header.number(), Ordering::Relaxed);
+        *self.block_info.base_fee_per_gas.write() = header.base_fee_per_gas();
 
         let provider = match self
             .client()
@@ -372,6 +381,7 @@ where
             sender,
             eth_balance,
             l1_data_fee,
+            base_fee_per_gas: self.block_info.base_fee_per_gas(),
             hardfork,
         };
 
@@ -458,16 +468,72 @@ fn is_morph_tx(tx: &impl Typed2718) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_consensus::{Signed, TxEip1559, TxLegacy};
+    use alloy_consensus::{Block, Header, Signed, TxEip1559, TxLegacy};
     use alloy_eips::eip2718::Encodable2718;
     use alloy_primitives::{B256, Signature, TxKind, address};
     use morph_chainspec::MORPH_MAINNET;
-    use morph_primitives::TxL1Msg;
+    use morph_primitives::{TxL1Msg, TxMorph};
+    use morph_revm::{
+        L2_TOKEN_REGISTRY_ADDRESS, compute_mapping_slot, compute_mapping_slot_for_address,
+    };
     use reth_primitives_traits::Recovered;
     use reth_provider::test_utils::{ExtendedAccount, MockEthProvider};
     use reth_transaction_pool::{
         blobstore::InMemoryBlobStore, validate::EthTransactionValidatorBuilder,
     };
+
+    fn storage_key(slot: U256) -> B256 {
+        B256::from(slot.to_be_bytes::<32>())
+    }
+
+    fn token_id_key(token_id: u16) -> [u8; 32] {
+        let mut key = [0u8; 32];
+        key[30..32].copy_from_slice(&token_id.to_be_bytes());
+        key
+    }
+
+    fn token_registry_account(
+        token_id: u16,
+        token_address: alloy_primitives::Address,
+        balance_slot: U256,
+        token_balance: U256,
+    ) -> ExtendedAccount {
+        let token_registry_slot = U256::from(151);
+        let price_ratio_slot = U256::from(153);
+        let token_key = token_id_key(token_id);
+        let base = compute_mapping_slot(token_registry_slot, &token_key);
+
+        let mut slot_2 = [0u8; 32];
+        slot_2[30] = 18;
+        slot_2[31] = 1;
+
+        ExtendedAccount::new(0, U256::ZERO).extend_storage([
+            (
+                storage_key(base),
+                U256::from_be_bytes(token_address.into_word().0),
+            ),
+            (
+                storage_key(base + U256::from(1)),
+                balance_slot + U256::from(1),
+            ),
+            (
+                storage_key(base + U256::from(2)),
+                U256::from_be_bytes(slot_2),
+            ),
+            (storage_key(base + U256::from(3)), U256::from(1)),
+            (
+                storage_key(compute_mapping_slot(price_ratio_slot, &token_key)),
+                U256::from(1),
+            ),
+            (
+                storage_key(compute_mapping_slot_for_address(
+                    balance_slot,
+                    address!("0000000000000000000000000000000000000001"),
+                )),
+                token_balance,
+            ),
+        ])
+    }
 
     #[test]
     fn test_morph_l1_block_info_default() {
@@ -480,20 +546,22 @@ mod tests {
     fn test_morph_l1_block_info_update() {
         let info = MorphL1BlockInfo::new();
         let l1_info = L1BlockInfo::default();
-        info.update(l1_info, 1234, 100);
+        info.update(l1_info, 1234, 100, Some(42));
 
         assert_eq!(info.timestamp(), 1234);
         assert_eq!(info.number(), 100);
+        assert_eq!(info.base_fee_per_gas(), Some(42));
     }
 
     #[test]
     fn validate_l1_message_rejected() {
         // Create validator with mock provider
         let client = MockEthProvider::default().with_chain_spec(MORPH_MAINNET.clone());
-        let eth_validator = EthTransactionValidatorBuilder::new(client)
-            .no_shanghai()
-            .no_cancun()
-            .build(InMemoryBlobStore::default());
+        let eth_validator: EthTransactionValidator<_, crate::MorphPooledTransaction> =
+            EthTransactionValidatorBuilder::new(client)
+                .no_shanghai()
+                .no_cancun()
+                .build::<crate::MorphPooledTransaction, _>(InMemoryBlobStore::default());
         let validator = MorphTransactionValidator::new(eth_validator);
 
         let origin = TransactionOrigin::External;
@@ -532,11 +600,12 @@ mod tests {
         let client = MockEthProvider::default().with_chain_spec(MORPH_MAINNET.clone());
         let signer = address!("0000000000000000000000000000000000000001");
         client.add_account(signer, ExtendedAccount::new(0, U256::from(10u128.pow(18))));
-        let eth_validator = EthTransactionValidatorBuilder::new(client)
-            .no_shanghai()
-            .no_cancun()
-            .disable_balance_check()
-            .build(InMemoryBlobStore::default());
+        let eth_validator: EthTransactionValidator<_, crate::MorphPooledTransaction> =
+            EthTransactionValidatorBuilder::new(client)
+                .no_shanghai()
+                .no_cancun()
+                .disable_balance_check()
+                .build::<crate::MorphPooledTransaction, _>(InMemoryBlobStore::default());
         let validator = MorphTransactionValidator::new(eth_validator);
 
         let origin = TransactionOrigin::External;
@@ -582,11 +651,12 @@ mod tests {
         let client = MockEthProvider::default().with_chain_spec(MORPH_MAINNET.clone());
         let signer = address!("0000000000000000000000000000000000000001");
         client.add_account(signer, ExtendedAccount::new(0, U256::from(10u128.pow(18))));
-        let eth_validator = EthTransactionValidatorBuilder::new(client)
-            .no_shanghai()
-            .no_cancun()
-            .disable_balance_check()
-            .build(InMemoryBlobStore::default());
+        let eth_validator: EthTransactionValidator<_, crate::MorphPooledTransaction> =
+            EthTransactionValidatorBuilder::new(client)
+                .no_shanghai()
+                .no_cancun()
+                .disable_balance_check()
+                .build::<crate::MorphPooledTransaction, _>(InMemoryBlobStore::default());
         let validator = MorphTransactionValidator::new(eth_validator);
 
         let origin = TransactionOrigin::External;
@@ -622,5 +692,82 @@ mod tests {
                 panic!("Expected valid transaction, got error: {err:?}");
             }
         }
+    }
+
+    #[test]
+    fn validate_morph_tx_uses_effective_gas_price_for_token_fee_path() {
+        let client = MockEthProvider::default().with_chain_spec(MORPH_MAINNET.clone());
+        let signer = address!("0000000000000000000000000000000000000001");
+        let token = address!("5300000000000000000000000000000000000042");
+        let balance_slot = U256::from(7);
+
+        client.add_block(
+            B256::from([0x11; 32]),
+            Block::new(
+                Header {
+                    number: 1,
+                    timestamp: 1,
+                    gas_limit: 30_000_000,
+                    base_fee_per_gas: Some(10),
+                    ..Default::default()
+                },
+                Default::default(),
+            ),
+        );
+        client.add_account(signer, ExtendedAccount::new(0, U256::ZERO));
+        client.add_account(
+            L2_TOKEN_REGISTRY_ADDRESS,
+            token_registry_account(1, token, balance_slot, U256::from(300_000u64)),
+        );
+        client.add_account(
+            token,
+            ExtendedAccount::new(0, U256::ZERO).extend_storage([(
+                storage_key(compute_mapping_slot_for_address(balance_slot, signer)),
+                U256::from(300_000u64),
+            )]),
+        );
+
+        let eth_validator: EthTransactionValidator<_, crate::MorphPooledTransaction> =
+            EthTransactionValidatorBuilder::new(client)
+                .no_shanghai()
+                .no_cancun()
+                .disable_balance_check()
+                .build::<crate::MorphPooledTransaction, _>(InMemoryBlobStore::default());
+        let validator = MorphTransactionValidator::new(eth_validator);
+
+        let tx = TxMorph {
+            chain_id: 2818,
+            nonce: 0,
+            gas_limit: 21_000,
+            max_fee_per_gas: 100,
+            max_priority_fee_per_gas: 1,
+            to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
+            value: U256::ZERO,
+            access_list: Default::default(),
+            version: 0,
+            fee_token_id: 1,
+            fee_limit: U256::from(300_000u64),
+            reference: None,
+            memo: None,
+            input: Default::default(),
+        };
+        let envelope = MorphTxEnvelope::Morph(Signed::new_unchecked(
+            tx,
+            Signature::test_signature(),
+            B256::ZERO,
+        ));
+        let recovered = Recovered::new_unchecked(envelope, signer);
+        let validation = validator
+            .validate_morph_tx_balance(
+                &recovered,
+                signer,
+                U256::ZERO,
+                U256::ZERO,
+                morph_chainspec::hardfork::MorphHardfork::Viridian,
+            )
+            .expect("MorphTx should be affordable when priced with the effective gas price");
+
+        assert!(validation.uses_token_fee);
+        assert_eq!(validation.required_token_amount, U256::from(231_000u64));
     }
 }

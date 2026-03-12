@@ -661,30 +661,49 @@ fn transfer_erc20_with_slot<DB>(
 where
     DB: alloy_evm::Database,
 {
-    // Sub amount (checked: reject if insufficient, matching go-ethereum's
-    // changeAltTokenBalanceByState which returns an error on underflow)
-    let from_storage_slot = compute_mapping_slot_for_address(token_balance_slot, from);
-    let balance = *journal.sload(token, from_storage_slot)?;
-    let new_balance = balance.checked_sub(token_amount).ok_or(
-        MorphInvalidTransaction::InsufficientTokenBalance {
-            required: token_amount,
-            available: balance,
-        },
-    )?;
-    journal.sstore(token, from_storage_slot, new_balance)?;
+    let checkpoint = journal.checkpoint();
+    let result = (|| {
+        // Sub amount (checked: reject if insufficient, matching go-ethereum's
+        // changeAltTokenBalanceByState which returns an error on underflow)
+        let from_storage_slot = compute_mapping_slot_for_address(token_balance_slot, from);
+        let from_balance = *journal.sload(token, from_storage_slot)?;
+        let new_from_balance = from_balance.checked_sub(token_amount).ok_or(
+            MorphInvalidTransaction::InsufficientTokenBalance {
+                required: token_amount,
+                available: from_balance,
+            },
+        )?;
 
-    // Add amount (checked: unlike go-ethereum's unbounded big.Int Add,
-    // we reject on overflow to maintain token conservation)
-    let to_storage_slot = compute_mapping_slot_for_address(token_balance_slot, to);
-    let balance = journal.sload(token, to_storage_slot)?;
-    let new_to_balance =
-        balance
-            .checked_add(token_amount)
-            .ok_or(MorphInvalidTransaction::TokenTransferFailed {
+        // Self-transfers are a no-op after the balance check above.
+        let to_storage_slot = compute_mapping_slot_for_address(token_balance_slot, to);
+        if from_storage_slot == to_storage_slot {
+            return Ok((from_storage_slot, to_storage_slot));
+        }
+
+        // Add amount (checked: unlike go-ethereum's unbounded big.Int Add,
+        // we reject on overflow to maintain token conservation)
+        let to_balance = *journal.sload(token, to_storage_slot)?;
+        let new_to_balance = to_balance.checked_add(token_amount).ok_or(
+            MorphInvalidTransaction::TokenTransferFailed {
                 reason: "recipient token balance overflow".into(),
-            })?;
-    journal.sstore(token, to_storage_slot, new_to_balance)?;
-    Ok((from_storage_slot, to_storage_slot))
+            },
+        )?;
+
+        journal.sstore(token, from_storage_slot, new_from_balance)?;
+        journal.sstore(token, to_storage_slot, new_to_balance)?;
+        Ok((from_storage_slot, to_storage_slot))
+    })();
+
+    match result {
+        Ok(slots) => {
+            journal.checkpoint_commit();
+            Ok(slots)
+        }
+        Err(err) => {
+            journal.checkpoint_revert(checkpoint);
+            Err(err)
+        }
+    }
 }
 
 /// Gas limit for internal EVM calls (ERC20 transfer, balanceOf).
@@ -827,15 +846,19 @@ where
     // Matches go-ethereum's transferAltTokenByEVM which always checks this,
     // even for self-transfers (from == to), where it would fail because the
     // net balance change is zero but the expected decrease is `token_amount`.
-    let expected_balance = from_balance_before
-        .checked_sub(token_amount)
-        .ok_or_else(|| {
-            EVMError::Transaction(MorphInvalidTransaction::TokenTransferFailed {
-                reason: format!(
-                    "sender balance {from_balance_before} less than token amount {token_amount}"
-                ),
-            })
-        })?;
+    let expected_balance = match from_balance_before.checked_sub(token_amount) {
+        Some(balance) => balance,
+        None => {
+            evm.ctx_mut().journal_mut().checkpoint_revert(checkpoint);
+            return Err(EVMError::Transaction(
+                MorphInvalidTransaction::TokenTransferFailed {
+                    reason: format!(
+                        "sender balance {from_balance_before} less than token amount {token_amount}"
+                    ),
+                },
+            ));
+        }
+    };
     if from_balance_after != expected_balance {
         evm.ctx_mut().journal_mut().checkpoint_revert(checkpoint);
         return Err(MorphInvalidTransaction::TokenTransferFailed {
@@ -1020,6 +1043,102 @@ mod tests {
             .and_then(|account| account.storage.get(&U256::ZERO))
             .unwrap();
         assert_eq!(slot_state.present_value, original_balance);
+    }
+
+    #[test]
+    fn transfer_erc20_with_evm_reverts_state_on_expected_balance_underflow() {
+        let from = address!("1000000000000000000000000000000000000001");
+        let to = address!("2000000000000000000000000000000000000002");
+        let token = address!("3000000000000000000000000000000000000003");
+        let original_balance = U256::from(50);
+        let contract_code = mutating_return_code(1, 1);
+
+        let mut db = CacheDB::new(EmptyDB::default());
+        db.insert_account_info(
+            from,
+            AccountInfo {
+                balance: U256::from(1_000_000),
+                ..Default::default()
+            },
+        );
+        db.insert_account_info(
+            token,
+            AccountInfo {
+                code_hash: keccak256(contract_code.as_ref()),
+                code: Some(Bytecode::new_raw(contract_code)),
+                ..Default::default()
+            },
+        );
+        db.insert_account_storage(token, U256::ZERO, original_balance)
+            .unwrap();
+
+        let mut evm = MorphEvm::new(
+            MorphContext::new(db, MorphHardfork::default()),
+            NoOpInspector,
+        );
+        evm.block = MorphBlockEnv {
+            inner: BlockEnv::default(),
+        };
+
+        let err =
+            transfer_erc20_with_evm(&mut evm, from, to, token, U256::from(1), Some(U256::ZERO))
+                .unwrap_err();
+
+        assert!(matches!(
+            err,
+            EVMError::Transaction(MorphInvalidTransaction::TokenTransferFailed { .. })
+        ));
+        let slot_state = evm
+            .ctx_ref()
+            .journal()
+            .state
+            .get(&token)
+            .and_then(|account| account.storage.get(&U256::ZERO))
+            .unwrap();
+        assert_eq!(slot_state.present_value, original_balance);
+    }
+
+    #[test]
+    fn transfer_erc20_with_slot_reverts_sender_on_recipient_overflow() {
+        let from = address!("1000000000000000000000000000000000000001");
+        let to = address!("2000000000000000000000000000000000000002");
+        let token = address!("3000000000000000000000000000000000000003");
+        let balance_slot = U256::from(7);
+        let from_storage_slot = compute_mapping_slot_for_address(balance_slot, from);
+        let to_storage_slot = compute_mapping_slot_for_address(balance_slot, to);
+
+        let mut db = CacheDB::new(EmptyDB::default());
+        db.insert_account_info(token, AccountInfo::default());
+        db.insert_account_storage(token, from_storage_slot, U256::from(10))
+            .unwrap();
+        db.insert_account_storage(token, to_storage_slot, U256::MAX)
+            .unwrap();
+
+        let mut evm = MorphEvm::new(
+            MorphContext::new(db, MorphHardfork::default()),
+            NoOpInspector,
+        );
+        evm.block = MorphBlockEnv {
+            inner: BlockEnv::default(),
+        };
+
+        let journal = evm.ctx_mut().journal_mut();
+        let _ = journal.load_account_mut(token).unwrap();
+        journal.touch(token);
+
+        let err = transfer_erc20_with_slot(journal, from, to, token, U256::from(1), balance_slot)
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            EVMError::Transaction(MorphInvalidTransaction::TokenTransferFailed { .. })
+        ));
+        let from_balance_after = *evm
+            .ctx_mut()
+            .journal_mut()
+            .sload(token, from_storage_slot)
+            .unwrap();
+        assert_eq!(from_balance_after, U256::from(10));
     }
 
     #[test]
