@@ -9,7 +9,6 @@ publish = false
 resolver = "3"
 members = [
     "bin/morph-reth",
-    "bin/state-root-check",
     "crates/chainspec",
     "crates/consensus",
     "crates/engine-api",
@@ -104,7 +103,6 @@ reth-storage-api = { git = "https://github.com/morph-l2/reth", rev = "1dd7227738
 reth-tasks = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
 reth-tracing = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
 reth-trie = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
-reth-trie-db = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
 reth-transaction-pool = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e" }
 reth-zstd-compressors = { git = "https://github.com/morph-l2/reth", rev = "1dd722773844d1a3c50a691dc09f6cdf8e6bd00e", default-features = false }
 

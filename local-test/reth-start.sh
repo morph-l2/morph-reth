@@ -39,13 +39,17 @@ args=(
   --log.file.filter info
   --morph.max-tx-payload-bytes "${MORPH_MAX_TX_PAYLOAD_BYTES}"
   --nat none
-  --engine.persistence-threshold 256
-  --engine.memory-block-buffer-target 16
+  --engine.legacy-state-root
 )
 
 # Add optional max-tx-per-block if configured
 if [[ -n "${MORPH_MAX_TX_PER_BLOCK}" ]]; then
   args+=(--morph.max-tx-per-block "${MORPH_MAX_TX_PER_BLOCK}")
+fi
+
+# Add optional geth RPC URL for state root cross-validation
+if [[ -n "${MORPH_GETH_RPC_URL}" ]]; then
+  args+=(--morph.geth-rpc-url "${MORPH_GETH_RPC_URL}")
 fi
 
 # Add bootnodes if configured
