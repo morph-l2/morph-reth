@@ -14,8 +14,8 @@ use parking_lot::Mutex;
 use reth_chainspec::EthChainSpec;
 use reth_errors::ConsensusError;
 use reth_node_api::{
-    AddOnsContext, FullNodeComponents, InvalidPayloadAttributesError, NewPayloadError,
-    NodeTypes, PayloadAttributes, PayloadTypes, PayloadValidator, StateRootValidator,
+    AddOnsContext, FullNodeComponents, InvalidPayloadAttributesError, NewPayloadError, NodeTypes,
+    PayloadAttributes, PayloadTypes, PayloadValidator, StateRootValidator,
 };
 use reth_node_builder::{
     invalid_block_hook::InvalidBlockHookExt,
@@ -197,7 +197,6 @@ impl MorphEngineValidator {
             .map(B256::from)
     }
 }
-
 
 impl PayloadValidator<MorphPayloadTypes> for MorphEngineValidator {
     type Block = morph_primitives::Block;

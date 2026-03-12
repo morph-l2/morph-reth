@@ -937,7 +937,7 @@ mod tests {
     use alloy_primitives::{Bytes, address, keccak256};
     use morph_chainspec::hardfork::MorphHardfork;
     use revm::{
-        context::{BlockEnv, TxEnv},
+        context::BlockEnv,
         database::{CacheDB, EmptyDB},
         inspector::NoOpInspector,
         state::{AccountInfo, Bytecode},

@@ -13,13 +13,10 @@ use revm::{
     },
     inspector::InspectorEvmTr,
     interpreter::{
-        Host, Instruction, InstructionContext, gas::BLOCKHASH,
-        interpreter::EthInterpreter,
+        Host, Instruction, InstructionContext, gas::BLOCKHASH, interpreter::EthInterpreter,
         interpreter_types::StackTr,
     },
-    primitives::{
-        BLOCK_HASH_HISTORY,
-    },
+    primitives::BLOCK_HASH_HISTORY,
 };
 
 /// The Morph EVM context type.
