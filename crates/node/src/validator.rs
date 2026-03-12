@@ -14,7 +14,7 @@ use parking_lot::Mutex;
 use reth_chainspec::EthChainSpec;
 use reth_errors::ConsensusError;
 use reth_node_api::{
-    AddOnsContext, BlockTy, FullNodeComponents, InvalidPayloadAttributesError, NewPayloadError,
+    AddOnsContext, FullNodeComponents, InvalidPayloadAttributesError, NewPayloadError,
     NodeTypes, PayloadAttributes, PayloadTypes, PayloadValidator, StateRootValidator,
 };
 use reth_node_builder::{

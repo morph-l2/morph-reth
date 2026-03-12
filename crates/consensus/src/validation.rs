@@ -43,7 +43,7 @@ use morph_primitives::{
     Block, BlockBody, MorphHeader, MorphReceipt, MorphTxEnvelope,
     transaction::morph_transaction::MORPH_TX_VERSION_1,
 };
-use reth_consensus::{Consensus, ConsensusError, FullConsensus, HeaderValidator, ReceiptRootBloom};
+use reth_consensus::{Consensus, ConsensusError, FullConsensus, HeaderValidator};
 use reth_consensus_common::validation::{
     validate_against_parent_hash_number, validate_body_against_header,
 };
