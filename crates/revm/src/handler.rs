@@ -647,6 +647,77 @@ where
     }
 }
 
+/// Execute `f` within a journal checkpoint. Commits on `Ok`, reverts on `Err`.
+#[inline]
+fn with_journal_checkpoint<DB, T, E>(
+    journal: &mut revm::Journal<DB>,
+    f: impl FnOnce(&mut revm::Journal<DB>) -> Result<T, E>,
+) -> Result<T, E>
+where
+    DB: alloy_evm::Database,
+{
+    let checkpoint = journal.checkpoint();
+    match f(journal) {
+        Ok(val) => {
+            journal.checkpoint_commit();
+            Ok(val)
+        }
+        Err(err) => {
+            journal.checkpoint_revert(checkpoint);
+            Err(err)
+        }
+    }
+}
+
+/// Execute `f` within a journal checkpoint, saving and restoring `evm.tx`.
+///
+/// On `Ok` the checkpoint is committed; on `Err` it is reverted.
+/// `evm.tx` is always restored to its original value regardless of the outcome,
+/// so callers of [`evm_call`] inside `f` do not need to manage `evm.tx` themselves.
+#[inline]
+fn with_evm_checkpoint<DB, I, T>(
+    evm: &mut MorphEvm<DB, I>,
+    f: impl FnOnce(&mut MorphEvm<DB, I>) -> Result<T, EVMError<DB::Error, MorphInvalidTransaction>>,
+) -> Result<T, EVMError<DB::Error, MorphInvalidTransaction>>
+where
+    DB: alloy_evm::Database,
+{
+    let tx_origin = std::mem::take(&mut evm.tx);
+    let checkpoint = evm.ctx_mut().journal_mut().checkpoint();
+    let result = f(evm);
+    evm.tx = tx_origin;
+    match result {
+        Ok(val) => {
+            evm.ctx_mut().journal_mut().checkpoint_commit();
+            Ok(val)
+        }
+        Err(err) => {
+            evm.ctx_mut().journal_mut().checkpoint_revert(checkpoint);
+            Err(err)
+        }
+    }
+}
+
+/// Execute `f` within a journal snapshot that always reverts, saving and restoring `evm.tx`.
+///
+/// This gives `f` read-only (StaticCall-like) semantics: any state changes made by
+/// [`evm_call`] inside `f` are discarded when `f` returns.
+#[inline]
+fn with_evm_snapshot<DB, I, T>(
+    evm: &mut MorphEvm<DB, I>,
+    f: impl FnOnce(&mut MorphEvm<DB, I>) -> T,
+) -> T
+where
+    DB: alloy_evm::Database,
+{
+    let tx_origin = std::mem::take(&mut evm.tx);
+    let checkpoint = evm.ctx_mut().journal_mut().checkpoint();
+    let result = f(evm);
+    evm.ctx_mut().journal_mut().checkpoint_revert(checkpoint);
+    evm.tx = tx_origin;
+    result
+}
+
 /// Performs an ERC20 balance transfer by directly `sload`/`sstore`-ing the token contract storage
 /// using the known `balance` mapping base slot, returning the computed storage slots for `from`/`to`.
 #[inline]
@@ -661,8 +732,7 @@ fn transfer_erc20_with_slot<DB>(
 where
     DB: alloy_evm::Database,
 {
-    let checkpoint = journal.checkpoint();
-    let result = (|| {
+    with_journal_checkpoint(journal, |journal| {
         // Sub amount (checked: reject if insufficient, matching go-ethereum's
         // changeAltTokenBalanceByState which returns an error on underflow)
         let from_storage_slot = compute_mapping_slot_for_address(token_balance_slot, from);
@@ -692,18 +762,7 @@ where
         journal.sstore(token, from_storage_slot, new_from_balance)?;
         journal.sstore(token, to_storage_slot, new_to_balance)?;
         Ok((from_storage_slot, to_storage_slot))
-    })();
-
-    match result {
-        Ok(slots) => {
-            journal.checkpoint_commit();
-            Ok(slots)
-        }
-        Err(err) => {
-            journal.checkpoint_revert(checkpoint);
-            Err(err)
-        }
-    }
+    })
 }
 
 /// Gas limit for internal EVM calls (ERC20 transfer, balanceOf).
@@ -742,29 +801,26 @@ where
 
 /// Query ERC20 `balanceOf(address)` via an internal EVM call.
 ///
-/// Uses [`evm_call`] so that journal logs are not drained.
+/// Uses [`with_evm_snapshot`] to match go-ethereum's StaticCall semantics:
+/// all state changes and `evm.tx` mutations are reverted after the call.
 fn evm_call_balance_of<DB, I>(evm: &mut MorphEvm<DB, I>, token: Address, account: Address) -> U256
 where
     DB: alloy_evm::Database,
 {
-    // Snapshot the journal so this helper matches go-ethereum's StaticCall
-    // semantics even though we route through the normal CALL machinery.
-    let checkpoint = evm.ctx_mut().journal_mut().checkpoint();
-    let calldata = encode_balance_of_calldata(account);
-    let result = evm_call(evm, Address::ZERO, token, calldata);
-    let balance = match result {
-        Ok(ref result) if result.instruction_result().is_ok() => {
-            let output = &result.interpreter_result().output;
-            if output.len() >= 32 {
-                U256::from_be_slice(&output[..32])
-            } else {
-                U256::ZERO
+    with_evm_snapshot(evm, |evm| {
+        let calldata = encode_balance_of_calldata(account);
+        match evm_call(evm, Address::ZERO, token, calldata) {
+            Ok(ref result) if result.instruction_result().is_ok() => {
+                let output = &result.interpreter_result().output;
+                if output.len() >= 32 {
+                    U256::from_be_slice(&output[..32])
+                } else {
+                    U256::ZERO
+                }
             }
+            _ => U256::ZERO,
         }
-        _ => U256::ZERO,
-    };
-    evm.ctx_mut().journal_mut().checkpoint_revert(checkpoint);
-    balance
+    })
 }
 
 /// Matches go-ethereum's `transferAltTokenByEVM` validation:
@@ -789,88 +845,67 @@ fn transfer_erc20_with_evm<DB, I>(
 where
     DB: alloy_evm::Database,
 {
-    // Save the original tx by swapping in a default, avoiding a full clone of
-    // MorphTxEnv (which contains Bytes, AccessList, etc.).
-    let tx_origin = std::mem::take(&mut evm.tx);
-
-    // Read sender balance before transfer if not provided
+    // Read sender balance before transfer if not provided.
+    // This uses with_evm_snapshot internally, so evm.tx is safe.
     let from_balance_before = match from_balance_before {
         Some(b) => b,
         None => evm_call_balance_of(evm, token_address, from),
     };
-    let checkpoint = evm.ctx_mut().journal_mut().checkpoint();
 
-    let calldata = build_transfer_calldata(to, token_amount);
-    let frame_result = match evm_call(evm, from, token_address, calldata) {
-        Ok(result) => result,
-        Err(e) => {
-            evm.ctx_mut().journal_mut().checkpoint_revert(checkpoint);
-            evm.tx = tx_origin;
-            return Err(MorphInvalidTransaction::TokenTransferFailed {
+    with_evm_checkpoint(evm, |evm| {
+        let calldata = build_transfer_calldata(to, token_amount);
+        let frame_result = evm_call(evm, from, token_address, calldata).map_err(|e| {
+            EVMError::Transaction(MorphInvalidTransaction::TokenTransferFailed {
                 reason: format!("Error: {e:?}"),
+            })
+        })?;
+
+        if !frame_result.instruction_result().is_ok() {
+            return Err(MorphInvalidTransaction::TokenTransferFailed {
+                reason: format!("{:?}", frame_result.interpreter_result()),
             }
             .into());
         }
-    };
 
-    if !frame_result.instruction_result().is_ok() {
-        evm.ctx_mut().journal_mut().checkpoint_revert(checkpoint);
-        evm.tx = tx_origin;
-        return Err(MorphInvalidTransaction::TokenTransferFailed {
-            reason: format!("{:?}", frame_result.interpreter_result()),
+        // Validate ABI bool return value, matching go-ethereum behavior:
+        // - No return data: accepted (old tokens that don't return bool)
+        // - 32+ bytes with last byte == 1: accepted (standard ERC20)
+        // - Otherwise: rejected
+        let output = &frame_result.interpreter_result().output;
+        if !output.is_empty() && (output.len() < 32 || output[31] != 1) {
+            return Err(MorphInvalidTransaction::TokenTransferFailed {
+                reason: "alt token transfer returned failure".to_string(),
+            }
+            .into());
         }
-        .into());
-    }
 
-    // Validate ABI bool return value, matching go-ethereum behavior:
-    // - No return data: accepted (old tokens that don't return bool)
-    // - 32+ bytes with last byte == 1: accepted (standard ERC20)
-    // - Otherwise: rejected
-    let output = &frame_result.interpreter_result().output;
-    if !output.is_empty() && (output.len() < 32 || output[31] != 1) {
-        evm.ctx_mut().journal_mut().checkpoint_revert(checkpoint);
-        evm.tx = tx_origin;
-        return Err(MorphInvalidTransaction::TokenTransferFailed {
-            reason: "alt token transfer returned failure".to_string(),
-        }
-        .into());
-    }
+        // Verify sender balance changed by the expected amount, matching go-ethereum.
+        // evm_call_balance_of uses with_evm_snapshot, so evm.tx is safe here too.
+        let from_balance_after = evm_call_balance_of(evm, token_address, from);
 
-    // Verify sender balance changed by the expected amount, matching go-ethereum.
-    let from_balance_after = evm_call_balance_of(evm, token_address, from);
-
-    // Restore the original transaction
-    evm.tx = tx_origin;
-
-    // Verify sender balance decreased by exactly the transfer amount.
-    // Matches go-ethereum's transferAltTokenByEVM which always checks this,
-    // even for self-transfers (from == to), where it would fail because the
-    // net balance change is zero but the expected decrease is `token_amount`.
-    let expected_balance = match from_balance_before.checked_sub(token_amount) {
-        Some(balance) => balance,
-        None => {
-            evm.ctx_mut().journal_mut().checkpoint_revert(checkpoint);
-            return Err(EVMError::Transaction(
-                MorphInvalidTransaction::TokenTransferFailed {
+        // Verify sender balance decreased by exactly the transfer amount.
+        // Matches go-ethereum's transferAltTokenByEVM which always checks this,
+        // even for self-transfers (from == to), where it would fail because the
+        // net balance change is zero but the expected decrease is `token_amount`.
+        let expected_balance =
+            from_balance_before
+                .checked_sub(token_amount)
+                .ok_or(MorphInvalidTransaction::TokenTransferFailed {
                     reason: format!(
                         "sender balance {from_balance_before} less than token amount {token_amount}"
                     ),
-                },
-            ));
+                })?;
+        if from_balance_after != expected_balance {
+            return Err(MorphInvalidTransaction::TokenTransferFailed {
+                reason: format!(
+                    "sender balance mismatch: expected {expected_balance}, got {from_balance_after}"
+                ),
+            }
+            .into());
         }
-    };
-    if from_balance_after != expected_balance {
-        evm.ctx_mut().journal_mut().checkpoint_revert(checkpoint);
-        return Err(MorphInvalidTransaction::TokenTransferFailed {
-            reason: format!(
-                "sender balance mismatch: expected {expected_balance}, got {from_balance_after}"
-            ),
-        }
-        .into());
-    }
 
-    evm.ctx_mut().journal_mut().checkpoint_commit();
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Build the calldata for ERC20 `transfer(address,uint256)` call.
