@@ -429,11 +429,7 @@ where
                 .logs
                 .drain(log_count_before..)
                 .collect();
-            // Only keep refund Transfer logs when the refund succeeds.
-            // Go-ethereum's refundGas() emits no logs on failure.
-            if result.is_ok() {
-                evm.post_fee_logs = refund_logs;
-            }
+            evm.post_fee_logs = refund_logs;
             result
         };
 
