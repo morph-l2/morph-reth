@@ -20,7 +20,10 @@ use alloy_consensus::Transaction;
 use alloy_consensus::transaction::TxHashRef;
 use alloy_evm::{
     Database, Evm,
-    block::{BlockExecutionError, BlockExecutionResult, BlockExecutor, ExecutableTx, OnStateHook},
+    block::{
+        BlockExecutionError, BlockExecutionResult, BlockExecutor, ExecutableTx, OnStateHook,
+        StateChangeSource,
+    },
 };
 use alloy_primitives::{Address, U256};
 use curie::apply_curie_hard_fork;
@@ -71,6 +74,9 @@ pub(crate) struct MorphBlockExecutor<'a, DB: Database, I> {
     /// Cached hardfork for this block (constant across all transactions).
     /// Set in `apply_pre_execution_changes`, reused in `commit_transaction`.
     hardfork: MorphHardfork,
+    /// Hook for notifying the engine about per-transaction state changes.
+    /// Used by `StateRootTask` for incremental sparse trie computation.
+    state_hook: Option<Box<dyn OnStateHook>>,
 }
 
 impl<'a, DB, I> MorphBlockExecutor<'a, DB, I>
@@ -96,6 +102,7 @@ where
             receipts: Vec::new(),
             gas_used: 0,
             hardfork: MorphHardfork::default(),
+            state_hook: None,
         }
     }
 
@@ -336,6 +343,12 @@ where
         // Uses the hardfork cached in apply_pre_execution_changes (constant per block).
         let morph_tx_fields = self.get_morph_tx_fields(tx.tx(), *tx.signer(), self.hardfork)?;
 
+        // Notify the state hook (e.g. StateRootTask) BEFORE committing,
+        // so the sparse trie can be updated incrementally per transaction.
+        if let Some(hook) = &mut self.state_hook {
+            hook.on_state(StateChangeSource::Transaction(self.receipts.len()), &state);
+        }
+
         // Update cumulative gas used
         let gas_used = result.gas_used();
         self.gas_used += gas_used;
@@ -387,12 +400,8 @@ where
         ))
     }
 
-    /// Sets a state hook for observing state changes.
-    ///
-    /// Note: State hooks are not yet implemented for the Morph block executor.
-    /// This is a no-op placeholder for future implementation.
-    fn set_state_hook(&mut self, _hook: Option<Box<dyn OnStateHook>>) {
-        // State hooks are not yet supported for Morph block executor
+    fn set_state_hook(&mut self, hook: Option<Box<dyn OnStateHook>>) {
+        self.state_hook = hook;
     }
 
     /// Returns a mutable reference to the EVM instance.
