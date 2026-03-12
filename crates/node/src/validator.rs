@@ -210,7 +210,10 @@ impl StateRootValidator<morph_primitives::MorphPrimitives> for MorphEngineValida
         // Before Jade, block headers carry ZK-trie (Poseidon) roots while reth computes
         // MPT (Keccak) roots — they can never match. We still compute the root above
         // (to keep the trie current), but skip the comparison against the header.
-        if !self.chain_spec.is_jade_active_at_timestamp(block.header().timestamp()) {
+        if !self
+            .chain_spec
+            .is_jade_active_at_timestamp(block.header().timestamp())
+        {
             return Ok(());
         }
 
@@ -218,7 +221,11 @@ impl StateRootValidator<morph_primitives::MorphPrimitives> for MorphEngineValida
         let expected = block.header().state_root();
         if computed_state_root != expected {
             return Err(ConsensusError::BodyStateRootDiff(
-                GotExpected { got: computed_state_root, expected }.into(),
+                GotExpected {
+                    got: computed_state_root,
+                    expected,
+                }
+                .into(),
             ));
         }
         Ok(())
