@@ -11924,3 +11924,13 @@ dependencies = [
  "cc",
  "pkg-config",
 ]
+
+[[patch.unused]]
+name = "reth-e2e-test-utils"
+version = "1.10.0"
+source = "git+https://github.com/morph-l2/reth?rev=1dd722773844d1a3c50a691dc09f6cdf8e6bd00e#1dd722773844d1a3c50a691dc09f6cdf8e6bd00e"
+
+[[patch.unused]]
+name = "reth-ethereum"
+version = "1.10.0"
+source = "git+https://github.com/morph-l2/reth?rev=1dd722773844d1a3c50a691dc09f6cdf8e6bd00e#1dd722773844d1a3c50a691dc09f6cdf8e6bd00e"
