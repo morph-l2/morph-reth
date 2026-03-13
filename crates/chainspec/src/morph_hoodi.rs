@@ -60,5 +60,8 @@ mod tests {
 
         assert!(!MORPH_HOODI.is_emerald_active_at_timestamp(1766987999));
         assert!(MORPH_HOODI.is_emerald_active_at_timestamp(1766988000));
+
+        assert!(!MORPH_HOODI.is_jade_active_at_timestamp(1774418399));
+        assert!(MORPH_HOODI.is_jade_active_at_timestamp(1774418400));
     }
 }

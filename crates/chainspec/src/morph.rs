@@ -61,5 +61,8 @@ mod tests {
 
         assert!(!MORPH_MAINNET.is_emerald_active_at_timestamp(1767765599));
         assert!(MORPH_MAINNET.is_emerald_active_at_timestamp(1767765600));
+
+        assert!(!MORPH_MAINNET.is_jade_active_at_timestamp(1775627999));
+        assert!(MORPH_MAINNET.is_jade_active_at_timestamp(1775628000));
     }
 }
