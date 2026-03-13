@@ -47,14 +47,14 @@ cargo test -p morph-consensus
 Before submitting a pull request, ensure all checks pass:
 
 ```bash
-# Format code (requires nightly toolchain)
-cargo +nightly fmt --all
+# Format code
+cargo fmt --all
 
 # Run clippy lints
 cargo clippy --all --all-targets -- -D warnings
 
-# Build documentation
-cargo doc --no-deps --document-private-items
+# Run doc tests
+cargo test --doc --all --verbose
 ```
 
 ## Pull Request Process
@@ -82,7 +82,7 @@ See [README.md](README.md#architecture) for an overview of the crate structure.
 ## Code Style
 
 - Follow standard Rust conventions and idioms
-- Use `cargo fmt` formatting (nightly)
+- Use `cargo fmt` formatting (stable toolchain)
 - All public items should have documentation comments
 - Avoid `unsafe` code unless absolutely necessary and well-documented
 

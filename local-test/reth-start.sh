@@ -47,11 +47,6 @@ if [[ -n "${MORPH_MAX_TX_PER_BLOCK}" ]]; then
   args+=(--morph.max-tx-per-block "${MORPH_MAX_TX_PER_BLOCK}")
 fi
 
-# Add optional geth RPC URL for state root cross-validation
-if [[ -n "${MORPH_GETH_RPC_URL}" ]]; then
-  args+=(--morph.geth-rpc-url "${MORPH_GETH_RPC_URL}")
-fi
-
 # Add bootnodes if configured
 if [[ -n "${RETH_BOOTNODES}" ]]; then
   args+=(--bootnodes "${RETH_BOOTNODES}")
