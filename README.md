@@ -194,7 +194,7 @@ Morph provides a custom L2 Engine API (different from the standard Ethereum Engi
 
 | Method | Description |
 |--------|-------------|
-| `engine_assembleL2Block` | Build executable L2 block data for the next height from the supplied transaction list; sequencers are expected to provide L1-message txs here, while normal L2 txs are typically pulled from the txpool |
+| `engine_assembleL2Block` | Build executable L2 block data for the next height; the sequencer supplies L1-message transactions via the `transactions` parameter, and L2 transactions are pulled from the txpool |
 | `engine_validateL2Block` | Validate executable block data without importing it |
 | `engine_newL2Block` | Import a new L2 block via `newPayload` + `forkchoiceUpdated` and advance the canonical head |
 | `engine_newSafeL2Block` | Rebuild and import a safe L2 block from derivation inputs |
