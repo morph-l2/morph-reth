@@ -1486,7 +1486,34 @@ mod tests {
 
     #[test]
     fn test_validate_header_coinbase_non_zero_with_fee_vault() {
-        let chain_spec = create_test_chainspec();
+        // Create a chainspec with FeeVault explicitly enabled
+        let genesis_json = serde_json::json!({
+            "config": {
+                "chainId": 1337,
+                "homesteadBlock": 0,
+                "eip150Block": 0,
+                "eip155Block": 0,
+                "eip158Block": 0,
+                "byzantiumBlock": 0,
+                "constantinopleBlock": 0,
+                "petersburgBlock": 0,
+                "istanbulBlock": 0,
+                "berlinBlock": 0,
+                "londonBlock": 0,
+                "bernoulliBlock": 0,
+                "curieBlock": 0,
+                "morph203Time": 0,
+                "viridianTime": 0,
+                "emeraldTime": 0,
+                "morph": {
+                    "feeVaultAddress": "0x530000000000000000000000000000000000000a"
+                }
+            },
+            "alloc": {}
+        });
+        let genesis: Genesis = serde_json::from_value(genesis_json).unwrap();
+        let chain_spec = Arc::new(MorphChainSpec::from(genesis));
+        assert!(chain_spec.is_fee_vault_enabled(), "test chainspec must have FeeVault enabled");
         let consensus = MorphConsensus::new(chain_spec);
 
         let now = std::time::SystemTime::now()
@@ -1507,12 +1534,9 @@ mod tests {
         let sealed = SealedHeader::seal_slow(header);
 
         let result = consensus.validate_header(&sealed);
-        // If the test chain_spec has fee vault enabled, this should fail
-        if consensus.chain_spec().is_fee_vault_enabled() {
-            assert!(result.is_err());
-            let err_str = result.unwrap_err().to_string();
-            assert!(err_str.contains("coinbase"));
-        }
+        assert!(result.is_err());
+        let err_str = result.unwrap_err().to_string();
+        assert!(err_str.contains("coinbase"));
     }
 
     // ========================================================================

@@ -390,7 +390,9 @@ mod tests {
             tx: &tx,
             result: make_success_result(21000),
             cumulative_gas_used: 21000,
-            l1_fee: U256::ZERO,
+            // Pass a non-zero l1_fee to verify the builder ignores it for L1 messages.
+            // L1 message gas is prepaid on L1, so no L1 fee should appear in the receipt.
+            l1_fee: U256::from(999_999),
             morph_tx_fields: None,
             pre_fee_logs: vec![],
             post_fee_logs: vec![],
@@ -398,7 +400,7 @@ mod tests {
 
         let receipt = builder.build_receipt(ctx);
         assert!(matches!(receipt, MorphReceipt::L1Msg(_)));
-        // L1 messages return ZERO for l1_fee
+        // L1 messages return ZERO for l1_fee regardless of what was passed in
         assert_eq!(receipt.l1_fee(), U256::ZERO);
     }
 
@@ -429,8 +431,22 @@ mod tests {
         };
 
         let receipt = builder.build_receipt(ctx);
-        assert!(matches!(receipt, MorphReceipt::Morph(_)));
         assert_eq!(receipt.l1_fee(), l1_fee);
+
+        // Destructure the Morph variant and verify all MorphTx-specific fields
+        let MorphReceipt::Morph(morph_receipt) = &receipt else {
+            panic!("expected MorphReceipt::Morph, got {:?}", receipt.tx_type());
+        };
+        assert_eq!(morph_receipt.version, Some(0));
+        assert_eq!(morph_receipt.fee_token_id, Some(1));
+        assert_eq!(morph_receipt.fee_rate, Some(U256::from(2_000_000_000u64)));
+        assert_eq!(
+            morph_receipt.token_scale,
+            Some(U256::from(10u64).pow(U256::from(18u64)))
+        );
+        assert_eq!(morph_receipt.fee_limit, Some(U256::from(1000u64)));
+        assert_eq!(morph_receipt.reference, None);
+        assert_eq!(morph_receipt.memo, None);
     }
 
     #[test]
@@ -452,8 +468,20 @@ mod tests {
 
         let receipt = builder.build_receipt(ctx);
         // Should still be MorphReceipt::Morph variant, just without token fields
-        assert!(matches!(receipt, MorphReceipt::Morph(_)));
         assert_eq!(receipt.l1_fee(), l1_fee);
+
+        // Destructure and verify fields are None (fallback path uses with_l1_fee)
+        let MorphReceipt::Morph(morph_receipt) = &receipt else {
+            panic!("expected MorphReceipt::Morph, got {:?}", receipt.tx_type());
+        };
+        assert_eq!(morph_receipt.l1_fee, l1_fee);
+        assert_eq!(morph_receipt.version, None);
+        assert_eq!(morph_receipt.fee_token_id, None);
+        assert_eq!(morph_receipt.fee_rate, None);
+        assert_eq!(morph_receipt.token_scale, None);
+        assert_eq!(morph_receipt.fee_limit, None);
+        assert_eq!(morph_receipt.reference, None);
+        assert_eq!(morph_receipt.memo, None);
     }
 
     #[test]
