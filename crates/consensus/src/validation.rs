@@ -1513,7 +1513,10 @@ mod tests {
         });
         let genesis: Genesis = serde_json::from_value(genesis_json).unwrap();
         let chain_spec = Arc::new(MorphChainSpec::from(genesis));
-        assert!(chain_spec.is_fee_vault_enabled(), "test chainspec must have FeeVault enabled");
+        assert!(
+            chain_spec.is_fee_vault_enabled(),
+            "test chainspec must have FeeVault enabled"
+        );
         let consensus = MorphConsensus::new(chain_spec);
 
         let now = std::time::SystemTime::now()
