@@ -578,6 +578,138 @@ mod tests {
     }
 
     #[test]
+    fn test_bernoulli_disabled_ripemd160_returns_error() {
+        let precompiles = bernoulli();
+        let ripemd = precompiles.get(&addresses::RIPEMD160).unwrap();
+
+        // Calling the disabled stub should return an error (consuming all forwarded gas)
+        let result = ripemd.execute(b"hello", 100_000);
+        assert!(result.is_err(), "disabled ripemd160 should return error");
+        let err = result.unwrap_err();
+        match err {
+            PrecompileError::Other(msg) => {
+                assert!(
+                    msg.contains("ripemd160"),
+                    "error message should mention ripemd160"
+                );
+            }
+            _ => panic!("expected PrecompileError::Other, got: {err:?}"),
+        }
+    }
+
+    #[test]
+    fn test_bernoulli_disabled_blake2f_returns_error() {
+        let precompiles = bernoulli();
+        let blake2f = precompiles.get(&addresses::BLAKE2F).unwrap();
+
+        // Calling the disabled stub should return an error (consuming all forwarded gas)
+        let result = blake2f.execute(b"hello", 100_000);
+        assert!(result.is_err(), "disabled blake2f should return error");
+        let err = result.unwrap_err();
+        match err {
+            PrecompileError::Other(msg) => {
+                assert!(
+                    msg.contains("blake2f"),
+                    "error message should mention blake2f"
+                );
+            }
+            _ => panic!("expected PrecompileError::Other, got: {err:?}"),
+        }
+    }
+
+    #[test]
+    fn test_morph203_ripemd160_works() {
+        let precompiles = morph203();
+        let ripemd = precompiles.get(&addresses::RIPEMD160).unwrap();
+
+        // In Morph203, ripemd160 is re-enabled and should work (not return disabled error)
+        let result = ripemd.execute(b"hello", 100_000);
+        assert!(
+            result.is_ok(),
+            "morph203 ripemd160 should be functional: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_morph203_blake2f_works() {
+        let precompiles = morph203();
+        let blake2f = precompiles.get(&addresses::BLAKE2F).unwrap();
+
+        // blake2f requires specific input format (213 bytes), but the point is it should
+        // NOT return the "disabled" error. An invalid-input error is acceptable.
+        let result = blake2f.execute(b"hello", 100_000);
+        // Either Ok (valid input) or Err (invalid input format, NOT disabled error)
+        if let Err(PrecompileError::Other(msg)) = &result {
+            assert!(
+                !msg.contains("disabled"),
+                "morph203 blake2f should NOT be disabled: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_bernoulli_pairing_has_no_pair_limit() {
+        let precompiles = bernoulli();
+        let pairing = precompiles.get(&addresses::BN256_PAIRING).unwrap();
+
+        // 5 pairs (960 bytes) — Bernoulli uses Berlin pairing with no 4-pair limit
+        let input = vec![0u8; 5 * 192];
+        let result = pairing.execute(&input, 1_000_000);
+        // Should succeed (zero-padded valid points), NOT rejected for size
+        assert!(
+            result.is_ok(),
+            "Bernoulli pairing should accept 5 pairs (no limit)"
+        );
+    }
+
+    #[test]
+    fn test_morph203_pairing_exact_boundary() {
+        let precompiles = morph203();
+        let pairing = precompiles.get(&addresses::BN256_PAIRING).unwrap();
+
+        // Exactly 4 pairs (768 bytes) — should succeed
+        let input = vec![0u8; 4 * 192];
+        assert!(
+            pairing.execute(&input, 1_000_000).is_ok(),
+            "pairing with exactly 4 pairs should succeed"
+        );
+
+        // 4 pairs + 1 byte (769 bytes) — should be rejected
+        let input = vec![0u8; 4 * 192 + 1];
+        assert!(
+            pairing.execute(&input, 1_000_000).is_err(),
+            "pairing with 769 bytes should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_jade_uses_emerald_precompiles() {
+        let emerald_p = MorphPrecompiles::new_with_spec(MorphHardfork::Emerald);
+        let jade_p = MorphPrecompiles::new_with_spec(MorphHardfork::Jade);
+
+        assert_eq!(
+            emerald_p.precompiles().len(),
+            jade_p.precompiles().len(),
+            "Jade should use same precompile set as Emerald"
+        );
+        assert!(jade_p.contains(&addresses::P256_VERIFY));
+        assert!(jade_p.contains(&addresses::BLS12_G1ADD));
+        assert!(!jade_p.contains(&addresses::POINT_EVALUATION));
+    }
+
+    #[test]
+    fn test_default_precompiles_use_jade() {
+        let default_p = MorphPrecompiles::default();
+        let jade_p = MorphPrecompiles::new_with_spec(MorphHardfork::Jade);
+
+        assert_eq!(
+            default_p.precompiles().len(),
+            jade_p.precompiles().len(),
+            "Default precompiles should match Jade"
+        );
+    }
+
+    #[test]
     fn test_modexp_len_check() {
         // Value = 0 (all zeros) — should NOT exceed 32
         assert!(!modexp_len_exceeds_32(&[0u8; 32], 0));

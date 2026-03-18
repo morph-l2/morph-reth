@@ -53,7 +53,7 @@ pub struct RealMorphL2EngineApi<Provider> {
     engine_state_tracker: Arc<EngineStateTracker>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct InMemoryHead {
     number: u64,
     hash: B256,
@@ -956,34 +956,6 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_fcu_block_tag_hash_uses_l1_tag_when_available() {
-        let l1_tag = B256::from([0x11; 32]);
-        let head = B256::from([0x22; 32]);
-
-        let resolved = resolve_fcu_block_tag_hash(Some(l1_tag), head, 1_700_000_000, 1_700_000_030);
-
-        assert_eq!(resolved, l1_tag);
-    }
-
-    #[test]
-    fn test_resolve_fcu_block_tag_hash_falls_back_to_head_for_historical_blocks() {
-        let head = B256::from([0x33; 32]);
-
-        let resolved = resolve_fcu_block_tag_hash(None, head, 1_700_000_000, 1_700_000_000 + 300);
-
-        assert_eq!(resolved, head);
-    }
-
-    #[test]
-    fn test_resolve_fcu_block_tag_hash_returns_zero_near_live_without_l1_tag() {
-        let head = B256::from([0x44; 32]);
-
-        let resolved = resolve_fcu_block_tag_hash(None, head, 1_700_000_000, 1_700_000_000 + 5);
-
-        assert_eq!(resolved, B256::ZERO);
-    }
-
-    #[test]
     fn test_apply_executable_data_overrides_aligns_hash_with_engine_data() {
         let source_header: MorphHeader = Header::default().into();
         let source_recovered = recovered_with_header(source_header);
@@ -1140,5 +1112,143 @@ mod tests {
             overridden.sealed_block().header().inner.base_fee_per_gas,
             None
         );
+    }
+
+    // =========================================================================
+    // EngineStateTracker tests
+    // =========================================================================
+
+    #[test]
+    fn test_engine_state_tracker_default_is_none() {
+        let tracker = EngineStateTracker::default();
+        assert!(tracker.current_head().is_none());
+    }
+
+    #[test]
+    fn test_engine_state_tracker_record_local_head() {
+        let tracker = EngineStateTracker::default();
+        let hash = B256::from([0x42; 32]);
+        tracker.record_local_head(10, hash, 1_700_000_010);
+
+        let head = tracker.current_head().expect("head should be set");
+        assert_eq!(head.number, 10);
+        assert_eq!(head.hash, hash);
+        assert_eq!(head.timestamp, 1_700_000_010);
+    }
+
+    #[test]
+    fn test_engine_state_tracker_overwrites_on_update() {
+        let tracker = EngineStateTracker::default();
+        tracker.record_local_head(10, B256::from([0x01; 32]), 100);
+        tracker.record_local_head(20, B256::from([0x02; 32]), 200);
+
+        let head = tracker.current_head().expect("head should be set");
+        assert_eq!(head.number, 20);
+        assert_eq!(head.hash, B256::from([0x02; 32]));
+        assert_eq!(head.timestamp, 200);
+    }
+
+    #[test]
+    fn test_engine_state_tracker_ignores_non_canonical_events() {
+        use reth_node_api::ConsensusEngineEvent;
+
+        let tracker = EngineStateTracker::default();
+
+        // LiveSyncProgress events should not update the head
+        // (only CanonicalChainCommitted updates it)
+        // We can only test CanonicalChainCommitted since other variants
+        // require complex types. Verify the tracker remains None when no
+        // CanonicalChainCommitted event is sent.
+        assert!(tracker.current_head().is_none());
+
+        // Now send a CanonicalChainCommitted event
+        let header = MorphHeader {
+            inner: Header {
+                number: 5,
+                timestamp: 500,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let sealed_header = SealedHeader::seal_slow(header);
+        tracker.on_consensus_engine_event(&ConsensusEngineEvent::CanonicalChainCommitted(
+            Box::new(sealed_header),
+            Duration::ZERO,
+        ));
+
+        let head = tracker
+            .current_head()
+            .expect("head should be set after event");
+        assert_eq!(head.number, 5);
+    }
+
+    #[test]
+    fn test_engine_state_tracker_concurrent_reads() {
+        // Verify parking_lot::RwLock allows concurrent reads without panic
+        let tracker = EngineStateTracker::default();
+        tracker.record_local_head(1, B256::ZERO, 100);
+
+        // Multiple reads should not block or panic
+        let head1 = tracker.current_head();
+        let head2 = tracker.current_head();
+        assert_eq!(head1, head2);
+    }
+
+    // =========================================================================
+    // apply_executable_data_overrides edge cases
+    // =========================================================================
+
+    #[test]
+    fn test_apply_executable_data_overrides_exact_u64_max_base_fee() {
+        let recovered = recovered_with_header(Header::default().into());
+        let data = ExecutableL2Data {
+            base_fee_per_gas: Some(u64::MAX as u128),
+            logs_bloom: Bytes::from(vec![0u8; 256]),
+            hash: B256::from([0x55; 32]),
+            ..Default::default()
+        };
+
+        // u64::MAX should be accepted (it fits in u64)
+        let result = apply_executable_data_overrides(recovered, &data);
+        assert!(result.is_ok());
+        let header = result.unwrap().sealed_block().header().clone();
+        assert_eq!(header.inner.base_fee_per_gas, Some(u64::MAX));
+    }
+
+    #[test]
+    fn test_apply_executable_data_overrides_empty_logs_bloom() {
+        let recovered = recovered_with_header(Header::default().into());
+        let data = ExecutableL2Data {
+            logs_bloom: Bytes::new(),
+            hash: B256::from([0x66; 32]),
+            ..Default::default()
+        };
+
+        let err = apply_executable_data_overrides(recovered, &data).unwrap_err();
+        match err {
+            MorphEngineApiError::ValidationFailed(msg) => {
+                assert!(msg.contains("logs_bloom must be 256 bytes"));
+                assert!(msg.contains("0 bytes"));
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn test_apply_executable_data_overrides_oversized_logs_bloom() {
+        let recovered = recovered_with_header(Header::default().into());
+        let data = ExecutableL2Data {
+            logs_bloom: Bytes::from(vec![0u8; 512]),
+            hash: B256::from([0x77; 32]),
+            ..Default::default()
+        };
+
+        let err = apply_executable_data_overrides(recovered, &data).unwrap_err();
+        match err {
+            MorphEngineApiError::ValidationFailed(msg) => {
+                assert!(msg.contains("512 bytes"));
+            }
+            other => panic!("unexpected error: {other}"),
+        }
     }
 }

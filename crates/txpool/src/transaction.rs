@@ -210,3 +210,175 @@ impl EthPoolTransaction for MorphPooledTransaction {
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_consensus::{Sealed, Signed, Transaction, TxLegacy};
+    use alloy_eips::Encodable2718;
+    use alloy_eips::eip4844::BlobTransactionSidecar;
+    use alloy_primitives::{Bytes, Signature, U256};
+    use morph_primitives::transaction::TxL1Msg;
+    use reth_transaction_pool::PoolTransaction;
+
+    fn create_legacy_pooled_tx() -> MorphPooledTransaction {
+        let tx = TxLegacy {
+            chain_id: Some(1337),
+            nonce: 5,
+            gas_price: 1_000_000_000,
+            gas_limit: 21000,
+            to: TxKind::Call(Address::repeat_byte(0x01)),
+            value: U256::from(100u64),
+            input: Bytes::new(),
+        };
+        let sig = Signature::test_signature();
+        let envelope = MorphTxEnvelope::Legacy(Signed::new_unhashed(tx, sig));
+        let recovered = Recovered::new_unchecked(envelope, Address::repeat_byte(0xaa));
+        let len = recovered.encode_2718_len();
+        MorphPooledTransaction::new(recovered, len)
+    }
+
+    fn create_l1_msg_pooled_tx(queue_index: u64) -> MorphPooledTransaction {
+        let tx = TxL1Msg {
+            queue_index,
+            gas_limit: 21000,
+            to: Address::ZERO,
+            value: U256::ZERO,
+            input: Bytes::default(),
+            sender: Address::repeat_byte(0xbb),
+        };
+        let envelope = MorphTxEnvelope::L1Msg(Sealed::new(tx));
+        let recovered = Recovered::new_unchecked(envelope, Address::repeat_byte(0xbb));
+        let len = recovered.encode_2718_len();
+        MorphPooledTransaction::new(recovered, len)
+    }
+
+    fn create_morph_pooled_tx() -> MorphPooledTransaction {
+        use morph_primitives::TxMorph;
+        let tx = TxMorph {
+            chain_id: 1337,
+            nonce: 0,
+            gas_limit: 21000,
+            max_fee_per_gas: 2_000_000_000,
+            max_priority_fee_per_gas: 1_000_000_000,
+            to: TxKind::Call(Address::repeat_byte(0x02)),
+            value: U256::ZERO,
+            access_list: Default::default(),
+            version: 0,
+            fee_token_id: 1,
+            fee_limit: U256::from(1000u64),
+            reference: None,
+            memo: None,
+            input: Bytes::new(),
+        };
+        let sig = Signature::test_signature();
+        let envelope = MorphTxEnvelope::Morph(Signed::new_unhashed(tx, sig));
+        let recovered = Recovered::new_unchecked(envelope, Address::repeat_byte(0xcc));
+        let len = recovered.encode_2718_len();
+        MorphPooledTransaction::new(recovered, len)
+    }
+
+    #[test]
+    fn test_is_l1_message() {
+        let l1_tx = create_l1_msg_pooled_tx(0);
+        assert!(l1_tx.is_l1_message());
+        assert_eq!(l1_tx.queue_index(), Some(0));
+
+        let legacy_tx = create_legacy_pooled_tx();
+        assert!(!legacy_tx.is_l1_message());
+        assert_eq!(legacy_tx.queue_index(), None);
+    }
+
+    #[test]
+    fn test_is_morph_tx() {
+        let morph_tx = create_morph_pooled_tx();
+        assert!(morph_tx.is_morph_tx());
+
+        let legacy_tx = create_legacy_pooled_tx();
+        assert!(!legacy_tx.is_morph_tx());
+    }
+
+    #[test]
+    fn test_pool_transaction_sender() {
+        let tx = create_legacy_pooled_tx();
+        assert_eq!(tx.sender(), Address::repeat_byte(0xaa));
+    }
+
+    #[test]
+    fn test_pool_transaction_nonce() {
+        let tx = create_legacy_pooled_tx();
+        assert_eq!(tx.nonce(), 5);
+    }
+
+    #[test]
+    fn test_pool_transaction_value() {
+        let tx = create_legacy_pooled_tx();
+        assert_eq!(tx.value(), U256::from(100u64));
+    }
+
+    #[test]
+    fn test_pool_transaction_gas_limit() {
+        let tx = create_legacy_pooled_tx();
+        assert_eq!(tx.gas_limit(), 21000);
+    }
+
+    #[test]
+    fn test_encoded_2718_is_cached() {
+        let tx = create_legacy_pooled_tx();
+        let bytes1 = tx.encoded_2718().clone();
+        let bytes2 = tx.encoded_2718().clone();
+        assert_eq!(bytes1, bytes2, "cached encoding should be identical");
+        assert!(!bytes1.is_empty());
+    }
+
+    #[test]
+    fn test_from_pooled_roundtrip() {
+        let original = create_legacy_pooled_tx();
+        let hash = *original.hash();
+        let sender = original.sender();
+
+        let consensus = original.into_consensus();
+        assert_eq!(consensus.signer(), sender);
+
+        let recreated = MorphPooledTransaction::from_pooled(consensus);
+        assert_eq!(*recreated.hash(), hash);
+        assert_eq!(recreated.sender(), sender);
+    }
+
+    #[test]
+    fn test_take_blob_returns_none() {
+        let mut tx = create_legacy_pooled_tx();
+        let blob = tx.take_blob();
+        assert!(matches!(blob, EthBlobTransactionSidecar::None));
+    }
+
+    #[test]
+    fn test_try_into_pooled_eip4844_returns_none() {
+        let tx = create_legacy_pooled_tx();
+        let sidecar = Arc::new(BlobTransactionSidecarVariant::Eip4844(
+            BlobTransactionSidecar::default(),
+        ));
+        let result = tx.try_into_pooled_eip4844(sidecar);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_try_from_eip4844_returns_none() {
+        // Morph doesn't support blob transactions, so try_from_eip4844 always returns None
+        let tx = create_legacy_pooled_tx();
+        let recovered = tx.into_consensus();
+        let sidecar = BlobTransactionSidecar::default();
+        let result = MorphPooledTransaction::try_from_eip4844(
+            recovered,
+            BlobTransactionSidecarVariant::Eip4844(sidecar),
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_encoded_length_matches() {
+        let tx = create_legacy_pooled_tx();
+        // encoded_length is set during construction
+        assert!(tx.encoded_length() > 0);
+    }
+}

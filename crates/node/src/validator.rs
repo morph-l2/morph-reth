@@ -376,4 +376,208 @@ mod tests {
                 .is_none()
         );
     }
+
+    #[test]
+    fn test_record_and_take_expectation_roundtrip() {
+        let validator = MorphEngineValidator::new(test_chain_spec());
+        let hash = B256::from([0x42; 32]);
+        let expected_root = B256::from([0xee; 32]);
+
+        validator.record_withdraw_trie_root_expectation(
+            hash,
+            WithdrawTrieRootExpectation::Verify(expected_root),
+        );
+
+        // Take should return the expectation and remove it
+        let result = validator.take_withdraw_trie_root_expectation(hash);
+        assert_eq!(
+            result,
+            Some(WithdrawTrieRootExpectation::Verify(expected_root))
+        );
+
+        // Taking again should return None
+        assert!(
+            validator
+                .take_withdraw_trie_root_expectation(hash)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_record_skip_validation_expectation() {
+        let validator = MorphEngineValidator::new(test_chain_spec());
+        let hash = B256::from([0x99; 32]);
+
+        validator.record_withdraw_trie_root_expectation(
+            hash,
+            WithdrawTrieRootExpectation::SkipValidation,
+        );
+
+        let result = validator.take_withdraw_trie_root_expectation(hash);
+        assert_eq!(result, Some(WithdrawTrieRootExpectation::SkipValidation));
+    }
+
+    #[test]
+    fn test_duplicate_record_overwrites_value() {
+        let validator = MorphEngineValidator::new(test_chain_spec());
+        let hash = B256::from([0x11; 32]);
+        let root1 = B256::from([0xaa; 32]);
+        let root2 = B256::from([0xbb; 32]);
+
+        validator.record_withdraw_trie_root_expectation(
+            hash,
+            WithdrawTrieRootExpectation::Verify(root1),
+        );
+        validator.record_withdraw_trie_root_expectation(
+            hash,
+            WithdrawTrieRootExpectation::Verify(root2),
+        );
+
+        let result = validator.take_withdraw_trie_root_expectation(hash);
+        assert_eq!(result, Some(WithdrawTrieRootExpectation::Verify(root2)));
+    }
+
+    #[test]
+    fn test_take_nonexistent_returns_none() {
+        let validator = MorphEngineValidator::new(test_chain_spec());
+        let hash = B256::from([0xff; 32]);
+        assert!(
+            validator
+                .take_withdraw_trie_root_expectation(hash)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_updated_withdraw_trie_root_wrong_address() {
+        // If storage update is for a different address, should return None
+        let wrong_address = keccak256(alloy_primitives::Address::ZERO);
+        let hashed_slot = keccak256(B256::from(L2_MESSAGE_QUEUE_WITHDRAW_TRIE_ROOT_SLOT));
+        let state = HashedPostState::from_hashed_storage(
+            wrong_address,
+            HashedStorage::from_iter(false, [(hashed_slot, U256::from_be_bytes([0x11; 32]))]),
+        );
+        assert!(
+            MorphEngineValidator::updated_withdraw_trie_root_from_hashed_state(&state).is_none()
+        );
+    }
+
+    #[test]
+    fn test_updated_withdraw_trie_root_wrong_slot() {
+        // Correct address but wrong slot
+        let hashed_address = keccak256(L2_MESSAGE_QUEUE_ADDRESS);
+        let wrong_slot = keccak256(B256::from(alloy_primitives::U256::from(999)));
+        let state = HashedPostState::from_hashed_storage(
+            hashed_address,
+            HashedStorage::from_iter(false, [(wrong_slot, U256::from_be_bytes([0x22; 32]))]),
+        );
+        assert!(
+            MorphEngineValidator::updated_withdraw_trie_root_from_hashed_state(&state).is_none()
+        );
+    }
+
+    #[test]
+    fn test_validate_payload_attributes_timestamp_not_in_past() {
+        use alloy_rpc_types_engine::PayloadAttributes;
+        use morph_payload_types::MorphPayloadAttributes;
+        use reth_node_api::PayloadValidator;
+
+        let validator = MorphEngineValidator::new(test_chain_spec());
+
+        // Create a header with timestamp 100
+        let parent_header = MorphHeader {
+            inner: alloy_consensus::Header {
+                timestamp: 100,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let parent = reth_primitives_traits::SealedHeader::seal_slow(parent_header);
+
+        // Attributes with timestamp = 99 (before parent) should fail
+        let attr = MorphPayloadAttributes {
+            inner: PayloadAttributes {
+                timestamp: 99,
+                prev_randao: B256::ZERO,
+                suggested_fee_recipient: alloy_primitives::Address::ZERO,
+                withdrawals: None,
+                parent_beacon_block_root: None,
+            },
+            transactions: None,
+            gas_limit: None,
+            base_fee_per_gas: None,
+        };
+        assert!(
+            validator
+                .validate_payload_attributes_against_header(&attr, parent.header())
+                .is_err()
+        );
+
+        // Attributes with timestamp = 100 (equal to parent) should pass
+        let attr_same = MorphPayloadAttributes {
+            inner: PayloadAttributes {
+                timestamp: 100,
+                prev_randao: B256::ZERO,
+                suggested_fee_recipient: alloy_primitives::Address::ZERO,
+                withdrawals: None,
+                parent_beacon_block_root: None,
+            },
+            transactions: None,
+            gas_limit: None,
+            base_fee_per_gas: None,
+        };
+        assert!(
+            validator
+                .validate_payload_attributes_against_header(&attr_same, parent.header())
+                .is_ok()
+        );
+
+        // Attributes with timestamp = 101 (after parent) should pass
+        let attr_future = MorphPayloadAttributes {
+            inner: PayloadAttributes {
+                timestamp: 101,
+                prev_randao: B256::ZERO,
+                suggested_fee_recipient: alloy_primitives::Address::ZERO,
+                withdrawals: None,
+                parent_beacon_block_root: None,
+            },
+            transactions: None,
+            gas_limit: None,
+            base_fee_per_gas: None,
+        };
+        assert!(
+            validator
+                .validate_payload_attributes_against_header(&attr_future, parent.header())
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_validate_state_root_jade_not_active_always_ok() {
+        // On Hoodi, Jade is not activated. validate_state_root should always
+        // return Ok even with mismatched state roots.
+        use morph_primitives::MorphHeader;
+        use reth_primitives_traits::{RecoveredBlock, SealedBlock};
+
+        let validator = MorphEngineValidator::new(test_chain_spec());
+
+        let header = MorphHeader {
+            inner: alloy_consensus::Header {
+                timestamp: 0,
+                state_root: B256::from([0xaa; 32]),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let block = morph_primitives::Block {
+            header,
+            body: Default::default(),
+        };
+        let sealed = SealedBlock::seal_slow(block);
+        let recovered = RecoveredBlock::new_sealed(sealed, vec![]);
+
+        // Different computed root, but Jade is not active
+        let result = validator.validate_state_root(&recovered, B256::from([0xbb; 32]));
+        assert!(result.is_ok());
+    }
 }

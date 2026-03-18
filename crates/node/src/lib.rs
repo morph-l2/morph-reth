@@ -23,6 +23,8 @@ pub mod add_ons;
 pub mod args;
 pub mod components;
 pub mod node;
+#[cfg(feature = "test-utils")]
+pub mod test_utils;
 pub mod validator;
 
 // Re-export main node types

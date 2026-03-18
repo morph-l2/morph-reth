@@ -379,4 +379,96 @@ mod tests {
             address!("5300000000000000000000000000000000000021")
         );
     }
+
+    #[test]
+    fn test_eth_to_token_amount_zero_scale() {
+        let info = TokenFeeInfo {
+            price_ratio: U256::from(2_000_000_000_000_000_000u128),
+            scale: U256::ZERO, // Misconfigured
+            ..Default::default()
+        };
+
+        let eth_amount = U256::from(1_000_000_000_000_000_000u128);
+        let token_amount = info.eth_to_token_amount(eth_amount);
+        // Misconfigured token returns MAX
+        assert_eq!(token_amount, U256::MAX);
+    }
+
+    /// Verify rounding up when there's a remainder in the division.
+    #[test]
+    fn test_eth_to_token_amount_rounds_up() {
+        let info = TokenFeeInfo {
+            price_ratio: U256::from(3),
+            scale: U256::from(1),
+            ..Default::default()
+        };
+
+        // 10 * 1 / 3 = 3 remainder 1 -> rounds up to 4
+        let token_amount = info.eth_to_token_amount(U256::from(10));
+        assert_eq!(token_amount, U256::from(4));
+    }
+
+    /// Exact division should not round up.
+    #[test]
+    fn test_eth_to_token_amount_exact_division() {
+        let info = TokenFeeInfo {
+            price_ratio: U256::from(2),
+            scale: U256::from(1),
+            ..Default::default()
+        };
+
+        // 10 * 1 / 2 = 5 exact
+        let token_amount = info.eth_to_token_amount(U256::from(10));
+        assert_eq!(token_amount, U256::from(5));
+    }
+
+    #[test]
+    fn test_eth_to_token_amount_zero_eth() {
+        let info = TokenFeeInfo {
+            price_ratio: U256::from(2),
+            scale: U256::from(1),
+            ..Default::default()
+        };
+
+        let token_amount = info.eth_to_token_amount(U256::ZERO);
+        assert_eq!(token_amount, U256::ZERO);
+    }
+
+    #[test]
+    fn test_mapping_slot_different_keys_produce_different_slots() {
+        let slot = U256::from(151);
+        let key1 = {
+            let mut k = [0u8; 32];
+            k[31] = 1;
+            k
+        };
+        let key2 = {
+            let mut k = [0u8; 32];
+            k[31] = 2;
+            k
+        };
+        let result1 = compute_mapping_slot(slot, &key1);
+        let result2 = compute_mapping_slot(slot, &key2);
+        assert_ne!(result1, result2);
+    }
+
+    #[test]
+    fn test_mapping_slot_for_address_different_accounts() {
+        let slot = U256::from(1);
+        let addr1 = address!("1111111111111111111111111111111111111111");
+        let addr2 = address!("2222222222222222222222222222222222222222");
+        let result1 = compute_mapping_slot_for_address(slot, addr1);
+        let result2 = compute_mapping_slot_for_address(slot, addr2);
+        assert_ne!(result1, result2);
+    }
+
+    #[test]
+    fn test_encode_balance_of_zero_address() {
+        let account = Address::ZERO;
+        let calldata = encode_balance_of_calldata(account);
+        assert_eq!(calldata.len(), 36);
+        assert_eq!(&calldata[0..4], &[0x70, 0xa0, 0x82, 0x31]);
+        // Address should be all zeros
+        assert!(calldata[4..36].iter().all(|&b| b == 0));
+    }
 }
