@@ -12,18 +12,16 @@ if [[ "${1:-}" == "--yes" ]]; then
 fi
 
 echo "=========================================="
-echo "Reset local sync state (morph-reth + node)"
+echo "Reset local sync state (${MORPH_NETWORK}: morph-reth + node)"
 echo "=========================================="
 echo
 echo "This will remove:"
 echo "  - ${RETH_DATA_DIR}/db"
 echo "  - ${RETH_DATA_DIR}/static_files"
-echo "  - ${GETH_DATA_DIR}/geth"
 echo "  - ${NODE_HOME}/data"
 echo
 echo "This keeps:"
 echo "  - ${NODE_HOME}/config (genesis/keys)"
-echo "  - ${GETH_DATA_DIR}/keystore"
 echo "  - log files"
 echo
 
@@ -36,10 +34,9 @@ if [[ ${assume_yes} -ne 1 ]]; then
 fi
 
 "${SCRIPT_DIR}/stop-all.sh" || true
-pm2_stop "morph-geth" 2>/dev/null || true
 
-rm -rf "${RETH_DATA_DIR}/db" "${RETH_DATA_DIR}/static_files" "${GETH_DATA_DIR}/geth" "${NODE_HOME}/data"
-mkdir -p "${RETH_DATA_DIR}" "${GETH_DATA_DIR}" "${NODE_HOME}/data"
+rm -rf "${RETH_DATA_DIR}/db" "${RETH_DATA_DIR}/static_files" "${NODE_HOME}/data"
+mkdir -p "${RETH_DATA_DIR}" "${NODE_HOME}/data"
 
 cat > "${NODE_HOME}/data/priv_validator_state.json" <<'EOF'
 {"height":"0","round":0,"step":0}

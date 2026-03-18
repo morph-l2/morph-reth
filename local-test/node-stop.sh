@@ -6,4 +6,4 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 cd "${REPO_ROOT}"
 
-stop_by_pid_file "morphnode" "${NODE_PID_FILE}"
+pm2_stop "morph-node"

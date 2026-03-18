@@ -5,26 +5,55 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-# Morphnode configuration (binary is in ../morph/node, data is in local-test)
+# Network selection: mainnet (default) or hoodi.
+# Accept as first positional arg (e.g. ./start-all.sh hoodi) or MORPH_NETWORK env var.
+if [[ "${1:-}" == "mainnet" || "${1:-}" == "hoodi" ]]; then
+  MORPH_NETWORK="$1"
+  shift
+fi
+: "${MORPH_NETWORK:=mainnet}"
+
+if [[ "${MORPH_NETWORK}" != "mainnet" && "${MORPH_NETWORK}" != "hoodi" ]]; then
+  echo "ERROR: MORPH_NETWORK must be 'mainnet' or 'hoodi', got '${MORPH_NETWORK}'"
+  exit 1
+fi
+
+# Export so child processes (reth-start.sh, node-start.sh, etc.) inherit the value.
+export MORPH_NETWORK
+
+# ─── Network-specific defaults ────────────────────────────────────────────────
+
+if [[ "${MORPH_NETWORK}" == "mainnet" ]]; then
+  : "${MORPH_NODE_L1_RPC:=${MORPH_NODE_L1_ETH_RPC:-https://ethereum.publicnode.com}}"
+  : "${MORPH_NODE_DEPOSIT_CONTRACT:=${MORPH_NODE_SYNC_DEPOSIT_CONTRACT_ADDRESS:-0x3931ade842f5bb8763164bdd81e5361dce6cc1ef}}"
+  : "${MORPH_NODE_ROLLUP_CONTRACT:=}"
+  : "${MORPH_NODE_EXTRA_FLAGS:=--mainnet}"
+  : "${CONFIG_ZIP_URL:=https://raw.githubusercontent.com/morph-l2/run-morph-node/main/mainnet/data.zip}"
+  : "${CONFIG_ZIP_PATH:=./local-test/mainnet-data.zip}"
+  : "${MORPH_CHAIN:=mainnet}"
+else
+  : "${MORPH_NODE_L1_RPC:=${MORPH_NODE_L1_ETH_RPC:-https://ethereum-hoodi-rpc.publicnode.com}}"
+  : "${MORPH_NODE_DEPOSIT_CONTRACT:=${MORPH_NODE_SYNC_DEPOSIT_CONTRACT_ADDRESS:-0xd7f39d837f4790b215ba67e0ab63665912648dbe}}"
+  : "${MORPH_NODE_ROLLUP_CONTRACT:=0x57e0e6dde89dc52c01fe785774271504b1e04664}"
+  : "${MORPH_NODE_EXTRA_FLAGS:=}"
+  : "${CONFIG_ZIP_URL:=https://raw.githubusercontent.com/morph-l2/run-morph-node/main/hoodi/data.zip}"
+  : "${CONFIG_ZIP_PATH:=./local-test/hoodi-data.zip}"
+  : "${MORPH_CHAIN:=hoodi}"
+fi
+
+# ─── Shared configuration ─────────────────────────────────────────────────────
+
 : "${MORPHNODE_BIN:=../morph/node/build/bin/morphnode}"
-: "${NODE_HOME:=./local-test/node-data}"
+: "${NODE_HOME:=./local-test/${MORPH_NETWORK}/node-data}"
 : "${JWT_SECRET:=./local-test/jwt-secret.txt}"
-: "${NODE_LOG_FILE:=./local-test/node.log}"
+: "${NODE_LOG_FILE:=./local-test/${MORPH_NETWORK}/node.log}"
 : "${DOWNLOAD_CONFIG_IF_MISSING:=1}"
-: "${MAINNET_CONFIG_ZIP_URL:=https://raw.githubusercontent.com/morph-l2/run-morph-node/main/mainnet/data.zip}"
-: "${CONFIG_ZIP_PATH:=./local-test/mainnet-data.zip}"
 : "${KEEP_CONFIG_ARTIFACTS:=0}"
 : "${AUTO_RESET_ON_WRONG_BLOCK:=0}"
 
-# Morph Geth configuration
-: "${GETH_BIN:=../morph/go-ethereum/build/bin/geth}"
-: "${GETH_DATA_DIR:=./local-test/geth-data}"
-: "${GETH_LOG_FILE:=./local-test/geth.log}"
-
-# Morph-Reth configuration
 : "${RETH_BIN:=./target/release/morph-reth}"
-: "${RETH_DATA_DIR:=./local-test/reth-data}"
-: "${RETH_LOG_FILE:=./local-test/reth.log}"
+: "${RETH_DATA_DIR:=./local-test/${MORPH_NETWORK}/reth-data}"
+: "${RETH_LOG_FILE:=./local-test/${MORPH_NETWORK}/reth.log}"
 : "${RETH_HTTP_ADDR:=0.0.0.0}"
 : "${RETH_HTTP_PORT:=8545}"
 : "${RETH_AUTHRPC_ADDR:=127.0.0.1}"
@@ -32,6 +61,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 : "${RETH_BOOTNODES:=}"
 : "${MORPH_MAX_TX_PAYLOAD_BYTES:=122880}"
 : "${MORPH_MAX_TX_PER_BLOCK:=}"
+
+# ─── Helper functions ─────────────────────────────────────────────────────────
 
 check_binary() {
   local bin_path="$1"
@@ -48,7 +79,6 @@ cleanup_runtime_logs() {
   rm -rf "$(dirname "${RETH_LOG_FILE}")"/{[0-9]*,*.log*}
 }
 
-# pm2 helper functions
 pm2_check() {
   if ! command -v pm2 &> /dev/null; then
     echo "ERROR: pm2 is not installed"

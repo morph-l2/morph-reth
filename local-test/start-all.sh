@@ -7,7 +7,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 cd "${REPO_ROOT}"
 
 echo "=========================================="
-echo "Starting Morph full node (pm2)"
+echo "Starting Morph ${MORPH_NETWORK} full node (pm2)"
 echo "=========================================="
 
 # Step 1: Check pm2
@@ -53,7 +53,7 @@ echo "[4/4] Starting morphnode..."
 "${SCRIPT_DIR}/node-start.sh"
 
 echo
-echo "Full node started"
+echo "Full node started (${MORPH_NETWORK})"
 echo "RPC: http://${RETH_HTTP_ADDR}:${RETH_HTTP_PORT}"
 echo
 echo "Useful commands:"

@@ -7,7 +7,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 cd "${REPO_ROOT}"
 
 echo "=========================================="
-echo "Morph Node Status (with morph-reth)"
+echo "Morph ${MORPH_NETWORK} Node Status (with morph-reth)"
 echo "=========================================="
 echo
 

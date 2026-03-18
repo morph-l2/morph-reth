@@ -1,7 +1,6 @@
-# Data directories
-reth-data/
-geth-data/
-node-data/
+# Per-network data directories (mainnet/, hoodi/)
+mainnet/
+hoodi/
 
 # Runtime files
 jwt-secret.txt
@@ -13,6 +12,6 @@ jwt-secret.txt
 
 # Downloaded artifacts
 mainnet-data.zip
-mainnet-data/
+hoodi-data.zip
 .config-extract/
 config-prep.*/

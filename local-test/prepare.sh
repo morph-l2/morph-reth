@@ -7,7 +7,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 cd "${REPO_ROOT}"
 
 check_binary "${RETH_BIN}" "cargo build --release --bin morph-reth"
-check_binary "${MORPHNODE_BIN}" "run: cd node && make build"
+check_binary "${MORPHNODE_BIN}" "run: cd ../morph/node && make build"
 
 mkdir -p "${RETH_DATA_DIR}"
 mkdir -p "${NODE_HOME}"
@@ -32,8 +32,6 @@ if [[ ! -f "${NODE_HOME}/config/config.toml" || ! -f "${NODE_HOME}/config/genesi
       exit 1
     fi
 
-    # Clean legacy extraction directories from previous runs.
-    rm -rf "./local-test/.config-extract" "./local-test/mainnet-data"
     mkdir -p "$(dirname "${CONFIG_ZIP_PATH}")"
 
     temp_extract_dir="$(mktemp -d "${SCRIPT_DIR}/config-prep.XXXXXX")"
@@ -45,22 +43,24 @@ if [[ ! -f "${NODE_HOME}/config/config.toml" || ! -f "${NODE_HOME}/config/genesi
     }
     trap cleanup_temp EXIT
 
-    echo "Downloading mainnet config bundle..."
-    curl -fL "${MAINNET_CONFIG_ZIP_URL}" -o "${CONFIG_ZIP_PATH}"
+    echo "Downloading ${MORPH_NETWORK} config bundle..."
+    curl -fL "${CONFIG_ZIP_URL}" -o "${CONFIG_ZIP_PATH}"
     unzip -oq "${CONFIG_ZIP_PATH}" -d "${temp_extract_dir}"
 
     bundle_root=""
-    if [[ -f "${temp_extract_dir}/data/node-data/config/config.toml" && -f "${temp_extract_dir}/data/node-data/config/genesis.json" ]]; then
-      bundle_root="${temp_extract_dir}/data"
-    elif [[ -f "${temp_extract_dir}/mainnet-data/node-data/config/config.toml" && -f "${temp_extract_dir}/mainnet-data/node-data/config/genesis.json" ]]; then
-      bundle_root="${temp_extract_dir}/mainnet-data"
-    elif [[ -f "${temp_extract_dir}/node-data/config/config.toml" && -f "${temp_extract_dir}/node-data/config/genesis.json" ]]; then
-      bundle_root="${temp_extract_dir}"
-    fi
+    for candidate in \
+      "${temp_extract_dir}/data" \
+      "${temp_extract_dir}/${MORPH_NETWORK}-data" \
+      "${temp_extract_dir}"
+    do
+      if [[ -f "${candidate}/node-data/config/config.toml" && -f "${candidate}/node-data/config/genesis.json" ]]; then
+        bundle_root="${candidate}"
+        break
+      fi
+    done
 
     if [[ -z "${bundle_root}" ]]; then
       echo "Downloaded zip does not contain expected node-data config files."
-      echo "Checked bundle roots: ${temp_extract_dir}/data, ${temp_extract_dir}/mainnet-data, ${temp_extract_dir}"
       exit 1
     fi
 
@@ -78,7 +78,7 @@ if [[ ! -f "${NODE_HOME}/config/config.toml" || ! -f "${NODE_HOME}/config/genesi
     if [[ -f "${bundle_root}/node-data/data/priv_validator_state.json" ]]; then
       cp -f "${bundle_root}/node-data/data/priv_validator_state.json" "${NODE_HOME}/data/priv_validator_state.json"
     fi
-    echo "Config prepared at ${NODE_HOME} from ${MAINNET_CONFIG_ZIP_URL}"
+    echo "Config prepared at ${NODE_HOME} from ${CONFIG_ZIP_URL}"
   else
     echo "Warning: node-data is incomplete under ${NODE_HOME}."
     echo "Set DOWNLOAD_CONFIG_IF_MISSING=1 or prepare config files manually."
@@ -98,13 +98,14 @@ if [[ -f "${NODE_LOG_FILE}" ]] && grep -q "wrong block number" "${NODE_LOG_FILE}
   echo "Detected historical replay failure in ${NODE_LOG_FILE}: wrong block number"
   if [[ "${AUTO_RESET_ON_WRONG_BLOCK}" == "1" ]]; then
     echo "AUTO_RESET_ON_WRONG_BLOCK=1, resetting local sync state..."
-    "${SCRIPT_DIR}/reset-sync-state.sh" --yes
+    "${SCRIPT_DIR}/reset.sh" --yes
   else
-    echo "If replay fails again, run: ./local-test/reset-sync-state.sh --yes"
+    echo "If replay fails again, run: $(rel_path "${SCRIPT_DIR}")/reset.sh --yes"
   fi
 fi
 
 echo "Preparation finished."
+echo "MORPH_NETWORK=${MORPH_NETWORK}"
 echo "RETH_DATA_DIR=$(rel_path "${RETH_DATA_DIR}")"
 echo "NODE_HOME=$(rel_path "${NODE_HOME}")"
 echo "JWT_SECRET=$(rel_path "${JWT_SECRET}")"

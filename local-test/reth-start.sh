@@ -6,7 +6,7 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 cd "${REPO_ROOT}"
 
-echo "Starting morph-reth..."
+echo "Starting morph-reth (${MORPH_NETWORK})..."
 
 # Check prerequisites
 pm2_check
@@ -26,7 +26,7 @@ mkdir -p "$(dirname "${RETH_LOG_FILE}")"
 # Build command arguments
 args=(
   node
-  --chain mainnet
+  --chain "${MORPH_CHAIN}"
   --datadir "${RETH_DATA_DIR}"
   --http
   --http.addr "${RETH_HTTP_ADDR}"
@@ -40,6 +40,8 @@ args=(
   --morph.max-tx-payload-bytes "${MORPH_MAX_TX_PAYLOAD_BYTES}"
   --nat none
   --engine.legacy-state-root
+  --engine.persistence-threshold 256
+  --engine.memory-block-buffer-target 16
 )
 
 # Add optional max-tx-per-block if configured
