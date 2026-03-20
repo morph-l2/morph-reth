@@ -709,6 +709,114 @@ mod tests {
         );
     }
 
+    /// ECRECOVER (0x01) recovers the correct signer address from a known valid signature.
+    ///
+    /// Test vector from go-ethereum ecrecover tests (ethereum/tests suite).
+    /// Input: hash || v || r || s (128 bytes total)
+    /// Expected output: zero-padded 32-byte address
+    #[test]
+    fn test_ecrecover_valid_signature() {
+        let precompiles = bernoulli();
+        let ecrecover = precompiles.get(&addresses::ECRECOVER).unwrap();
+
+        // Known valid ECDSA signature over secp256k1 (from ethereum/tests ecRecover suite)
+        // hash: 0x18c547e4...3d1c
+        // v=28, r=0x73b16938...75f, s=0xeeb940b1...4549
+        // recovered: 0xa94f5374...bf0b
+        let mut input = [0u8; 128];
+        input[..32].copy_from_slice(&[
+            0x18, 0xc5, 0x47, 0xe4, 0xf7, 0xb0, 0xf3, 0x25, 0xad, 0x1e, 0x56, 0xf5, 0x7e, 0x26,
+            0xc7, 0x45, 0xb0, 0x9a, 0x3e, 0x50, 0x3d, 0x86, 0xe0, 0x0e, 0x52, 0x55, 0xff, 0x7f,
+            0x71, 0x5d, 0x3d, 0x1c,
+        ]);
+        input[63] = 0x1c; // v = 28
+        input[64..96].copy_from_slice(&[
+            0x73, 0xb1, 0x69, 0x38, 0x92, 0x21, 0x9d, 0x73, 0x6c, 0xab, 0xa5, 0x5b, 0xdb, 0x67,
+            0x21, 0x6e, 0x48, 0x55, 0x57, 0xea, 0x6b, 0x6a, 0xf7, 0x5f, 0x37, 0x09, 0x6c, 0x9a,
+            0xa6, 0xa5, 0xa7, 0x5f,
+        ]);
+        input[96..].copy_from_slice(&[
+            0xee, 0xb9, 0x40, 0xb1, 0xd0, 0x3b, 0x21, 0xe3, 0x6b, 0x0e, 0x47, 0xe7, 0x97, 0x69,
+            0xf0, 0x95, 0xfe, 0x2a, 0xb8, 0x55, 0xbd, 0x91, 0xe3, 0xa3, 0x87, 0x56, 0xb7, 0xd7,
+            0x5a, 0x9c, 0x45, 0x49,
+        ]);
+
+        let result = ecrecover.execute(&input, 10_000);
+        assert!(result.is_ok(), "valid ecrecover should succeed: {result:?}");
+
+        let output = result.unwrap().bytes;
+        assert_eq!(output.len(), 32, "ecrecover output must be 32 bytes");
+
+        // First 12 bytes must be zero (address is right-aligned in 32 bytes)
+        assert_eq!(&output[..12], &[0u8; 12], "first 12 bytes must be zero");
+
+        // Recovered address: 0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b
+        let expected_addr: [u8; 20] = [
+            0xa9, 0x4f, 0x53, 0x74, 0xfc, 0xe5, 0xed, 0xbc, 0x8e, 0x2a, 0x86, 0x97, 0xc1, 0x53,
+            0x31, 0x67, 0x7e, 0x6e, 0xbf, 0x0b,
+        ];
+        assert_eq!(&output[12..], &expected_addr, "recovered address mismatch");
+    }
+
+    /// SHA256 (0x02) produces the correct digest for empty input.
+    ///
+    /// SHA256("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+    #[test]
+    fn test_sha256_known_output() {
+        let precompiles = bernoulli();
+        let sha256 = precompiles.get(&addresses::SHA256).unwrap();
+
+        let result = sha256.execute(&[], 100_000);
+        assert!(result.is_ok(), "sha256 of empty input should succeed");
+
+        // SHA256("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+        let expected: [u8; 32] = [
+            0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f,
+            0xb9, 0x24, 0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b,
+            0x78, 0x52, 0xb8, 0x55,
+        ];
+        assert_eq!(
+            &result.unwrap().bytes[..],
+            &expected,
+            "sha256(\"\") mismatch"
+        );
+    }
+
+    /// Identity (0x04) passes through its input unchanged.
+    #[test]
+    fn test_identity_passthrough() {
+        let precompiles = bernoulli();
+        let identity = precompiles.get(&addresses::IDENTITY).unwrap();
+
+        let input: &[u8] = &[0x12, 0x34, 0xab, 0xcd];
+        let result = identity.execute(input, 100_000);
+        assert!(result.is_ok(), "identity should succeed");
+        assert_eq!(
+            &result.unwrap().bytes[..],
+            input,
+            "identity must return input unchanged"
+        );
+    }
+
+    /// KZG Point Evaluation (0x0a) must be absent from all Morph precompile sets.
+    ///
+    /// go-ethereum's Morph never includes KZG in any hardfork precompile set.
+    #[test]
+    fn test_kzg_0x0a_absent_all_profiles() {
+        assert!(
+            !bernoulli().contains(&addresses::POINT_EVALUATION),
+            "bernoulli must not include KZG (0x0a)"
+        );
+        assert!(
+            !morph203().contains(&addresses::POINT_EVALUATION),
+            "morph203 must not include KZG (0x0a)"
+        );
+        assert!(
+            !emerald().contains(&addresses::POINT_EVALUATION),
+            "emerald must not include KZG (0x0a)"
+        );
+    }
+
     #[test]
     fn test_modexp_len_check() {
         // Value = 0 (all zeros) — should NOT exceed 32
