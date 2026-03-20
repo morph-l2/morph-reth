@@ -62,9 +62,7 @@ async fn new_l2_block_imports_assembled_block_over_rpc() -> eyre::Result<()> {
     let mut params = AssembleL2BlockParams::empty(1);
     params.timestamp = Some(1);
 
-    let data: ExecutableL2Data = client
-        .request("engine_assembleL2Block", (params,))
-        .await?;
+    let data: ExecutableL2Data = client.request("engine_assembleL2Block", (params,)).await?;
     let expected_hash = data.hash;
 
     let _: () = client.request("engine_newL2Block", (data,)).await?;
@@ -75,7 +73,11 @@ async fn new_l2_block_imports_assembled_block_over_rpc() -> eyre::Result<()> {
         .sealed_header_by_number_or_tag(alloy_rpc_types_eth::BlockNumberOrTag::Latest)?
         .expect("latest header must exist after importing the block");
 
-    assert_eq!(latest.number(), 1, "engine_newL2Block should advance the head");
+    assert_eq!(
+        latest.number(),
+        1,
+        "engine_newL2Block should advance the head"
+    );
     assert_eq!(
         latest.hash(),
         expected_hash,
@@ -98,14 +100,10 @@ async fn validate_l2_block_rejects_tampered_hash_over_rpc() -> eyre::Result<()> 
     let mut params = AssembleL2BlockParams::empty(1);
     params.timestamp = Some(1);
 
-    let mut data: ExecutableL2Data = client
-        .request("engine_assembleL2Block", (params,))
-        .await?;
+    let mut data: ExecutableL2Data = client.request("engine_assembleL2Block", (params,)).await?;
     data.hash = B256::from([0xFF; 32]);
 
-    let response: GenericResponse = client
-        .request("engine_validateL2Block", (data,))
-        .await?;
+    let response: GenericResponse = client.request("engine_validateL2Block", (data,)).await?;
 
     assert!(
         !response.success,

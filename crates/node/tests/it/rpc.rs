@@ -348,7 +348,13 @@ async fn transaction_receipt_exposes_morph_fields_over_rpc() -> eyre::Result<()>
     node.rpc.inject_tx(raw_tx).await?;
 
     let payload = node.advance_block().await?;
-    let tx_hash = *payload.block().body().transactions.first().unwrap().tx_hash();
+    let tx_hash = *payload
+        .block()
+        .body()
+        .transactions
+        .first()
+        .unwrap()
+        .tx_hash();
     let client = node
         .rpc_client()
         .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
@@ -360,7 +366,10 @@ async fn transaction_receipt_exposes_morph_fields_over_rpc() -> eyre::Result<()>
     assert_eq!(receipt["type"].as_str(), Some("0x7f"));
     assert_eq!(receipt["version"].as_u64(), Some(1));
     assert_eq!(receipt["feeTokenID"].as_str(), Some("0x1"));
-    assert_eq!(receipt["reference"].as_str(), Some(expected_reference.as_str()));
+    assert_eq!(
+        receipt["reference"].as_str(),
+        Some(expected_reference.as_str())
+    );
     assert_eq!(receipt["memo"].as_str(), Some(expected_memo.as_str()));
     assert!(
         receipt["feeRate"].as_str().is_some(),
@@ -375,7 +384,9 @@ async fn transaction_receipt_exposes_morph_fields_over_rpc() -> eyre::Result<()>
         "feeLimit should be serialized for token-fee MorphTx receipts"
     );
     assert!(
-        receipt["l1Fee"].as_str().is_some_and(|value| value != "0x0"),
+        receipt["l1Fee"]
+            .as_str()
+            .is_some_and(|value| value != "0x0"),
         "l1Fee should be serialized as a non-zero quantity for calldata txs"
     );
 
@@ -403,7 +414,13 @@ async fn transaction_by_hash_exposes_morph_fields_over_rpc() -> eyre::Result<()>
     node.rpc.inject_tx(raw_tx).await?;
 
     let payload = node.advance_block().await?;
-    let tx_hash = *payload.block().body().transactions.first().unwrap().tx_hash();
+    let tx_hash = *payload
+        .block()
+        .body()
+        .transactions
+        .first()
+        .unwrap()
+        .tx_hash();
     let client = node
         .rpc_client()
         .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
