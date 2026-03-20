@@ -91,5 +91,5 @@ jobs:
           tool: cargo-nextest
 
       - name: Run E2E tests
-        run: cargo nextest run --profile ci -p morph-node -E 'test(it::)' --features test-utils
+        run: cargo nextest run --profile ci -p morph-node --test it --features test-utils
 
