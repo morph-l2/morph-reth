@@ -1,0 +1,15 @@
+[profile.default]
+# Each integration test opens an MDBX environment. macOS limits concurrent
+# memory-mapped files per process. Cap concurrent tests to avoid ENOMEM (error 12).
+test-threads = 4
+
+[profile.ci]
+# CI machines have more resources; allow up to 8 but still cap to avoid MDBX limits.
+test-threads = 4
+retries = 2
+fail-fast = false
+
+# Integration tests are heavier — give them more time
+[[profile.default.overrides]]
+filter = "test(it::)"
+slow-timeout = { period = "120s", terminate-after = 3 }

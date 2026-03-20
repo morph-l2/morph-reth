@@ -63,6 +63,8 @@ reth-e2e-test-utils = { workspace = true, optional = true }
 reth-tasks = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["sync"], optional = true }
 alloy-eips = { workspace = true, optional = true }
+alloy-rlp = { workspace = true, optional = true }
+alloy-signer = { workspace = true, optional = true }
 alloy-signer-local = { workspace = true, optional = true }
 
 [dev-dependencies]
@@ -70,7 +72,15 @@ tokio = { workspace = true, features = ["full"] }
 reth-db = { workspace = true, features = ["test-utils"] }
 reth-e2e-test-utils.workspace = true
 reth-node-core.workspace = true
+reth-payload-primitives.workspace = true
 reth-tasks.workspace = true
+reth-tracing.workspace = true
+alloy-consensus.workspace = true
+alloy-primitives.workspace = true
+alloy-rpc-types-engine.workspace = true
+alloy-rpc-types-eth.workspace = true
+morph-payload-types.workspace = true
+morph-primitives.workspace = true
 serde_json.workspace = true
 
 [[test]]
@@ -83,7 +93,9 @@ default = []
 test-utils = [
     "reth-e2e-test-utils",
     "dep:reth-tasks",
+    "dep:alloy-signer",
     "dep:tokio",
     "dep:alloy-eips",
+    "dep:alloy-rlp",
     "dep:alloy-signer-local",
 ]
