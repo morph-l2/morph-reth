@@ -4,7 +4,8 @@
 //! for common eth_ namespace methods after blocks have been produced.
 
 use alloy_consensus::{BlockHeader, transaction::TxHashRef};
-use alloy_primitives::Sealable;
+use alloy_primitives::{B256, Sealable};
+use jsonrpsee::core::client::ClientT;
 use morph_node::test_utils::{
     L1MessageBuilder, MorphTxBuilder, TEST_TOKEN_ID, TestNodeBuilder, advance_chain,
 };
@@ -13,6 +14,7 @@ use reth_provider::{
     AccountReader, BlockReader, BlockReaderIdExt, HeaderProvider, ReceiptProvider,
     StateProviderFactory, TransactionsProvider,
 };
+use serde_json::Value;
 
 use super::helpers::wallet_to_arc;
 
@@ -321,5 +323,102 @@ async fn l1_message_receipt_l1_fee_is_zero() -> eyre::Result<()> {
         alloy_primitives::U256::ZERO,
         "L1 message l1_fee must be 0"
     );
+    Ok(())
+}
+
+/// `eth_getTransactionReceipt` exposes Morph-specific receipt fields over JSON-RPC.
+#[tokio::test(flavor = "multi_thread")]
+async fn transaction_receipt_exposes_morph_fields_over_rpc() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+
+    let reference = B256::with_last_byte(0x44);
+    let memo = alloy_primitives::Bytes::from_static(b"invoice-42");
+    let expected_reference = reference.to_string();
+    let expected_memo = memo.to_string();
+
+    let raw_tx = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
+        .with_v1_token_fee(TEST_TOKEN_ID)
+        .with_reference(reference)
+        .with_memo(memo)
+        .with_data(vec![0xaa; 16])
+        .build_signed()?;
+    node.rpc.inject_tx(raw_tx).await?;
+
+    let payload = node.advance_block().await?;
+    let tx_hash = *payload.block().body().transactions.first().unwrap().tx_hash();
+    let client = node
+        .rpc_client()
+        .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
+
+    let receipt: Value = client
+        .request("eth_getTransactionReceipt", (tx_hash,))
+        .await?;
+
+    assert_eq!(receipt["type"].as_str(), Some("0x7f"));
+    assert_eq!(receipt["version"].as_u64(), Some(1));
+    assert_eq!(receipt["feeTokenID"].as_str(), Some("0x1"));
+    assert_eq!(receipt["reference"].as_str(), Some(expected_reference.as_str()));
+    assert_eq!(receipt["memo"].as_str(), Some(expected_memo.as_str()));
+    assert!(
+        receipt["feeRate"].as_str().is_some(),
+        "feeRate should be serialized for token-fee MorphTx receipts"
+    );
+    assert!(
+        receipt["tokenScale"].as_str().is_some(),
+        "tokenScale should be serialized for token-fee MorphTx receipts"
+    );
+    assert!(
+        receipt["feeLimit"].as_str().is_some(),
+        "feeLimit should be serialized for token-fee MorphTx receipts"
+    );
+    assert!(
+        receipt["l1Fee"].as_str().is_some_and(|value| value != "0x0"),
+        "l1Fee should be serialized as a non-zero quantity for calldata txs"
+    );
+
+    Ok(())
+}
+
+/// `eth_getTransactionByHash` exposes MorphTx reference and memo over JSON-RPC.
+#[tokio::test(flavor = "multi_thread")]
+async fn transaction_by_hash_exposes_morph_fields_over_rpc() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+
+    let reference = B256::with_last_byte(0x55);
+    let memo = alloy_primitives::Bytes::from_static(b"memo-check");
+    let expected_reference = reference.to_string();
+    let expected_memo = memo.to_string();
+
+    let raw_tx = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
+        .with_v1_token_fee(TEST_TOKEN_ID)
+        .with_reference(reference)
+        .with_memo(memo)
+        .build_signed()?;
+    node.rpc.inject_tx(raw_tx).await?;
+
+    let payload = node.advance_block().await?;
+    let tx_hash = *payload.block().body().transactions.first().unwrap().tx_hash();
+    let client = node
+        .rpc_client()
+        .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
+
+    let tx: Value = client
+        .request("eth_getTransactionByHash", (tx_hash,))
+        .await?;
+
+    assert_eq!(tx["hash"].as_str(), Some(tx_hash.to_string().as_str()));
+    assert_eq!(tx["type"].as_str(), Some("0x7f"));
+    assert_eq!(tx["version"].as_u64(), Some(1));
+    assert_eq!(tx["feeTokenID"].as_str(), Some("0x1"));
+    assert!(tx["feeLimit"].as_str().is_some());
+    assert_eq!(tx["reference"].as_str(), Some(expected_reference.as_str()));
+    assert_eq!(tx["memo"].as_str(), Some(expected_memo.as_str()));
+
     Ok(())
 }

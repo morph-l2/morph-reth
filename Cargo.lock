@@ -4824,6 +4824,7 @@ dependencies = [
  "clap",
  "dashmap 6.1.0",
  "eyre",
+ "jsonrpsee",
  "morph-chainspec",
  "morph-consensus",
  "morph-engine-api",

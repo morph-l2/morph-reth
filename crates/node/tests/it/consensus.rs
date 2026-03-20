@@ -276,3 +276,27 @@ async fn next_l1_msg_index_insufficient_for_l1_msgs() -> eyre::Result<()> {
     assert!(!accepted, "next_l1_msg_index < required should be rejected");
     Ok(())
 }
+
+/// A block may advance `next_l1_msg_index` past the included messages to account for skips.
+#[tokio::test(flavor = "multi_thread")]
+async fn next_l1_msg_index_can_skip_past_included_messages() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+    let (mut nodes, _tasks, _wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+
+    // Build block with queue indices 0,1 and then advance header.next_l1_msg_index to 4.
+    // This models the sequencer skipping queue indices 2 and 3 while still including 0 and 1.
+    let l1_msgs = L1MessageBuilder::build_sequential(0, 2);
+    let base = build_block_no_submit(&mut node, l1_msgs).await?;
+
+    let accepted = craft_and_try_import_block(&mut node, &base, |block| {
+        block.header.next_l1_msg_index = 4;
+    })
+    .await?;
+
+    assert!(
+        accepted,
+        "next_l1_msg_index may advance past included L1 messages to represent skipped queue indices"
+    );
+    Ok(())
+}

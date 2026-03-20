@@ -4,8 +4,12 @@
 //! enforcement — in particular the state-root validation gating introduced
 //! by the Jade hardfork.
 
+use alloy_consensus::BlockHeader;
 use alloy_primitives::B256;
+use jsonrpsee::core::client::ClientT;
 use morph_node::test_utils::{HardforkSchedule, TestNodeBuilder};
+use morph_payload_types::{AssembleL2BlockParams, ExecutableL2Data, GenericResponse};
+use reth_provider::BlockReaderIdExt;
 
 use super::helpers::{build_block_no_submit, craft_and_try_import_block};
 
@@ -40,6 +44,72 @@ async fn state_root_validation_skipped_pre_jade() -> eyre::Result<()> {
     assert!(
         accepted,
         "pre-Jade block with wrong state root must be accepted (state root validation skipped)"
+    );
+
+    Ok(())
+}
+
+/// `engine_newL2Block` can import a block assembled over the authenticated RPC.
+#[tokio::test(flavor = "multi_thread")]
+async fn new_l2_block_imports_assembled_block_over_rpc() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, _tasks, _wallet) = TestNodeBuilder::new().build().await?;
+    let node = nodes.pop().unwrap();
+
+    let auth = node.auth_server_handle();
+    let client = auth.http_client();
+    let mut params = AssembleL2BlockParams::empty(1);
+    params.timestamp = Some(1);
+
+    let data: ExecutableL2Data = client
+        .request("engine_assembleL2Block", (params,))
+        .await?;
+    let expected_hash = data.hash;
+
+    let _: () = client.request("engine_newL2Block", (data,)).await?;
+
+    let latest = node
+        .inner
+        .provider
+        .sealed_header_by_number_or_tag(alloy_rpc_types_eth::BlockNumberOrTag::Latest)?
+        .expect("latest header must exist after importing the block");
+
+    assert_eq!(latest.number(), 1, "engine_newL2Block should advance the head");
+    assert_eq!(
+        latest.hash(),
+        expected_hash,
+        "imported canonical head should match the assembled block hash"
+    );
+
+    Ok(())
+}
+
+/// `engine_validateL2Block` rejects a tampered block hash over authenticated RPC.
+#[tokio::test(flavor = "multi_thread")]
+async fn validate_l2_block_rejects_tampered_hash_over_rpc() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, _tasks, _wallet) = TestNodeBuilder::new().build().await?;
+    let node = nodes.pop().unwrap();
+
+    let auth = node.auth_server_handle();
+    let client = auth.http_client();
+    let mut params = AssembleL2BlockParams::empty(1);
+    params.timestamp = Some(1);
+
+    let mut data: ExecutableL2Data = client
+        .request("engine_assembleL2Block", (params,))
+        .await?;
+    data.hash = B256::from([0xFF; 32]);
+
+    let response: GenericResponse = client
+        .request("engine_validateL2Block", (data,))
+        .await?;
+
+    assert!(
+        !response.success,
+        "engine_validateL2Block should reject tampered block hashes"
     );
 
     Ok(())

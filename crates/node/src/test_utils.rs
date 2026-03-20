@@ -431,6 +431,31 @@ pub fn make_eip2930_tx(chain_id: u64, signer: PrivateKeySigner, nonce: u64) -> e
     Ok(envelope.encoded_2718().into())
 }
 
+/// Creates a signed EIP-4844 (type 0x03) transaction.
+pub fn make_eip4844_tx(chain_id: u64, signer: PrivateKeySigner, nonce: u64) -> eyre::Result<Bytes> {
+    use alloy_consensus::{EthereumTxEnvelope, SignableTransaction, TxEip4844};
+    use alloy_signer::SignerSync;
+
+    let tx = TxEip4844 {
+        chain_id,
+        nonce,
+        gas_limit: 100_000,
+        max_fee_per_gas: 20_000_000_000u128,
+        max_priority_fee_per_gas: 20_000_000_000u128,
+        max_fee_per_blob_gas: 1u128,
+        to: Address::with_last_byte(0x42),
+        value: U256::from(100),
+        access_list: Default::default(),
+        input: Bytes::new(),
+        blob_versioned_hashes: vec![B256::with_last_byte(0x01)],
+    };
+    let sig = signer
+        .sign_hash_sync(&tx.signature_hash())
+        .map_err(|e| eyre::eyre!("signing failed: {e}"))?;
+    let envelope = EthereumTxEnvelope::Eip4844(tx.into_signed(sig));
+    Ok(envelope.encoded_2718().into())
+}
+
 /// Creates a signed EIP-7702 (type 0x04) transaction.
 pub fn make_eip7702_tx(chain_id: u64, signer: PrivateKeySigner, nonce: u64) -> eyre::Result<Bytes> {
     use alloy_consensus::{SignableTransaction, TxEip7702};

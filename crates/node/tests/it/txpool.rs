@@ -9,8 +9,9 @@
 use alloy_consensus::TxLegacy;
 use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{Address, Bytes, TxKind, U256};
-use alloy_signer_local;
-use morph_node::test_utils::{L1MessageBuilder, TestNodeBuilder, advance_chain, make_transfer_tx};
+use morph_node::test_utils::{
+    L1MessageBuilder, TestNodeBuilder, advance_chain, make_eip4844_tx, make_transfer_tx,
+};
 use morph_primitives::MorphTxEnvelope;
 use reth_payload_primitives::BuiltPayload;
 
@@ -207,17 +208,16 @@ async fn eip2930_accepted_by_pool() -> eyre::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn blob_tx_rejected_by_pool() -> eyre::Result<()> {
+async fn eip4844_tx_rejected_by_pool() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
-    let (mut nodes, _tasks, _wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
     let node = nodes.pop().unwrap();
 
-    // Craft minimal bytes with blob tx type prefix (0x03)
-    let fake_blob_tx: alloy_primitives::Bytes = vec![0x03, 0xc0].into(); // type 3 + empty RLP list
-    let result = node.rpc.inject_tx(fake_blob_tx).await;
+    let blob_tx = make_eip4844_tx(wallet.chain_id, wallet.inner.clone(), 0)?;
+    let result = node.rpc.inject_tx(blob_tx).await;
     assert!(
         result.is_err(),
-        "blob transactions (type 0x03) must be rejected"
+        "EIP-4844 blob transactions (type 0x03) must be rejected"
     );
     Ok(())
 }
@@ -271,7 +271,7 @@ async fn tx_gas_limit_exceeds_block_limit_rejected() -> eyre::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn tx_max_fee_below_base_fee_rejected() -> eyre::Result<()> {
+async fn tx_max_fee_below_base_fee_accepted_for_queuing() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
     let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
     let node = nodes.pop().unwrap();

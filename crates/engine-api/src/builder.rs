@@ -580,7 +580,8 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
                 ))
             })?;
 
-        self.payload_builder
+        let mut built_payload = self
+            .payload_builder
             .best_payload(payload_id)
             .await
             .ok_or_else(|| {
@@ -588,7 +589,13 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
             })?
             .map_err(|e| {
                 MorphEngineApiError::BlockBuildError(format!("failed to get built payload: {e}"))
-            })
+            })?;
+
+        let (header, _) =
+            self.header_and_body_from_executable_data(&built_payload.executable_data)?;
+        built_payload.executable_data.hash = header.hash_slow();
+
+        Ok(built_payload)
     }
 
     async fn import_l2_block_via_engine(
@@ -696,6 +703,30 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
         &self,
         data: &ExecutableL2Data,
     ) -> EngineApiResult<(MorphExecutionData, MorphHeader)> {
+        let (header, body) = self.header_and_body_from_executable_data(data)?;
+        let computed_hash = header.hash_slow();
+        if computed_hash != data.hash {
+            return Err(MorphEngineApiError::ValidationFailed(format!(
+                "block hash mismatch: expected {}, computed {}",
+                data.hash, computed_hash
+            )));
+        }
+        let sealed_block =
+            SealedBlock::new_unchecked(Block::new(header.clone(), body), computed_hash);
+
+        Ok((
+            MorphExecutionData::with_expected_withdraw_trie_root(
+                Arc::new(sealed_block),
+                data.withdraw_trie_root,
+            ),
+            header,
+        ))
+    }
+
+    fn header_and_body_from_executable_data(
+        &self,
+        data: &ExecutableL2Data,
+    ) -> EngineApiResult<(MorphHeader, BlockBody)> {
         let base_fee_per_gas = data
             .base_fee_per_gas
             .map(|fee| {
@@ -779,27 +810,7 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
             withdrawals: None,
         };
 
-        // Compute header hash once and verify against expected hash before
-        // constructing the sealed block. This avoids the clone + re-hash that
-        // seal_slow would perform, saving one keccak256 + one MorphHeader clone
-        // per block import.
-        let computed_hash = header.hash_slow();
-        if computed_hash != data.hash {
-            return Err(MorphEngineApiError::ValidationFailed(format!(
-                "block hash mismatch: expected {}, computed {}",
-                data.hash, computed_hash
-            )));
-        }
-        let sealed_block =
-            SealedBlock::new_unchecked(Block::new(header.clone(), body), computed_hash);
-
-        Ok((
-            MorphExecutionData::with_expected_withdraw_trie_root(
-                Arc::new(sealed_block),
-                data.withdraw_trie_root,
-            ),
-            header,
-        ))
+        Ok((header, body))
     }
 
     fn ensure_payload_status_acceptable(
