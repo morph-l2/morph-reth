@@ -397,3 +397,194 @@ async fn morph_tx_fee_limit_zero_accepted() -> eyre::Result<()> {
     );
     Ok(())
 }
+
+// =============================================================================
+// ERC20 token fee — balance deduction and revert behavior
+// =============================================================================
+
+/// Helper: compute the ERC20 balance storage slot for an account.
+///
+/// For the test token (balance mapping at slot 1):
+///   slot = keccak256(address_left_padded_to_32 ++ slot_1_as_be32)
+fn token_balance_slot(account: Address) -> alloy_primitives::B256 {
+    let mut preimage = [0u8; 64];
+    preimage[12..32].copy_from_slice(account.as_slice());
+    preimage[63] = 1; // slot 1
+    alloy_primitives::keccak256(preimage)
+}
+
+/// After a successful MorphTx v0 with ERC20 fee, the sender's token balance
+/// must decrease (fee was charged from tokens, not ETH).
+#[tokio::test(flavor = "multi_thread")]
+async fn morph_tx_v0_token_balance_decreases() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+    use reth_provider::StateProviderFactory;
+
+    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+
+    let sender = alloy_primitives::address!("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+    let token_addr = morph_node::test_utils::TEST_TOKEN_ADDRESS;
+    let bal_slot = token_balance_slot(sender);
+
+    // Token balance before
+    let state_before = node.inner.provider.latest()?;
+    let bal_before = state_before
+        .storage(token_addr, bal_slot)?
+        .unwrap_or_default();
+    assert!(
+        bal_before > alloy_primitives::U256::ZERO,
+        "test account must have pre-funded tokens"
+    );
+
+    // Send a MorphTx v0 with ERC20 fee (simple call, should succeed)
+    let raw_tx = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
+        .with_v0_token_fee(TEST_TOKEN_ID)
+        .with_to(Address::with_last_byte(0x42))
+        .build_signed()?;
+    node.rpc.inject_tx(raw_tx).await?;
+    node.advance_block().await?;
+
+    // Token balance after
+    let state_after = node.inner.provider.latest()?;
+    let bal_after = state_after
+        .storage(token_addr, bal_slot)?
+        .unwrap_or_default();
+
+    assert!(
+        bal_after < bal_before,
+        "token balance must decrease after MorphTx v0 (fee deducted in tokens)"
+    );
+
+    Ok(())
+}
+
+/// Init code that deploys a contract whose runtime always REVERTs.
+///
+/// Constructor (12 bytes): CODECOPY + RETURN → deploys runtime below.
+/// Runtime (5 bytes): PUSH1 0; PUSH1 0; REVERT.
+const RUNTIME_REVERT_INIT: &[u8] = &[
+    0x60, 0x05, // PUSH1 5 (runtime code size)
+    0x60, 0x0C, // PUSH1 12 (offset of runtime in init code)
+    0x60, 0x00, // PUSH1 0 (memory dest)
+    0x39, // CODECOPY
+    0x60, 0x05, // PUSH1 5 (return size)
+    0x60, 0x00, // PUSH1 0 (return offset)
+    0xf3, // RETURN
+    // Runtime code (at offset 12):
+    0x60, 0x00, // PUSH1 0
+    0x60, 0x00, // PUSH1 0
+    0xfd, // REVERT
+];
+
+/// When the main tx reverts, the ERC20 gas fee is still charged.
+///
+/// Scenario:
+///   1. Block 1: Deploy a contract whose runtime always REVERTs (EIP-1559 tx)
+///   2. Block 2: Call that contract with MorphTx v0 (ERC20 fee)
+///   3. Verify: receipt.status = false, but token balance decreased
+///
+/// This exercises the handler's `validate_and_deduct_token_fee` (charges fee
+/// upfront) and `reimburse_caller_token_fee` (partial refund for unused gas)
+/// paths when the main transaction execution reverts.
+#[tokio::test(flavor = "multi_thread")]
+async fn morph_tx_v0_token_fee_still_charged_on_revert() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+    use alloy_consensus::TxReceipt;
+    use alloy_consensus::transaction::TxHashRef;
+    use morph_node::test_utils::{make_deploy_tx, wallet_at_index};
+    use reth_provider::{ReceiptProvider, StateProviderFactory};
+
+    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+
+    let sender = alloy_primitives::address!("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+    let token_addr = morph_node::test_utils::TEST_TOKEN_ADDRESS;
+    let bal_slot = token_balance_slot(sender);
+    let chain_id = wallet.chain_id;
+
+    // Token balance before any transactions
+    let bal_before = node
+        .inner
+        .provider
+        .latest()?
+        .storage(token_addr, bal_slot)?
+        .unwrap_or_default();
+
+    // Block 1: deploy the "runtime revert" contract with a standard EIP-1559 tx
+    let deploy_signer = wallet_at_index(0, chain_id);
+    let deploy_tx = make_deploy_tx(chain_id, deploy_signer, 0, RUNTIME_REVERT_INIT)?;
+    node.rpc.inject_tx(deploy_tx).await?;
+    node.advance_block().await?;
+
+    let revert_contract = Address::create(&sender, 0);
+
+    // Block 2: call the reverting contract with MorphTx v0 (ERC20 fee)
+    let morph_tx = MorphTxBuilder::new(chain_id, wallet.inner.clone(), 1)
+        .with_v0_token_fee(TEST_TOKEN_ID)
+        .with_to(revert_contract)
+        .with_gas_limit(100_000)
+        .build_signed()?;
+    node.rpc.inject_tx(morph_tx).await?;
+    let payload = node.advance_block().await?;
+
+    // Verify receipt: status must be false (main tx reverted)
+    let tx_hash = *payload
+        .block()
+        .body()
+        .transactions
+        .first()
+        .unwrap()
+        .tx_hash();
+    let receipt = node
+        .inner
+        .provider
+        .receipt_by_hash(tx_hash)?
+        .expect("receipt must exist");
+
+    assert!(
+        !receipt.status(),
+        "main tx should revert (runtime REVERT contract)"
+    );
+
+    // Token balance must have decreased even though the main tx reverted.
+    // Fee was deducted upfront; only unused gas is partially refunded.
+    let bal_after = node
+        .inner
+        .provider
+        .latest()?
+        .storage(token_addr, bal_slot)?
+        .unwrap_or_default();
+
+    assert!(
+        bal_after < bal_before,
+        "token balance must decrease even when main tx reverts \
+         (fee deducted upfront, partial refund for unused gas). \
+         before={bal_before}, after={bal_after}"
+    );
+
+    // The receipt should carry MorphTx-specific fee fields
+    match &receipt {
+        morph_primitives::MorphReceipt::Morph(morph_receipt) => {
+            assert_eq!(
+                morph_receipt.fee_token_id,
+                Some(TEST_TOKEN_ID),
+                "receipt must carry fee_token_id"
+            );
+            assert!(
+                morph_receipt.fee_rate.is_some(),
+                "receipt must carry fee_rate"
+            );
+            assert!(
+                morph_receipt.token_scale.is_some(),
+                "receipt must carry token_scale"
+            );
+        }
+        other => panic!(
+            "expected MorphReceipt::Morph variant, got {:?}",
+            other.tx_type()
+        ),
+    }
+
+    Ok(())
+}
