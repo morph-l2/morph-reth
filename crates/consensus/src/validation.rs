@@ -1370,12 +1370,15 @@ mod tests {
     #[test]
     fn test_verify_receipts_empty() {
         let receipts: [MorphReceipt; 0] = [];
-        let expected_root = alloy_consensus::proofs::calculate_receipt_root::<
-            alloy_consensus::ReceiptWithBloom<&MorphReceipt>,
-        >(&[]);
+        // Well-known Ethereum empty-trie root (keccak256 of RLP-encoded empty string).
+        // Using a hardcoded constant instead of calculate_receipt_root(&[]) to avoid
+        // a circular test that would pass even if the root computation is wrong.
+        let empty_root: B256 = "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421"
+            .parse()
+            .unwrap();
         let expected_bloom = Bloom::ZERO;
 
-        let result = verify_receipts(expected_root, expected_bloom, &receipts);
+        let result = verify_receipts(empty_root, expected_bloom, &receipts);
         assert!(result.is_ok());
     }
 

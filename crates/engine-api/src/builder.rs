@@ -1251,4 +1251,45 @@ mod tests {
             other => panic!("unexpected error: {other}"),
         }
     }
+
+    // ========================================================================
+    // resolve_fcu_block_tag_hash tests — all three branches
+    // ========================================================================
+
+    /// When L1 provides a tag hash, use it directly regardless of block age.
+    #[test]
+    fn test_resolve_fcu_with_l1_tag_hash() {
+        let l1_hash = B256::repeat_byte(0xAA);
+        let head_hash = B256::repeat_byte(0xBB);
+        let result = resolve_fcu_block_tag_hash(Some(l1_hash), head_hash, 0, 9999);
+        assert_eq!(
+            result, l1_hash,
+            "must use the L1-provided hash when present"
+        );
+    }
+
+    /// When no L1 tag and the block is stale (> 60s old), fall back to head hash.
+    #[test]
+    fn test_resolve_fcu_stale_block_falls_back_to_head() {
+        let head_hash = B256::repeat_byte(0xBB);
+        // block_timestamp = 100, now = 200 → age = 100 > 60s threshold
+        let result = resolve_fcu_block_tag_hash(None, head_hash, 100, 200);
+        assert_eq!(
+            result, head_hash,
+            "stale block (>60s) without L1 tag must fall back to head_hash"
+        );
+    }
+
+    /// When no L1 tag and the block is fresh (<= 60s old), return zero hash.
+    #[test]
+    fn test_resolve_fcu_fresh_block_returns_zero() {
+        let head_hash = B256::repeat_byte(0xBB);
+        // block_timestamp = 100, now = 130 → age = 30 ≤ 60s
+        let result = resolve_fcu_block_tag_hash(None, head_hash, 100, 130);
+        assert_eq!(
+            result,
+            B256::ZERO,
+            "fresh block (≤60s) without L1 tag must return B256::ZERO"
+        );
+    }
 }

@@ -518,8 +518,8 @@ async fn transfer_tx_with_nonce(chain_id: u64, signer: PrivateKeySigner, nonce: 
 ///
 /// The attributes generator function passed to reth's E2E test framework.
 /// Creates minimal attributes with no L1 messages, suitable for basic tests.
-/// Use [`L1MessageBuilder`] + [`morph_payload_attributes_with_l1_msgs`] for
-/// tests that need L1 messages.
+/// Use [`L1MessageBuilder`] + [`advance_block_with_l1_messages`] (in
+/// `tests/it/helpers.rs`) for tests that need L1 messages.
 pub fn morph_payload_attributes(timestamp: u64) -> MorphPayloadBuilderAttributes {
     let attributes = PayloadAttributes {
         timestamp,
@@ -572,7 +572,7 @@ pub struct L1MessageBuilder {
 impl L1MessageBuilder {
     /// Create a new builder with the given queue index.
     ///
-    /// Defaults: sender = random address, target = zero address,
+    /// Defaults: sender = `0x01`, target = zero address,
     /// value = 0, gas_limit = 100_000, data = empty.
     pub fn new(queue_index: u64) -> Self {
         Self {
@@ -694,8 +694,7 @@ pub const TEST_TOKEN_ADDRESS: Address = Address::new([
 ///
 /// let raw = MorphTxBuilder::new(chain_id, signer, nonce)
 ///     .with_v0_token_fee(TEST_TOKEN_ID)
-///     .build_signed()
-///     .await?;
+///     .build_signed()?;
 /// ```
 ///
 /// # Example — v1 ETH fee
@@ -703,8 +702,7 @@ pub const TEST_TOKEN_ADDRESS: Address = Address::new([
 /// ```ignore
 /// let raw = MorphTxBuilder::new(chain_id, signer, nonce)
 ///     .with_v1_eth_fee()
-///     .build_signed()
-///     .await?;
+///     .build_signed()?;
 /// ```
 pub struct MorphTxBuilder {
     chain_id: u64,

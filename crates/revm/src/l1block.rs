@@ -337,34 +337,40 @@ mod tests {
 
     #[test]
     fn test_calculate_tx_l1_cost_curie() {
-        let l1_commit_scalar = U256::from(230_759_955_285u64);
-        let l1_base_fee = U256::from(30_000_000_000u64); // 30 gwei
-        let l1_blob_base_fee = U256::from(1);
-        let l1_blob_scalar = U256::from(417_565_260);
-        let calldata_gas = l1_commit_scalar.saturating_mul(l1_base_fee);
+        // Use Morph mainnet initial Curie oracle values:
+        //   l1_commit_scalar = 230_759_955_285
+        //   l1_base_fee      = 30 gwei = 30_000_000_000
+        //   l1_blob_base_fee = 1
+        //   l1_blob_scalar   = 417_565_260
+        //
+        // Step-by-step (all integer arithmetic, no rounding):
+        //   calldata_gas = commit_scalar × base_fee
+        //                = 230_759_955_285 × 30_000_000_000
+        //                = 6_922_798_658_550_000_000_000
+        //   blob_gas     = len × blob_base_fee × blob_scalar
+        //                = 100 × 1 × 417_565_260
+        //                = 41_756_526_000
+        //   total        = (calldata_gas + blob_gas) / 1_000_000_000
+        //                = (6_922_798_658_550_000_000_000 + 41_756_526_000) / 1_000_000_000
+        //                = 6_922_798_658_591 (integer division, truncated)
+        //
+        // Pre-computed to avoid a circular test that would pass even if the
+        // formula itself were wrong.
+        let calldata_gas =
+            U256::from(230_759_955_285u64).saturating_mul(U256::from(30_000_000_000u64));
 
         let info = L1BlockInfo {
-            l1_base_fee,
-            l1_blob_base_fee,
-            l1_commit_scalar,
-            l1_blob_scalar,
+            l1_base_fee: U256::from(30_000_000_000u64),
+            l1_blob_base_fee: U256::from(1),
+            l1_commit_scalar: U256::from(230_759_955_285u64),
+            l1_blob_scalar: U256::from(417_565_260),
             calldata_gas,
             ..Default::default()
         };
 
-        // Test with 100 bytes of input
         let input = vec![0xff; 100];
         let cost = info.calculate_tx_l1_cost(&input, MorphHardfork::Curie);
-
-        // blob_gas = len * blob_base_fee * blob_scalar = 100 * 1 * 417_565_260
-        // total = (calldata_gas + blob_gas) / 1e9
-        let blob_gas = U256::from(100u64)
-            .saturating_mul(l1_blob_base_fee)
-            .saturating_mul(l1_blob_scalar);
-        let expected = calldata_gas
-            .saturating_add(blob_gas)
-            .wrapping_div(U256::from(1_000_000_000u64));
-        assert_eq!(cost, expected);
+        assert_eq!(cost, U256::from(6_922_798_658_591u64));
     }
 
     /// Verify the L1 fee cap at u64::MAX for circuit compatibility.

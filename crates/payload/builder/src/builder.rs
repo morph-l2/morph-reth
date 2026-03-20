@@ -963,7 +963,9 @@ mod tests {
     #[test]
     fn test_best_transaction_attributes() {
         let ctx = test_ctx(None);
-        let _ = ctx.best_transaction_attributes(7_000_000_000);
+        let attrs = ctx.best_transaction_attributes(7_000_000_000);
+        assert_eq!(attrs.basefee, 7_000_000_000);
+        assert!(attrs.blob_fee.is_none());
     }
 
     #[test]
