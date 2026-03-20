@@ -233,12 +233,15 @@ pub(crate) async fn expect_payload_build_failure(
     let attrs = MorphPayloadBuilderAttributes::try_new(head_hash, rpc_attrs, 3)
         .map_err(|e| eyre::eyre!("failed to build payload attributes: {e}"))?;
 
-    let payload_id = node
+    let payload_id = match node
         .inner
         .payload_builder_handle
         .send_new_payload(attrs)
         .await?
-        .map_err(|e| eyre::eyre!("payload build failed at send: {e}"))?;
+    {
+        Ok(id) => id,
+        Err(e) => return Ok(e.to_string()),
+    };
 
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 

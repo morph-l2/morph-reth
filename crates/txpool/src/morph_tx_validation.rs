@@ -452,8 +452,8 @@ mod tests {
         // EmptyDB has no token registry state, so token lookup will fail
         let err = validate_morph_tx(&mut db, &input).unwrap_err();
         assert!(
-            matches!(err, MorphTxError::TokenNotFound { .. }),
-            "expected TokenNotFound, got {err:?}"
+            matches!(err, MorphTxError::TokenNotFound { token_id: 42 }),
+            "expected TokenNotFound {{ token_id: 42 }}, got {err:?}"
         );
     }
 }

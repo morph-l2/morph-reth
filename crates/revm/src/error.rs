@@ -158,7 +158,10 @@ mod tests {
     fn test_into_evm_error() {
         let morph_err = MorphInvalidTransaction::TokenNotRegistered(1);
         let evm_err: EVMError<std::convert::Infallible, MorphInvalidTransaction> = morph_err.into();
-        assert!(matches!(evm_err, EVMError::Transaction(_)));
+        assert!(matches!(
+            evm_err,
+            EVMError::Transaction(MorphInvalidTransaction::TokenNotRegistered(1))
+        ));
     }
 
     #[test]

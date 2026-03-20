@@ -91,7 +91,7 @@ required-features = ["test-utils"]
 [features]
 default = []
 test-utils = [
-    "reth-e2e-test-utils",
+    "dep:reth-e2e-test-utils",
     "dep:reth-tasks",
     "dep:alloy-signer",
     "dep:tokio",

@@ -376,6 +376,7 @@ pub async fn advance_empty_block(node: &mut MorphTestNode) -> eyre::Result<Morph
     node.submit_payload(payload.clone()).await?;
     let block_hash = payload.block().hash();
     node.update_forkchoice(block_hash, block_hash).await?;
+    node.sync_to(block_hash).await?;
 
     Ok(payload)
 }
@@ -440,7 +441,7 @@ pub fn make_eip7702_tx(chain_id: u64, signer: PrivateKeySigner, nonce: u64) -> e
     let authorization = Authorization {
         chain_id: U256::from(chain_id),
         address: delegate_to,
-        nonce: 0,
+        nonce,
     };
     let auth_sig = signer
         .sign_hash_sync(&authorization.signature_hash())
