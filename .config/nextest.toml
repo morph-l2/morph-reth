@@ -4,10 +4,20 @@
 test-threads = 4
 
 [profile.ci]
-# CI machines have more resources; allow up to 8 but still cap to avoid MDBX limits.
-test-threads = 4
+# GitHub Actions ubuntu-latest has 4 vCPUs / 16GB RAM.
+# Each E2E test spawns a full reth node (MDBX + tokio runtime + rayon pools).
+# Limit to 2 concurrent tests to avoid MDBX resource exhaustion.
+test-threads = 2
 retries = 2
 fail-fast = false
+
+# E2E integration tests spawn full nodes — each needs exclusive MDBX resources.
+# threads-required = 2 means nextest counts each as needing 2 of the test-threads
+# slots, so only 1 runs at a time on CI (2 slots / 2 required = 1 concurrent).
+[[profile.ci.overrides]]
+filter = "package(morph-node) & test(it::)"
+threads-required = 2
+slow-timeout = { period = "120s", terminate-after = 3 }
 
 # Integration tests are heavier — give them more time
 [[profile.default.overrides]]

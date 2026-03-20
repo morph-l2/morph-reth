@@ -85,9 +85,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-e2e-
 
-      - name: Increase MDBX memory map limit
-        run: sudo sysctl -w vm.max_map_count=2097152
+      - name: Install nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
 
       - name: Run E2E tests
-        run: cargo test -p morph-node --test it --features test-utils --verbose -- --test-threads=1
+        run: cargo nextest run --profile ci -p morph-node -E 'test(it::)' --features test-utils
 
