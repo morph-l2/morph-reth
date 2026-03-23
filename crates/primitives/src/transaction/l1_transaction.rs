@@ -285,23 +285,12 @@ impl Encodable2718 for TxL1Msg {
     }
 
     fn encode_2718_len(&self) -> usize {
-        let payload_length = self.fields_len();
-        1 + Header {
-            list: true,
-            payload_length,
-        }
-        .length()
-            + payload_length
+        1 + self.rlp_encoded_length()
     }
 
     fn encode_2718(&self, out: &mut dyn BufMut) {
-        L1_TX_TYPE_ID.encode(out);
-        let header = Header {
-            list: true,
-            payload_length: self.fields_len(),
-        };
-        header.encode(out);
-        self.encode_fields(out);
+        out.put_u8(L1_TX_TYPE_ID);
+        self.rlp_encode(out);
     }
 }
 

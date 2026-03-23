@@ -43,9 +43,6 @@ use revm::{
     precompile::{Precompile, PrecompileError, PrecompileId, PrecompileResult, Precompiles},
     primitives::{OnceLock, hardfork::SpecId},
 };
-use std::boxed::Box;
-use std::string::String;
-
 /// Standard precompile addresses
 pub mod addresses {
     use super::Address;

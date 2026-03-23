@@ -444,37 +444,15 @@ where
         // FCU round-trip through the async engine pipeline for what is purely a tag
         // update, and correctly skips the update when the caller passes B256::ZERO.
         if finalized_block_hash != B256::ZERO {
-            let sealed = self
-                .provider
-                .sealed_header_by_hash(finalized_block_hash)
-                .map_err(|e| MorphEngineApiError::Internal(e.to_string()))?
-                .ok_or_else(|| {
-                    MorphEngineApiError::Internal(format!(
-                        "finalized block {finalized_block_hash} not found"
-                    ))
-                })?;
-            self.provider.set_finalized(sealed);
-            tracing::info!(
-                target: "morph::engine",
-                %finalized_block_hash,
-                "finalized block tag updated"
-            );
+            self.update_block_tag(finalized_block_hash, "finalized", |sealed| {
+                self.provider.set_finalized(sealed);
+            })?;
         }
 
         if safe_block_hash != B256::ZERO {
-            let sealed = self
-                .provider
-                .sealed_header_by_hash(safe_block_hash)
-                .map_err(|e| MorphEngineApiError::Internal(e.to_string()))?
-                .ok_or_else(|| {
-                    MorphEngineApiError::Internal(format!("safe block {safe_block_hash} not found"))
-                })?;
-            self.provider.set_safe(sealed);
-            tracing::info!(
-                target: "morph::engine",
-                %safe_block_hash,
-                "safe block tag updated"
-            );
+            self.update_block_tag(safe_block_hash, "safe", |sealed| {
+                self.provider.set_safe(sealed);
+            })?;
         }
 
         // Cache the L1-based hashes so subsequent FCU calls use them instead of
@@ -498,6 +476,34 @@ where
 }
 
 impl<Provider> RealMorphL2EngineApi<Provider> {
+    /// Looks up a sealed header by hash, calls `setter` on it, and logs the tag update.
+    ///
+    /// Used by `set_block_tags` to deduplicate the finalized/safe update paths.
+    fn update_block_tag(
+        &self,
+        hash: B256,
+        tag_name: &str,
+        setter: impl FnOnce(SealedHeader<MorphHeader>),
+    ) -> EngineApiResult<()>
+    where
+        Provider: HeaderProvider<Header = MorphHeader>,
+    {
+        let sealed = self
+            .provider
+            .sealed_header_by_hash(hash)
+            .map_err(|e| MorphEngineApiError::Internal(e.to_string()))?
+            .ok_or_else(|| {
+                MorphEngineApiError::Internal(format!("{tag_name} block {hash} not found"))
+            })?;
+        setter(sealed);
+        tracing::info!(
+            target: "morph::engine",
+            %hash,
+            "{tag_name} block tag updated"
+        );
+        Ok(())
+    }
+
     async fn build_l2_payload(
         &self,
         params: AssembleL2BlockParams,
