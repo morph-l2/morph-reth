@@ -66,6 +66,16 @@ impl MorphNode {
         ProviderFactoryBuilder::default()
     }
 
+    fn payload_builder_config(&self) -> MorphBuilderConfig {
+        let config =
+            MorphBuilderConfig::default().with_max_da_block_size(self.args.max_tx_payload_bytes);
+
+        match self.args.max_tx_per_block {
+            Some(max_tx) => config.with_max_tx_per_block(max_tx),
+            None => config,
+        }
+    }
+
     /// Returns a [`ComponentsBuilder`] configured for a Morph node.
     pub fn components<N>(
         payload_builder_config: MorphBuilderConfig,
@@ -118,17 +128,7 @@ where
     type AddOns = MorphAddOns<NodeAdapter<N>>;
 
     fn components_builder(&self) -> Self::ComponentsBuilder {
-        // Build payload config from args
-        let payload_config =
-            MorphBuilderConfig::default().with_max_da_block_size(self.args.max_tx_payload_bytes);
-
-        let payload_config = if let Some(max_tx) = self.args.max_tx_per_block {
-            payload_config.with_max_tx_per_block(max_tx)
-        } else {
-            payload_config
-        };
-
-        Self::components(payload_config)
+        Self::components(self.payload_builder_config())
     }
 
     fn add_ons(&self) -> Self::AddOns {

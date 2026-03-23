@@ -22,8 +22,8 @@ use reth_primitives_traits::{
 use reth_revm::database::StateProviderDatabase;
 use reth_storage_api::{BlockReaderIdExt, StateProviderFactory};
 use reth_transaction_pool::{
-    EthPoolTransaction, EthTransactionValidator, TransactionOrigin, TransactionValidationOutcome,
-    TransactionValidator,
+    EthPoolTransaction, EthTransactionValidator, PoolTransaction, TransactionOrigin,
+    TransactionValidationOutcome, TransactionValidator,
 };
 use std::sync::{
     Arc,
@@ -143,6 +143,24 @@ impl<Client, Tx> MorphTransactionValidator<Client, Tx> {
     pub fn block_info(&self) -> &Arc<MorphL1BlockInfo> {
         &self.block_info
     }
+}
+
+fn insufficient_funds_outcome<Tx: PoolTransaction>(
+    transaction: Tx,
+    balance: U256,
+    cost: U256,
+) -> TransactionValidationOutcome<Tx> {
+    TransactionValidationOutcome::Invalid(
+        transaction,
+        InvalidTransactionError::InsufficientFunds(
+            GotExpected {
+                got: balance,
+                expected: cost,
+            }
+            .into(),
+        )
+        .into(),
+    )
 }
 
 impl<Client, Tx> MorphTransactionValidator<Client, Tx>
@@ -301,16 +319,10 @@ where
                 if !validation.uses_token_fee {
                     let cost = valid_tx.transaction().cost().saturating_add(l1_data_fee);
                     if cost > balance {
-                        return TransactionValidationOutcome::Invalid(
+                        return insufficient_funds_outcome(
                             valid_tx.into_transaction(),
-                            InvalidTransactionError::InsufficientFunds(
-                                GotExpected {
-                                    got: balance,
-                                    expected: cost,
-                                }
-                                .into(),
-                            )
-                            .into(),
+                            balance,
+                            cost,
                         );
                     }
                 }
@@ -318,17 +330,7 @@ where
                 // Regular transaction: validate ETH balance covers cost + L1 fee
                 let cost = valid_tx.transaction().cost().saturating_add(l1_data_fee);
                 if cost > balance {
-                    return TransactionValidationOutcome::Invalid(
-                        valid_tx.into_transaction(),
-                        InvalidTransactionError::InsufficientFunds(
-                            GotExpected {
-                                got: balance,
-                                expected: cost,
-                            }
-                            .into(),
-                        )
-                        .into(),
-                    );
+                    return insufficient_funds_outcome(valid_tx.into_transaction(), balance, cost);
                 }
             }
 
