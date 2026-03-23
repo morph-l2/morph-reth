@@ -240,7 +240,10 @@ fn read_balance_from_storage<DB: Database>(
     account: Address,
     balance_slot: U256,
 ) -> Result<U256, DB::Error> {
-    db.storage(token, compute_mapping_slot_for_address(balance_slot, account))
+    db.storage(
+        token,
+        compute_mapping_slot_for_address(balance_slot, account),
+    )
 }
 
 /// Query ERC20 balance via EVM call.

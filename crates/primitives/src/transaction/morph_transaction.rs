@@ -397,44 +397,19 @@ impl TxMorph {
         Self::decode_fields_v1_inner(buf)
     }
 
-    /// Decodes the 11 common fields shared by V0 and V1 (assumes RLP header already consumed).
-    ///
-    /// Fields decoded in order: chain_id, nonce, max_priority_fee_per_gas, max_fee_per_gas,
-    /// gas_limit, to, value, input, access_list, fee_token_id, fee_limit.
-    fn decode_common_fields(
-        buf: &mut &[u8],
-    ) -> alloy_rlp::Result<(
-        ChainId,
-        u64,
-        u128,
-        u128,
-        u64,
-        TxKind,
-        U256,
-        Bytes,
-        alloy_eips::eip2930::AccessList,
-        u16,
-        U256,
-    )> {
-        Ok((
-            Decodable::decode(buf)?,
-            Decodable::decode(buf)?,
-            Decodable::decode(buf)?,
-            Decodable::decode(buf)?,
-            Decodable::decode(buf)?,
-            Decodable::decode(buf)?,
-            Decodable::decode(buf)?,
-            Decodable::decode(buf)?,
-            Decodable::decode(buf)?,
-            Decodable::decode(buf)?,
-            Decodable::decode(buf)?,
-        ))
-    }
-
     /// Decodes V1 format fields (inner, assumes RLP header already consumed).
     fn decode_fields_v1_inner(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
-        let (chain_id, nonce, max_priority_fee_per_gas, max_fee_per_gas, gas_limit, to, value,
-            input, access_list, fee_token_id, fee_limit) = Self::decode_common_fields(buf)?;
+        let chain_id = Decodable::decode(buf)?;
+        let nonce = Decodable::decode(buf)?;
+        let max_priority_fee_per_gas = Decodable::decode(buf)?;
+        let max_fee_per_gas = Decodable::decode(buf)?;
+        let gas_limit = Decodable::decode(buf)?;
+        let to = Decodable::decode(buf)?;
+        let value = Decodable::decode(buf)?;
+        let input = Decodable::decode(buf)?;
+        let access_list = Decodable::decode(buf)?;
+        let fee_token_id = Decodable::decode(buf)?;
+        let fee_limit = Decodable::decode(buf)?;
 
         // Decode reference: empty bytes means None, 32 bytes means Some(B256)
         let reference_bytes: Bytes = Decodable::decode(buf)?;
@@ -476,8 +451,17 @@ impl TxMorph {
 
     /// Decodes V0 format fields (inner, assumes RLP header already consumed).
     fn decode_fields_v0_inner(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
-        let (chain_id, nonce, max_priority_fee_per_gas, max_fee_per_gas, gas_limit, to, value,
-            input, access_list, fee_token_id, fee_limit) = Self::decode_common_fields(buf)?;
+        let chain_id = Decodable::decode(buf)?;
+        let nonce = Decodable::decode(buf)?;
+        let max_priority_fee_per_gas = Decodable::decode(buf)?;
+        let max_fee_per_gas = Decodable::decode(buf)?;
+        let gas_limit = Decodable::decode(buf)?;
+        let to = Decodable::decode(buf)?;
+        let value = Decodable::decode(buf)?;
+        let input = Decodable::decode(buf)?;
+        let access_list = Decodable::decode(buf)?;
+        let fee_token_id: u16 = Decodable::decode(buf)?;
+        let fee_limit = Decodable::decode(buf)?;
 
         // V0 requires FeeTokenID > 0
         if fee_token_id == 0 {

@@ -92,7 +92,8 @@ impl MorphReceipt {
 
     /// Returns length of RLP-encoded receipt fields with the given [`Bloom`] without an RLP header.
     pub fn rlp_encoded_fields_length(&self, bloom: &Bloom) -> usize {
-        self.as_receipt().rlp_encoded_fields_length_with_bloom(bloom)
+        self.as_receipt()
+            .rlp_encoded_fields_length_with_bloom(bloom)
     }
 
     /// RLP-encodes receipt fields with the given [`Bloom`] without an RLP header.

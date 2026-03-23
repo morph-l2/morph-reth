@@ -194,9 +194,7 @@ where
             }
         };
 
-        Ok(token_info.map(|info| {
-            receipt_fields(fee_token_id, info.price_ratio, info.scale)
-        }))
+        Ok(token_info.map(|info| receipt_fields(fee_token_id, info.price_ratio, info.scale)))
     }
 }
 
