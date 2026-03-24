@@ -165,7 +165,12 @@ async fn payload_builder_hash_matches_block_hash_with_nonzero_prev_randao() -> e
         if tokio::time::Instant::now() > deadline {
             return Err(eyre::eyre!("timeout waiting for payload {payload_id:?}"));
         }
-        match node.inner.payload_builder_handle.best_payload(payload_id).await {
+        match node
+            .inner
+            .payload_builder_handle
+            .best_payload(payload_id)
+            .await
+        {
             Some(Ok(p)) => break p,
             Some(Err(e)) => return Err(eyre::eyre!("payload build error: {e}")),
             None => tokio::time::sleep(std::time::Duration::from_millis(50)).await,

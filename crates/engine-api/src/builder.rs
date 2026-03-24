@@ -4,8 +4,7 @@
 
 use crate::{EngineApiResult, MorphEngineApiError, MorphL2EngineApi};
 use alloy_consensus::{
-    BlockHeader, EMPTY_OMMER_ROOT_HASH, Header,
-    proofs::calculate_transaction_root,
+    BlockHeader, EMPTY_OMMER_ROOT_HASH, Header, proofs::calculate_transaction_root,
 };
 use alloy_eips::eip2718::Decodable2718;
 use alloy_primitives::{Address, B64, B256, Sealable};
