@@ -5,10 +5,15 @@
 //! by the Jade hardfork.
 
 use alloy_consensus::BlockHeader;
-use alloy_primitives::B256;
+use alloy_primitives::{Address, B256};
+use alloy_rpc_types_engine::PayloadAttributes;
 use jsonrpsee::core::client::ClientT;
 use morph_node::test_utils::{HardforkSchedule, TestNodeBuilder};
-use morph_payload_types::{AssembleL2BlockParams, ExecutableL2Data, GenericResponse};
+use morph_payload_types::{
+    AssembleL2BlockParams, ExecutableL2Data, GenericResponse, MorphPayloadAttributes,
+    MorphPayloadBuilderAttributes,
+};
+use reth_payload_primitives::{BuiltPayload, PayloadBuilderAttributes};
 use reth_provider::BlockReaderIdExt;
 
 use super::helpers::{build_block_no_submit, craft_and_try_import_block};
@@ -108,6 +113,74 @@ async fn validate_l2_block_rejects_tampered_hash_over_rpc() -> eyre::Result<()> 
     assert!(
         !response.success,
         "engine_validateL2Block should reject tampered block hashes"
+    );
+
+    Ok(())
+}
+
+/// A non-zero `prev_randao` must not change the built block hash on Morph L2.
+#[tokio::test(flavor = "multi_thread")]
+async fn payload_builder_hash_matches_block_hash_with_nonzero_prev_randao() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, _tasks, _wallet) = TestNodeBuilder::new().build().await?;
+    let node = nodes.pop().unwrap();
+
+    let head = node
+        .inner
+        .provider
+        .sealed_header_by_number_or_tag(alloy_rpc_types_eth::BlockNumberOrTag::Latest)?;
+    let (head_hash, head_ts) = head
+        .map(|h| (h.hash(), h.timestamp()))
+        .unwrap_or((B256::ZERO, 0));
+
+    let attrs = MorphPayloadBuilderAttributes::try_new(
+        head_hash,
+        MorphPayloadAttributes {
+            inner: PayloadAttributes {
+                timestamp: head_ts + 1,
+                prev_randao: B256::repeat_byte(0xAA),
+                suggested_fee_recipient: Address::ZERO,
+                withdrawals: Some(vec![]),
+                parent_beacon_block_root: Some(B256::ZERO),
+            },
+            transactions: Some(vec![]),
+            gas_limit: None,
+            base_fee_per_gas: None,
+        },
+        3,
+    )?;
+
+    let payload_id = node
+        .inner
+        .payload_builder_handle
+        .send_new_payload(attrs)
+        .await?
+        .map_err(|e| eyre::eyre!("payload build failed: {e}"))?;
+
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let payload = loop {
+        if tokio::time::Instant::now() > deadline {
+            return Err(eyre::eyre!("timeout waiting for payload {payload_id:?}"));
+        }
+        match node.inner.payload_builder_handle.best_payload(payload_id).await {
+            Some(Ok(p)) => break p,
+            Some(Err(e)) => return Err(eyre::eyre!("payload build error: {e}")),
+            None => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
+        }
+    };
+
+    assert_eq!(
+        payload.block().header().mix_hash(),
+        Some(B256::ZERO),
+        "Morph blocks should always use a zero mix_hash"
+    );
+    assert_eq!(
+        payload.block().hash(),
+        payload.executable_data.hash,
+        "ExecutableL2Data hash should match the built block hash"
     );
 
     Ok(())

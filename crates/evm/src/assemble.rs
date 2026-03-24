@@ -100,7 +100,8 @@ impl BlockAssembler<MorphEvmConfig> for MorphBlockAssembler {
             withdrawals_root: None,
             logs_bloom,
             timestamp: timestamp.to(),
-            mix_hash: evm_env.block_env.prevrandao().unwrap_or_default(),
+            // Morph L2 keeps mix_hash fixed to zero, matching geth's L2 header shape.
+            mix_hash: Default::default(),
             nonce: B64::ZERO,
             // Only include base_fee_per_gas after London (EIP-1559)
             base_fee_per_gas: is_london_active.then_some(evm_env.block_env.basefee()),

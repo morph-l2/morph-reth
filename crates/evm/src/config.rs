@@ -1,5 +1,6 @@
 use crate::{MorphBlockAssembler, MorphEvmConfig, MorphEvmError, MorphNextBlockEnvAttributes};
 use alloy_consensus::BlockHeader;
+use alloy_primitives::B256;
 use morph_chainspec::hardfork::{MorphHardfork, MorphHardforks};
 use morph_primitives::Block;
 use morph_primitives::{MorphHeader, MorphPrimitives};
@@ -103,7 +104,8 @@ impl ConfigureEvm for MorphEvmConfig {
             beneficiary: fee_recipient,
             timestamp: U256::from(attributes.timestamp),
             difficulty: U256::ZERO,
-            prevrandao: Some(attributes.prev_randao),
+            // Morph L2 follows geth's L2 path here: PREVRANDAO/mixHash is fixed to zero.
+            prevrandao: Some(B256::ZERO),
             gas_limit: attributes.gas_limit,
             basefee: attributes.base_fee_per_gas.unwrap_or_else(|| {
                 self.chain_spec()

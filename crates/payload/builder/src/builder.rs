@@ -3,7 +3,7 @@
 use crate::{MorphBuilderConfig, MorphPayloadBuilderError, config::PayloadBuildingBreaker};
 use alloy_consensus::{BlockHeader, Transaction, Typed2718};
 use alloy_eips::eip2718::Encodable2718;
-use alloy_primitives::{B256, Bytes, Sealable, U256};
+use alloy_primitives::{B256, Bytes, U256};
 use alloy_rlp::Encodable;
 use morph_chainspec::MorphChainSpec;
 use morph_chainspec::{L2_MESSAGE_QUEUE_ADDRESS, L2_MESSAGE_QUEUE_WITHDRAW_TRIE_ROOT_SLOT};
@@ -40,22 +40,6 @@ fn read_withdraw_trie_root<DB: revm::Database>(db: &mut DB) -> Result<B256, DB::
         L2_MESSAGE_QUEUE_WITHDRAW_TRIE_ROOT_SLOT,
     )?;
     Ok(B256::from(value))
-}
-
-/// Computes the hash that round-trips through `ExecutableL2Data`.
-///
-/// `engine_newL2Block` / `engine_validateL2Block` reconstruct a header from the
-/// lossy `ExecutableL2Data` projection, which omits fields like
-/// `parent_beacon_block_root`. Use the same projection here so the hash emitted
-/// by `engine_assembleL2Block` can be fed back into the engine unchanged.
-fn executable_data_hash(header: &MorphHeader) -> B256 {
-    let mut projected = header.clone();
-    projected.inner.mix_hash = B256::ZERO;
-    projected.inner.nonce = Default::default();
-    projected.inner.extra_data = Default::default();
-    projected.inner.parent_beacon_block_root = None;
-    projected.inner.requests_hash = None;
-    projected.hash_slow()
 }
 
 // =============================================================================
@@ -738,7 +722,7 @@ where
         logs_bloom: Bytes::from(logs_bloom_bytes),
         withdraw_trie_root,
         next_l1_message_index: info.next_l1_message_index,
-        hash: executable_data_hash(header),
+        hash: sealed_block.hash(),
     };
 
     let execution_output = ExecutionOutcome::new(
