@@ -578,8 +578,7 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
                 ))
             })?;
 
-        let mut built_payload = self
-            .payload_builder
+        self.payload_builder
             .best_payload(payload_id)
             .await
             .ok_or_else(|| {
@@ -587,13 +586,7 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
             })?
             .map_err(|e| {
                 MorphEngineApiError::BlockBuildError(format!("failed to get built payload: {e}"))
-            })?;
-
-        let (header, _) =
-            self.header_and_body_from_executable_data(&built_payload.executable_data)?;
-        built_payload.executable_data.hash = header.hash_slow();
-
-        Ok(built_payload)
+            })
     }
 
     async fn import_l2_block_via_engine(
