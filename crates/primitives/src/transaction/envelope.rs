@@ -59,12 +59,12 @@ impl MorphTxEnvelope {
     }
 
     pub fn is_l1_msg(&self) -> bool {
-        self.tx_type() == MorphTxType::L1Msg
+        matches!(self, Self::L1Msg(_))
     }
 
     /// Returns `true` if this is a MorphTx (0x7F) transaction.
     pub fn is_morph_tx(&self) -> bool {
-        self.tx_type() == MorphTxType::Morph
+        matches!(self, Self::Morph(_))
     }
 
     /// Returns the fee token ID for MorphTx, or `None` for other transaction types.
