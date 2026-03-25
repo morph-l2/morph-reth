@@ -3,17 +3,21 @@
 //! Ensures that the node's JSON-RPC interface returns correct data
 //! for common eth_ namespace methods after blocks have been produced.
 
-use alloy_consensus::{BlockHeader, transaction::TxHashRef};
-use alloy_primitives::{B256, Sealable};
+use alloy_consensus::{BlockHeader, SignableTransaction, TxLegacy, transaction::TxHashRef};
+use alloy_eips::Encodable2718;
+use alloy_primitives::{Address, B256, Bytes, Sealable, TxKind, U256};
+use alloy_signer::SignerSync;
 use jsonrpsee::core::client::ClientT;
 use morph_node::test_utils::{
-    L1MessageBuilder, MorphTxBuilder, TEST_TOKEN_ID, TestNodeBuilder, advance_chain,
+    L1MessageBuilder, MorphTestNode, MorphTxBuilder, TEST_TOKEN_ID, TestNodeBuilder, advance_chain,
 };
+use morph_primitives::MorphTxEnvelope;
 use reth_payload_primitives::BuiltPayload;
 use reth_provider::{
     AccountReader, BlockReader, BlockReaderIdExt, HeaderProvider, ReceiptProvider,
     StateProviderFactory, TransactionsProvider,
 };
+use reth_tasks::TaskManager;
 use serde_json::Value;
 
 use super::helpers::wallet_to_arc;
@@ -436,6 +440,145 @@ async fn transaction_by_hash_exposes_morph_fields_over_rpc() -> eyre::Result<()>
     assert!(tx["feeLimit"].as_str().is_some());
     assert_eq!(tx["reference"].as_str(), Some(expected_reference.as_str()));
     assert_eq!(tx["memo"].as_str(), Some(expected_memo.as_str()));
+
+    Ok(())
+}
+
+/// Produces a simple one-transaction block on the standard Jade profile and returns the
+/// node, task manager, and identifiers needed by the replay-based debug / trace RPCs.
+async fn build_standard_jade_block_for_debug_trace()
+-> eyre::Result<(MorphTestNode, TaskManager, B256, B256)> {
+    let (mut nodes, tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+
+    let tx = TxLegacy {
+        chain_id: Some(wallet.chain_id),
+        nonce: 0,
+        gas_limit: 21_000,
+        gas_price: 20_000_000_000u128,
+        to: TxKind::Call(Address::with_last_byte(0x42)),
+        value: U256::from(100),
+        input: Bytes::new(),
+    };
+    let sig = wallet
+        .inner
+        .sign_hash_sync(&tx.signature_hash())
+        .map_err(|e| eyre::eyre!("signing failed: {e}"))?;
+    let raw_tx: Bytes = MorphTxEnvelope::Legacy(tx.into_signed(sig))
+        .encoded_2718()
+        .into();
+    node.rpc.inject_tx(raw_tx).await?;
+
+    let payload = node.advance_block().await?;
+    let tx_hash = *payload
+        .block()
+        .body()
+        .transactions
+        .first()
+        .expect("produced block should contain the submitted tx")
+        .tx_hash();
+    let block_hash = payload.block().hash();
+
+    Ok((node, tasks, tx_hash, block_hash))
+}
+
+/// Comprehensive test: debug + trace replay APIs on a standard Jade block with Cancun active.
+///
+/// Uses internal APIs (debug_api / trace_api) directly via `node.rpc.inner`,
+/// matching the approach on `main`.  This avoids HTTP serialization overhead
+/// and the TaskManager lifetime pitfalls of the HTTP path.
+#[tokio::test(flavor = "multi_thread")]
+async fn debug_trace_replay_apis_work_for_standard_jade_block() -> eyre::Result<()> {
+    use alloy_rpc_types_eth::TransactionRequest;
+    use morph_rpc::MorphTransactionRequest;
+
+    reth_tracing::init_test_tracing();
+
+    let (node, _tasks, tx_hash, block_hash) = build_standard_jade_block_for_debug_trace().await?;
+
+    // Verify parent_beacon_block_root is None (Morph L2 does not use beacon chain)
+    let block = node
+        .inner
+        .provider
+        .block_by_hash(block_hash)?
+        .expect("block should exist");
+    assert!(
+        block.header.inner.parent_beacon_block_root.is_none(),
+        "Morph L2 blocks must not carry parentBeaconBlockRoot"
+    );
+
+    // ----------------------------------------------------------------
+    // debug_traceTransaction (default structLogs tracer)
+    // ----------------------------------------------------------------
+    node.rpc
+        .inner
+        .debug_api()
+        .debug_trace_transaction(tx_hash, Default::default())
+        .await?;
+
+    // ----------------------------------------------------------------
+    // debug_traceBlock by hash and by number
+    // ----------------------------------------------------------------
+    let traces_by_hash = node
+        .rpc
+        .inner
+        .debug_api()
+        .debug_trace_block(block_hash.into(), Default::default())
+        .await?;
+    assert_eq!(traces_by_hash.len(), 1, "block should contain exactly one tx trace");
+
+    let traces_by_number = node
+        .rpc
+        .inner
+        .debug_api()
+        .debug_trace_block(1u64.into(), Default::default())
+        .await?;
+    assert_eq!(traces_by_number.len(), 1);
+
+    // ----------------------------------------------------------------
+    // trace_transaction (parity-style)
+    // ----------------------------------------------------------------
+    let parity_traces = node
+        .rpc
+        .inner
+        .trace_api()
+        .trace_transaction(tx_hash)
+        .await?;
+    assert!(
+        parity_traces.is_some_and(|t| !t.is_empty()),
+        "trace_transaction should return non-empty traces"
+    );
+
+    // ----------------------------------------------------------------
+    // trace_block (parity-style)
+    // ----------------------------------------------------------------
+    let block_traces = node
+        .rpc
+        .inner
+        .trace_api()
+        .trace_block(block_hash.into())
+        .await?;
+    assert!(
+        block_traces.is_some_and(|t| !t.is_empty()),
+        "trace_block should return non-empty traces"
+    );
+
+    // ----------------------------------------------------------------
+    // debug_traceCall
+    // ----------------------------------------------------------------
+    let call = MorphTransactionRequest::from(TransactionRequest {
+        from: Some(Address::with_last_byte(0x01)),
+        to: Some(Address::with_last_byte(0x42).into()),
+        gas: Some(21_000),
+        gas_price: Some(20_000_000_000),
+        value: Some(U256::ZERO),
+        ..Default::default()
+    });
+    node.rpc
+        .inner
+        .debug_api()
+        .debug_trace_call(call, Some(block_hash.into()), Default::default())
+        .await?;
 
     Ok(())
 }
