@@ -128,6 +128,7 @@ alloy-provider = { version = "1.4.3", default-features = false }
 alloy-rlp = "0.3.10"
 alloy-rpc-types-engine = "1.4.3"
 alloy-rpc-types-eth = { version = "1.4.3" }
+alloy-rpc-types-trace = "1.4.3"
 alloy-serde = "1.4.3"
 alloy-signer = "1.4.3"
 alloy-signer-local = "1.4.3"
@@ -185,5 +186,4 @@ pyroscope_pprofrs = "0.2.10"
 [patch.crates-io]
 vergen = { git = "https://github.com/rustyhorde/vergen", rev = "a43c276d2b68d05832a429cc4540755541ca4950" }
 vergen-lib = { git = "https://github.com/rustyhorde/vergen", rev = "a43c276d2b68d05832a429cc4540755541ca4950" }
-
 

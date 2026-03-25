@@ -4812,10 +4812,12 @@ name = "morph-node"
 version = "0.1.0"
 dependencies = [
  "alloy-consensus",
+ "alloy-genesis",
  "alloy-hardforks",
  "alloy-primitives",
  "alloy-rpc-types-engine",
  "alloy-rpc-types-eth",
+ "alloy-rpc-types-trace",
  "clap",
  "dashmap 6.1.0",
  "eyre",
@@ -4849,6 +4851,7 @@ dependencies = [
  "reth-transaction-pool",
  "reth-trie",
  "serde",
+ "serde_json",
  "tokio",
  "tokio-stream",
 ]
@@ -6840,12 +6843,16 @@ dependencies = [
  "rayon",
  "reth-config",
  "reth-consensus",
+ "reth-ethereum-primitives",
  "reth-metrics",
  "reth-network-p2p",
  "reth-network-peers",
  "reth-primitives-traits",
+ "reth-provider",
  "reth-storage-api",
  "reth-tasks",
+ "reth-testing-utils",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
@@ -6973,6 +6980,7 @@ dependencies = [
  "parking_lot",
  "rayon",
  "reth-chain-state",
+ "reth-chainspec",
  "reth-consensus",
  "reth-db",
  "reth-engine-primitives",
@@ -6987,9 +6995,13 @@ dependencies = [
  "reth-primitives-traits",
  "reth-provider",
  "reth-prune",
+ "reth-prune-types",
  "reth-revm",
+ "reth-stages",
  "reth-stages-api",
+ "reth-static-file",
  "reth-tasks",
+ "reth-tracing",
  "reth-trie",
  "reth-trie-parallel",
  "reth-trie-sparse",
@@ -7610,6 +7622,7 @@ dependencies = [
  "auto_impl",
  "derive_more",
  "futures",
+ "parking_lot",
  "reth-consensus",
  "reth-eth-wire-types",
  "reth-ethereum-primitives",
@@ -8501,6 +8514,7 @@ dependencies = [
  "num-traits",
  "rayon",
  "reqwest",
+ "reth-chainspec",
  "reth-codecs",
  "reth-config",
  "reth-consensus",
@@ -8509,6 +8523,7 @@ dependencies = [
  "reth-era",
  "reth-era-downloader",
  "reth-era-utils",
+ "reth-ethereum-primitives",
  "reth-etl",
  "reth-evm",
  "reth-execution-types",
@@ -8524,8 +8539,10 @@ dependencies = [
  "reth-static-file-types",
  "reth-storage-api",
  "reth-storage-errors",
+ "reth-testing-utils",
  "reth-trie",
  "reth-trie-db",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -8664,6 +8681,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "reth-testing-utils"
+version = "1.10.0"
+source = "git+https://github.com/morph-l2/reth?rev=1dd722773844d1a3c50a691dc09f6cdf8e6bd00e#1dd722773844d1a3c50a691dc09f6cdf8e6bd00e"
+dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
+ "alloy-genesis",
+ "alloy-primitives",
+ "rand 0.8.5",
+ "rand 0.9.2",
+ "reth-ethereum-primitives",
+ "reth-primitives-traits",
+ "secp256k1 0.30.0",
+]
+
+[[package]]
 name = "reth-tokio-util"
 version = "1.10.0"
 source = "git+https://github.com/morph-l2/reth?rev=1dd722773844d1a3c50a691dc09f6cdf8e6bd00e#1dd722773844d1a3c50a691dc09f6cdf8e6bd00e"
@@ -8722,6 +8755,7 @@ dependencies = [
  "futures-util",
  "metrics",
  "parking_lot",
+ "paste",
  "pin-project",
  "rand 0.9.2",
  "reth-chain-state",
