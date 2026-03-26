@@ -1,0 +1,79 @@
+name: PR Title
+
+on:
+  pull_request:
+    types: [opened, reopened, edited, synchronize]
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  conventional-title:
+    name: Validate Conventional Commit Title
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check title
+        id: lint_pr_title
+        uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            chore
+            test
+            bench
+            perf
+            refactor
+            docs
+            ci
+            revert
+            deps
+            style
+        continue-on-error: true
+
+      - name: Add PR Comment for Invalid Title
+        if: steps.lint_pr_title.outcome == 'failure'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: pr-title-lint-error
+          message: |
+            PR title 不符合 Conventional Commit 规范。
+
+            **合法格式示例：**
+            - `feat: add new feature`
+            - `fix(consensus): correct gas calculation`
+            - `docs: update README`
+
+            **可用类型：**
+            | 类型 | 说明 |
+            |------|------|
+            | `feat` | 新功能 |
+            | `fix` | Bug 修复 |
+            | `chore` | 日常维护 |
+            | `test` | 测试相关 |
+            | `bench` | 基准测试 |
+            | `perf` | 性能优化 |
+            | `refactor` | 代码重构 |
+            | `docs` | 文档更新 |
+            | `ci` | CI/CD 配置 |
+            | `revert` | 回滚 |
+            | `deps` | 依赖更新 |
+            | `style` | 代码格式化 |
+
+            **Breaking Changes** 用 `!` 标记，如：`feat!: changed the API`
+
+            详见：https://www.conventionalcommits.org/en/v1.0.0/
+
+      - name: Remove Comment for Valid Title
+        if: steps.lint_pr_title.outcome == 'success'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: pr-title-lint-error
+          delete: true
+
+      - name: Fail workflow if title invalid
+        if: steps.lint_pr_title.outcome == 'failure'
+        run: exit 1
