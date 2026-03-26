@@ -71,3 +71,9 @@ impl From<alloy_rlp::Error> for MorphConsensusError {
         Self::TransactionDecodeError(err.to_string())
     }
 }
+
+impl From<MorphConsensusError> for reth_consensus::ConsensusError {
+    fn from(e: MorphConsensusError) -> Self {
+        Self::Other(e.to_string())
+    }
+}

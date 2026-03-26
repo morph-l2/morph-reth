@@ -4760,7 +4760,6 @@ dependencies = [
  "alloy-consensus",
  "alloy-eips",
  "alloy-genesis",
- "alloy-hardforks",
  "alloy-primitives",
  "alloy-rpc-types-engine",
  "async-trait",

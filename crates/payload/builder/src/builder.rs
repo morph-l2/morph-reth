@@ -92,17 +92,11 @@ pub struct MorphPayloadBuilder<Pool, Client, Txs = ()> {
 impl<Pool, Client> MorphPayloadBuilder<Pool, Client, ()> {
     /// Creates a new [`MorphPayloadBuilder`] with default configuration.
     pub fn new(pool: Pool, evm_config: MorphEvmConfig, client: Client) -> Self {
-        Self {
-            evm_config,
-            pool,
-            client,
-            best_transactions: (),
-            config: MorphBuilderConfig::default(),
-        }
+        Self::with_config(pool, evm_config, client, MorphBuilderConfig::default())
     }
 
     /// Creates a new [`MorphPayloadBuilder`] with the specified configuration.
-    pub const fn with_config(
+    pub fn with_config(
         pool: Pool,
         evm_config: MorphEvmConfig,
         client: Client,

@@ -159,9 +159,7 @@ impl HeaderValidator<MorphHeader> for MorphConsensus {
         if self.chain_spec.is_fee_vault_enabled()
             && header.beneficiary() != alloy_primitives::Address::ZERO
         {
-            return Err(ConsensusError::Other(
-                MorphConsensusError::InvalidCoinbase(header.beneficiary()).to_string(),
-            ));
+            return Err(MorphConsensusError::InvalidCoinbase(header.beneficiary()).into());
         }
 
         // Check timestamp is not in the future
@@ -197,9 +195,7 @@ impl HeaderValidator<MorphHeader> for MorphConsensus {
             .base_fee_per_gas()
             .ok_or(ConsensusError::BaseFeeMissing)?;
         if base_fee > MORPH_MAXIMUM_BASE_FEE {
-            return Err(ConsensusError::Other(
-                MorphConsensusError::BaseFeeOverLimit(base_fee).to_string(),
-            ));
+            return Err(MorphConsensusError::BaseFeeOverLimit(base_fee).into());
         }
         Ok(())
     }
@@ -233,13 +229,11 @@ impl HeaderValidator<MorphHeader> for MorphConsensus {
         // decrease across blocks. This is the header-only half of L1 message
         // validation; the body-level half is in validate_block_pre_execution.
         if header.next_l1_msg_index < parent.next_l1_msg_index {
-            return Err(ConsensusError::Other(
-                MorphConsensusError::InvalidNextL1MessageIndex {
-                    expected: parent.next_l1_msg_index,
-                    actual: header.next_l1_msg_index,
-                }
-                .to_string(),
-            ));
+            return Err(MorphConsensusError::InvalidNextL1MessageIndex {
+                expected: parent.next_l1_msg_index,
+                actual: header.next_l1_msg_index,
+            }
+            .into());
         }
 
         Ok(())
@@ -299,9 +293,7 @@ impl Consensus<Block> for MorphConsensus {
 
         // Check withdrawals are empty
         if block.body().withdrawals().is_some() {
-            return Err(ConsensusError::Other(
-                MorphConsensusError::WithdrawalsNonEmpty.to_string(),
-            ));
+            return Err(MorphConsensusError::WithdrawalsNonEmpty.into());
         }
 
         // Validate MorphTx version and field constraints.
@@ -499,35 +491,28 @@ fn validate_l1_messages_in_block(
         if tx.is_l1_msg() {
             // Check L1 messages are only at the start of the block (before any L2 tx)
             if saw_l2_transaction {
-                return Err(ConsensusError::Other(
-                    MorphConsensusError::InvalidL1MessageOrder.to_string(),
-                ));
+                return Err(MorphConsensusError::InvalidL1MessageOrder.into());
             }
 
-            let tx_queue_index = tx.queue_index().ok_or_else(|| {
-                ConsensusError::Other(MorphConsensusError::MalformedL1Message.to_string())
-            })?;
+            let tx_queue_index = tx
+                .queue_index()
+                .ok_or_else(|| ConsensusError::from(MorphConsensusError::MalformedL1Message))?;
 
             // Check queue indices are strictly sequential (each = previous + 1).
             // Use checked_add to prevent overflow at u64::MAX.
             if let Some(prev) = prev_queue_index {
                 let expected = prev.checked_add(1).ok_or_else(|| {
-                    ConsensusError::Other(
-                        MorphConsensusError::L1MessagesNotInOrder {
-                            expected: u64::MAX,
-                            actual: tx_queue_index,
-                        }
-                        .to_string(),
-                    )
+                    ConsensusError::from(MorphConsensusError::L1MessagesNotInOrder {
+                        expected: u64::MAX,
+                        actual: tx_queue_index,
+                    })
                 })?;
                 if tx_queue_index != expected {
-                    return Err(ConsensusError::Other(
-                        MorphConsensusError::L1MessagesNotInOrder {
-                            expected,
-                            actual: tx_queue_index,
-                        }
-                        .to_string(),
-                    ));
+                    return Err(MorphConsensusError::L1MessagesNotInOrder {
+                        expected,
+                        actual: tx_queue_index,
+                    }
+                    .into());
                 }
             }
 
@@ -554,22 +539,17 @@ fn validate_l1_messages_in_block(
             )
         })?;
         let min_expected = last_queue_index.checked_add(1).ok_or_else(|| {
-            ConsensusError::Other(
-                MorphConsensusError::InvalidNextL1MessageIndex {
-                    expected: u64::MAX,
-                    actual: header_next_l1_msg_index,
-                }
-                .to_string(),
-            )
+            ConsensusError::from(MorphConsensusError::InvalidNextL1MessageIndex {
+                expected: u64::MAX,
+                actual: header_next_l1_msg_index,
+            })
         })?;
         if header_next_l1_msg_index < min_expected {
-            return Err(ConsensusError::Other(
-                MorphConsensusError::InvalidNextL1MessageIndex {
-                    expected: min_expected,
-                    actual: header_next_l1_msg_index,
-                }
-                .to_string(),
-            ));
+            return Err(MorphConsensusError::InvalidNextL1MessageIndex {
+                expected: min_expected,
+                actual: header_next_l1_msg_index,
+            }
+            .into());
         }
     }
 
@@ -593,20 +573,16 @@ fn validate_morph_txs(txs: &[MorphTxEnvelope], is_jade: bool) -> Result<(), Cons
 
         // Reject MorphTx V1 before Jade fork (hardfork-gated, consensus-only check).
         if !is_jade && morph_tx.version == MORPH_TX_VERSION_1 {
-            return Err(ConsensusError::Other(
-                MorphConsensusError::InvalidBody(
-                    "MorphTx version 1 is not yet active (jade fork not reached)".into(),
-                )
-                .to_string(),
-            ));
+            return Err(MorphConsensusError::InvalidBody(
+                "MorphTx version 1 is not yet active (jade fork not reached)".into(),
+            )
+            .into());
         }
 
         // Reuse primitive-layer validation (version, fee_token_id, reference,
         // memo length, fee_limit constraints, gas price ordering).
         if let Err(reason) = morph_tx.validate() {
-            return Err(ConsensusError::Other(
-                MorphConsensusError::InvalidBody(reason.to_string()).to_string(),
-            ));
+            return Err(MorphConsensusError::InvalidBody(reason.to_string()).into());
         }
     }
 
