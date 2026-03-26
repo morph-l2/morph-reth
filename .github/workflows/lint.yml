@@ -54,3 +54,13 @@ jobs:
 
       - name: Run Clippy for feature-gated integration tests
         run: cargo clippy -p morph-node --test it --features test-utils -- -D warnings
+
+  typos:
+    name: Typos
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check spelling
+        uses: crate-ci/typos@v1
