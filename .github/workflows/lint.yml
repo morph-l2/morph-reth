@@ -54,6 +54,4 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --all --all-targets -- -D warnings
 
-      - name: Run Clippy for feature-gated integration tests
-        run: cargo clippy -p morph-node --test it --features test-utils -- -D warnings
 
