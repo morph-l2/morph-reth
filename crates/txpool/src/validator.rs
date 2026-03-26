@@ -256,9 +256,12 @@ where
             );
         }
 
+        // Check if this is a MorphTx (0x7F) - need special handling for ERC20 gas payment
+        let is_morph_tx = is_morph_tx(&transaction);
+
         // Reject MorphTx (0x7F) before Emerald hardfork.
         // go-ethereum's MakeSigner only registers MorphTxType from forks.Emerald onwards.
-        if is_morph_tx(&transaction)
+        if is_morph_tx
             && !self
                 .chain_spec()
                 .is_emerald_active_at_timestamp(self.block_timestamp())
@@ -268,9 +271,6 @@ where
                 InvalidTransactionError::TxTypeNotSupported.into(),
             );
         }
-
-        // Check if this is a MorphTx (0x7F) - need special handling for ERC20 gas payment
-        let is_morph_tx = is_morph_tx(&transaction);
 
         let outcome = self.inner.validate_one(origin, transaction);
         if outcome.is_invalid() || outcome.is_error() {
