@@ -92,11 +92,17 @@ pub struct MorphPayloadBuilder<Pool, Client, Txs = ()> {
 impl<Pool, Client> MorphPayloadBuilder<Pool, Client, ()> {
     /// Creates a new [`MorphPayloadBuilder`] with default configuration.
     pub fn new(pool: Pool, evm_config: MorphEvmConfig, client: Client) -> Self {
-        Self::with_config(pool, evm_config, client, MorphBuilderConfig::default())
+        Self {
+            evm_config,
+            pool,
+            client,
+            best_transactions: (),
+            config: MorphBuilderConfig::default(),
+        }
     }
 
     /// Creates a new [`MorphPayloadBuilder`] with the specified configuration.
-    pub fn with_config(
+    pub const fn with_config(
         pool: Pool,
         evm_config: MorphEvmConfig,
         client: Client,
@@ -743,4 +749,309 @@ where
     );
 
     Ok(BuildOutcomeKind::Better { payload })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // =========================================================================
+    // ExecutionInfo tests
+    // =========================================================================
+
+    #[test]
+    fn test_execution_info_default() {
+        let info = ExecutionInfo::default();
+        assert_eq!(info.cumulative_gas_used, 0);
+        assert_eq!(info.cumulative_da_bytes_used, 0);
+        assert_eq!(info.total_fees, U256::ZERO);
+        assert_eq!(info.next_l1_message_index, 0);
+        assert_eq!(info.transaction_count, 0);
+    }
+
+    #[test]
+    fn test_execution_info_new_with_l1_index() {
+        let info = ExecutionInfo::new(42);
+        assert_eq!(info.next_l1_message_index, 42);
+        assert_eq!(info.cumulative_gas_used, 0);
+        assert_eq!(info.cumulative_da_bytes_used, 0);
+        assert_eq!(info.total_fees, U256::ZERO);
+        assert_eq!(info.transaction_count, 0);
+    }
+
+    #[test]
+    fn test_execution_info_new_with_zero_index() {
+        let info = ExecutionInfo::new(0);
+        assert_eq!(info.next_l1_message_index, 0);
+    }
+
+    #[test]
+    fn test_execution_info_new_with_max_index() {
+        let info = ExecutionInfo::new(u64::MAX);
+        assert_eq!(info.next_l1_message_index, u64::MAX);
+    }
+
+    // =========================================================================
+    // is_tx_over_limits tests
+    // =========================================================================
+
+    #[test]
+    fn test_is_tx_over_limits_within_gas_no_da() {
+        let info = ExecutionInfo {
+            cumulative_gas_used: 100_000,
+            ..Default::default()
+        };
+        // tx_gas + cumulative = 100_000 + 21_000 = 121_000, block limit = 30_000_000
+        assert!(!info.is_tx_over_limits(21_000, 100, 30_000_000, None));
+    }
+
+    #[test]
+    fn test_is_tx_over_limits_exceeds_gas_limit() {
+        let info = ExecutionInfo {
+            cumulative_gas_used: 29_990_000,
+            ..Default::default()
+        };
+        // tx_gas + cumulative = 29_990_000 + 21_000 = 30_011_000 > 30_000_000
+        assert!(info.is_tx_over_limits(21_000, 100, 30_000_000, None));
+    }
+
+    #[test]
+    fn test_is_tx_over_limits_exactly_at_gas_limit() {
+        let info = ExecutionInfo {
+            cumulative_gas_used: 29_979_000,
+            ..Default::default()
+        };
+        // tx_gas + cumulative = 29_979_000 + 21_000 = 30_000_000 == block limit
+        // Uses > comparison, so exactly at limit is NOT over
+        assert!(!info.is_tx_over_limits(21_000, 100, 30_000_000, None));
+    }
+
+    #[test]
+    fn test_is_tx_over_limits_one_over_gas_limit() {
+        let info = ExecutionInfo {
+            cumulative_gas_used: 29_979_001,
+            ..Default::default()
+        };
+        // tx_gas + cumulative = 29_979_001 + 21_000 = 30_000_001 > 30_000_000
+        assert!(info.is_tx_over_limits(21_000, 100, 30_000_000, None));
+    }
+
+    #[test]
+    fn test_is_tx_over_limits_exceeds_da_limit() {
+        let info = ExecutionInfo {
+            cumulative_da_bytes_used: 120_000,
+            ..Default::default()
+        };
+        // da_used + tx_size = 120_000 + 10_000 = 130_000 < 131_072, NOT over
+        assert!(!info.is_tx_over_limits(21_000, 10_000, 30_000_000, Some(128 * 1024)));
+
+        // da_used + tx_size = 120_000 + 12_000 = 132_000 > 131_072
+        assert!(info.is_tx_over_limits(21_000, 12_000, 30_000_000, Some(128 * 1024)));
+    }
+
+    #[test]
+    fn test_is_tx_over_limits_da_limit_none_ignores_da() {
+        let info = ExecutionInfo {
+            cumulative_da_bytes_used: u64::MAX,
+            ..Default::default()
+        };
+        // Even with max DA usage, no DA limit means it's not over
+        assert!(!info.is_tx_over_limits(21_000, 1_000, 30_000_000, None));
+    }
+
+    #[test]
+    fn test_is_tx_over_limits_da_limit_exactly_at_boundary() {
+        let info = ExecutionInfo {
+            cumulative_da_bytes_used: 100,
+            ..Default::default()
+        };
+        // da_used + tx_size = 100 + 100 = 200 == da_limit, NOT over (uses > not >=)
+        assert!(!info.is_tx_over_limits(21_000, 100, 30_000_000, Some(200)));
+
+        // da_used + tx_size = 100 + 101 = 201 > 200
+        assert!(info.is_tx_over_limits(21_000, 101, 30_000_000, Some(200)));
+    }
+
+    #[test]
+    fn test_is_tx_over_limits_gas_ok_but_da_exceeded() {
+        let info = ExecutionInfo {
+            cumulative_gas_used: 100_000,
+            cumulative_da_bytes_used: 500,
+            ..Default::default()
+        };
+        assert!(info.is_tx_over_limits(21_000, 600, 30_000_000, Some(1000)));
+    }
+
+    #[test]
+    fn test_is_tx_over_limits_da_ok_but_gas_exceeded() {
+        let info = ExecutionInfo {
+            cumulative_gas_used: 29_990_000,
+            cumulative_da_bytes_used: 100,
+            ..Default::default()
+        };
+        assert!(info.is_tx_over_limits(21_000, 100, 30_000_000, Some(1_000_000)));
+    }
+
+    #[test]
+    fn test_is_tx_over_limits_zero_gas_tx() {
+        let info = ExecutionInfo::default();
+        assert!(!info.is_tx_over_limits(0, 0, 30_000_000, None));
+    }
+
+    #[test]
+    fn test_is_tx_over_limits_zero_block_gas_limit() {
+        let info = ExecutionInfo::default();
+        assert!(info.is_tx_over_limits(1, 0, 0, None));
+        // 0 > 0 is false
+        assert!(!info.is_tx_over_limits(0, 0, 0, None));
+    }
+
+    // =========================================================================
+    // MorphPayloadBuilder constructor tests
+    // =========================================================================
+
+    fn test_evm_config() -> MorphEvmConfig {
+        MorphEvmConfig::new_with_default_factory(morph_chainspec::MORPH_MAINNET.clone())
+    }
+
+    #[test]
+    fn test_morph_payload_builder_new_default_config() {
+        let builder = MorphPayloadBuilder::<(), ()>::new((), test_evm_config(), ());
+        assert_eq!(builder.config, MorphBuilderConfig::default());
+    }
+
+    #[test]
+    fn test_morph_payload_builder_with_config() {
+        let config = MorphBuilderConfig::default().with_gas_limit(10_000_000);
+        let builder =
+            MorphPayloadBuilder::<(), ()>::with_config((), test_evm_config(), (), config.clone());
+        assert_eq!(builder.config, config);
+    }
+
+    #[test]
+    fn test_morph_payload_builder_set_config() {
+        let builder = MorphPayloadBuilder::<(), ()>::new((), test_evm_config(), ());
+        let config = MorphBuilderConfig::default()
+            .with_gas_limit(5_000_000)
+            .with_max_tx_per_block(500);
+        let builder = builder.set_config(config.clone());
+        assert_eq!(builder.config, config);
+    }
+
+    // =========================================================================
+    // MorphPayloadBuilderCtx helper tests
+    // =========================================================================
+
+    fn test_ctx(best_payload: Option<MorphBuiltPayload>) -> MorphPayloadBuilderCtx {
+        MorphPayloadBuilderCtx {
+            evm_config: test_evm_config(),
+            config: PayloadConfig::new(
+                Arc::new(SealedHeader::seal_slow(MorphHeader::default())),
+                MorphPayloadBuilderAttributes::try_new(
+                    B256::ZERO,
+                    morph_payload_types::MorphPayloadAttributes::default(),
+                    1,
+                )
+                .unwrap(),
+            ),
+            cancel: Default::default(),
+            best_payload,
+            builder_config: MorphBuilderConfig::default(),
+        }
+    }
+
+    #[test]
+    fn test_best_transaction_attributes() {
+        let ctx = test_ctx(None);
+        let attrs = ctx.best_transaction_attributes(7_000_000_000);
+        assert_eq!(attrs.basefee, 7_000_000_000);
+        assert!(attrs.blob_fee.is_none());
+    }
+
+    #[test]
+    fn test_is_better_payload_no_previous() {
+        let ctx = test_ctx(None);
+        assert!(ctx.is_better_payload(U256::ZERO));
+        assert!(ctx.is_better_payload(U256::from(100)));
+    }
+
+    #[test]
+    fn test_payload_id_is_deterministic() {
+        let ctx = test_ctx(None);
+        let id1 = ctx.payload_id();
+        let id2 = ctx.payload_id();
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn test_parent_returns_correct_header() {
+        let ctx = test_ctx(None);
+        assert_eq!(ctx.parent().number(), 0);
+    }
+
+    // =========================================================================
+    // read_withdraw_trie_root tests (requires mock DB)
+    // =========================================================================
+
+    struct MockDb {
+        storage_value: U256,
+    }
+
+    impl revm::Database for MockDb {
+        type Error = std::convert::Infallible;
+
+        fn basic(
+            &mut self,
+            _address: alloy_primitives::Address,
+        ) -> Result<Option<revm::state::AccountInfo>, Self::Error> {
+            Ok(None)
+        }
+
+        fn code_by_hash(
+            &mut self,
+            _code_hash: B256,
+        ) -> Result<revm::bytecode::Bytecode, Self::Error> {
+            Ok(revm::bytecode::Bytecode::default())
+        }
+
+        fn storage(
+            &mut self,
+            _address: alloy_primitives::Address,
+            _index: U256,
+        ) -> Result<U256, Self::Error> {
+            Ok(self.storage_value)
+        }
+
+        fn block_hash(&mut self, _number: u64) -> Result<B256, Self::Error> {
+            Ok(B256::ZERO)
+        }
+    }
+
+    #[test]
+    fn test_read_withdraw_trie_root_zero() {
+        let mut db = MockDb {
+            storage_value: U256::ZERO,
+        };
+        let root = read_withdraw_trie_root(&mut db).unwrap();
+        assert_eq!(root, B256::ZERO);
+    }
+
+    #[test]
+    fn test_read_withdraw_trie_root_nonzero() {
+        let expected = B256::from([0xAB; 32]);
+        let mut db = MockDb {
+            storage_value: expected.into(),
+        };
+        let root = read_withdraw_trie_root(&mut db).unwrap();
+        assert_eq!(root, expected);
+    }
+
+    #[test]
+    fn test_read_withdraw_trie_root_max_value() {
+        let mut db = MockDb {
+            storage_value: U256::MAX,
+        };
+        let root = read_withdraw_trie_root(&mut db).unwrap();
+        assert_eq!(root, B256::from(U256::MAX));
+    }
 }

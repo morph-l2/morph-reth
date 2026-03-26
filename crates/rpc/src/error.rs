@@ -172,3 +172,96 @@ impl From<Infallible> for MorphEthApiError {
         match err {}
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_display_messages() {
+        assert_eq!(
+            MorphEthApiError::BlockNotFound.to_string(),
+            "block not found"
+        );
+        assert_eq!(
+            MorphEthApiError::TransactionNotFound(B256::ZERO).to_string(),
+            format!("transaction {} not found", B256::ZERO)
+        );
+        assert_eq!(
+            MorphEthApiError::SkippedTransactionNotFound(B256::ZERO).to_string(),
+            format!("skipped transaction {} not found", B256::ZERO)
+        );
+        assert_eq!(
+            MorphEthApiError::InvalidBlockNumberOrHash.to_string(),
+            "invalid block number or hash"
+        );
+        assert_eq!(
+            MorphEthApiError::StateNotAvailable.to_string(),
+            "state not available for block"
+        );
+        assert_eq!(
+            MorphEthApiError::Internal("oops".to_string()).to_string(),
+            "internal error: oops"
+        );
+        assert_eq!(
+            MorphEthApiError::Database("db fail".to_string()).to_string(),
+            "database error: db fail"
+        );
+        assert_eq!(
+            MorphEthApiError::Provider("provider fail".to_string()).to_string(),
+            "provider error: provider fail"
+        );
+    }
+
+    #[test]
+    fn error_to_json_rpc_error_codes() {
+        let check = |err: MorphEthApiError, expected_code: i32| {
+            let rpc_err: jsonrpsee::types::ErrorObject<'static> = err.into();
+            assert_eq!(rpc_err.code(), expected_code);
+        };
+
+        check(MorphEthApiError::BlockNotFound, -32001);
+        check(MorphEthApiError::TransactionNotFound(B256::ZERO), -32002);
+        check(
+            MorphEthApiError::SkippedTransactionNotFound(B256::ZERO),
+            -32003,
+        );
+        check(MorphEthApiError::InvalidBlockNumberOrHash, -32004);
+        check(MorphEthApiError::StateNotAvailable, -32005);
+        check(MorphEthApiError::Internal("x".into()), -32603);
+        check(MorphEthApiError::Database("x".into()), -32006);
+        check(MorphEthApiError::Provider("x".into()), -32007);
+    }
+
+    #[test]
+    fn as_eth_api_error_returns_inner_for_eth_variant() {
+        let inner = EthApiError::InvalidParams("test".to_string());
+        let err = MorphEthApiError::Eth(inner);
+        assert!(err.as_err().is_some());
+    }
+
+    #[test]
+    fn as_eth_api_error_returns_none_for_non_eth_variants() {
+        assert!(MorphEthApiError::BlockNotFound.as_err().is_none());
+        assert!(MorphEthApiError::StateNotAvailable.as_err().is_none());
+        assert!(MorphEthApiError::Internal("x".into()).as_err().is_none());
+    }
+
+    #[test]
+    fn from_eth_api_error() {
+        let inner = EthApiError::InvalidParams("test".to_string());
+        let err: MorphEthApiError = inner.into();
+        assert!(matches!(err, MorphEthApiError::Eth(_)));
+    }
+
+    #[test]
+    fn to_morph_err_extension_trait() {
+        let ok_result: Result<u32, EthApiError> = Ok(42);
+        assert_eq!(ok_result.to_morph_err().unwrap(), 42);
+
+        let err_result: Result<u32, EthApiError> =
+            Err(EthApiError::InvalidParams("bad".to_string()));
+        let morph_err = err_result.to_morph_err().unwrap_err();
+        assert!(matches!(morph_err, MorphEthApiError::Eth(_)));
+    }
+}

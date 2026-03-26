@@ -315,6 +315,87 @@ mod tests {
     }
 
     #[test]
+    fn morph_blockhash_block_zero() {
+        // Block 0 requested from block 1 — block 0 is within [1-256, 1) = [0, 1), so valid
+        let result = morph_blockhash_result(2818, 1, 0);
+        assert_ne!(result, U256::ZERO, "block 0 from block 1 should be valid");
+
+        // Block 0 requested from block 0 — current block returns zero
+        let result = morph_blockhash_result(2818, 0, 0);
+        assert_eq!(
+            result,
+            U256::ZERO,
+            "block 0 from block 0 should be zero (current block)"
+        );
+    }
+
+    #[test]
+    fn morph_blockhash_chain_id_zero() {
+        // chain_id=0 should still produce a deterministic hash
+        let result = morph_blockhash_value(0, 100);
+        assert_ne!(result, U256::ZERO, "chain_id=0 should still produce a hash");
+
+        // Different chain_ids produce different hashes
+        let result_0 = morph_blockhash_value(0, 100);
+        let result_1 = morph_blockhash_value(1, 100);
+        assert_ne!(
+            result_0, result_1,
+            "different chain_ids should produce different hashes"
+        );
+    }
+
+    #[test]
+    fn morph_blockhash_small_current_block() {
+        let chain_id = 2818;
+        // current_number = 5, so valid range is [0, 5)
+        // Block 0 through 4 should be valid
+        for n in 0..5 {
+            assert_ne!(
+                morph_blockhash_result(chain_id, 5, n),
+                U256::ZERO,
+                "block {n} from block 5 should be valid"
+            );
+        }
+        // Block 5 (current) should be zero
+        assert_eq!(morph_blockhash_result(chain_id, 5, 5), U256::ZERO);
+    }
+
+    #[test]
+    fn morph_blockhash_boundary_256() {
+        let chain_id = 2818;
+        let current = 300;
+
+        // current - 256 = 44 (inclusive lower bound)
+        assert_ne!(
+            morph_blockhash_result(chain_id, current, 44),
+            U256::ZERO,
+            "block current-256 should be valid"
+        );
+
+        // current - 257 = 43 (out of range)
+        assert_eq!(
+            morph_blockhash_result(chain_id, current, 43),
+            U256::ZERO,
+            "block current-257 should be zero"
+        );
+
+        // current - 1 = 299 (valid, most recent)
+        assert_ne!(
+            morph_blockhash_result(chain_id, current, 299),
+            U256::ZERO,
+            "block current-1 should be valid"
+        );
+    }
+
+    #[test]
+    fn morph_blockhash_deterministic() {
+        // Same inputs always produce the same output
+        let a = morph_blockhash_value(2818, 1000);
+        let b = morph_blockhash_value(2818, 1000);
+        assert_eq!(a, b, "blockhash should be deterministic");
+    }
+
+    #[test]
     fn morph_blockhash_window_matches_geth_rules() {
         let chain_id = 2818_u64;
         let current = 2_662_438_u64;

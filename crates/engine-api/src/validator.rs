@@ -115,4 +115,50 @@ mod tests {
         // After Jade: should validate (using MPT)
         assert!(ctx.should_validate_state_root(1000));
     }
+
+    #[test]
+    fn test_validation_context_chain_spec_accessor() {
+        let chain_spec = create_test_chainspec(Some(1000));
+        let ctx = MorphValidationContext::new(chain_spec);
+
+        // Verify the chain_spec accessor returns a valid chain spec
+        // by checking a hardfork method on it
+        assert!(ctx.chain_spec().is_jade_active_at_timestamp(1000));
+        assert!(!ctx.chain_spec().is_jade_active_at_timestamp(999));
+    }
+
+    #[test]
+    fn test_should_validate_state_root_at_jade_boundary() {
+        let chain_spec = create_test_chainspec(Some(1000));
+
+        // Exactly at Jade timestamp: should validate (active)
+        assert!(should_validate_state_root(&chain_spec, 1000));
+
+        // One second before: should NOT validate
+        assert!(!should_validate_state_root(&chain_spec, 999));
+
+        // One second after: should validate
+        assert!(should_validate_state_root(&chain_spec, 1001));
+    }
+
+    #[test]
+    fn test_should_validate_state_root_jade_at_zero() {
+        // Jade active from genesis (timestamp 0)
+        let chain_spec = create_test_chainspec(Some(0));
+
+        // Should always validate when Jade is at timestamp 0
+        assert!(should_validate_state_root(&chain_spec, 0));
+        assert!(should_validate_state_root(&chain_spec, 1));
+        assert!(should_validate_state_root(&chain_spec, u64::MAX));
+    }
+
+    #[test]
+    fn test_should_validate_state_root_jade_at_max_timestamp() {
+        let chain_spec = create_test_chainspec(Some(u64::MAX));
+
+        // Only u64::MAX should trigger validation
+        assert!(!should_validate_state_root(&chain_spec, 0));
+        assert!(!should_validate_state_root(&chain_spec, u64::MAX - 1));
+        assert!(should_validate_state_root(&chain_spec, u64::MAX));
+    }
 }

@@ -131,6 +131,10 @@ fn build_hardforks(genesis: &Genesis, chain_info: &MorphGenesisInfo) -> ChainHar
 /// Chains supported by Morph. First value should be used as the default.
 pub const SUPPORTED_CHAINS: &[&str] = &["mainnet", "hoodi"];
 
+// =============================================================================
+// Chain Specification Parser (CLI)
+// =============================================================================
+
 /// Morph chain specification parser.
 #[derive(Debug, Clone, Default)]
 pub struct MorphChainSpecParser;

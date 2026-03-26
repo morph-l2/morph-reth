@@ -76,6 +76,11 @@ pub struct ExecutableL2Data {
 }
 
 impl ExecutableL2Data {
+    /// Create a new empty [`ExecutableL2Data`].
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     /// Returns true if this block contains any transactions.
     pub fn has_transactions(&self) -> bool {
         !self.transactions.is_empty()
@@ -99,6 +104,12 @@ mod tests {
         assert_eq!(data.gas_limit, 0);
         assert!(!data.has_transactions());
         assert_eq!(data.transaction_count(), 0);
+    }
+
+    #[test]
+    fn test_executable_l2_data_new() {
+        let data = ExecutableL2Data::new();
+        assert_eq!(data, ExecutableL2Data::default());
     }
 
     #[test]
@@ -175,5 +186,68 @@ mod tests {
         assert_eq!(data.gas_limit, 30_000_000);
         assert_eq!(data.gas_used, 21000);
         assert_eq!(data.next_l1_message_index, 10);
+    }
+
+    #[test]
+    fn test_transaction_count_multiple() {
+        let mut data = ExecutableL2Data::default();
+        data.transactions.push(Bytes::from(vec![0x01]));
+        data.transactions.push(Bytes::from(vec![0x02]));
+        data.transactions.push(Bytes::from(vec![0x03]));
+        assert_eq!(data.transaction_count(), 3);
+        assert!(data.has_transactions());
+    }
+
+    #[test]
+    fn test_serde_with_base_fee() {
+        let data = ExecutableL2Data {
+            base_fee_per_gas: Some(1_000_000_000),
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&data).expect("serialize");
+        assert!(json.contains("baseFeePerGas"));
+
+        let decoded: ExecutableL2Data = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded.base_fee_per_gas, Some(1_000_000_000));
+    }
+
+    #[test]
+    fn test_serde_with_large_base_fee() {
+        // u128 base fee that exceeds u64
+        let data = ExecutableL2Data {
+            base_fee_per_gas: Some(u128::MAX),
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&data).expect("serialize");
+        let decoded: ExecutableL2Data = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded.base_fee_per_gas, Some(u128::MAX));
+    }
+
+    #[test]
+    fn test_serde_empty_transactions_present() {
+        let data = ExecutableL2Data {
+            transactions: vec![],
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&data).expect("serialize");
+        let decoded: ExecutableL2Data = serde_json::from_str(&json).expect("deserialize");
+        assert!(decoded.transactions.is_empty());
+        assert!(!decoded.has_transactions());
+    }
+
+    #[test]
+    fn test_clone_and_equality() {
+        let data = ExecutableL2Data {
+            parent_hash: B256::from([0x11; 32]),
+            number: 42,
+            gas_used: 21000,
+            ..Default::default()
+        };
+
+        let cloned = data.clone();
+        assert_eq!(data, cloned);
     }
 }

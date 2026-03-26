@@ -554,4 +554,330 @@ mod tests {
         assert!(tx_env.memo.is_none());
         assert!(tx_env.version.is_none());
     }
+
+    // =========================================================================
+    // morph_envelope_from_ethereum tests
+    // =========================================================================
+
+    #[test]
+    fn morph_envelope_from_ethereum_legacy() {
+        use alloy_consensus::{Signed, TxLegacy};
+        let signed = Signed::new_unchecked(
+            TxLegacy {
+                gas_limit: 21_000,
+                ..Default::default()
+            },
+            Signature::new(U256::ZERO, U256::ZERO, false),
+            Default::default(),
+        );
+        let eth = EthereumTxEnvelope::Legacy(signed);
+        let result = morph_envelope_from_ethereum(eth);
+        assert!(result.is_ok());
+        assert!(matches!(result.unwrap(), MorphTxEnvelope::Legacy(_)));
+    }
+
+    #[test]
+    fn morph_envelope_from_ethereum_eip2930() {
+        use alloy_consensus::{Signed, TxEip2930};
+        let signed = Signed::new_unchecked(
+            TxEip2930 {
+                gas_limit: 21_000,
+                ..Default::default()
+            },
+            Signature::new(U256::ZERO, U256::ZERO, false),
+            Default::default(),
+        );
+        let eth = EthereumTxEnvelope::Eip2930(signed);
+        let result = morph_envelope_from_ethereum(eth);
+        assert!(result.is_ok());
+        assert!(matches!(result.unwrap(), MorphTxEnvelope::Eip2930(_)));
+    }
+
+    #[test]
+    fn morph_envelope_from_ethereum_eip1559() {
+        use alloy_consensus::{Signed, TxEip1559};
+        let signed = Signed::new_unchecked(
+            TxEip1559 {
+                gas_limit: 21_000,
+                ..Default::default()
+            },
+            Signature::new(U256::ZERO, U256::ZERO, false),
+            Default::default(),
+        );
+        let eth = EthereumTxEnvelope::Eip1559(signed);
+        let result = morph_envelope_from_ethereum(eth);
+        assert!(result.is_ok());
+        assert!(matches!(result.unwrap(), MorphTxEnvelope::Eip1559(_)));
+    }
+
+    #[test]
+    fn morph_envelope_from_ethereum_eip7702() {
+        use alloy_consensus::{Signed, TxEip7702};
+        let signed = Signed::new_unchecked(
+            TxEip7702 {
+                gas_limit: 21_000,
+                ..Default::default()
+            },
+            Signature::new(U256::ZERO, U256::ZERO, false),
+            Default::default(),
+        );
+        let eth = EthereumTxEnvelope::Eip7702(signed);
+        let result = morph_envelope_from_ethereum(eth);
+        assert!(result.is_ok());
+        assert!(matches!(result.unwrap(), MorphTxEnvelope::Eip7702(_)));
+    }
+
+    #[test]
+    fn morph_envelope_from_ethereum_rejects_eip4844() {
+        use alloy_consensus::Signed;
+        let signed = Signed::new_unchecked(
+            TxEip4844 {
+                gas_limit: 21_000,
+                ..Default::default()
+            },
+            Signature::new(U256::ZERO, U256::ZERO, false),
+            Default::default(),
+        );
+        let eth = EthereumTxEnvelope::Eip4844(signed);
+        let result = morph_envelope_from_ethereum(eth);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("EIP-4844"));
+    }
+
+    // =========================================================================
+    // try_build_morph_tx_from_request tests
+    // =========================================================================
+
+    #[test]
+    fn try_build_morph_tx_returns_none_for_standard_tx() {
+        let req = create_basic_transaction_request();
+        let result = try_build_morph_tx_from_request(&req, U64::ZERO, U256::ZERO, None, None);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn try_build_morph_tx_with_fee_token_id() {
+        let req = create_basic_transaction_request();
+        let result =
+            try_build_morph_tx_from_request(&req, U64::from(1), U256::from(1_000_000), None, None);
+        assert!(result.is_ok());
+        let tx = result.unwrap().unwrap();
+        assert_eq!(tx.fee_token_id, 1);
+        assert_eq!(tx.fee_limit, U256::from(1_000_000));
+        assert_eq!(
+            tx.version,
+            morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_1
+        );
+    }
+
+    #[test]
+    fn try_build_morph_tx_with_reference_only() {
+        let req = create_basic_transaction_request();
+        let reference = B256::random();
+        let result =
+            try_build_morph_tx_from_request(&req, U64::ZERO, U256::ZERO, Some(reference), None);
+        assert!(result.is_ok());
+        let tx = result.unwrap().unwrap();
+        assert_eq!(tx.reference, Some(reference));
+        assert_eq!(tx.fee_token_id, 0);
+    }
+
+    #[test]
+    fn try_build_morph_tx_with_memo_only() {
+        let req = create_basic_transaction_request();
+        let memo = Bytes::from("hello world");
+        let result =
+            try_build_morph_tx_from_request(&req, U64::ZERO, U256::ZERO, None, Some(memo.clone()));
+        assert!(result.is_ok());
+        let tx = result.unwrap().unwrap();
+        assert_eq!(tx.memo, Some(memo));
+    }
+
+    #[test]
+    fn try_build_morph_tx_empty_memo_is_not_trigger() {
+        let req = create_basic_transaction_request();
+        let result =
+            try_build_morph_tx_from_request(&req, U64::ZERO, U256::ZERO, None, Some(Bytes::new()));
+        assert!(result.is_ok());
+        // Empty memo should NOT trigger MorphTx creation
+        assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn try_build_morph_tx_requires_chain_id() {
+        let mut req = create_basic_transaction_request();
+        req.chain_id = None;
+        let result =
+            try_build_morph_tx_from_request(&req, U64::from(1), U256::from(100), None, None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("chain_id"));
+    }
+
+    #[test]
+    fn try_build_morph_tx_sets_correct_tx_fields() {
+        let req = create_basic_transaction_request();
+        let result = try_build_morph_tx_from_request(
+            &req,
+            U64::from(2),
+            U256::from(500_000),
+            Some(B256::random()),
+            Some(Bytes::from("memo")),
+        );
+        let tx = result.unwrap().unwrap();
+        assert_eq!(tx.chain_id, 2818);
+        assert_eq!(tx.gas_limit, 100000);
+        assert_eq!(tx.nonce, 1);
+        assert_eq!(tx.max_fee_per_gas, 1_000_000_000); // falls back to gas_price
+        assert_eq!(tx.value, U256::from(1000));
+    }
+
+    // =========================================================================
+    // FromConsensusTx tests
+    // =========================================================================
+
+    #[test]
+    fn from_consensus_tx_l1_message() {
+        use alloy_primitives::Sealed;
+        use morph_primitives::TxL1Msg;
+
+        let l1_msg = TxL1Msg {
+            queue_index: 42,
+            gas_limit: 100_000,
+            sender: address!("000000000000000000000000000000000000dead"),
+            ..Default::default()
+        };
+        let tx = MorphTxEnvelope::L1Msg(Sealed::new_unchecked(l1_msg, B256::default()));
+        let signer = Address::ZERO;
+        let tx_info = TransactionInfo {
+            hash: Some(B256::ZERO),
+            block_hash: Some(B256::random()),
+            block_number: Some(10),
+            index: Some(0),
+            base_fee: Some(1000),
+        };
+
+        let rpc_tx = MorphRpcTransaction::from_consensus_tx(tx, signer, tx_info).unwrap();
+        assert_eq!(
+            rpc_tx.sender,
+            Some(address!("000000000000000000000000000000000000dead"))
+        );
+        assert_eq!(rpc_tx.queue_index, Some(U64::from(42)));
+        // L1 messages don't have MorphTx-specific fields
+        assert!(rpc_tx.version.is_none());
+        assert!(rpc_tx.fee_token_id.is_none());
+    }
+
+    #[test]
+    fn from_consensus_tx_morph_tx() {
+        use alloy_consensus::Signed;
+
+        let morph_tx = TxMorph {
+            chain_id: 2818,
+            nonce: 5,
+            gas_limit: 50_000,
+            max_fee_per_gas: 2_000_000_000,
+            max_priority_fee_per_gas: 1_000_000,
+            fee_token_id: 3,
+            fee_limit: U256::from(100_000),
+            version: morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_1,
+            reference: Some(B256::random()),
+            memo: Some(Bytes::from("hello")),
+            ..Default::default()
+        };
+        let tx = MorphTxEnvelope::Morph(Signed::new_unchecked(
+            morph_tx,
+            Signature::new(U256::ZERO, U256::ZERO, false),
+            Default::default(),
+        ));
+        let signer = address!("0000000000000000000000000000000000000099");
+        let tx_info = TransactionInfo {
+            hash: Some(B256::ZERO),
+            block_hash: Some(B256::random()),
+            block_number: Some(100),
+            index: Some(5),
+            base_fee: Some(1_000_000_000),
+        };
+
+        let rpc_tx = MorphRpcTransaction::from_consensus_tx(tx, signer, tx_info).unwrap();
+        // MorphTx should NOT have L1 message fields
+        assert!(rpc_tx.sender.is_none());
+        assert!(rpc_tx.queue_index.is_none());
+        // Should have MorphTx-specific fields
+        assert_eq!(
+            rpc_tx.version,
+            Some(morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_1)
+        );
+        assert_eq!(rpc_tx.fee_token_id, Some(U64::from(3)));
+        assert_eq!(rpc_tx.fee_limit, Some(U256::from(100_000)));
+        assert!(rpc_tx.reference.is_some());
+        assert_eq!(rpc_tx.memo, Some(Bytes::from("hello")));
+    }
+
+    #[test]
+    fn from_consensus_tx_standard_eip1559() {
+        use alloy_consensus::{Signed, TxEip1559};
+
+        let tx = MorphTxEnvelope::Eip1559(Signed::new_unchecked(
+            TxEip1559 {
+                chain_id: 2818,
+                nonce: 0,
+                gas_limit: 21_000,
+                max_fee_per_gas: 2_000_000_000,
+                max_priority_fee_per_gas: 1_000_000,
+                ..Default::default()
+            },
+            Signature::new(U256::ZERO, U256::ZERO, false),
+            Default::default(),
+        ));
+        let signer = address!("0000000000000000000000000000000000000001");
+        let tx_info = TransactionInfo {
+            hash: Some(B256::ZERO),
+            block_hash: None,
+            block_number: None,
+            index: None,
+            base_fee: Some(1_000_000_000),
+        };
+
+        let rpc_tx = MorphRpcTransaction::from_consensus_tx(tx, signer, tx_info).unwrap();
+        // Standard tx should have no L1 message or MorphTx fields
+        assert!(rpc_tx.sender.is_none());
+        assert!(rpc_tx.queue_index.is_none());
+        assert!(rpc_tx.version.is_none());
+        assert!(rpc_tx.fee_token_id.is_none());
+        assert!(rpc_tx.fee_limit.is_none());
+        assert!(rpc_tx.reference.is_none());
+        assert!(rpc_tx.memo.is_none());
+    }
+
+    #[test]
+    fn from_consensus_tx_effective_gas_price_calculated() {
+        use alloy_consensus::{Signed, TxEip1559};
+
+        let tx = MorphTxEnvelope::Eip1559(Signed::new_unchecked(
+            TxEip1559 {
+                chain_id: 2818,
+                gas_limit: 21_000,
+                max_fee_per_gas: 3_000_000_000,
+                max_priority_fee_per_gas: 500_000_000,
+                ..Default::default()
+            },
+            Signature::new(U256::ZERO, U256::ZERO, false),
+            Default::default(),
+        ));
+        let base_fee = 1_000_000_000u64;
+        let tx_info = TransactionInfo {
+            hash: Some(B256::ZERO),
+            block_hash: Some(B256::random()),
+            block_number: Some(1),
+            index: Some(0),
+            base_fee: Some(base_fee),
+        };
+
+        let rpc_tx = MorphRpcTransaction::from_consensus_tx(tx, Address::ZERO, tx_info).unwrap();
+        // effective_gas_price = min(max_priority_fee, max_fee - base_fee) + base_fee
+        // = min(500_000_000, 3_000_000_000 - 1_000_000_000) + 1_000_000_000
+        // = 500_000_000 + 1_000_000_000 = 1_500_000_000
+        assert_eq!(rpc_tx.inner.effective_gas_price, Some(1_500_000_000));
+    }
 }

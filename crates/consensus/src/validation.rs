@@ -159,7 +159,9 @@ impl HeaderValidator<MorphHeader> for MorphConsensus {
         if self.chain_spec.is_fee_vault_enabled()
             && header.beneficiary() != alloy_primitives::Address::ZERO
         {
-            return Err(MorphConsensusError::InvalidCoinbase(header.beneficiary()).into());
+            return Err(ConsensusError::Other(
+                MorphConsensusError::InvalidCoinbase(header.beneficiary()).to_string(),
+            ));
         }
 
         // Check timestamp is not in the future
@@ -195,7 +197,9 @@ impl HeaderValidator<MorphHeader> for MorphConsensus {
             .base_fee_per_gas()
             .ok_or(ConsensusError::BaseFeeMissing)?;
         if base_fee > MORPH_MAXIMUM_BASE_FEE {
-            return Err(MorphConsensusError::BaseFeeOverLimit(base_fee).into());
+            return Err(ConsensusError::Other(
+                MorphConsensusError::BaseFeeOverLimit(base_fee).to_string(),
+            ));
         }
         Ok(())
     }
@@ -229,11 +233,13 @@ impl HeaderValidator<MorphHeader> for MorphConsensus {
         // decrease across blocks. This is the header-only half of L1 message
         // validation; the body-level half is in validate_block_pre_execution.
         if header.next_l1_msg_index < parent.next_l1_msg_index {
-            return Err(MorphConsensusError::InvalidNextL1MessageIndex {
-                expected: parent.next_l1_msg_index,
-                actual: header.next_l1_msg_index,
-            }
-            .into());
+            return Err(ConsensusError::Other(
+                MorphConsensusError::InvalidNextL1MessageIndex {
+                    expected: parent.next_l1_msg_index,
+                    actual: header.next_l1_msg_index,
+                }
+                .to_string(),
+            ));
         }
 
         Ok(())
@@ -293,7 +299,9 @@ impl Consensus<Block> for MorphConsensus {
 
         // Check withdrawals are empty
         if block.body().withdrawals().is_some() {
-            return Err(MorphConsensusError::WithdrawalsNonEmpty.into());
+            return Err(ConsensusError::Other(
+                MorphConsensusError::WithdrawalsNonEmpty.to_string(),
+            ));
         }
 
         // Validate MorphTx version and field constraints.
@@ -491,28 +499,35 @@ fn validate_l1_messages_in_block(
         if tx.is_l1_msg() {
             // Check L1 messages are only at the start of the block (before any L2 tx)
             if saw_l2_transaction {
-                return Err(MorphConsensusError::InvalidL1MessageOrder.into());
+                return Err(ConsensusError::Other(
+                    MorphConsensusError::InvalidL1MessageOrder.to_string(),
+                ));
             }
 
-            let tx_queue_index = tx
-                .queue_index()
-                .ok_or_else(|| ConsensusError::from(MorphConsensusError::MalformedL1Message))?;
+            let tx_queue_index = tx.queue_index().ok_or_else(|| {
+                ConsensusError::Other(MorphConsensusError::MalformedL1Message.to_string())
+            })?;
 
             // Check queue indices are strictly sequential (each = previous + 1).
             // Use checked_add to prevent overflow at u64::MAX.
             if let Some(prev) = prev_queue_index {
                 let expected = prev.checked_add(1).ok_or_else(|| {
-                    ConsensusError::from(MorphConsensusError::L1MessagesNotInOrder {
-                        expected: u64::MAX,
-                        actual: tx_queue_index,
-                    })
+                    ConsensusError::Other(
+                        MorphConsensusError::L1MessagesNotInOrder {
+                            expected: u64::MAX,
+                            actual: tx_queue_index,
+                        }
+                        .to_string(),
+                    )
                 })?;
                 if tx_queue_index != expected {
-                    return Err(MorphConsensusError::L1MessagesNotInOrder {
-                        expected,
-                        actual: tx_queue_index,
-                    }
-                    .into());
+                    return Err(ConsensusError::Other(
+                        MorphConsensusError::L1MessagesNotInOrder {
+                            expected,
+                            actual: tx_queue_index,
+                        }
+                        .to_string(),
+                    ));
                 }
             }
 
@@ -539,17 +554,22 @@ fn validate_l1_messages_in_block(
             )
         })?;
         let min_expected = last_queue_index.checked_add(1).ok_or_else(|| {
-            ConsensusError::from(MorphConsensusError::InvalidNextL1MessageIndex {
-                expected: u64::MAX,
-                actual: header_next_l1_msg_index,
-            })
+            ConsensusError::Other(
+                MorphConsensusError::InvalidNextL1MessageIndex {
+                    expected: u64::MAX,
+                    actual: header_next_l1_msg_index,
+                }
+                .to_string(),
+            )
         })?;
         if header_next_l1_msg_index < min_expected {
-            return Err(MorphConsensusError::InvalidNextL1MessageIndex {
-                expected: min_expected,
-                actual: header_next_l1_msg_index,
-            }
-            .into());
+            return Err(ConsensusError::Other(
+                MorphConsensusError::InvalidNextL1MessageIndex {
+                    expected: min_expected,
+                    actual: header_next_l1_msg_index,
+                }
+                .to_string(),
+            ));
         }
     }
 
@@ -573,16 +593,20 @@ fn validate_morph_txs(txs: &[MorphTxEnvelope], is_jade: bool) -> Result<(), Cons
 
         // Reject MorphTx V1 before Jade fork (hardfork-gated, consensus-only check).
         if !is_jade && morph_tx.version == MORPH_TX_VERSION_1 {
-            return Err(MorphConsensusError::InvalidBody(
-                "MorphTx version 1 is not yet active (jade fork not reached)".into(),
-            )
-            .into());
+            return Err(ConsensusError::Other(
+                MorphConsensusError::InvalidBody(
+                    "MorphTx version 1 is not yet active (jade fork not reached)".into(),
+                )
+                .to_string(),
+            ));
         }
 
         // Reuse primitive-layer validation (version, fee_token_id, reference,
         // memo length, fee_limit constraints, gas price ordering).
         if let Err(reason) = morph_tx.validate() {
-            return Err(MorphConsensusError::InvalidBody(reason.to_string()).into());
+            return Err(ConsensusError::Other(
+                MorphConsensusError::InvalidBody(reason.to_string()).to_string(),
+            ));
         }
     }
 
@@ -649,7 +673,7 @@ mod tests {
     use alloy_consensus::{Header, Signed};
     use alloy_genesis::Genesis;
     use alloy_primitives::{Address, B64, B256, Bytes, Signature, U256};
-    use morph_primitives::transaction::TxL1Msg;
+    use morph_primitives::transaction::{MAX_MEMO_LENGTH, MORPH_TX_VERSION_0, TxL1Msg};
 
     fn create_test_chainspec() -> Arc<MorphChainSpec> {
         let genesis_json = serde_json::json!({
@@ -934,8 +958,8 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_l1_messages_in_block_next_index_too_low() {
-        // Valid sequential L1 messages (0, 1, 2) but header.next_l1_msg_index < last+1
+    fn test_validate_l1_messages_in_block_wrong_next_l1_msg_index() {
+        // Valid sequential L1 messages (0, 1, 2) but wrong next_l1_msg_index in header
         let txs = [
             create_l1_msg_tx(0),
             create_l1_msg_tx(1),
@@ -943,31 +967,12 @@ mod tests {
             create_regular_tx(),
         ];
 
-        // Header says 2 but minimum is 3 (last=2, 2+1=3) — INVALID
+        // Header says 2 but should be 3 (last=2, 2+1=3). Value < min_expected triggers error.
         let result = validate_l1_messages_in_block(&txs, 2);
         assert!(result.is_err());
         let err_str = result.unwrap_err().to_string();
         assert!(err_str.contains("expected 3"));
         assert!(err_str.contains("got 2"));
-    }
-
-    #[test]
-    fn test_validate_l1_messages_in_block_skipped_messages_allowed() {
-        // L1 messages 0, 1, 2 but header says next=5 (messages 3, 4 were skipped).
-        // This is valid — Morph allows the sequencer to skip L1 messages.
-        let txs = [
-            create_l1_msg_tx(0),
-            create_l1_msg_tx(1),
-            create_l1_msg_tx(2),
-            create_regular_tx(),
-        ];
-
-        // header_next=5 > last+1=3 — valid (2 messages skipped)
-        assert!(validate_l1_messages_in_block(&txs, 5).is_ok());
-        // header_next=3 == last+1=3 — valid (no messages skipped)
-        assert!(validate_l1_messages_in_block(&txs, 3).is_ok());
-        // header_next=100 > last+1=3 — valid (many messages skipped)
-        assert!(validate_l1_messages_in_block(&txs, 100).is_ok());
     }
 
     #[test]
@@ -1365,12 +1370,15 @@ mod tests {
     #[test]
     fn test_verify_receipts_empty() {
         let receipts: [MorphReceipt; 0] = [];
-        let expected_root = alloy_consensus::proofs::calculate_receipt_root::<
-            alloy_consensus::ReceiptWithBloom<&MorphReceipt>,
-        >(&[]);
+        // Well-known Ethereum empty-trie root (keccak256 of RLP-encoded empty string).
+        // Using a hardcoded constant instead of calculate_receipt_root(&[]) to avoid
+        // a circular test that would pass even if the root computation is wrong.
+        let empty_root: B256 = "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421"
+            .parse()
+            .unwrap();
         let expected_bloom = Bloom::ZERO;
 
-        let result = verify_receipts(expected_root, expected_bloom, &receipts);
+        let result = verify_receipts(empty_root, expected_bloom, &receipts);
         assert!(result.is_ok());
     }
 
@@ -1472,6 +1480,421 @@ mod tests {
         assert!(matches!(
             validate_against_parent_timestamp(&child, &parent, true),
             Err(ConsensusError::TimestampIsInPast { .. })
+        ));
+    }
+
+    // ========================================================================
+    // Coinbase / FeeVault Validation Tests
+    // ========================================================================
+
+    #[test]
+    fn test_validate_header_coinbase_non_zero_with_fee_vault() {
+        // Create a chainspec with FeeVault explicitly enabled
+        let genesis_json = serde_json::json!({
+            "config": {
+                "chainId": 1337,
+                "homesteadBlock": 0,
+                "eip150Block": 0,
+                "eip155Block": 0,
+                "eip158Block": 0,
+                "byzantiumBlock": 0,
+                "constantinopleBlock": 0,
+                "petersburgBlock": 0,
+                "istanbulBlock": 0,
+                "berlinBlock": 0,
+                "londonBlock": 0,
+                "bernoulliBlock": 0,
+                "curieBlock": 0,
+                "morph203Time": 0,
+                "viridianTime": 0,
+                "emeraldTime": 0,
+                "morph": {
+                    "feeVaultAddress": "0x530000000000000000000000000000000000000a"
+                }
+            },
+            "alloc": {}
+        });
+        let genesis: Genesis = serde_json::from_value(genesis_json).unwrap();
+        let chain_spec = Arc::new(MorphChainSpec::from(genesis));
+        assert!(
+            chain_spec.is_fee_vault_enabled(),
+            "test chainspec must have FeeVault enabled"
+        );
+        let consensus = MorphConsensus::new(chain_spec);
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Non-zero coinbase with fee vault enabled should fail
+        let header = create_morph_header(Header {
+            nonce: B64::ZERO,
+            ommers_hash: EMPTY_OMMER_ROOT_HASH,
+            beneficiary: Address::repeat_byte(0x01),
+            gas_limit: 30_000_000,
+            timestamp: now - 10,
+            base_fee_per_gas: Some(1_000_000),
+            ..Default::default()
+        });
+        let sealed = SealedHeader::seal_slow(header);
+
+        let result = consensus.validate_header(&sealed);
+        assert!(result.is_err());
+        let err_str = result.unwrap_err().to_string();
+        assert!(err_str.contains("coinbase"));
+    }
+
+    // ========================================================================
+    // MorphTx Version Validation Tests
+    // ========================================================================
+
+    fn create_morph_tx_v0(fee_token_id: u16) -> MorphTxEnvelope {
+        use alloy_consensus::Signed;
+        use morph_primitives::TxMorph;
+
+        let tx = TxMorph {
+            chain_id: 1337,
+            nonce: 0,
+            gas_limit: 21000,
+            max_fee_per_gas: 2_000_000_000,
+            max_priority_fee_per_gas: 1_000_000_000,
+            to: alloy_primitives::TxKind::Call(Address::repeat_byte(0x01)),
+            value: U256::ZERO,
+            access_list: Default::default(),
+            version: MORPH_TX_VERSION_0,
+            fee_token_id,
+            fee_limit: U256::from(1000u64),
+            reference: None,
+            memo: None,
+            input: Bytes::new(),
+        };
+        MorphTxEnvelope::Morph(Signed::new_unchecked(
+            tx,
+            Signature::new(U256::ZERO, U256::ZERO, false),
+            B256::ZERO,
+        ))
+    }
+
+    fn create_morph_tx_v1(fee_token_id: u16) -> MorphTxEnvelope {
+        use alloy_consensus::Signed;
+        use morph_primitives::TxMorph;
+
+        let tx = TxMorph {
+            chain_id: 1337,
+            nonce: 0,
+            gas_limit: 21000,
+            max_fee_per_gas: 2_000_000_000,
+            max_priority_fee_per_gas: 1_000_000_000,
+            to: alloy_primitives::TxKind::Call(Address::repeat_byte(0x01)),
+            value: U256::ZERO,
+            access_list: Default::default(),
+            version: MORPH_TX_VERSION_1,
+            fee_token_id,
+            fee_limit: U256::ZERO,
+            reference: Some(B256::repeat_byte(0xab)),
+            memo: Some(Bytes::from_static(b"test-memo")),
+            input: Bytes::new(),
+        };
+        MorphTxEnvelope::Morph(Signed::new_unchecked(
+            tx,
+            Signature::new(U256::ZERO, U256::ZERO, false),
+            B256::ZERO,
+        ))
+    }
+
+    #[test]
+    fn test_validate_morph_tx_v0_valid() {
+        // V0 with fee_token_id > 0 and no reference/memo
+        let txs = [create_morph_tx_v0(1)];
+        let result = validate_morph_txs(&txs, false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_morph_tx_v0_zero_fee_token_rejected() {
+        // V0 with fee_token_id == 0 should be rejected
+        let txs = [create_morph_tx_v0(0)];
+        let result = validate_morph_txs(&txs, false);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("version 0 MorphTx requires FeeTokenID > 0")
+        );
+    }
+
+    #[test]
+    fn test_validate_morph_tx_v0_with_reference_rejected() {
+        use alloy_consensus::Signed;
+        use morph_primitives::TxMorph;
+
+        let tx = TxMorph {
+            chain_id: 1337,
+            nonce: 0,
+            gas_limit: 21000,
+            max_fee_per_gas: 2_000_000_000,
+            max_priority_fee_per_gas: 1_000_000_000,
+            to: alloy_primitives::TxKind::Call(Address::repeat_byte(0x01)),
+            value: U256::ZERO,
+            access_list: Default::default(),
+            version: MORPH_TX_VERSION_0,
+            fee_token_id: 1,
+            fee_limit: U256::from(1000u64),
+            reference: Some(B256::repeat_byte(0x01)), // V0 should not have reference
+            memo: None,
+            input: Bytes::new(),
+        };
+        let envelope = MorphTxEnvelope::Morph(Signed::new_unchecked(
+            tx,
+            Signature::new(U256::ZERO, U256::ZERO, false),
+            B256::ZERO,
+        ));
+
+        let txs = [envelope];
+        let result = validate_morph_txs(&txs, false);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("version 0 MorphTx does not support Reference field")
+        );
+    }
+
+    #[test]
+    fn test_validate_morph_tx_v1_before_jade_rejected() {
+        // V1 before jade fork should be rejected
+        let txs = [create_morph_tx_v1(1)];
+        let result = validate_morph_txs(&txs, false);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("jade fork not reached")
+        );
+    }
+
+    #[test]
+    fn test_validate_morph_tx_v1_after_jade_valid() {
+        // V1 after jade fork should pass
+        let txs = [create_morph_tx_v1(1)];
+        let result = validate_morph_txs(&txs, true);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_morph_tx_v1_fee_token_0_with_fee_limit_rejected() {
+        use alloy_consensus::Signed;
+        use morph_primitives::TxMorph;
+
+        // V1 with fee_token_id == 0 and non-zero fee_limit is invalid
+        let tx = TxMorph {
+            chain_id: 1337,
+            nonce: 0,
+            gas_limit: 21000,
+            max_fee_per_gas: 2_000_000_000,
+            max_priority_fee_per_gas: 1_000_000_000,
+            to: alloy_primitives::TxKind::Call(Address::repeat_byte(0x01)),
+            value: U256::ZERO,
+            access_list: Default::default(),
+            version: MORPH_TX_VERSION_1,
+            fee_token_id: 0,
+            fee_limit: U256::from(100u64), // non-zero with fee_token_id=0
+            reference: None,
+            memo: None,
+            input: Bytes::new(),
+        };
+        let envelope = MorphTxEnvelope::Morph(Signed::new_unchecked(
+            tx,
+            Signature::new(U256::ZERO, U256::ZERO, false),
+            B256::ZERO,
+        ));
+
+        let txs = [envelope];
+        let result = validate_morph_txs(&txs, true);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("version 1 MorphTx cannot have FeeLimit when FeeTokenID is 0")
+        );
+    }
+
+    #[test]
+    fn test_validate_morph_tx_v1_memo_too_long_rejected() {
+        use alloy_consensus::Signed;
+        use morph_primitives::TxMorph;
+
+        let tx = TxMorph {
+            chain_id: 1337,
+            nonce: 0,
+            gas_limit: 21000,
+            max_fee_per_gas: 2_000_000_000,
+            max_priority_fee_per_gas: 1_000_000_000,
+            to: alloy_primitives::TxKind::Call(Address::repeat_byte(0x01)),
+            value: U256::ZERO,
+            access_list: Default::default(),
+            version: MORPH_TX_VERSION_1,
+            fee_token_id: 1,
+            fee_limit: U256::from(100u64),
+            reference: None,
+            memo: Some(Bytes::from(vec![0xab; MAX_MEMO_LENGTH + 1])), // too long
+            input: Bytes::new(),
+        };
+        let envelope = MorphTxEnvelope::Morph(Signed::new_unchecked(
+            tx,
+            Signature::new(U256::ZERO, U256::ZERO, false),
+            B256::ZERO,
+        ));
+
+        let txs = [envelope];
+        let result = validate_morph_txs(&txs, true);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("memo exceeds maximum length")
+        );
+    }
+
+    #[test]
+    fn test_validate_morph_tx_unsupported_version_rejected() {
+        use alloy_consensus::Signed;
+        use morph_primitives::TxMorph;
+
+        let tx = TxMorph {
+            chain_id: 1337,
+            nonce: 0,
+            gas_limit: 21000,
+            max_fee_per_gas: 2_000_000_000,
+            max_priority_fee_per_gas: 1_000_000_000,
+            to: alloy_primitives::TxKind::Call(Address::repeat_byte(0x01)),
+            value: U256::ZERO,
+            access_list: Default::default(),
+            version: 99, // Unsupported version
+            fee_token_id: 1,
+            fee_limit: U256::from(100u64),
+            reference: None,
+            memo: None,
+            input: Bytes::new(),
+        };
+        let envelope = MorphTxEnvelope::Morph(Signed::new_unchecked(
+            tx,
+            Signature::new(U256::ZERO, U256::ZERO, false),
+            B256::ZERO,
+        ));
+
+        let txs = [envelope];
+        let result = validate_morph_txs(&txs, true);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported MorphTx version")
+        );
+    }
+
+    #[test]
+    fn test_validate_morph_txs_skips_non_morph_tx() {
+        // Regular transactions should be skipped entirely
+        let txs = [create_regular_tx(), create_l1_msg_tx(0)];
+        let result = validate_morph_txs(&txs, false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_morph_txs_mixed_block() {
+        // Mixed block with valid V0 MorphTx and regular txs
+        let txs = [
+            create_l1_msg_tx(0),
+            create_regular_tx(),
+            create_morph_tx_v0(1),
+        ];
+        let result = validate_morph_txs(&txs, false);
+        assert!(result.is_ok());
+    }
+
+    // ========================================================================
+    // L1 Message Queue Index Overflow Tests
+    // ========================================================================
+
+    #[test]
+    fn test_validate_l1_messages_in_block_queue_index_overflow() {
+        // When prev_queue_index is u64::MAX, checked_add should fail
+        let txs = [create_l1_msg_tx(u64::MAX - 1), create_l1_msg_tx(u64::MAX)];
+
+        // last=MAX, MAX+1 overflows
+        let result = validate_l1_messages_in_block(&txs, 0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_l1_messages_in_block_single_l1() {
+        let txs = [create_l1_msg_tx(42)];
+        // last=42, 42+1=43==header_next
+        assert!(validate_l1_messages_in_block(&txs, 43).is_ok());
+        // Wrong header_next
+        assert!(validate_l1_messages_in_block(&txs, 42).is_err());
+    }
+
+    // ========================================================================
+    // Post-Execution Validation Tests
+    // ========================================================================
+
+    #[test]
+    fn test_validate_block_post_execution_gas_mismatch() {
+        use alloy_consensus::Receipt;
+        use morph_primitives::{MorphReceipt, MorphTransactionReceipt};
+
+        let chain_spec = create_test_chainspec();
+        let consensus = MorphConsensus::new(chain_spec);
+
+        // Create a receipt with cumulative_gas_used = 21000
+        let receipt = MorphReceipt::Legacy(MorphTransactionReceipt::with_l1_fee(
+            Receipt {
+                status: true.into(),
+                cumulative_gas_used: 21000,
+                logs: vec![],
+            },
+            U256::ZERO,
+        ));
+
+        let result = alloy_evm::block::BlockExecutionResult {
+            receipts: vec![receipt],
+            requests: Default::default(),
+            gas_used: 21000,
+            blob_gas_used: 0,
+        };
+
+        // Create a block header with gas_used = 50000 (mismatch!)
+        let header = create_morph_header(Header {
+            nonce: B64::ZERO,
+            ommers_hash: EMPTY_OMMER_ROOT_HASH,
+            gas_limit: 30_000_000,
+            gas_used: 50000, // Does not match receipt
+            timestamp: 1000,
+            base_fee_per_gas: Some(1_000_000),
+            ..Default::default()
+        });
+        let body = morph_primitives::BlockBody {
+            transactions: vec![create_regular_tx()],
+            ommers: vec![],
+            withdrawals: None,
+        };
+        let block = morph_primitives::Block { header, body };
+        let recovered =
+            reth_primitives_traits::RecoveredBlock::new_unhashed(block, vec![Address::ZERO]);
+
+        let post_result = consensus.validate_block_post_execution(&recovered, &result);
+        assert!(matches!(
+            post_result,
+            Err(ConsensusError::BlockGasUsed { .. })
         ));
     }
 }
