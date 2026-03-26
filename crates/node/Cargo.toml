@@ -84,6 +84,11 @@ morph-payload-types.workspace = true
 morph-primitives.workspace = true
 serde_json.workspace = true
 
+[[test]]
+name = "it"
+path = "tests/it/main.rs"
+required-features = ["test-utils"]
+
 [features]
 default = []
 test-utils = [

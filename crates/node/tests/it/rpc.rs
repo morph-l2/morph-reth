@@ -525,7 +525,11 @@ async fn debug_trace_replay_apis_work_for_standard_jade_block() -> eyre::Result<
         .debug_api()
         .debug_trace_block(block_hash.into(), Default::default())
         .await?;
-    assert_eq!(traces_by_hash.len(), 1, "block should contain exactly one tx trace");
+    assert_eq!(
+        traces_by_hash.len(),
+        1,
+        "block should contain exactly one tx trace"
+    );
 
     let traces_by_number = node
         .rpc
