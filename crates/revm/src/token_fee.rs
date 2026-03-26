@@ -225,7 +225,7 @@ fn read_token_balance_with_fallback<DB: Database>(
     let db: &mut dyn Database<Error = DB::Error> = db;
     let mut evm = MorphEvm::new(MorphContext::new(db, hardfork), NoOpInspector {});
 
-    match query_balance_via_system_call(&mut evm, token, account) {
+    match query_erc20_balance(&mut evm, token, account) {
         Ok(balance) => Ok(balance),
         Err(EVMError::Database(e)) => Err(e),
         Err(_) => Ok(U256::ZERO), // Non-DB errors → zero (safe fallback)
@@ -240,13 +240,16 @@ fn read_balance_from_storage<DB: Database>(
     account: Address,
     balance_slot: U256,
 ) -> Result<U256, DB::Error> {
-    let mut key = [0u8; 32];
-    key[12..32].copy_from_slice(account.as_slice());
-    read_mapping_value(db, token, balance_slot, &key)
+    db.storage(
+        token,
+        compute_mapping_slot_for_address(balance_slot, account),
+    )
 }
 
-/// Execute EVM `balanceOf(address)` call.
-fn query_balance_via_system_call<DB, I>(
+/// Query ERC20 balance via EVM call.
+///
+/// Use this when you have a `MorphEvm` instance and need to call `balanceOf`.
+pub fn query_erc20_balance<DB, I>(
     evm: &mut MorphEvm<DB, I>,
     token: Address,
     account: Address,
@@ -267,20 +270,6 @@ where
         Ok(_) => Ok(U256::ZERO),
         Err(_) => Ok(U256::ZERO),
     }
-}
-
-/// Query ERC20 balance via EVM call.
-///
-/// Use this when you have a `MorphEvm` instance and need to call `balanceOf`.
-pub fn query_erc20_balance<DB, I>(
-    evm: &mut MorphEvm<DB, I>,
-    token: Address,
-    account: Address,
-) -> Result<U256, EVMError<DB::Error, MorphInvalidTransaction>>
-where
-    DB: Database,
-{
-    query_balance_via_system_call(evm, token, account)
 }
 
 /// Encode ERC20 `balanceOf(address)` calldata.

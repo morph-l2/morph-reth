@@ -10,7 +10,8 @@ use morph_evm::MorphEvmConfig;
 use morph_primitives::{MorphHeader, MorphPrimitives};
 use reth_node_api::{FullNodeComponents, FullNodeTypes, NodeTypes};
 use reth_node_builder::rpc::{EthApiBuilder, EthApiCtx};
-use reth_provider::ChainSpecProvider;
+use reth_primitives_traits::RecoveredBlock;
+use reth_provider::{ChainSpecProvider, ProviderBlock};
 use reth_rpc::EthApi;
 use reth_rpc_convert::{RpcConvert, RpcConverter, RpcTypes};
 use reth_rpc_eth_api::{
@@ -364,6 +365,17 @@ where
     MorphEthApiError: reth_rpc_eth_types::error::FromEvmError<N::Evm>,
     Rpc: RpcConvert<Primitives = N::Primitives, Error = EthApiError, Evm = N::Evm>,
 {
+    fn apply_pre_execution_changes<DB: Send + reth_evm::Database + revm::DatabaseCommit>(
+        &self,
+        _block: &RecoveredBlock<ProviderBlock<Self::Provider>>,
+        _db: &mut DB,
+        _evm_env: &reth_evm::EvmEnvFor<Self::Evm>,
+    ) -> Result<(), Self::Error> {
+        // Morph L2 does not execute Ethereum pre-block system calls such as
+        // EIP-2935/EIP-4788 during block replay. Using the upstream default here
+        // incorrectly requires `parent_beacon_block_root` on Cancun-active chains.
+        Ok(())
+    }
 }
 
 // ===== Internal container =====

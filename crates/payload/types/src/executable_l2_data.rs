@@ -73,11 +73,6 @@ pub struct ExecutableL2Data {
 }
 
 impl ExecutableL2Data {
-    /// Create a new empty [`ExecutableL2Data`].
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Returns true if this block contains any transactions.
     pub fn has_transactions(&self) -> bool {
         !self.transactions.is_empty()
@@ -101,12 +96,6 @@ mod tests {
         assert_eq!(data.gas_limit, 0);
         assert!(!data.has_transactions());
         assert_eq!(data.transaction_count(), 0);
-    }
-
-    #[test]
-    fn test_executable_l2_data_new() {
-        let data = ExecutableL2Data::new();
-        assert_eq!(data, ExecutableL2Data::default());
     }
 
     #[test]

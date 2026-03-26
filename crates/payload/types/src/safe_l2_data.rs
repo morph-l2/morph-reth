@@ -41,11 +41,6 @@ pub struct SafeL2Data {
 }
 
 impl SafeL2Data {
-    /// Create a new empty [`SafeL2Data`].
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Returns true if this block contains any transactions.
     pub fn has_transactions(&self) -> bool {
         !self.transactions.is_empty()

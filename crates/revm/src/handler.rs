@@ -133,7 +133,8 @@ where
             return Ok(());
         }
 
-        // MorphTx (0x7F) can use token fee (fee_token_id > 0) or ETH fee (fee_token_id == 0).
+        // MorphTx (0x7F) with token fee: reimburse unused tokens.
+        // fee_token_id == 0 falls through to the standard ETH reimbursement below.
         if tx.is_morph_tx() {
             let token_id = tx.fee_token_id.unwrap_or_default();
             if token_id > 0 {
@@ -144,12 +145,9 @@ where
                 }
                 return self.reimburse_caller_token_fee(evm, exec_result.gas());
             }
-            // fee_token_id == 0 follows standard ETH reimbursement flow
-            post_execution::reimburse_caller(evm.ctx(), exec_result.gas(), U256::ZERO)?;
-            return Ok(());
         }
 
-        // Standard ETH-based fee handling
+        // Standard ETH-based fee handling (also handles MorphTx with fee_token_id == 0)
         post_execution::reimburse_caller(evm.ctx(), exec_result.gas(), U256::ZERO)?;
         Ok(())
     }

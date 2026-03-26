@@ -185,5 +185,3 @@ pyroscope_pprofrs = "0.2.10"
 [patch.crates-io]
 vergen = { git = "https://github.com/rustyhorde/vergen", rev = "a43c276d2b68d05832a429cc4540755541ca4950" }
 vergen-lib = { git = "https://github.com/rustyhorde/vergen", rev = "a43c276d2b68d05832a429cc4540755541ca4950" }
-
-

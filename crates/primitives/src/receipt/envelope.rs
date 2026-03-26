@@ -249,15 +249,7 @@ impl Encodable2718 for MorphReceiptEnvelope {
 
 impl Typed2718 for MorphReceiptEnvelope {
     fn ty(&self) -> u8 {
-        let ty = match self {
-            Self::Legacy(_) => MorphTxType::Legacy,
-            Self::Eip2930(_) => MorphTxType::Eip2930,
-            Self::Eip1559(_) => MorphTxType::Eip1559,
-            Self::Eip7702(_) => MorphTxType::Eip7702,
-            Self::L1Message(_) => MorphTxType::L1Msg,
-            Self::Morph(_) => MorphTxType::Morph,
-        };
-        ty as u8
+        self.tx_type() as u8
     }
 }
 
