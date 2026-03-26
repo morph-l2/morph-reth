@@ -3,9 +3,9 @@ name: Deny
 on:
   push:
     branches: [main]
-    paths: [Cargo.lock]
+    paths: [Cargo.lock, deny.toml]
   pull_request:
-    paths: [Cargo.lock]
+    paths: [Cargo.lock, deny.toml]
 
 permissions:
   contents: read
