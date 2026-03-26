@@ -42,6 +42,7 @@ reth-trie.workspace = true
 
 # Alloy
 alloy-consensus.workspace = true
+alloy-genesis.workspace = true
 alloy-hardforks.workspace = true
 alloy-primitives.workspace = true
 alloy-rpc-types-engine.workspace = true
@@ -55,12 +56,47 @@ parking_lot.workspace = true
 tokio-stream.workspace = true
 
 serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+
+# Optional: E2E testing framework
+reth-e2e-test-utils = { workspace = true, optional = true }
+reth-tasks = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["sync"], optional = true }
+alloy-eips = { workspace = true, optional = true }
+alloy-rlp = { workspace = true, optional = true }
+alloy-signer = { workspace = true, optional = true }
+alloy-signer-local = { workspace = true, optional = true }
 
 [dev-dependencies]
-tokio.workspace = true
+tokio = { workspace = true, features = ["full"] }
 reth-db = { workspace = true, features = ["test-utils"] }
+reth-e2e-test-utils.workspace = true
 reth-node-core.workspace = true
+reth-payload-primitives.workspace = true
 reth-tasks.workspace = true
+reth-tracing.workspace = true
+alloy-consensus.workspace = true
+alloy-primitives.workspace = true
+alloy-rpc-types-engine.workspace = true
+alloy-rpc-types-eth.workspace = true
+jsonrpsee.workspace = true
+morph-payload-types.workspace = true
+morph-primitives.workspace = true
+serde_json.workspace = true
+
+[[test]]
+name = "it"
+path = "tests/it/main.rs"
+required-features = ["test-utils"]
 
 [features]
 default = []
+test-utils = [
+    "dep:reth-e2e-test-utils",
+    "dep:reth-tasks",
+    "dep:alloy-signer",
+    "dep:tokio",
+    "dep:alloy-eips",
+    "dep:alloy-rlp",
+    "dep:alloy-signer-local",
+]

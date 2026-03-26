@@ -66,16 +66,6 @@ impl MorphNode {
         ProviderFactoryBuilder::default()
     }
 
-    fn payload_builder_config(&self) -> MorphBuilderConfig {
-        let config =
-            MorphBuilderConfig::default().with_max_da_block_size(self.args.max_tx_payload_bytes);
-
-        match self.args.max_tx_per_block {
-            Some(max_tx) => config.with_max_tx_per_block(max_tx),
-            None => config,
-        }
-    }
-
     /// Returns a [`ComponentsBuilder`] configured for a Morph node.
     pub fn components<N>(
         payload_builder_config: MorphBuilderConfig,
@@ -128,7 +118,17 @@ where
     type AddOns = MorphAddOns<NodeAdapter<N>>;
 
     fn components_builder(&self) -> Self::ComponentsBuilder {
-        Self::components(self.payload_builder_config())
+        // Build payload config from args
+        let payload_config =
+            MorphBuilderConfig::default().with_max_da_block_size(self.args.max_tx_payload_bytes);
+
+        let payload_config = if let Some(max_tx) = self.args.max_tx_per_block {
+            payload_config.with_max_tx_per_block(max_tx)
+        } else {
+            payload_config
+        };
+
+        Self::components(payload_config)
     }
 
     fn add_ons(&self) -> Self::AddOns {
@@ -226,4 +226,94 @@ fn unix_timestamp_now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use morph_chainspec::MORPH_HOODI;
+    use reth_payload_primitives::PayloadAttributesBuilder;
+
+    #[test]
+    fn morph_node_default() {
+        let node = MorphNode::default();
+        assert_eq!(
+            node.args.max_tx_payload_bytes,
+            super::super::args::MORPH_DEFAULT_MAX_TX_PAYLOAD_BYTES
+        );
+        assert!(node.args.max_tx_per_block.is_none());
+    }
+
+    #[test]
+    fn morph_node_new_with_args() {
+        let args = super::super::args::MorphArgs {
+            max_tx_payload_bytes: 200_000,
+            max_tx_per_block: Some(500),
+        };
+        let node = MorphNode::new(args);
+        assert_eq!(node.args.max_tx_payload_bytes, 200_000);
+        assert_eq!(node.args.max_tx_per_block, Some(500));
+    }
+
+    #[test]
+    fn payload_attributes_builder_produces_valid_attributes() {
+        let chain_spec = MORPH_HOODI.clone();
+        let builder = MorphPayloadAttributesBuilder::new(chain_spec);
+
+        // Create a parent header at a known timestamp
+        let parent_header = MorphHeader {
+            inner: alloy_consensus::Header {
+                timestamp: 1_000_000,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let parent = reth_primitives_traits::SealedHeader::seal_slow(parent_header);
+
+        let attrs = builder.build(&parent);
+
+        // Timestamp should be at least parent + 1
+        assert!(attrs.inner.timestamp > 1_000_000);
+        // No L1 transactions in local mining mode
+        assert!(attrs.transactions.is_none());
+        assert!(attrs.gas_limit.is_none());
+        assert!(attrs.base_fee_per_gas.is_none());
+    }
+
+    #[test]
+    fn payload_attributes_builder_timestamp_uses_wall_clock_when_ahead() {
+        let chain_spec = MORPH_HOODI.clone();
+        let builder = MorphPayloadAttributesBuilder::new(chain_spec);
+
+        // Use a parent header with timestamp = 0 (very old)
+        let parent_header = MorphHeader {
+            inner: alloy_consensus::Header {
+                timestamp: 0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let parent = reth_primitives_traits::SealedHeader::seal_slow(parent_header);
+
+        let attrs = builder.build(&parent);
+
+        // When parent is very old, timestamp should be approximately wall clock time
+        let now = unix_timestamp_now();
+        assert!(attrs.inner.timestamp >= now.saturating_sub(2));
+        assert!(attrs.inner.timestamp <= now.saturating_add(2));
+    }
+
+    #[test]
+    fn node_types_check() {
+        // Verify that MorphNode implements NodeTypes with the correct associated types
+        fn assert_node_types<
+            N: reth_node_api::NodeTypes<
+                    Primitives = morph_primitives::MorphPrimitives,
+                    ChainSpec = morph_chainspec::MorphChainSpec,
+                    Payload = morph_payload_types::MorphPayloadTypes,
+                >,
+        >() {
+        }
+        assert_node_types::<MorphNode>();
+    }
 }
