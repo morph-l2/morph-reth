@@ -1,9 +1,6 @@
 FROM lukemathwalker/cargo-chef:latest-rust-1 AS chef
 WORKDIR /app
 
-LABEL org.opencontainers.image.source=https://github.com/morph-l2/morph-reth
-LABEL org.opencontainers.image.licenses="MIT OR Apache-2.0"
-
 # reth-mdbx-sys requires libclang for bindgen
 RUN apt-get update && \
     apt-get install -y --no-install-recommends libclang-dev pkg-config && \
@@ -38,6 +35,9 @@ RUN cp /app/target/$BUILD_PROFILE/morph-reth /app/morph-reth
 
 # Minimal runtime image
 FROM debian:bookworm-slim AS runtime
+
+LABEL org.opencontainers.image.source=https://github.com/morph-l2/morph-reth
+LABEL org.opencontainers.image.licenses="MIT OR Apache-2.0"
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
     useradd --system --create-home --home-dir /var/lib/morph-reth --shell /usr/sbin/nologin morph-reth && \
     rm -rf /var/lib/apt/lists/*

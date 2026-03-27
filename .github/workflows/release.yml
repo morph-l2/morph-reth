@@ -109,7 +109,7 @@ jobs:
           cd dist
           tar czf ../${{ matrix.archive }}.tar.gz morph-reth
           cd ..
-          shasum -a 256 ${{ matrix.archive }}.tar.gz > ${{ matrix.archive }}.tar.gz.sha256
+          sha256sum ${{ matrix.archive }}.tar.gz > ${{ matrix.archive }}.tar.gz.sha256
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
