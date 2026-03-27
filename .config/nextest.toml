@@ -1,15 +1,16 @@
 [profile.default]
-# Each integration test opens an MDBX environment. macOS limits concurrent
-# memory-mapped files per process. Cap concurrent tests to avoid ENOMEM (error 12).
-test-threads = 4
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+# E2E integration tests spawn full nodes — give them more time
+[[profile.default.overrides]]
+filter = "package(morph-node) & binary(it)"
+slow-timeout = { period = "120s", terminate-after = 3 }
 
 [profile.ci]
-# GitHub Actions ubuntu-latest has 4 vCPUs / 16GB RAM.
-# Each E2E test spawns a full reth node (MDBX + tokio runtime + rayon pools).
-# Limit to 2 concurrent tests to avoid MDBX resource exhaustion.
-test-threads = 2
-retries = 2
+test-threads = "num-cpus"
+retries = { backoff = "exponential", count = 2, delay = "2s", jitter = true }
 fail-fast = false
+slow-timeout = { period = "30s", terminate-after = 4 }
 
 # E2E integration tests spawn full nodes — each needs exclusive MDBX resources.
 # threads-required = 2 means nextest counts each as needing 2 of the test-threads
@@ -17,9 +18,4 @@ fail-fast = false
 [[profile.ci.overrides]]
 filter = "package(morph-node) & binary(it)"
 threads-required = 2
-slow-timeout = { period = "120s", terminate-after = 3 }
-
-# Integration tests are heavier — give them more time
-[[profile.default.overrides]]
-filter = "package(morph-node) & binary(it)"
 slow-timeout = { period = "120s", terminate-after = 3 }
