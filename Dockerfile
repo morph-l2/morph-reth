@@ -5,7 +5,9 @@ LABEL org.opencontainers.image.source=https://github.com/morph-l2/morph-reth
 LABEL org.opencontainers.image.licenses="MIT OR Apache-2.0"
 
 # reth-mdbx-sys requires libclang for bindgen
-RUN apt-get update && apt-get -y upgrade && apt-get install -y libclang-dev pkg-config
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends libclang-dev pkg-config && \
+    rm -rf /var/lib/apt/lists/*
 
 # Generate dependency recipe
 FROM chef AS planner
@@ -37,10 +39,13 @@ RUN cp /app/target/$BUILD_PROFILE/morph-reth /app/morph-reth
 # Minimal runtime image
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
+    useradd --system --create-home --home-dir /var/lib/morph-reth --shell /usr/sbin/nologin morph-reth && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/morph-reth /usr/local/bin/
 
 EXPOSE 8545 8546 8551 30303 30303/udp
 
+WORKDIR /var/lib/morph-reth
+USER morph-reth
 ENTRYPOINT ["/usr/local/bin/morph-reth"]

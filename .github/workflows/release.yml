@@ -25,17 +25,21 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      ref: ${{ steps.version.outputs.ref }}
     steps:
       - name: Determine tag
         id: version
         run: |
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             TAG="${{ inputs.tag }}"
+            REF="refs/tags/${TAG}"
           else
             TAG="${GITHUB_REF#refs/tags/}"
+            REF="${GITHUB_REF}"
           fi
           VERSION="${TAG#v}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
           echo "Extracted version: $VERSION"
 
   check-version:
@@ -46,6 +50,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.extract-version.outputs.ref }}
 
       - name: Verify Cargo.toml version matches tag
         run: |
@@ -54,7 +60,7 @@ jobs:
           TAG_VERSION="${{ needs.extract-version.outputs.version }}"
           echo "Cargo.toml version: $CARGO_VERSION"
           echo "Tag version: $TAG_VERSION"
-          if [[ "$TAG_VERSION" != "$CARGO_VERSION"* ]]; then
+          if [[ "$TAG_VERSION" != "$CARGO_VERSION" ]]; then
             echo "::error::Tag version ($TAG_VERSION) does not match Cargo.toml version ($CARGO_VERSION)"
             exit 1
           fi
@@ -74,6 +80,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.extract-version.outputs.ref }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -120,6 +128,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
+          ref: ${{ needs.extract-version.outputs.ref }}
           fetch-depth: 0
 
       - name: Download all artifacts
@@ -135,7 +144,7 @@ jobs:
           if [[ -n "$PREVIOUS_TAG" ]]; then
             CHANGELOG=$(git log --pretty=format:"- %s" ${PREVIOUS_TAG}..HEAD)
           else
-            CHANGELOG=$(git log --pretty=format:"- %s" HEAD~20..HEAD)
+            CHANGELOG=$(git log -n 20 --pretty=format:"- %s")
           fi
           # Write to file to avoid escaping issues
           echo "$CHANGELOG" > changelog.md
@@ -150,6 +159,7 @@ jobs:
             PRERELEASE="--prerelease"
           fi
           gh release create "v${VERSION}" \
+            --verify-tag \
             --draft \
             --title "v${VERSION}" \
             --notes-file changelog.md \
