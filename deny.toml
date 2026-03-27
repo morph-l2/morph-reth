@@ -51,6 +51,8 @@ allow = [
     "Zlib",
     # https://github.com/rustls/webpki/blob/main/LICENSE ISC Style
     "LicenseRef-rustls-webpki",
+    # https://github.com/briansmith/ring/blob/main/LICENSE ISC + OpenSSL + SSLeay
+    "LicenseRef-ring",
     "CDLA-Permissive-2.0",
     "MPL-2.0",
 ]
