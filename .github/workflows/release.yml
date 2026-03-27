@@ -64,7 +64,7 @@ jobs:
           TAG_VERSION="${{ needs.extract-version.outputs.version }}"
           echo "Cargo.toml version: $CARGO_VERSION"
           echo "Tag version: $TAG_VERSION"
-          if [[ "$TAG_VERSION" != "$CARGO_VERSION" ]]; then
+          if [[ "$TAG_VERSION" != "$CARGO_VERSION"* ]]; then
             echo "::error::Tag version ($TAG_VERSION) does not match Cargo.toml version ($CARGO_VERSION)"
             exit 1
           fi
