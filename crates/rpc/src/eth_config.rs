@@ -20,8 +20,8 @@ use morph_chainspec::{
 use reth_chainspec::{ChainSpecProvider, EthChainSpec, ForkCondition, Hardforks, Head};
 use reth_errors::{ProviderError, RethError};
 use reth_evm::{
-    precompiles::{Precompile, PrecompilesMap},
     ConfigureEvm, Evm,
+    precompiles::{Precompile, PrecompilesMap},
 };
 use reth_node_api::NodePrimitives;
 use reth_primitives_traits::header::HeaderMut;
@@ -62,7 +62,7 @@ pub struct MorphForkConfig {
     pub chain_id: u64,
     /// The fork hash from EIP-6122.
     pub fork_id: alloy_primitives::Bytes,
-    /// Active precompile contracts: address -> name.
+    /// Active precompile contracts: name -> address.
     pub precompiles: BTreeMap<String, Address>,
     /// System contracts: name -> address.
     pub system_contracts: BTreeMap<String, Address>,
@@ -110,8 +110,7 @@ where
     Provider: ChainSpecProvider<ChainSpec = MorphChainSpec>
         + BlockReaderIdExt<Header: HeaderMut>
         + 'static,
-    EvmConfig:
-        ConfigureEvm<Primitives: NodePrimitives<BlockHeader = Provider::Header>> + 'static,
+    EvmConfig: ConfigureEvm<Primitives: NodePrimitives<BlockHeader = Provider::Header>> + 'static,
 {
     /// Creates a new [`MorphEthConfigHandler`].
     pub const fn new(provider: Provider, evm_config: EvmConfig) -> Self {
@@ -123,7 +122,11 @@ where
 
     /// Extracts the Jade fork timestamp from the chain spec, if configured.
     fn jade_fork_time(&self) -> Option<u64> {
-        match self.provider.chain_spec().morph_fork_activation(MorphHardfork::Jade) {
+        match self
+            .provider
+            .chain_spec()
+            .morph_fork_activation(MorphHardfork::Jade)
+        {
             ForkCondition::Timestamp(t) => Some(t),
             _ => None,
         }
@@ -197,16 +200,15 @@ where
         fork_timestamps.sort_unstable();
         fork_timestamps.dedup();
 
-        let (current_fork_idx, current_fork_timestamp) = fork_timestamps
+        let latest_ts = latest.timestamp();
+        let current_fork_timestamp = fork_timestamps
             .iter()
-            .position(|ts| &latest.timestamp() < ts)
-            .and_then(|idx| idx.checked_sub(1))
-            .or_else(|| fork_timestamps.len().checked_sub(1))
-            .and_then(|idx| fork_timestamps.get(idx).map(|ts| (idx, *ts)))
+            .copied()
+            .rfind(|&ts| ts <= latest_ts)
             .ok_or_else(|| RethError::msg("no active timestamp fork found"))?;
+        let next_fork_timestamp = fork_timestamps.iter().copied().find(|&ts| ts > latest_ts);
 
-        let current =
-            self.build_fork_config_at(current_fork_timestamp, current_precompiles);
+        let current = self.build_fork_config_at(current_fork_timestamp, current_precompiles);
 
         let mut config = MorphEthConfig {
             current,
@@ -214,9 +216,7 @@ where
             last: None,
         };
 
-        if let Some(next_fork_timestamp) =
-            fork_timestamps.get(current_fork_idx + 1).copied()
-        {
+        if let Some(next_fork_timestamp) = next_fork_timestamp {
             let fake_header = {
                 let mut header = latest.clone();
                 header.set_timestamp(next_fork_timestamp);
@@ -228,8 +228,7 @@ where
                     .map_err(RethError::other)?,
             );
 
-            config.next =
-                Some(self.build_fork_config_at(next_fork_timestamp, next_precompiles));
+            config.next = Some(self.build_fork_config_at(next_fork_timestamp, next_precompiles));
         } else {
             // No future fork scheduled — no "last" either.
             return Ok(config);
@@ -247,21 +246,18 @@ where
                 .map_err(RethError::other)?,
         );
 
-        config.last =
-            Some(self.build_fork_config_at(last_fork_timestamp, last_precompiles));
+        config.last = Some(self.build_fork_config_at(last_fork_timestamp, last_precompiles));
 
         Ok(config)
     }
 }
 
-impl<Provider, EvmConfig> MorphEthConfigApiServer
-    for MorphEthConfigHandler<Provider, EvmConfig>
+impl<Provider, EvmConfig> MorphEthConfigApiServer for MorphEthConfigHandler<Provider, EvmConfig>
 where
     Provider: ChainSpecProvider<ChainSpec = MorphChainSpec>
         + BlockReaderIdExt<Header: HeaderMut>
         + 'static,
-    EvmConfig:
-        ConfigureEvm<Primitives: NodePrimitives<BlockHeader = Provider::Header>> + 'static,
+    EvmConfig: ConfigureEvm<Primitives: NodePrimitives<BlockHeader = Provider::Header>> + 'static,
 {
     fn config(&self) -> RpcResult<MorphEthConfig> {
         Ok(self.config_impl().map_err(EthApiError::from)?)
