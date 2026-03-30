@@ -104,10 +104,8 @@ where
             std::sync::Arc::new(morph_engine_api::EngineStateTracker::default());
 
         // Create Morph eth_config handler (EIP-7910 + morph extension)
-        let eth_config_handler = MorphEthConfigHandler::new(
-            ctx.node.provider().clone(),
-            ctx.node.evm_config().clone(),
-        );
+        let eth_config_handler =
+            MorphEthConfigHandler::new(ctx.node.provider().clone(), ctx.node.evm_config().clone());
 
         // Keep a local view of canonical head/forkchoice from reth engine events.
         let tracker_for_events = engine_state_tracker.clone();
