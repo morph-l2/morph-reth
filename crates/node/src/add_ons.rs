@@ -6,7 +6,7 @@ use crate::{
 };
 use morph_evm::MorphEvmConfig;
 use morph_primitives::{Block, MorphHeader, MorphReceipt};
-use morph_rpc::MorphEthApiBuilder;
+use morph_rpc::{MorphEthApiBuilder, MorphEthConfigApiServer, MorphEthConfigHandler};
 use reth_node_api::{AddOnsContext, FullNodeComponents, FullNodeTypes, NodeAddOns, NodePrimitives};
 use reth_node_builder::{
     NodeAdapter,
@@ -103,6 +103,10 @@ where
         let engine_state_tracker =
             std::sync::Arc::new(morph_engine_api::EngineStateTracker::default());
 
+        // Create Morph eth_config handler (EIP-7910 + morph extension)
+        let eth_config_handler =
+            MorphEthConfigHandler::new(ctx.node.provider().clone(), ctx.node.evm_config().clone());
+
         // Keep a local view of canonical head/forkchoice from reth engine events.
         let tracker_for_events = engine_state_tracker.clone();
         task_executor.spawn_critical("morph engine state tracker", async move {
@@ -112,12 +116,22 @@ where
             }
         });
 
-        // Use launch_add_ons_with to register custom Engine API
+        // Use launch_add_ons_with to register custom Engine API and eth_config
         self.inner
             .launch_add_ons_with(ctx, move |container| {
                 let reth_node_builder::rpc::RpcModuleContainer {
-                    auth_module, ..
+                    modules,
+                    auth_module,
+                    ..
                 } = container;
+
+                // Register Morph eth_config handler (EIP-7910 + morph extension)
+                // This provides eth_config on HTTP/WS/IPC for morphnode compatibility.
+                tracing::debug!(target: "morph::node", "Registering Morph eth_config handler");
+                modules
+                    .merge_configured(eth_config_handler.into_rpc())
+                    .map_err(|e| eyre::eyre!("Failed to register eth_config handler: {}", e))?;
+                tracing::info!(target: "morph::node", "Morph eth_config handler registered successfully");
 
                 // Create and register Morph L2 Engine API
                 tracing::debug!(target: "morph::node", "Registering Morph L2 Engine API");

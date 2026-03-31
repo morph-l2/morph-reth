@@ -28,6 +28,7 @@ reth-rpc-eth-types.workspace = true
 reth-evm.workspace = true
 reth-provider.workspace = true
 reth-revm.workspace = true
+reth-storage-api.workspace = true
 reth-tasks.workspace = true
 reth-errors.workspace = true
 reth-transaction-pool.workspace = true
@@ -56,6 +57,9 @@ eyre.workspace = true
 # Logging
 tracing.workspace = true
 
+
+[dev-dependencies]
+serde_json.workspace = true
 
 [features]
 default = []

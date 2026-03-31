@@ -176,8 +176,10 @@ impl Transaction for TxL1Msg {
         0
     }
 
-    fn effective_gas_price(&self, _base_fee: Option<u64>) -> u128 {
-        0
+    fn effective_gas_price(&self, base_fee: Option<u64>) -> u128 {
+        // L1 messages are prepaid on L1 and have no gas price themselves.
+        // Return baseFee as the effective gas price to match go-ethereum behavior.
+        base_fee.unwrap_or(0) as u128
     }
 
     fn is_dynamic_fee(&self) -> bool {
@@ -366,7 +368,8 @@ mod tests {
         assert_eq!(tx.max_priority_fee_per_gas(), None);
         assert_eq!(tx.max_fee_per_blob_gas(), None);
         assert_eq!(tx.priority_fee_or_price(), 0);
-        assert_eq!(tx.effective_gas_price(Some(100)), 0);
+        assert_eq!(tx.effective_gas_price(Some(100)), 100); // returns baseFee for receipts
+        assert_eq!(tx.effective_gas_price(None), 0); // no baseFee → 0 (execution path)
         assert!(!tx.is_dynamic_fee());
         assert!(!tx.is_create()); // L1 messages can never create contracts
         assert_eq!(
