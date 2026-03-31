@@ -65,7 +65,10 @@ pub struct ExecutableL2Data {
 
     // === Metadata ===
     /// Next L1 message queue index after this block.
-    #[serde(with = "alloy_serde::quantity")]
+    ///
+    /// NOTE: morph-geth serializes this as a bare JSON number (uint64), not a hex quantity
+    /// string. All other numeric fields use hex, but NextL1MessageIndex is the exception.
+    /// See morph/go-ethereum/eth/catalyst/gen_l2_ed.go line 31.
     pub next_l1_message_index: u64,
 
     /// Cached block hash.
@@ -163,7 +166,7 @@ mod tests {
             "receiptsRoot": "0x0000000000000000000000000000000000000000000000000000000000000004",
             "logsBloom": "0x",
             "withdrawTrieRoot": "0x0000000000000000000000000000000000000000000000000000000000000005",
-            "nextL1MessageIndex": "0xa",
+            "nextL1MessageIndex": 10,
             "hash": "0x0000000000000000000000000000000000000000000000000000000000000006"
         }"#;
 
