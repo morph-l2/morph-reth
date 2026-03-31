@@ -27,8 +27,6 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
 
       - name: Install mold linker
         uses: rui314/setup-mold@v1
@@ -38,8 +36,5 @@ jobs:
         with:
           cache-on-failure: true
 
-      - name: Build debug
-        run: cargo build --all --verbose
-
-      - name: Build release
-        run: cargo build --all --release --verbose
+      - name: Check compilation
+        run: cargo check --all --all-targets
