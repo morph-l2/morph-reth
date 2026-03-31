@@ -6,6 +6,7 @@ use crate::{
     hardfork::{MorphHardfork, MorphHardforks},
 };
 use alloy_chains::Chain;
+use alloy_consensus::Sealable;
 use alloy_eips::eip7840::BlobParams;
 use alloy_evm::eth::spec::EthExecutorSpec;
 use alloy_genesis::Genesis;
@@ -37,7 +38,12 @@ pub(crate) fn make_genesis_header(genesis: &Genesis, state_root: B256) -> MorphH
     let base_spec = ChainSpec::from_genesis(genesis.clone());
     let mut inner = base_spec.genesis_header.header().clone();
     inner.state_root = state_root;
-
+    // morph-geth defaults to MORPH_BASE_FEE (1_000_000) when baseFeePerGas is
+    // absent, not Ethereum's INITIAL_BASE_FEE (1_000_000_000). Apply the same
+    // default so the genesis block header hash matches.
+    if genesis.base_fee_per_gas.is_none() {
+        inner.base_fee_per_gas = Some(MORPH_BASE_FEE);
+    }
     MorphHeader::from(inner)
 }
 
@@ -256,8 +262,16 @@ impl MorphChainSpec {
             None => {
                 // Compute MPT state root from alloc (for CLI-provided genesis)
                 let base_spec = ChainSpec::from_genesis(genesis.clone());
-                let header = MorphHeader::from(base_spec.genesis_header.header().clone());
-                let hash = base_spec.genesis_hash();
+                let mut header = base_spec.genesis_header.header().clone();
+                // morph-geth defaults to MORPH_BASE_FEE (1_000_000) when
+                // baseFeePerGas is absent, not Ethereum's INITIAL_BASE_FEE
+                // (1_000_000_000). Override to match.
+                if genesis.base_fee_per_gas.is_none() {
+                    header.base_fee_per_gas = Some(MORPH_BASE_FEE);
+                }
+                let header = MorphHeader::from(header);
+                // Recompute genesis hash with the corrected base fee
+                let hash = header.hash_slow();
                 SealedHeader::new(header, hash)
             }
         };
