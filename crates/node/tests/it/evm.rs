@@ -44,7 +44,7 @@ const STORE_BLOCKHASH: &[u8] = &[
     0xf3, // RETURN
 ];
 
-/// Init code: constructor always REVERTs.
+/// Init code: constructor always reverts.
 ///
 /// PUSH1 0; PUSH1 0; REVERT
 const REVERT_ALWAYS: &[u8] = &[
@@ -125,7 +125,7 @@ async fn contract_deploy_stores_state() -> eyre::Result<()> {
     Ok(())
 }
 
-/// A constructor that REVERTs: the receipt status is false, gas is consumed.
+/// A constructor that reverts: the receipt status is false, gas is consumed.
 #[tokio::test(flavor = "multi_thread")]
 async fn contract_revert_receipt_status_false() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();

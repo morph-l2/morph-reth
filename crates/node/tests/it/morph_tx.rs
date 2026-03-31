@@ -459,7 +459,7 @@ async fn morph_tx_v0_token_balance_decreases() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Init code that deploys a contract whose runtime always REVERTs.
+/// Init code that deploys a contract whose runtime always reverts.
 ///
 /// Constructor (12 bytes): CODECOPY + RETURN → deploys runtime below.
 /// Runtime (5 bytes): PUSH1 0; PUSH1 0; REVERT.
@@ -480,7 +480,7 @@ const RUNTIME_REVERT_INIT: &[u8] = &[
 /// When the main tx reverts, the ERC20 gas fee is still charged.
 ///
 /// Scenario:
-///   1. Block 1: Deploy a contract whose runtime always REVERTs (EIP-1559 tx)
+///   1. Block 1: Deploy a contract whose runtime always reverts (EIP-1559 tx)
 ///   2. Block 2: Call that contract with MorphTx v0 (ERC20 fee)
 ///   3. Verify: receipt.status = false, but token balance decreased
 ///
