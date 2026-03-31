@@ -16,6 +16,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_MIN_STACK: 8388608
+  RUSTFLAGS: -C link-arg=-fuse-ld=mold
 
 jobs:
   test:
@@ -27,6 +28,9 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install mold linker
+        uses: rui314/setup-mold@v1
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
@@ -51,6 +55,9 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install mold linker
+        uses: rui314/setup-mold@v1
+
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
         with:
@@ -69,6 +76,9 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install mold linker
+        uses: rui314/setup-mold@v1
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2

@@ -44,6 +44,9 @@ jobs:
         with:
           components: clippy
 
+      - name: Install mold linker
+        uses: rui314/setup-mold@v1
+
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
         with:

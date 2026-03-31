@@ -15,7 +15,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings
+  RUSTFLAGS: -D warnings -C link-arg=-fuse-ld=mold
 
 jobs:
   build:
@@ -27,16 +27,14 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+
+      - name: Install mold linker
+        uses: rui314/setup-mold@v1
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
 
-      - name: Build debug
-        run: cargo build --all --verbose
-
-      - name: Build release
-        run: cargo build --all --release --verbose
+      - name: Check compilation
+        run: cargo check --all --all-targets
