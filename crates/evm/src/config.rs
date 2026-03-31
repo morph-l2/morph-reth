@@ -1,5 +1,6 @@
 use crate::{MorphBlockAssembler, MorphEvmConfig, MorphEvmError, MorphNextBlockEnvAttributes};
 use alloy_consensus::BlockHeader;
+use alloy_primitives::B256;
 use morph_chainspec::hardfork::{MorphHardfork, MorphHardforks};
 use morph_primitives::Block;
 use morph_primitives::{MorphHeader, MorphPrimitives};
@@ -103,7 +104,8 @@ impl ConfigureEvm for MorphEvmConfig {
             beneficiary: fee_recipient,
             timestamp: U256::from(attributes.timestamp),
             difficulty: U256::ZERO,
-            prevrandao: Some(attributes.prev_randao),
+            // Morph L2 follows geth's L2 path here: PREVRANDAO/mixHash is fixed to zero.
+            prevrandao: Some(B256::ZERO),
             gas_limit: attributes.gas_limit,
             basefee: attributes.base_fee_per_gas.unwrap_or_else(|| {
                 self.chain_spec()
@@ -147,5 +149,194 @@ impl ConfigureEvm for MorphEvmConfig {
             withdrawals: attributes.inner.withdrawals.map(Cow::Owned),
             extra_data: attributes.inner.extra_data,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_consensus::Header;
+    use alloy_primitives::{B256, Bytes, U256};
+    use morph_chainspec::MorphChainSpec;
+    use reth_evm::{ConfigureEvm, NextBlockEnvAttributes};
+    use std::sync::Arc;
+
+    fn create_test_chainspec() -> Arc<MorphChainSpec> {
+        let genesis_json = serde_json::json!({
+            "config": {
+                "chainId": 1337,
+                "homesteadBlock": 0,
+                "eip150Block": 0,
+                "eip155Block": 0,
+                "eip158Block": 0,
+                "byzantiumBlock": 0,
+                "constantinopleBlock": 0,
+                "petersburgBlock": 0,
+                "istanbulBlock": 0,
+                "berlinBlock": 0,
+                "londonBlock": 0,
+                "mergeNetsplitBlock": 0,
+                "terminalTotalDifficulty": 0,
+                "terminalTotalDifficultyPassed": true,
+                "shanghaiTime": 0,
+                "cancunTime": 0,
+                "bernoulliBlock": 0,
+                "curieBlock": 0,
+                "morph203Time": 0,
+                "viridianTime": 0,
+                "morph": {}
+            },
+            "alloc": {}
+        });
+        let genesis: alloy_genesis::Genesis = serde_json::from_value(genesis_json).unwrap();
+        Arc::new(MorphChainSpec::from(genesis))
+    }
+
+    fn create_morph_header(number: u64, timestamp: u64) -> MorphHeader {
+        MorphHeader {
+            inner: Header {
+                number,
+                timestamp,
+                gas_limit: 30_000_000,
+                base_fee_per_gas: Some(1_000_000),
+                ..Default::default()
+            },
+            next_l1_msg_index: 0,
+        }
+    }
+
+    #[test]
+    fn test_evm_env_sets_chain_id() {
+        let chain_spec = create_test_chainspec();
+        let config = MorphEvmConfig::new_with_default_factory(chain_spec);
+
+        let header = create_morph_header(100, 1000);
+        let env = config.evm_env(&header).unwrap();
+
+        assert_eq!(env.cfg_env.chain_id, 1337);
+    }
+
+    #[test]
+    fn test_evm_env_sets_block_env_fields() {
+        let chain_spec = create_test_chainspec();
+        let config = MorphEvmConfig::new_with_default_factory(chain_spec);
+
+        let header = create_morph_header(100, 1000);
+        let env = config.evm_env(&header).unwrap();
+
+        assert_eq!(env.block_env.inner.number, U256::from(100u64));
+        assert_eq!(env.block_env.inner.timestamp, U256::from(1000u64));
+        assert_eq!(env.block_env.inner.gas_limit, 30_000_000);
+        assert_eq!(env.block_env.inner.basefee, 1_000_000);
+    }
+
+    #[test]
+    fn test_evm_env_blob_gas_placeholder() {
+        let chain_spec = create_test_chainspec();
+        let config = MorphEvmConfig::new_with_default_factory(chain_spec);
+
+        let header = create_morph_header(100, 1000);
+        let env = config.evm_env(&header).unwrap();
+
+        // Morph uses placeholder blob gas values
+        let blob_info = env.block_env.inner.blob_excess_gas_and_price.unwrap();
+        assert_eq!(blob_info.excess_blob_gas, 0);
+        assert_eq!(blob_info.blob_gasprice, 1);
+    }
+
+    #[test]
+    fn test_evm_env_eip7623_disabled() {
+        let chain_spec = create_test_chainspec();
+        let config = MorphEvmConfig::new_with_default_factory(chain_spec);
+
+        let header = create_morph_header(100, 1000);
+        let env = config.evm_env(&header).unwrap();
+
+        assert!(env.cfg_env.disable_eip7623);
+    }
+
+    #[test]
+    fn test_evm_env_tx_gas_limit_cap_matches_header() {
+        let chain_spec = create_test_chainspec();
+        let config = MorphEvmConfig::new_with_default_factory(chain_spec);
+
+        let header = create_morph_header(100, 1000);
+        let env = config.evm_env(&header).unwrap();
+
+        assert_eq!(env.cfg_env.tx_gas_limit_cap, Some(30_000_000));
+    }
+
+    #[test]
+    fn test_next_evm_env_increments_block_number() {
+        let chain_spec = create_test_chainspec();
+        let config = MorphEvmConfig::new_with_default_factory(chain_spec);
+
+        let parent = create_morph_header(99, 1000);
+        let attrs = MorphNextBlockEnvAttributes {
+            inner: NextBlockEnvAttributes {
+                timestamp: 1001,
+                suggested_fee_recipient: alloy_primitives::Address::ZERO,
+                prev_randao: B256::repeat_byte(0xcc),
+                gas_limit: 30_000_000,
+                parent_beacon_block_root: None,
+                withdrawals: None,
+                extra_data: Bytes::new(),
+            },
+            base_fee_per_gas: Some(500_000),
+        };
+
+        let env = config.next_evm_env(&parent, &attrs).unwrap();
+
+        assert_eq!(env.block_env.inner.number, U256::from(100u64));
+        assert_eq!(env.block_env.inner.timestamp, U256::from(1001u64));
+        assert_eq!(env.block_env.inner.basefee, 500_000);
+    }
+
+    #[test]
+    fn test_context_for_block_populates_fields() {
+        let chain_spec = create_test_chainspec();
+        let config = MorphEvmConfig::new_with_default_factory(chain_spec);
+
+        let header = create_morph_header(100, 1000);
+        let block = morph_primitives::Block {
+            header,
+            body: morph_primitives::BlockBody {
+                transactions: vec![],
+                ommers: vec![],
+                withdrawals: None,
+            },
+        };
+        let sealed = SealedBlock::seal_slow(block);
+
+        let ctx = config.context_for_block(&sealed).unwrap();
+        assert_eq!(ctx.parent_hash, sealed.header().parent_hash());
+        assert!(ctx.ommers.is_empty());
+    }
+
+    #[test]
+    fn test_context_for_next_block_uses_parent_hash() {
+        let chain_spec = create_test_chainspec();
+        let config = MorphEvmConfig::new_with_default_factory(chain_spec);
+
+        let parent = create_morph_header(99, 1000);
+        let parent_sealed = SealedHeader::seal_slow(parent);
+
+        let attrs = MorphNextBlockEnvAttributes {
+            inner: NextBlockEnvAttributes {
+                timestamp: 1001,
+                suggested_fee_recipient: alloy_primitives::Address::ZERO,
+                prev_randao: B256::ZERO,
+                gas_limit: 30_000_000,
+                parent_beacon_block_root: None,
+                withdrawals: None,
+                extra_data: Bytes::new(),
+            },
+            base_fee_per_gas: None,
+        };
+
+        let ctx = config
+            .context_for_next_block(&parent_sealed, attrs)
+            .unwrap();
+        assert_eq!(ctx.parent_hash, parent_sealed.hash());
     }
 }

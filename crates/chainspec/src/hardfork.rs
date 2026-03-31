@@ -297,4 +297,54 @@ mod tests {
         assert_eq!(MorphHardfork::from(SpecId::PRAGUE), MorphHardfork::Viridian);
         assert_eq!(MorphHardfork::from(SpecId::OSAKA), MorphHardfork::Jade);
     }
+
+    #[test]
+    fn test_is_bernoulli() {
+        assert!(MorphHardfork::Bernoulli.is_bernoulli());
+        assert!(MorphHardfork::Curie.is_bernoulli());
+        assert!(MorphHardfork::Morph203.is_bernoulli());
+        assert!(MorphHardfork::Viridian.is_bernoulli());
+        assert!(MorphHardfork::Emerald.is_bernoulli());
+        assert!(MorphHardfork::Jade.is_bernoulli());
+    }
+
+    /// SpecIds below CANCUN should map to Morph203 (the latest CANCUN-level hardfork).
+    #[test]
+    fn test_specid_below_cancun_maps_to_morph203() {
+        assert_eq!(
+            MorphHardfork::from(SpecId::SHANGHAI),
+            MorphHardfork::Morph203
+        );
+        assert_eq!(
+            MorphHardfork::from(SpecId::HOMESTEAD),
+            MorphHardfork::Morph203
+        );
+    }
+
+    /// Verify bidirectional mapping consistency: Hardfork -> SpecId -> Hardfork
+    /// always returns the latest hardfork sharing that SpecId.
+    #[test]
+    fn test_specid_roundtrip_returns_latest_for_spec() {
+        // Bernoulli -> CANCUN -> Morph203 (latest CANCUN hardfork)
+        let spec = SpecId::from(MorphHardfork::Bernoulli);
+        assert_eq!(MorphHardfork::from(spec), MorphHardfork::Morph203);
+
+        // Emerald -> OSAKA -> Jade (latest OSAKA hardfork)
+        let spec = SpecId::from(MorphHardfork::Emerald);
+        assert_eq!(MorphHardfork::from(spec), MorphHardfork::Jade);
+    }
+
+    #[test]
+    fn test_default_hardfork_is_jade() {
+        assert_eq!(MorphHardfork::default(), MorphHardfork::Jade);
+    }
+
+    #[test]
+    fn test_hardfork_ordering() {
+        assert!(MorphHardfork::Bernoulli < MorphHardfork::Curie);
+        assert!(MorphHardfork::Curie < MorphHardfork::Morph203);
+        assert!(MorphHardfork::Morph203 < MorphHardfork::Viridian);
+        assert!(MorphHardfork::Viridian < MorphHardfork::Emerald);
+        assert!(MorphHardfork::Emerald < MorphHardfork::Jade);
+    }
 }

@@ -132,4 +132,54 @@ mod tests {
         let decoded: GenericResponse = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(response, decoded);
     }
+
+    #[test]
+    fn test_assemble_params_with_timestamp() {
+        let mut params = AssembleL2BlockParams::new(100, vec![]);
+        assert!(params.timestamp.is_none());
+
+        params.timestamp = Some(1_700_000_000);
+        assert_eq!(params.timestamp, Some(1_700_000_000));
+    }
+
+    #[test]
+    fn test_assemble_params_serde_with_timestamp() {
+        let json = r#"{
+            "number": "0x64",
+            "transactions": [],
+            "timestamp": "0x6553f100"
+        }"#;
+
+        let params: AssembleL2BlockParams = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(params.number, 100);
+        assert_eq!(params.timestamp, Some(0x6553f100));
+    }
+
+    #[test]
+    fn test_assemble_params_serde_without_timestamp() {
+        let json = r#"{
+            "number": "0x1",
+            "transactions": ["0xdead"]
+        }"#;
+
+        let params: AssembleL2BlockParams = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(params.number, 1);
+        assert!(params.timestamp.is_none());
+        assert_eq!(params.transactions.len(), 1);
+    }
+
+    #[test]
+    fn test_assemble_params_default() {
+        let params = AssembleL2BlockParams::default();
+        assert_eq!(params.number, 0);
+        assert!(params.transactions.is_empty());
+        assert!(params.timestamp.is_none());
+    }
+
+    #[test]
+    fn test_generic_response_failure_serde() {
+        let response = GenericResponse::failure();
+        let json = serde_json::to_string(&response).expect("serialize");
+        assert_eq!(json, r#"{"success":false}"#);
+    }
 }

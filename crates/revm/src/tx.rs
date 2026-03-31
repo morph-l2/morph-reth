@@ -280,9 +280,8 @@ impl MorphTxEnv {
         // Use builder pattern to set Morph-specific fields
         let mut env = Self::new(inner).with_rlp_bytes(rlp_bytes);
         if let Some(info) = morph_tx_info {
-            env = env
-                .with_version(info.version)
-                .with_fee_token_id(info.fee_token_id);
+            env = env.with_version(info.version);
+            env = env.with_fee_token_id(info.fee_token_id);
             env = env.with_fee_limit(info.fee_limit);
             if let Some(reference) = info.reference {
                 env = env.with_reference(reference);

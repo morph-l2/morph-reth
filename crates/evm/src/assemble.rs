@@ -133,3 +133,67 @@ impl BlockAssembler<MorphEvmConfig> for MorphBlockAssembler {
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use morph_chainspec::MorphChainSpec;
+    use std::sync::Arc;
+
+    fn create_test_chainspec() -> Arc<MorphChainSpec> {
+        let genesis_json = serde_json::json!({
+            "config": {
+                "chainId": 1337,
+                "homesteadBlock": 0,
+                "eip150Block": 0,
+                "eip155Block": 0,
+                "eip158Block": 0,
+                "byzantiumBlock": 0,
+                "constantinopleBlock": 0,
+                "petersburgBlock": 0,
+                "istanbulBlock": 0,
+                "berlinBlock": 0,
+                "londonBlock": 0,
+                "mergeNetsplitBlock": 0,
+                "terminalTotalDifficulty": 0,
+                "terminalTotalDifficultyPassed": true,
+                "shanghaiTime": 0,
+                "cancunTime": 0,
+                "bernoulliBlock": 0,
+                "curieBlock": 0,
+                "morph203Time": 0,
+                "viridianTime": 0,
+                "morph": {}
+            },
+            "alloc": {}
+        });
+        let genesis: alloy_genesis::Genesis = serde_json::from_value(genesis_json).unwrap();
+        Arc::new(MorphChainSpec::from(genesis))
+    }
+
+    #[test]
+    fn test_assembler_creation_and_chain_spec() {
+        let chain_spec = create_test_chainspec();
+        let assembler = MorphBlockAssembler::new(chain_spec.clone());
+        assert_eq!(assembler.chain_spec().inner.chain.id(), 1337);
+        // chain_spec should be the same Arc
+        assert!(Arc::ptr_eq(assembler.chain_spec(), &chain_spec));
+    }
+
+    #[test]
+    fn test_assembler_is_clone() {
+        let chain_spec = create_test_chainspec();
+        let assembler = MorphBlockAssembler::new(chain_spec);
+        let cloned = assembler.clone();
+        // Verify cloned assembler has the same chain spec
+        assert!(Arc::ptr_eq(assembler.chain_spec(), cloned.chain_spec()));
+    }
+
+    #[test]
+    fn test_assembler_is_debug() {
+        let chain_spec = create_test_chainspec();
+        let assembler = MorphBlockAssembler::new(chain_spec);
+        let debug_str = format!("{assembler:?}");
+        assert!(debug_str.contains("MorphBlockAssembler"));
+    }
+}

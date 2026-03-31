@@ -1,6 +1,7 @@
 //! Morph RPC transaction type.
 
 use alloy_consensus::Transaction as ConsensusTransaction;
+use alloy_consensus::Transaction as TransactionTrait;
 use alloy_eips::Typed2718;
 use alloy_network::TransactionResponse;
 use alloy_primitives::{Address, B256, BlockHash, Bytes, TxKind, U64, U256};
@@ -80,11 +81,11 @@ impl ConsensusTransaction for MorphRpcTransaction {
     }
 
     fn gas_price(&self) -> Option<u128> {
-        ConsensusTransaction::gas_price(&self.inner)
+        TransactionTrait::gas_price(&self.inner)
     }
 
     fn max_fee_per_gas(&self) -> u128 {
-        ConsensusTransaction::max_fee_per_gas(&self.inner)
+        TransactionTrait::max_fee_per_gas(&self.inner)
     }
 
     fn max_priority_fee_per_gas(&self) -> Option<u128> {
