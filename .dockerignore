@@ -1,0 +1,13 @@
+target/
+.git/
+.github/
+.claude/
+.worktrees/
+.config/
+local-test/
+tests/
+*.md
+deny.toml
+typos.toml
+.editorconfig
+.gitignore
