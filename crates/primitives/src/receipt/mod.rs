@@ -92,35 +92,43 @@ impl MorphReceipt {
 
     /// Returns length of RLP-encoded receipt fields with the given [`Bloom`] without an RLP header.
     pub fn rlp_encoded_fields_length(&self, bloom: &Bloom) -> usize {
-        self.as_receipt()
-            .rlp_encoded_fields_length_with_bloom(bloom)
+        match self {
+            Self::Legacy(r)
+            | Self::Eip2930(r)
+            | Self::Eip1559(r)
+            | Self::Eip7702(r)
+            | Self::Morph(r) => r.rlp_encoded_fields_length_with_bloom(bloom),
+            Self::L1Msg(r) => r.rlp_encoded_fields_length_with_bloom(bloom),
+        }
     }
 
     /// RLP-encodes receipt fields with the given [`Bloom`] without an RLP header.
     pub fn rlp_encode_fields(&self, bloom: &Bloom, out: &mut dyn BufMut) {
-        self.as_receipt().rlp_encode_fields_with_bloom(bloom, out);
+        match self {
+            Self::Legacy(r)
+            | Self::Eip2930(r)
+            | Self::Eip1559(r)
+            | Self::Eip7702(r)
+            | Self::Morph(r) => r.rlp_encode_fields_with_bloom(bloom, out),
+            Self::L1Msg(r) => r.rlp_encode_fields_with_bloom(bloom, out),
+        }
     }
 
     /// Returns RLP header for inner encoding.
     pub fn rlp_header_inner(&self, bloom: &Bloom) -> Header {
-        self.rlp_header_inner_impl(Some(bloom))
+        Header {
+            list: true,
+            payload_length: self.rlp_encoded_fields_length(bloom),
+        }
     }
 
     /// Returns RLP header for inner encoding without bloom.
     ///
     /// Used for DA (data availability) layer compression where bloom is omitted to save space.
     pub fn rlp_header_inner_without_bloom(&self) -> Header {
-        self.rlp_header_inner_impl(None)
-    }
-
-    fn rlp_header_inner_impl(&self, bloom: Option<&Bloom>) -> Header {
-        let payload_length = match bloom {
-            Some(b) => self.rlp_encoded_fields_length(b),
-            None => self.rlp_encoded_fields_length_without_bloom(),
-        };
         Header {
             list: true,
-            payload_length,
+            payload_length: self.rlp_encoded_fields_length_without_bloom(),
         }
     }
 
