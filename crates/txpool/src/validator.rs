@@ -262,8 +262,33 @@ where
             );
         }
 
+        // Reject EIP-7702 transactions before Viridian hardfork (PRAGUE)
+        if transaction.is_eip7702()
+            && !self
+                .chain_spec()
+                .is_viridian_active_at_timestamp(self.block_timestamp())
+        {
+            return TransactionValidationOutcome::Invalid(
+                transaction,
+                InvalidTransactionError::TxTypeNotSupported.into(),
+            );
+        }
+
         // Check if this is a MorphTx (0x7F) - need special handling for ERC20 gas payment
         let is_morph_tx = is_morph_tx(&transaction);
+
+        // Reject MorphTx (0x7F) before Emerald hardfork.
+        // go-ethereum's MakeSigner only registers MorphTxType from forks.Emerald onwards.
+        if is_morph_tx
+            && !self
+                .chain_spec()
+                .is_emerald_active_at_timestamp(self.block_timestamp())
+        {
+            return TransactionValidationOutcome::Invalid(
+                transaction,
+                InvalidTransactionError::TxTypeNotSupported.into(),
+            );
+        }
 
         let outcome = self.inner.validate_one(origin, transaction);
         if outcome.is_invalid() || outcome.is_error() {
