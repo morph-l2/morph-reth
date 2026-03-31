@@ -4,11 +4,9 @@
 
 use crate::{EngineApiResult, MorphEngineApiError, MorphL2EngineApi};
 use alloy_consensus::{
-    BlockHeader, EMPTY_OMMER_ROOT_HASH, Header, constants::EMPTY_WITHDRAWALS,
-    proofs::calculate_transaction_root,
+    BlockHeader, EMPTY_OMMER_ROOT_HASH, Header, proofs::calculate_transaction_root,
 };
 use alloy_eips::eip2718::Decodable2718;
-use alloy_hardforks::EthereumHardforks;
 use alloy_primitives::{Address, B64, B256, Sealable};
 use alloy_rpc_types_engine::PayloadAttributes;
 use morph_chainspec::MorphChainSpec;
@@ -53,7 +51,7 @@ pub struct RealMorphL2EngineApi<Provider> {
     engine_state_tracker: Arc<EngineStateTracker>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct InMemoryHead {
     number: u64,
     hash: B256,
@@ -698,10 +696,10 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
         Ok(header)
     }
 
-    fn execution_payload_from_executable_data(
+    fn header_and_body_from_executable_data(
         &self,
         data: &ExecutableL2Data,
-    ) -> EngineApiResult<(MorphExecutionData, MorphHeader)> {
+    ) -> EngineApiResult<(MorphHeader, BlockBody)> {
         let base_fee_per_gas = data
             .base_fee_per_gas
             .map(|fee| {
@@ -740,12 +738,6 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
         }
 
         let logs_bloom = alloy_primitives::Bloom::from_slice(data.logs_bloom.as_ref());
-        let shanghai_active = self
-            .chain_spec
-            .is_shanghai_active_at_timestamp(data.timestamp);
-        let cancun_active = self
-            .chain_spec
-            .is_cancun_active_at_timestamp(data.timestamp);
         // Override coinbase to empty address when FeeVault is enabled,
         // matching go-ethereum's executableDataToBlock (l2_api.go:292-293).
         let beneficiary = if self.chain_spec.is_fee_vault_enabled() {
@@ -762,7 +754,8 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
                 state_root: data.state_root,
                 transactions_root: calculate_transaction_root(&txs),
                 receipts_root: data.receipts_root,
-                withdrawals_root: shanghai_active.then_some(EMPTY_WITHDRAWALS),
+                // Morph L2 has no withdrawals — always None, matching assemble path.
+                withdrawals_root: None,
                 logs_bloom,
                 difficulty: Default::default(),
                 number: data.number,
@@ -774,8 +767,9 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
                 base_fee_per_gas,
                 extra_data: Default::default(),
                 parent_beacon_block_root: None,
-                blob_gas_used: cancun_active.then_some(0),
-                excess_blob_gas: cancun_active.then_some(0),
+                // Morph L2 has no blob transactions — always None, matching assemble path.
+                blob_gas_used: None,
+                excess_blob_gas: None,
                 requests_hash: None,
             },
         };
@@ -784,6 +778,15 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
             ommers: Default::default(),
             withdrawals: None,
         };
+
+        Ok((header, body))
+    }
+
+    fn execution_payload_from_executable_data(
+        &self,
+        data: &ExecutableL2Data,
+    ) -> EngineApiResult<(MorphExecutionData, MorphHeader)> {
+        let (header, body) = self.header_and_body_from_executable_data(data)?;
 
         // Compute header hash once and verify against expected hash before
         // constructing the sealed block. This avoids the clone + re-hash that
