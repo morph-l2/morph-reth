@@ -311,4 +311,145 @@ mod tests {
         let cost = info.calculate_tx_l1_cost(&input, MorphHardfork::Bernoulli);
         assert_eq!(cost, U256::from(80_000_000_000u64));
     }
+
+    #[test]
+    fn test_data_gas_empty_input_pre_curie() {
+        let info = L1BlockInfo {
+            l1_fee_overhead: U256::from(200),
+            ..Default::default()
+        };
+        // Empty input: 0 byte cost + 200 overhead + 64 extra = 264
+        let gas = info.data_gas(&[], MorphHardfork::Bernoulli);
+        assert_eq!(gas, U256::from(264));
+    }
+
+    #[test]
+    fn test_data_gas_empty_input_curie() {
+        let info = L1BlockInfo {
+            l1_blob_base_fee: U256::from(10),
+            l1_blob_scalar: U256::from(2),
+            ..Default::default()
+        };
+        // Empty input: 0 * 10 * 2 = 0
+        let gas = info.data_gas(&[], MorphHardfork::Curie);
+        assert_eq!(gas, U256::ZERO);
+    }
+
+    #[test]
+    fn test_calculate_tx_l1_cost_curie() {
+        // Use Morph mainnet initial Curie oracle values:
+        //   l1_commit_scalar = 230_759_955_285
+        //   l1_base_fee      = 30 gwei = 30_000_000_000
+        //   l1_blob_base_fee = 1
+        //   l1_blob_scalar   = 417_565_260
+        //
+        // Step-by-step (all integer arithmetic, no rounding):
+        //   calldata_gas = commit_scalar × base_fee
+        //                = 230_759_955_285 × 30_000_000_000
+        //                = 6_922_798_658_550_000_000_000
+        //   blob_gas     = len × blob_base_fee × blob_scalar
+        //                = 100 × 1 × 417_565_260
+        //                = 41_756_526_000
+        //   total        = (calldata_gas + blob_gas) / 1_000_000_000
+        //                = (6_922_798_658_550_000_000_000 + 41_756_526_000) / 1_000_000_000
+        //                = 6_922_798_658_591 (integer division, truncated)
+        //
+        // Pre-computed to avoid a circular test that would pass even if the
+        // formula itself were wrong.
+        let calldata_gas =
+            U256::from(230_759_955_285u64).saturating_mul(U256::from(30_000_000_000u64));
+
+        let info = L1BlockInfo {
+            l1_base_fee: U256::from(30_000_000_000u64),
+            l1_blob_base_fee: U256::from(1),
+            l1_commit_scalar: U256::from(230_759_955_285u64),
+            l1_blob_scalar: U256::from(417_565_260),
+            calldata_gas,
+            ..Default::default()
+        };
+
+        let input = vec![0xff; 100];
+        let cost = info.calculate_tx_l1_cost(&input, MorphHardfork::Curie);
+        assert_eq!(cost, U256::from(6_922_798_658_591u64));
+    }
+
+    /// Verify the L1 fee cap at u64::MAX for circuit compatibility.
+    #[test]
+    fn test_l1_fee_cap_at_u64_max() {
+        let info = L1BlockInfo {
+            l1_base_fee: U256::MAX,
+            l1_fee_overhead: U256::from(0),
+            l1_base_fee_scalar: U256::MAX,
+            ..Default::default()
+        };
+
+        let input = vec![0xff; 100];
+        let cost = info.calculate_tx_l1_cost(&input, MorphHardfork::Bernoulli);
+
+        // Should be capped at u64::MAX
+        assert_eq!(cost, U256::from(u64::MAX));
+    }
+
+    #[test]
+    fn test_data_gas_all_zero_bytes() {
+        let info = L1BlockInfo {
+            l1_fee_overhead: U256::from(0),
+            ..Default::default()
+        };
+        // 4 zero bytes * 4 gas + 0 overhead + 64 extra = 80
+        let input = vec![0x00; 4];
+        let gas = info.data_gas(&input, MorphHardfork::Bernoulli);
+        assert_eq!(gas, U256::from(4 * 4 + 64));
+    }
+
+    #[test]
+    fn test_data_gas_all_nonzero_bytes() {
+        let info = L1BlockInfo {
+            l1_fee_overhead: U256::from(0),
+            ..Default::default()
+        };
+        // 4 non-zero bytes * 16 gas + 0 overhead + 64 extra = 128
+        let input = vec![0xff; 4];
+        let gas = info.data_gas(&input, MorphHardfork::Bernoulli);
+        assert_eq!(gas, U256::from(4 * 16 + 64));
+    }
+
+    #[test]
+    fn test_l1_cost_zero_with_zero_params() {
+        let info = L1BlockInfo::default();
+        let input = vec![0xff; 10];
+        // All parameters are zero, so cost is zero (tx_l1_gas * 0 * 0 / precision = 0)
+        let cost = info.calculate_tx_l1_cost(&input, MorphHardfork::Bernoulli);
+        assert_eq!(cost, U256::ZERO);
+    }
+
+    #[test]
+    fn test_curie_oracle_storage_constants() {
+        assert_eq!(CURIE_L1_GAS_PRICE_ORACLE_STORAGE.len(), 4);
+        // Verify the 4 slots are the expected ones
+        assert_eq!(
+            CURIE_L1_GAS_PRICE_ORACLE_STORAGE[0].0,
+            GPO_L1_BLOB_BASE_FEE_SLOT
+        );
+        assert_eq!(
+            CURIE_L1_GAS_PRICE_ORACLE_STORAGE[1].0,
+            GPO_COMMIT_SCALAR_SLOT
+        );
+        assert_eq!(CURIE_L1_GAS_PRICE_ORACLE_STORAGE[2].0, GPO_BLOB_SCALAR_SLOT);
+        assert_eq!(CURIE_L1_GAS_PRICE_ORACLE_STORAGE[3].0, GPO_IS_CURIE_SLOT);
+    }
+
+    #[test]
+    fn test_gpo_storage_slot_ordering() {
+        // Slots should be sequential per the contract layout
+        assert_eq!(GPO_OWNER_SLOT, U256::from(0));
+        assert_eq!(GPO_L1_BASE_FEE_SLOT, U256::from(1));
+        assert_eq!(GPO_OVERHEAD_SLOT, U256::from(2));
+        assert_eq!(GPO_SCALAR_SLOT, U256::from(3));
+        assert_eq!(GPO_WHITELIST_SLOT, U256::from(4));
+        assert_eq!(GPO_L1_BLOB_BASE_FEE_SLOT, U256::from(6));
+        assert_eq!(GPO_COMMIT_SCALAR_SLOT, U256::from(7));
+        assert_eq!(GPO_BLOB_SCALAR_SLOT, U256::from(8));
+        assert_eq!(GPO_IS_CURIE_SLOT, U256::from(9));
+    }
 }

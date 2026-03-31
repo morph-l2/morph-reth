@@ -315,4 +315,61 @@ mod tests {
 
         assert_eq!(header, deserialized);
     }
+
+    #[test]
+    fn test_morph_header_rlp_roundtrip() {
+        let inner = create_test_header();
+        let header = MorphHeader {
+            inner,
+            next_l1_msg_index: 42,
+        };
+
+        let mut buf = Vec::new();
+        alloy_rlp::Encodable::encode(&header, &mut buf);
+
+        let decoded = <MorphHeader as alloy_rlp::Decodable>::decode(&mut buf.as_slice())
+            .expect("RLP decode should succeed");
+
+        assert_eq!(header, decoded);
+    }
+
+    #[test]
+    fn test_morph_header_size() {
+        let inner = create_test_header();
+        let header = MorphHeader {
+            inner: inner.clone(),
+            next_l1_msg_index: 0,
+        };
+
+        let inner_size = reth_primitives_traits::InMemorySize::size(&inner);
+        let header_size = reth_primitives_traits::InMemorySize::size(&header);
+
+        // MorphHeader size = inner size + size_of::<u64>() for next_l1_msg_index
+        assert_eq!(header_size, inner_size + core::mem::size_of::<u64>());
+    }
+
+    #[test]
+    fn test_morph_header_mut_trait() {
+        use reth_primitives_traits::header::HeaderMut;
+
+        let inner = create_test_header();
+        let mut header: MorphHeader = inner.into();
+
+        let new_hash = b256!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        header.set_parent_hash(new_hash);
+        assert_eq!(header.parent_hash(), new_hash);
+
+        header.set_block_number(999);
+        assert_eq!(header.number(), 999);
+
+        header.set_timestamp(12345);
+        assert_eq!(header.timestamp(), 12345);
+
+        let new_root = b256!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        header.set_state_root(new_root);
+        assert_eq!(header.state_root(), new_root);
+
+        header.set_difficulty(U256::from(42u64));
+        assert_eq!(header.difficulty(), U256::from(42u64));
+    }
 }

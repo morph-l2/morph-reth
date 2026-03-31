@@ -88,19 +88,92 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_error_codes() {
+    fn test_error_code_discontinuous_block_number() {
         let err = MorphEngineApiError::DiscontinuousBlockNumber {
             expected: 100,
             actual: 102,
         };
         let rpc_err = err.into_rpc_error();
         assert_eq!(rpc_err.code(), -32001);
+    }
 
+    #[test]
+    fn test_error_code_wrong_parent_hash() {
+        let err = MorphEngineApiError::WrongParentHash {
+            expected: B256::from([0x01; 32]),
+            actual: B256::from([0x02; 32]),
+        };
+        let rpc_err = err.into_rpc_error();
+        assert_eq!(rpc_err.code(), -32001);
+    }
+
+    #[test]
+    fn test_error_code_invalid_transaction() {
         let err = MorphEngineApiError::InvalidTransaction {
             index: 0,
             message: "invalid signature".to_string(),
         };
         let rpc_err = err.into_rpc_error();
         assert_eq!(rpc_err.code(), -32002);
+    }
+
+    #[test]
+    fn test_error_code_block_build_error() {
+        let err = MorphEngineApiError::BlockBuildError("out of gas".to_string());
+        let rpc_err = err.into_rpc_error();
+        assert_eq!(rpc_err.code(), -32003);
+    }
+
+    #[test]
+    fn test_error_code_validation_failed() {
+        let err = MorphEngineApiError::ValidationFailed("invalid state root".to_string());
+        let rpc_err = err.into_rpc_error();
+        assert_eq!(rpc_err.code(), -32004);
+    }
+
+    #[test]
+    fn test_error_code_execution_failed() {
+        let err = MorphEngineApiError::ExecutionFailed("evm error".to_string());
+        let rpc_err = err.into_rpc_error();
+        assert_eq!(rpc_err.code(), -32005);
+    }
+
+    #[test]
+    fn test_error_code_database() {
+        let err = MorphEngineApiError::Database("connection lost".to_string());
+        let rpc_err = err.into_rpc_error();
+        assert_eq!(rpc_err.code(), -32010);
+    }
+
+    #[test]
+    fn test_error_code_internal() {
+        let err = MorphEngineApiError::Internal("unexpected".to_string());
+        let rpc_err = err.into_rpc_error();
+        assert_eq!(rpc_err.code(), -32099);
+    }
+
+    #[test]
+    fn test_error_display_messages() {
+        let err = MorphEngineApiError::DiscontinuousBlockNumber {
+            expected: 100,
+            actual: 102,
+        };
+        assert!(err.to_string().contains("100"));
+        assert!(err.to_string().contains("102"));
+
+        let err = MorphEngineApiError::InvalidTransaction {
+            index: 3,
+            message: "nonce too low".to_string(),
+        };
+        assert!(err.to_string().contains("index 3"));
+        assert!(err.to_string().contains("nonce too low"));
+    }
+
+    #[test]
+    fn test_from_error_to_rpc_error() {
+        let err = MorphEngineApiError::Internal("test".to_string());
+        let rpc_err: ErrorObjectOwned = err.into();
+        assert_eq!(rpc_err.code(), -32099);
+        assert!(rpc_err.message().contains("test"));
     }
 }

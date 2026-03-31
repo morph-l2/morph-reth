@@ -49,3 +49,54 @@ pub const L2_MESSAGE_QUEUE_ADDRESS: Address = address!("530000000000000000000000
 ///
 /// This is slot 33, which stores the Merkle root for L2->L1 messages.
 pub const L2_MESSAGE_QUEUE_WITHDRAW_TRIE_ROOT_SLOT: U256 = U256::from_limbs([33, 0, 0, 0]);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_chain_ids_are_distinct() {
+        assert_ne!(MORPH_MAINNET_CHAIN_ID, MORPH_HOODI_CHAIN_ID);
+    }
+
+    #[test]
+    fn test_chain_id_values() {
+        assert_eq!(MORPH_MAINNET_CHAIN_ID, 2818);
+        assert_eq!(MORPH_HOODI_CHAIN_ID, 2910);
+    }
+
+    #[test]
+    fn test_genesis_hashes_are_distinct() {
+        assert_ne!(MORPH_MAINNET_GENESIS_HASH, MORPH_HOODI_GENESIS_HASH);
+        assert_ne!(
+            MORPH_MAINNET_GENESIS_STATE_ROOT,
+            MORPH_HOODI_GENESIS_STATE_ROOT
+        );
+    }
+
+    #[test]
+    fn test_genesis_hashes_are_nonzero() {
+        assert_ne!(MORPH_MAINNET_GENESIS_HASH, B256::ZERO);
+        assert_ne!(MORPH_HOODI_GENESIS_HASH, B256::ZERO);
+        assert_ne!(MORPH_MAINNET_GENESIS_STATE_ROOT, B256::ZERO);
+        assert_ne!(MORPH_HOODI_GENESIS_STATE_ROOT, B256::ZERO);
+    }
+
+    #[test]
+    fn test_l2_message_queue_address() {
+        assert_eq!(
+            L2_MESSAGE_QUEUE_ADDRESS,
+            address!("5300000000000000000000000000000000000001")
+        );
+    }
+
+    #[test]
+    fn test_withdraw_trie_root_slot() {
+        assert_eq!(L2_MESSAGE_QUEUE_WITHDRAW_TRIE_ROOT_SLOT, U256::from(33));
+    }
+
+    #[test]
+    fn test_base_fee() {
+        assert_eq!(MORPH_BASE_FEE, 1_000_000);
+    }
+}

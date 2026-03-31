@@ -174,6 +174,17 @@ impl MorphPayloadBuilderAttributes {
     }
 }
 
+impl From<EthPayloadBuilderAttributes> for MorphPayloadBuilderAttributes {
+    fn from(inner: EthPayloadBuilderAttributes) -> Self {
+        Self {
+            inner,
+            transactions: vec![],
+            gas_limit: None,
+            base_fee_per_gas: None,
+        }
+    }
+}
+
 /// Compute payload ID from parent hash and attributes.
 ///
 /// Uses SHA-256 hashing with the version byte as the first byte of the result.
@@ -347,5 +358,191 @@ mod tests {
 
         let attrs: MorphPayloadAttributes = serde_json::from_str(json).expect("deserialize");
         assert_eq!(attrs.transactions.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_payload_id_different_versions_are_distinct() {
+        let parent = B256::random();
+        let attrs = create_test_attributes();
+
+        // Every distinct version should produce a different ID
+        let ids: Vec<_> = (0..=5)
+            .map(|v| payload_id_morph(&parent, &attrs, v))
+            .collect();
+        for i in 0..ids.len() {
+            for j in (i + 1)..ids.len() {
+                assert_ne!(ids[i], ids[j], "version {i} and {j} should differ");
+            }
+        }
+    }
+
+    #[test]
+    fn test_payload_id_different_parents() {
+        let attrs = create_test_attributes();
+
+        let id1 = payload_id_morph(&B256::from([0x01; 32]), &attrs, 1);
+        let id2 = payload_id_morph(&B256::from([0x02; 32]), &attrs, 1);
+
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn test_payload_id_different_timestamps() {
+        let parent = B256::random();
+        let mut attrs1 = create_test_attributes();
+        attrs1.inner.timestamp = 100;
+        let mut attrs2 = create_test_attributes();
+        attrs2.inner.timestamp = 200;
+
+        let id1 = payload_id_morph(&parent, &attrs1, 1);
+        let id2 = payload_id_morph(&parent, &attrs2, 1);
+
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn test_payload_id_none_vs_empty_transactions() {
+        let parent = B256::random();
+        let mut attrs1 = create_test_attributes();
+        attrs1.transactions = None;
+        let mut attrs2 = create_test_attributes();
+        attrs2.transactions = Some(vec![]);
+
+        let id1 = payload_id_morph(&parent, &attrs1, 1);
+        let id2 = payload_id_morph(&parent, &attrs2, 1);
+
+        // None vs Some(empty) should produce different IDs because
+        // we hash whether the field is Some or None
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn test_payload_id_with_gas_limit_override() {
+        let parent = B256::random();
+        let mut attrs1 = create_test_attributes();
+        attrs1.gas_limit = None;
+        let mut attrs2 = create_test_attributes();
+        attrs2.gas_limit = Some(30_000_000);
+
+        let id1 = payload_id_morph(&parent, &attrs1, 1);
+        let id2 = payload_id_morph(&parent, &attrs2, 1);
+
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn test_payload_id_with_base_fee_override() {
+        let parent = B256::random();
+        let mut attrs1 = create_test_attributes();
+        attrs1.base_fee_per_gas = None;
+        let mut attrs2 = create_test_attributes();
+        attrs2.base_fee_per_gas = Some(1_000_000_000);
+
+        let id1 = payload_id_morph(&parent, &attrs1, 1);
+        let id2 = payload_id_morph(&parent, &attrs2, 1);
+
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn test_payload_id_with_withdrawals() {
+        let parent = B256::random();
+        let mut attrs1 = create_test_attributes();
+        attrs1.inner.withdrawals = None;
+        let mut attrs2 = create_test_attributes();
+        attrs2.inner.withdrawals = Some(vec![]);
+
+        let id1 = payload_id_morph(&parent, &attrs1, 1);
+        let id2 = payload_id_morph(&parent, &attrs2, 1);
+
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn test_payload_id_with_beacon_root() {
+        let parent = B256::random();
+        let mut attrs1 = create_test_attributes();
+        attrs1.inner.parent_beacon_block_root = None;
+        let mut attrs2 = create_test_attributes();
+        attrs2.inner.parent_beacon_block_root = Some(B256::from([0x42; 32]));
+
+        let id1 = payload_id_morph(&parent, &attrs1, 1);
+        let id2 = payload_id_morph(&parent, &attrs2, 1);
+
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn test_payload_attributes_trait_impl() {
+        use reth_payload_primitives::PayloadAttributes as _;
+
+        let mut attrs = create_test_attributes();
+        attrs.inner.timestamp = 42;
+        attrs.inner.withdrawals = Some(vec![]);
+        attrs.inner.parent_beacon_block_root = Some(B256::from([0x01; 32]));
+
+        assert_eq!(attrs.timestamp(), 42);
+        assert!(attrs.withdrawals().is_some());
+        assert_eq!(
+            attrs.parent_beacon_block_root(),
+            Some(B256::from([0x01; 32]))
+        );
+    }
+
+    #[test]
+    fn test_builder_attributes_has_l1_messages_empty() {
+        let attrs = MorphPayloadBuilderAttributes::try_new(B256::ZERO, create_test_attributes(), 1)
+            .unwrap();
+        assert!(!attrs.has_l1_messages());
+    }
+
+    #[test]
+    fn test_builder_attributes_accessors() {
+        let parent = B256::from([0x42; 32]);
+        let mut rpc_attrs = create_test_attributes();
+        rpc_attrs.inner.timestamp = 999;
+        rpc_attrs.inner.suggested_fee_recipient = Address::from([0x01; 20]);
+        rpc_attrs.inner.prev_randao = B256::from([0x02; 32]);
+        rpc_attrs.gas_limit = Some(30_000_000);
+        rpc_attrs.base_fee_per_gas = Some(1_000_000_000);
+
+        let attrs = MorphPayloadBuilderAttributes::try_new(parent, rpc_attrs, 1).unwrap();
+
+        assert_eq!(attrs.parent(), parent);
+        assert_eq!(attrs.timestamp(), 999);
+        assert_eq!(attrs.suggested_fee_recipient(), Address::from([0x01; 20]));
+        assert_eq!(attrs.prev_randao(), B256::from([0x02; 32]));
+        assert!(attrs.parent_beacon_block_root().is_none());
+        assert_eq!(attrs.gas_limit, Some(30_000_000));
+        assert_eq!(attrs.base_fee_per_gas, Some(1_000_000_000));
+    }
+
+    #[test]
+    fn test_serde_with_gas_and_base_fee_overrides() {
+        let json = r#"{
+            "timestamp": "0x499602d2",
+            "prevRandao": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "suggestedFeeRecipient": "0x0000000000000000000000000000000000000002",
+            "gasLimit": "0x1c9c380",
+            "baseFeePerGas": "0x3b9aca00"
+        }"#;
+
+        let attrs: MorphPayloadAttributes = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(attrs.gas_limit, Some(30_000_000));
+        assert_eq!(attrs.base_fee_per_gas, Some(1_000_000_000));
+    }
+
+    #[test]
+    fn test_serde_optional_fields_absent() {
+        let json = r#"{
+            "timestamp": "0x1",
+            "prevRandao": "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "suggestedFeeRecipient": "0x0000000000000000000000000000000000000000"
+        }"#;
+
+        let attrs: MorphPayloadAttributes = serde_json::from_str(json).expect("deserialize");
+        assert!(attrs.transactions.is_none());
+        assert!(attrs.gas_limit.is_none());
+        assert!(attrs.base_fee_per_gas.is_none());
     }
 }

@@ -166,20 +166,19 @@ where
         let version = tx.version().unwrap_or(0);
         let reference = tx.reference();
         let memo = tx.memo().cloned();
-        let receipt_fields = |fee_token_id, fee_rate, token_scale| MorphReceiptTxFields {
-            version,
-            fee_token_id,
-            fee_rate,
-            token_scale,
-            fee_limit,
-            reference,
-            memo: memo.clone(),
-        };
 
         // For fee_token_id==0 (ETH fee MorphTx, V1 only), no token registry lookup needed.
         // Still preserve version/reference/memo in the receipt.
         if fee_token_id == 0 {
-            return Ok(Some(receipt_fields(0, U256::ZERO, U256::ZERO)));
+            return Ok(Some(MorphReceiptTxFields {
+                version,
+                fee_token_id: 0,
+                fee_rate: U256::ZERO,
+                token_scale: U256::ZERO,
+                fee_limit,
+                reference,
+                memo,
+            }));
         }
 
         // Reuse cached token fee info from handler validation to avoid redundant DB reads.
@@ -194,7 +193,15 @@ where
             }
         };
 
-        Ok(token_info.map(|info| receipt_fields(fee_token_id, info.price_ratio, info.scale)))
+        Ok(token_info.map(|info| MorphReceiptTxFields {
+            version,
+            fee_token_id,
+            fee_rate: info.price_ratio,
+            token_scale: info.scale,
+            fee_limit,
+            reference,
+            memo,
+        }))
     }
 }
 

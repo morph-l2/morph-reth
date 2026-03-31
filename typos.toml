@@ -1,0 +1,20 @@
+[files]
+extend-exclude = [
+    ".git",
+    "target",
+    "Cargo.toml",
+    "Cargo.lock",
+    "*.json",
+]
+
+[default]
+extend-ignore-re = [
+    # Hex strings of various lengths
+    "(?i)0x[0-9a-f]{8,}",
+    "(?i)[0-9a-f]{40}",
+    "(?i)[0-9a-f]{64}",
+]
+
+[default.extend-words]
+# Valid identifiers that should not be flagged
+ser = "ser"

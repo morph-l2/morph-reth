@@ -134,3 +134,101 @@ impl PayloadTypes for MorphPayloadTypes {
         MorphExecutionData::new(Arc::new(block))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_consensus::Header;
+    use morph_primitives::{BlockBody, MorphHeader};
+    use reth_primitives_traits::Block as _;
+
+    fn create_test_block() -> SealedBlock<Block> {
+        let header: MorphHeader = Header::default().into();
+        let body = BlockBody::default();
+        let block = Block::new(header, body);
+        block.seal_slow()
+    }
+
+    // =========================================================================
+    // MorphExecutionData tests
+    // =========================================================================
+
+    #[test]
+    fn test_execution_data_new_no_withdraw_root() {
+        let block = Arc::new(create_test_block());
+        let data = MorphExecutionData::new(block);
+        assert!(data.expected_withdraw_trie_root.is_none());
+    }
+
+    #[test]
+    fn test_execution_data_with_withdraw_root() {
+        let block = Arc::new(create_test_block());
+        let root = B256::from([0xAA; 32]);
+        let data = MorphExecutionData::with_expected_withdraw_trie_root(block, root);
+        assert_eq!(data.expected_withdraw_trie_root, Some(root));
+    }
+
+    #[test]
+    fn test_execution_data_with_zero_withdraw_root() {
+        let block = Arc::new(create_test_block());
+        let data = MorphExecutionData::with_expected_withdraw_trie_root(block, B256::ZERO);
+        assert_eq!(data.expected_withdraw_trie_root, Some(B256::ZERO));
+    }
+
+    #[test]
+    fn test_execution_payload_trait_no_withdrawals() {
+        let block = Arc::new(create_test_block());
+        let data = MorphExecutionData::new(block);
+        // L2 doesn't have withdrawals
+        assert!(data.withdrawals().is_none());
+    }
+
+    #[test]
+    fn test_execution_payload_trait_no_access_list() {
+        let block = Arc::new(create_test_block());
+        let data = MorphExecutionData::new(block);
+        assert!(data.block_access_list().is_none());
+    }
+
+    #[test]
+    fn test_execution_payload_trait_empty_block_counts() {
+        let block = Arc::new(create_test_block());
+        let data = MorphExecutionData::new(block.clone());
+        assert_eq!(data.transaction_count(), 0);
+        assert_eq!(data.gas_used(), 0);
+        assert_eq!(data.block_number(), 0);
+        assert_eq!(data.block_hash(), block.hash());
+    }
+
+    #[test]
+    fn test_execution_payload_trait_timestamps_and_hashes() {
+        let header = MorphHeader {
+            inner: Header {
+                timestamp: 1_700_000_000,
+                parent_hash: B256::from([0x11; 32]),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let block = Block::new(header, BlockBody::default());
+        let sealed = Arc::new(block.seal_slow());
+        let data = MorphExecutionData::new(sealed.clone());
+
+        assert_eq!(data.timestamp(), 1_700_000_000);
+        assert_eq!(data.parent_hash(), B256::from([0x11; 32]));
+        assert_eq!(data.block_hash(), sealed.hash());
+    }
+
+    // =========================================================================
+    // MorphPayloadTypes::block_to_payload tests
+    // =========================================================================
+
+    #[test]
+    fn test_block_to_payload() {
+        let block = create_test_block();
+        let hash = block.hash();
+        let data = MorphPayloadTypes::block_to_payload(block);
+        assert_eq!(data.block_hash(), hash);
+        assert!(data.expected_withdraw_trie_root.is_none());
+    }
+}

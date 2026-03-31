@@ -41,6 +41,11 @@ pub struct SafeL2Data {
 }
 
 impl SafeL2Data {
+    /// Create a new empty [`SafeL2Data`].
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     /// Returns true if this block contains any transactions.
     pub fn has_transactions(&self) -> bool {
         !self.transactions.is_empty()
@@ -97,5 +102,55 @@ mod tests {
 
         let decoded: SafeL2Data = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(data, decoded);
+    }
+
+    #[test]
+    fn test_safe_l2_data_new() {
+        let data = SafeL2Data::new();
+        assert_eq!(data, SafeL2Data::default());
+    }
+
+    #[test]
+    fn test_transaction_helpers() {
+        let mut data = SafeL2Data::default();
+        assert!(!data.has_transactions());
+        assert_eq!(data.transaction_count(), 0);
+
+        data.transactions.push(Bytes::from(vec![0x01]));
+        data.transactions.push(Bytes::from(vec![0x02]));
+        assert!(data.has_transactions());
+        assert_eq!(data.transaction_count(), 2);
+    }
+
+    #[test]
+    fn test_serde_camel_case() {
+        let json = r#"{
+            "number": "0x64",
+            "gasLimit": "0x1c9c380",
+            "baseFeePerGas": "0x3b9aca00",
+            "timestamp": "0x499602d2",
+            "transactions": ["0xdead"]
+        }"#;
+
+        let data: SafeL2Data = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(data.number, 100);
+        assert_eq!(data.gas_limit, 30_000_000);
+        assert_eq!(data.base_fee_per_gas, Some(1_000_000_000));
+        assert_eq!(data.timestamp, 1234567890);
+        assert_eq!(data.transaction_count(), 1);
+    }
+
+    #[test]
+    fn test_clone_and_equality() {
+        let data = SafeL2Data {
+            number: 42,
+            gas_limit: 30_000_000,
+            base_fee_per_gas: Some(100),
+            timestamp: 999,
+            transactions: vec![Bytes::from(vec![0x01, 0x02])],
+        };
+
+        let cloned = data.clone();
+        assert_eq!(data, cloned);
     }
 }

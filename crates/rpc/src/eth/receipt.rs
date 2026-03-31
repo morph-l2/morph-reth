@@ -153,3 +153,103 @@ fn morph_tx_receipt_fields(receipt: &MorphReceipt) -> MorphTxReceiptFields {
         MorphReceipt::L1Msg(_) => MorphTxReceiptFields::default(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_consensus::Receipt;
+    use alloy_primitives::{Bytes as PrimitiveBytes, b256};
+    use morph_primitives::MorphTransactionReceipt;
+
+    fn make_morph_receipt_with_fields() -> MorphTransactionReceipt {
+        MorphTransactionReceipt {
+            inner: Receipt {
+                status: alloy_consensus::Eip658Value::Eip658(true),
+                cumulative_gas_used: 100_000,
+                logs: vec![],
+            },
+            l1_fee: U256::from(5000),
+            version: Some(1),
+            fee_token_id: Some(3),
+            fee_rate: Some(U256::from(2_000_000)),
+            token_scale: Some(U256::from(1_000_000)),
+            fee_limit: Some(U256::from(999_999)),
+            reference: Some(b256!(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            )),
+            memo: Some(PrimitiveBytes::from("test memo")),
+        }
+    }
+
+    #[test]
+    fn morph_tx_receipt_fields_extracts_all_fields_from_legacy() {
+        let r = make_morph_receipt_with_fields();
+        let receipt = MorphReceipt::Legacy(r.clone());
+        let fields = morph_tx_receipt_fields(&receipt);
+
+        assert_eq!(fields.l1_fee, r.l1_fee);
+        assert_eq!(fields.version, r.version);
+        assert_eq!(fields.fee_token_id, r.fee_token_id);
+        assert_eq!(fields.fee_rate, r.fee_rate);
+        assert_eq!(fields.token_scale, r.token_scale);
+        assert_eq!(fields.fee_limit, r.fee_limit);
+        assert_eq!(fields.reference, r.reference);
+        assert_eq!(fields.memo, r.memo);
+    }
+
+    #[test]
+    fn morph_tx_receipt_fields_extracts_from_eip1559() {
+        let r = make_morph_receipt_with_fields();
+        let receipt = MorphReceipt::Eip1559(r.clone());
+        let fields = morph_tx_receipt_fields(&receipt);
+        assert_eq!(fields.l1_fee, r.l1_fee);
+        assert_eq!(fields.fee_token_id, r.fee_token_id);
+    }
+
+    #[test]
+    fn morph_tx_receipt_fields_extracts_from_morph_type() {
+        let r = make_morph_receipt_with_fields();
+        let receipt = MorphReceipt::Morph(r.clone());
+        let fields = morph_tx_receipt_fields(&receipt);
+        assert_eq!(fields.l1_fee, r.l1_fee);
+        assert_eq!(fields.version, Some(1));
+        assert_eq!(fields.fee_token_id, Some(3));
+    }
+
+    #[test]
+    fn l1_msg_receipt_returns_default_fields() {
+        let receipt = MorphReceipt::L1Msg(Receipt {
+            status: alloy_consensus::Eip658Value::Eip658(true),
+            cumulative_gas_used: 50_000,
+            logs: vec![],
+        });
+        let fields = morph_tx_receipt_fields(&receipt);
+
+        assert_eq!(fields.l1_fee, U256::ZERO);
+        assert!(fields.version.is_none());
+        assert!(fields.fee_token_id.is_none());
+        assert!(fields.fee_rate.is_none());
+        assert!(fields.token_scale.is_none());
+        assert!(fields.fee_limit.is_none());
+        assert!(fields.reference.is_none());
+        assert!(fields.memo.is_none());
+    }
+
+    #[test]
+    fn morph_tx_receipt_fields_handles_zero_l1_fee() {
+        let mut r = make_morph_receipt_with_fields();
+        r.l1_fee = U256::ZERO;
+        let receipt = MorphReceipt::Eip2930(r);
+        let fields = morph_tx_receipt_fields(&receipt);
+        assert_eq!(fields.l1_fee, U256::ZERO);
+    }
+
+    #[test]
+    fn morph_tx_receipt_fields_eip7702() {
+        let r = make_morph_receipt_with_fields();
+        let receipt = MorphReceipt::Eip7702(r.clone());
+        let fields = morph_tx_receipt_fields(&receipt);
+        assert_eq!(fields.l1_fee, r.l1_fee);
+        assert_eq!(fields.reference, r.reference);
+    }
+}

@@ -195,4 +195,111 @@ mod tests {
         let pool_err: InvalidPoolTransactionError = err.into();
         assert!(matches!(pool_err, InvalidPoolTransactionError::Other(_)));
     }
+
+    #[test]
+    fn test_error_conversion_insufficient_eth() {
+        let err = MorphTxError::InsufficientEthForValue {
+            balance: U256::from(50),
+            value: U256::from(100),
+        };
+        let pool_err: InvalidPoolTransactionError = err.into();
+        assert!(matches!(
+            pool_err,
+            InvalidPoolTransactionError::Overdraft { .. }
+        ));
+    }
+
+    #[test]
+    fn test_error_conversion_insufficient_token() {
+        let err = MorphTxError::InsufficientTokenBalance {
+            token_id: 1,
+            token_address: address!("1234567890123456789012345678901234567890"),
+            balance: U256::from(30),
+            required: U256::from(60),
+        };
+        let pool_err: InvalidPoolTransactionError = err.into();
+        assert!(matches!(
+            pool_err,
+            InvalidPoolTransactionError::Overdraft { .. }
+        ));
+    }
+
+    #[test]
+    fn test_is_bad_transaction() {
+        // Malformed = bad
+        assert!(MorphTxError::InvalidTokenId.is_bad_transaction());
+        assert!(
+            MorphTxError::InvalidFormat {
+                reason: "test".into()
+            }
+            .is_bad_transaction()
+        );
+
+        // Insufficient funds = not bad (shouldn't penalize peer)
+        assert!(
+            !MorphTxError::InsufficientTokenBalance {
+                token_id: 1,
+                token_address: Address::ZERO,
+                balance: U256::ZERO,
+                required: U256::from(1u64),
+            }
+            .is_bad_transaction()
+        );
+
+        assert!(
+            !MorphTxError::InsufficientEthForValue {
+                balance: U256::ZERO,
+                value: U256::from(1u64),
+            }
+            .is_bad_transaction()
+        );
+
+        // Token state issues = not bad
+        assert!(!MorphTxError::TokenNotFound { token_id: 1 }.is_bad_transaction());
+        assert!(!MorphTxError::TokenNotActive { token_id: 1 }.is_bad_transaction());
+        assert!(!MorphTxError::InvalidPriceRatio { token_id: 1 }.is_bad_transaction());
+        assert!(
+            !MorphTxError::TokenInfoFetchFailed {
+                token_id: 1,
+                message: "error".into()
+            }
+            .is_bad_transaction()
+        );
+    }
+
+    #[test]
+    fn test_error_display_all_variants() {
+        // Verify all variants produce non-empty display strings
+        let variants: Vec<MorphTxError> = vec![
+            MorphTxError::InvalidTokenId,
+            MorphTxError::TokenNotFound { token_id: 1 },
+            MorphTxError::TokenNotActive { token_id: 2 },
+            MorphTxError::InvalidPriceRatio { token_id: 3 },
+            MorphTxError::InsufficientTokenBalance {
+                token_id: 4,
+                token_address: Address::ZERO,
+                balance: U256::from(10u64),
+                required: U256::from(20u64),
+            },
+            MorphTxError::InsufficientEthForValue {
+                balance: U256::from(5u64),
+                value: U256::from(10u64),
+            },
+            MorphTxError::TokenInfoFetchFailed {
+                token_id: 5,
+                message: "db error".into(),
+            },
+            MorphTxError::InvalidFormat {
+                reason: "bad version".into(),
+            },
+        ];
+
+        for err in variants {
+            let display = err.to_string();
+            assert!(
+                !display.is_empty(),
+                "Display for {err:?} should not be empty"
+            );
+        }
+    }
 }
