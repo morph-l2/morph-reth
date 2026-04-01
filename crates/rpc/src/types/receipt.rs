@@ -115,3 +115,133 @@ impl ReceiptResponse for MorphRpcReceipt {
         self.inner.state_root()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_consensus::{Eip658Value, Receipt, ReceiptWithBloom};
+    use alloy_primitives::{Bloom, address, b256};
+
+    /// Helper to build a minimal TransactionReceipt with a MorphReceiptEnvelope.
+    fn make_rpc_receipt(
+        l1_fee: U256,
+        fee_token_id: Option<U64>,
+        version: Option<u8>,
+    ) -> MorphRpcReceipt {
+        let inner_receipt = Receipt {
+            status: Eip658Value::Eip658(true),
+            cumulative_gas_used: 50_000,
+            logs: vec![],
+        };
+        let envelope = MorphReceiptEnvelope::Eip1559(ReceiptWithBloom {
+            receipt: inner_receipt,
+            logs_bloom: Bloom::ZERO,
+        });
+        let tx_receipt = TransactionReceipt {
+            inner: envelope,
+            transaction_hash: b256!(
+                "0000000000000000000000000000000000000000000000000000000000000001"
+            ),
+            transaction_index: Some(0),
+            block_hash: Some(b256!(
+                "0000000000000000000000000000000000000000000000000000000000000002"
+            )),
+            block_number: Some(42),
+            gas_used: 21_000,
+            effective_gas_price: 1_000_000_000,
+            blob_gas_used: None,
+            blob_gas_price: None,
+            from: address!("0000000000000000000000000000000000000001"),
+            to: Some(address!("0000000000000000000000000000000000000002")),
+            contract_address: None,
+        };
+
+        MorphRpcReceipt {
+            inner: tx_receipt,
+            l1_fee,
+            version,
+            fee_token_id,
+            fee_rate: None,
+            token_scale: None,
+            fee_limit: None,
+            reference: None,
+            memo: None,
+        }
+    }
+
+    #[test]
+    fn receipt_response_delegates_to_inner() {
+        let receipt = make_rpc_receipt(U256::from(100), None, None);
+
+        assert!(receipt.status());
+        assert_eq!(receipt.block_number(), Some(42));
+        assert_eq!(receipt.gas_used(), 21_000);
+        assert_eq!(receipt.effective_gas_price(), 1_000_000_000);
+        assert_eq!(receipt.blob_gas_used(), None);
+        assert_eq!(receipt.blob_gas_price(), None);
+        assert_eq!(
+            receipt.from(),
+            address!("0000000000000000000000000000000000000001")
+        );
+        assert_eq!(
+            receipt.to(),
+            Some(address!("0000000000000000000000000000000000000002"))
+        );
+        assert_eq!(receipt.contract_address(), None);
+        assert_eq!(receipt.transaction_index(), Some(0));
+        assert_eq!(receipt.cumulative_gas_used(), 50_000);
+    }
+
+    #[test]
+    fn receipt_serde_roundtrip_standard() {
+        let receipt = make_rpc_receipt(U256::from(500), None, None);
+        let json = serde_json::to_string(&receipt).unwrap();
+        let deserialized: MorphRpcReceipt = serde_json::from_str(&json).unwrap();
+        assert_eq!(receipt, deserialized);
+    }
+
+    #[test]
+    fn receipt_serde_roundtrip_with_morph_fields() {
+        let mut receipt = make_rpc_receipt(U256::from(1000), Some(U64::from(1)), Some(1));
+        receipt.fee_rate = Some(U256::from(2_000_000));
+        receipt.token_scale = Some(U256::from(1_000_000));
+        receipt.fee_limit = Some(U256::from(500_000));
+        receipt.reference = Some(b256!(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ));
+        receipt.memo = Some(Bytes::from("hello"));
+
+        let json = serde_json::to_string(&receipt).unwrap();
+        let deserialized: MorphRpcReceipt = serde_json::from_str(&json).unwrap();
+        assert_eq!(receipt, deserialized);
+    }
+
+    #[test]
+    fn receipt_serde_skips_none_fields() {
+        let receipt = make_rpc_receipt(U256::from(100), None, None);
+        let json = serde_json::to_string(&receipt).unwrap();
+
+        // Optional fields should not appear in JSON when None
+        assert!(!json.contains("version"));
+        assert!(!json.contains("feeTokenID"));
+        assert!(!json.contains("feeRate"));
+        assert!(!json.contains("tokenScale"));
+        assert!(!json.contains("feeLimit"));
+        assert!(!json.contains("reference"));
+        assert!(!json.contains("memo"));
+    }
+
+    #[test]
+    fn receipt_serde_l1_fee_field_name() {
+        let receipt = make_rpc_receipt(U256::from(12345), None, None);
+        let json = serde_json::to_string(&receipt).unwrap();
+        assert!(json.contains("\"l1Fee\""));
+    }
+
+    #[test]
+    fn receipt_serde_fee_token_id_field_name() {
+        let receipt = make_rpc_receipt(U256::ZERO, Some(U64::from(42)), Some(1));
+        let json = serde_json::to_string(&receipt).unwrap();
+        assert!(json.contains("\"feeTokenID\""));
+    }
+}

@@ -78,4 +78,28 @@ mod tests {
         assert_eq!(args.max_tx_payload_bytes, 100000);
         assert_eq!(args.max_tx_per_block, Some(500));
     }
+
+    #[test]
+    fn test_all_args_combined() {
+        let args = CommandParser::<MorphArgs>::parse_from([
+            "test",
+            "--morph.max-tx-payload-bytes",
+            "200000",
+            "--morph.max-tx-per-block",
+            "1000",
+        ])
+        .args;
+        assert_eq!(args.max_tx_payload_bytes, 200000);
+        assert_eq!(args.max_tx_per_block, Some(1000));
+    }
+
+    #[test]
+    fn test_default_trait_impl() {
+        let args = MorphArgs::default();
+        assert_eq!(
+            args.max_tx_payload_bytes,
+            MORPH_DEFAULT_MAX_TX_PAYLOAD_BYTES
+        );
+        assert!(args.max_tx_per_block.is_none());
+    }
 }

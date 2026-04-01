@@ -229,3 +229,433 @@ impl MorphReceiptBuilder for DefaultMorphReceiptBuilder {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_consensus::{Signed, TxLegacy, TxReceipt};
+    use alloy_primitives::{Address, Log, Signature, TxKind};
+    use morph_primitives::transaction::TxL1Msg;
+    use revm::context::result::ExecutionResult;
+
+    // We use NoOpInspector-based MorphEvm for the generic E parameter.
+    // Since build_receipt only uses E::HaltReason, we can use any concrete Evm type.
+    type TestEvm = crate::evm::MorphEvm<revm::database::EmptyDB>;
+
+    fn make_success_result(gas_used: u64) -> ExecutionResult<morph_revm::MorphHaltReason> {
+        ExecutionResult::Success {
+            reason: revm::context::result::SuccessReason::Stop,
+            gas_used,
+            gas_refunded: 0,
+            logs: vec![],
+            output: revm::context::result::Output::Call(alloy_primitives::Bytes::new()),
+        }
+    }
+
+    fn make_success_with_logs(
+        gas_used: u64,
+        logs: Vec<Log>,
+    ) -> ExecutionResult<morph_revm::MorphHaltReason> {
+        ExecutionResult::Success {
+            reason: revm::context::result::SuccessReason::Stop,
+            gas_used,
+            gas_refunded: 0,
+            logs,
+            output: revm::context::result::Output::Call(alloy_primitives::Bytes::new()),
+        }
+    }
+
+    fn make_revert_result(gas_used: u64) -> ExecutionResult<morph_revm::MorphHaltReason> {
+        ExecutionResult::Revert {
+            gas_used,
+            output: alloy_primitives::Bytes::new(),
+        }
+    }
+
+    fn create_legacy_tx() -> MorphTxEnvelope {
+        let tx = TxLegacy {
+            chain_id: Some(1337),
+            nonce: 0,
+            gas_price: 1_000_000_000,
+            gas_limit: 21000,
+            to: TxKind::Call(Address::repeat_byte(0x01)),
+            value: U256::ZERO,
+            input: alloy_primitives::Bytes::new(),
+        };
+        MorphTxEnvelope::Legacy(Signed::new_unhashed(tx, Signature::test_signature()))
+    }
+
+    fn create_eip1559_tx() -> MorphTxEnvelope {
+        use alloy_consensus::TxEip1559;
+        let tx = TxEip1559 {
+            chain_id: 1337,
+            nonce: 0,
+            gas_limit: 21000,
+            max_fee_per_gas: 2_000_000_000,
+            max_priority_fee_per_gas: 1_000_000_000,
+            to: TxKind::Call(Address::repeat_byte(0x02)),
+            value: U256::ZERO,
+            input: alloy_primitives::Bytes::new(),
+            access_list: Default::default(),
+        };
+        MorphTxEnvelope::Eip1559(Signed::new_unhashed(tx, Signature::test_signature()))
+    }
+
+    fn create_l1_msg_tx() -> MorphTxEnvelope {
+        use alloy_consensus::Sealed;
+        let tx = TxL1Msg {
+            queue_index: 0,
+            gas_limit: 21000,
+            to: Address::ZERO,
+            value: U256::ZERO,
+            input: alloy_primitives::Bytes::default(),
+            sender: Address::ZERO,
+        };
+        MorphTxEnvelope::L1Msg(Sealed::new(tx))
+    }
+
+    fn create_morph_tx() -> MorphTxEnvelope {
+        use morph_primitives::TxMorph;
+        use morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_0;
+        let tx = TxMorph {
+            chain_id: 1337,
+            nonce: 0,
+            gas_limit: 21000,
+            max_fee_per_gas: 2_000_000_000,
+            max_priority_fee_per_gas: 1_000_000_000,
+            to: TxKind::Call(Address::repeat_byte(0x03)),
+            value: U256::ZERO,
+            access_list: Default::default(),
+            version: MORPH_TX_VERSION_0,
+            fee_token_id: 1,
+            fee_limit: U256::from(1000u64),
+            reference: None,
+            memo: None,
+            input: alloy_primitives::Bytes::new(),
+        };
+        MorphTxEnvelope::Morph(Signed::new_unhashed(tx, Signature::test_signature()))
+    }
+
+    #[test]
+    fn test_build_legacy_receipt() {
+        let builder = DefaultMorphReceiptBuilder;
+        let tx = create_legacy_tx();
+        let l1_fee = U256::from(5000u64);
+
+        let ctx = MorphReceiptBuilderCtx::<TestEvm> {
+            tx: &tx,
+            result: make_success_result(21000),
+            cumulative_gas_used: 21000,
+            l1_fee,
+            morph_tx_fields: None,
+            pre_fee_logs: vec![],
+            post_fee_logs: vec![],
+        };
+
+        let receipt = builder.build_receipt(ctx);
+        assert!(matches!(receipt, MorphReceipt::Legacy(_)));
+        assert_eq!(receipt.l1_fee(), l1_fee);
+        assert_eq!(receipt.cumulative_gas_used(), 21000);
+        assert!(receipt.status());
+    }
+
+    #[test]
+    fn test_build_eip1559_receipt() {
+        let builder = DefaultMorphReceiptBuilder;
+        let tx = create_eip1559_tx();
+        let l1_fee = U256::from(8000u64);
+
+        let ctx = MorphReceiptBuilderCtx::<TestEvm> {
+            tx: &tx,
+            result: make_success_result(21000),
+            cumulative_gas_used: 42000,
+            l1_fee,
+            morph_tx_fields: None,
+            pre_fee_logs: vec![],
+            post_fee_logs: vec![],
+        };
+
+        let receipt = builder.build_receipt(ctx);
+        assert!(matches!(receipt, MorphReceipt::Eip1559(_)));
+        assert_eq!(receipt.l1_fee(), l1_fee);
+        assert_eq!(receipt.cumulative_gas_used(), 42000);
+    }
+
+    #[test]
+    fn test_build_l1_msg_receipt_no_l1_fee() {
+        let builder = DefaultMorphReceiptBuilder;
+        let tx = create_l1_msg_tx();
+
+        let ctx = MorphReceiptBuilderCtx::<TestEvm> {
+            tx: &tx,
+            result: make_success_result(21000),
+            cumulative_gas_used: 21000,
+            // Pass a non-zero l1_fee to verify the builder ignores it for L1 messages.
+            // L1 message gas is prepaid on L1, so no L1 fee should appear in the receipt.
+            l1_fee: U256::from(999_999),
+            morph_tx_fields: None,
+            pre_fee_logs: vec![],
+            post_fee_logs: vec![],
+        };
+
+        let receipt = builder.build_receipt(ctx);
+        assert!(matches!(receipt, MorphReceipt::L1Msg(_)));
+        // L1 messages return ZERO for l1_fee regardless of what was passed in
+        assert_eq!(receipt.l1_fee(), U256::ZERO);
+    }
+
+    #[test]
+    fn test_build_morph_tx_receipt_with_fields() {
+        let builder = DefaultMorphReceiptBuilder;
+        let tx = create_morph_tx();
+        let l1_fee = U256::from(3000u64);
+
+        let fields = MorphReceiptTxFields {
+            version: 0,
+            fee_token_id: 1,
+            fee_rate: U256::from(2_000_000_000u64),
+            token_scale: U256::from(10u64).pow(U256::from(18u64)),
+            fee_limit: U256::from(1000u64),
+            reference: None,
+            memo: None,
+        };
+
+        let ctx = MorphReceiptBuilderCtx::<TestEvm> {
+            tx: &tx,
+            result: make_success_result(21000),
+            cumulative_gas_used: 21000,
+            l1_fee,
+            morph_tx_fields: Some(fields),
+            pre_fee_logs: vec![],
+            post_fee_logs: vec![],
+        };
+
+        let receipt = builder.build_receipt(ctx);
+        assert_eq!(receipt.l1_fee(), l1_fee);
+
+        // Destructure the Morph variant and verify all MorphTx-specific fields
+        let MorphReceipt::Morph(morph_receipt) = &receipt else {
+            panic!("expected MorphReceipt::Morph, got {:?}", receipt.tx_type());
+        };
+        assert_eq!(morph_receipt.version, Some(0));
+        assert_eq!(morph_receipt.fee_token_id, Some(1));
+        assert_eq!(morph_receipt.fee_rate, Some(U256::from(2_000_000_000u64)));
+        assert_eq!(
+            morph_receipt.token_scale,
+            Some(U256::from(10u64).pow(U256::from(18u64)))
+        );
+        assert_eq!(morph_receipt.fee_limit, Some(U256::from(1000u64)));
+        assert_eq!(morph_receipt.reference, None);
+        assert_eq!(morph_receipt.memo, None);
+    }
+
+    #[test]
+    fn test_build_morph_tx_receipt_without_fields_fallback() {
+        let builder = DefaultMorphReceiptBuilder;
+        let tx = create_morph_tx();
+        let l1_fee = U256::from(3000u64);
+
+        // Missing morph_tx_fields => should fallback to with_l1_fee
+        let ctx = MorphReceiptBuilderCtx::<TestEvm> {
+            tx: &tx,
+            result: make_success_result(21000),
+            cumulative_gas_used: 21000,
+            l1_fee,
+            morph_tx_fields: None,
+            pre_fee_logs: vec![],
+            post_fee_logs: vec![],
+        };
+
+        let receipt = builder.build_receipt(ctx);
+        // Should still be MorphReceipt::Morph variant, just without token fields
+        assert_eq!(receipt.l1_fee(), l1_fee);
+
+        // Destructure and verify fields are None (fallback path uses with_l1_fee)
+        let MorphReceipt::Morph(morph_receipt) = &receipt else {
+            panic!("expected MorphReceipt::Morph, got {:?}", receipt.tx_type());
+        };
+        assert_eq!(morph_receipt.l1_fee, l1_fee);
+        assert_eq!(morph_receipt.version, None);
+        assert_eq!(morph_receipt.fee_token_id, None);
+        assert_eq!(morph_receipt.fee_rate, None);
+        assert_eq!(morph_receipt.token_scale, None);
+        assert_eq!(morph_receipt.fee_limit, None);
+        assert_eq!(morph_receipt.reference, None);
+        assert_eq!(morph_receipt.memo, None);
+    }
+
+    #[test]
+    fn test_build_receipt_reverted_tx() {
+        let builder = DefaultMorphReceiptBuilder;
+        let tx = create_legacy_tx();
+
+        let ctx = MorphReceiptBuilderCtx::<TestEvm> {
+            tx: &tx,
+            result: make_revert_result(15000),
+            cumulative_gas_used: 15000,
+            l1_fee: U256::from(100u64),
+            morph_tx_fields: None,
+            pre_fee_logs: vec![],
+            post_fee_logs: vec![],
+        };
+
+        let receipt = builder.build_receipt(ctx);
+        assert!(
+            !TxReceipt::status(&receipt),
+            "reverted tx should have status=false"
+        );
+    }
+
+    #[test]
+    fn test_build_receipt_with_logs() {
+        let builder = DefaultMorphReceiptBuilder;
+        let tx = create_legacy_tx();
+        let log = Log::new(
+            Address::repeat_byte(0x01),
+            vec![B256::repeat_byte(0x02)],
+            alloy_primitives::Bytes::from_static(b"log-data"),
+        )
+        .unwrap();
+
+        let ctx = MorphReceiptBuilderCtx::<TestEvm> {
+            tx: &tx,
+            result: make_success_with_logs(21000, vec![log]),
+            cumulative_gas_used: 21000,
+            l1_fee: U256::ZERO,
+            morph_tx_fields: None,
+            pre_fee_logs: vec![],
+            post_fee_logs: vec![],
+        };
+
+        let receipt = builder.build_receipt(ctx);
+        assert_eq!(TxReceipt::logs(&receipt).len(), 1);
+    }
+
+    fn make_fee_log(marker: u8) -> Log {
+        Log::new(
+            Address::repeat_byte(marker),
+            vec![B256::repeat_byte(marker)],
+            alloy_primitives::Bytes::new(),
+        )
+        .unwrap()
+    }
+
+    /// Fee Transfer logs (pre/post) survive when the main transaction reverts.
+    ///
+    /// go-ethereum's StateDB.logs is independent of snapshot/revert — fee logs
+    /// are always included. revm's ExecutionResult::Revert carries no logs field,
+    /// so morph-reth caches fee logs in pre_fee_logs/post_fee_logs and merges
+    /// them unconditionally in the receipt builder.
+    #[test]
+    fn test_fee_logs_survive_main_tx_revert() {
+        let builder = DefaultMorphReceiptBuilder;
+        let tx = create_legacy_tx();
+
+        let pre_log = make_fee_log(0xAA); // fee deduction Transfer
+        let post_log = make_fee_log(0xBB); // fee refund Transfer
+
+        let ctx = MorphReceiptBuilderCtx::<TestEvm> {
+            tx: &tx,
+            result: make_revert_result(20_000),
+            cumulative_gas_used: 20_000,
+            l1_fee: U256::ZERO,
+            morph_tx_fields: None,
+            pre_fee_logs: vec![pre_log.clone()],
+            post_fee_logs: vec![post_log.clone()],
+        };
+
+        let receipt = builder.build_receipt(ctx);
+
+        assert!(
+            !TxReceipt::status(&receipt),
+            "reverted tx must have status=false"
+        );
+
+        let logs = TxReceipt::logs(&receipt);
+        // Main tx logs are absent (revert), but fee logs must still be present.
+        assert_eq!(
+            logs.len(),
+            2,
+            "pre_fee_log + post_fee_log must appear despite revert"
+        );
+        assert_eq!(
+            logs[0].address, pre_log.address,
+            "first log must be pre_fee_log"
+        );
+        assert_eq!(
+            logs[1].address, post_log.address,
+            "second log must be post_fee_log"
+        );
+    }
+
+    /// Log ordering on successful tx: [pre_fee_log, main_tx_log, post_fee_log].
+    ///
+    /// Matches go-ethereum's receipt log ordering where fee deduction comes
+    /// first (before main tx), and fee refund comes last (after main tx).
+    #[test]
+    fn test_fee_log_ordering_on_success() {
+        let builder = DefaultMorphReceiptBuilder;
+        let tx = create_legacy_tx();
+
+        let pre_log = make_fee_log(0xAA);
+        let main_log = make_fee_log(0xCC);
+        let post_log = make_fee_log(0xBB);
+
+        let ctx = MorphReceiptBuilderCtx::<TestEvm> {
+            tx: &tx,
+            result: make_success_with_logs(21_000, vec![main_log.clone()]),
+            cumulative_gas_used: 21_000,
+            l1_fee: U256::ZERO,
+            morph_tx_fields: None,
+            pre_fee_logs: vec![pre_log.clone()],
+            post_fee_logs: vec![post_log.clone()],
+        };
+
+        let receipt = builder.build_receipt(ctx);
+        assert!(TxReceipt::status(&receipt));
+
+        let logs = TxReceipt::logs(&receipt);
+        assert_eq!(logs.len(), 3, "pre_fee + main + post_fee = 3 logs");
+        assert_eq!(
+            logs[0].address, pre_log.address,
+            "pre_fee_log must be first"
+        );
+        assert_eq!(
+            logs[1].address, main_log.address,
+            "main_tx_log must be second"
+        );
+        assert_eq!(
+            logs[2].address, post_log.address,
+            "post_fee_log must be last"
+        );
+    }
+
+    /// Fee logs without refund: only pre_fee_log when no gas is refunded.
+    ///
+    /// If all gas is consumed exactly (no unused gas), the post_fee_log
+    /// may be empty. But the pre_fee_log must always appear.
+    #[test]
+    fn test_pre_fee_log_only_no_post_fee() {
+        let builder = DefaultMorphReceiptBuilder;
+        let tx = create_legacy_tx();
+
+        let pre_log = make_fee_log(0xAA);
+
+        let ctx = MorphReceiptBuilderCtx::<TestEvm> {
+            tx: &tx,
+            result: make_revert_result(21_000),
+            cumulative_gas_used: 21_000,
+            l1_fee: U256::ZERO,
+            morph_tx_fields: None,
+            pre_fee_logs: vec![pre_log.clone()],
+            post_fee_logs: vec![], // no refund
+        };
+
+        let receipt = builder.build_receipt(ctx);
+        assert!(!TxReceipt::status(&receipt));
+
+        let logs = TxReceipt::logs(&receipt);
+        assert_eq!(logs.len(), 1, "only pre_fee_log when there is no refund");
+        assert_eq!(logs[0].address, pre_log.address);
+    }
+}

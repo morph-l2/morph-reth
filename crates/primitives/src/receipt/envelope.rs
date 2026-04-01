@@ -249,7 +249,15 @@ impl Encodable2718 for MorphReceiptEnvelope {
 
 impl Typed2718 for MorphReceiptEnvelope {
     fn ty(&self) -> u8 {
-        self.tx_type() as u8
+        let ty = match self {
+            Self::Legacy(_) => MorphTxType::Legacy,
+            Self::Eip2930(_) => MorphTxType::Eip2930,
+            Self::Eip1559(_) => MorphTxType::Eip1559,
+            Self::Eip7702(_) => MorphTxType::Eip7702,
+            Self::L1Message(_) => MorphTxType::L1Msg,
+            Self::Morph(_) => MorphTxType::Morph,
+        };
+        ty as u8
     }
 }
 
@@ -299,5 +307,180 @@ impl From<crate::receipt::MorphReceipt> for MorphReceiptEnvelope<Log> {
             MorphTxType::L1Msg => Self::L1Message(with_bloom),
             MorphTxType::Morph => Self::Morph(with_bloom),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::Address;
+
+    fn create_test_log() -> Log {
+        Log::new_unchecked(Address::ZERO, vec![], alloy_primitives::Bytes::new())
+    }
+
+    fn create_test_receipt(tx_type: MorphTxType) -> MorphReceiptEnvelope {
+        MorphReceiptEnvelope::from_parts(true, 21000, &[create_test_log()], tx_type)
+    }
+
+    #[test]
+    fn test_tx_type() {
+        assert_eq!(
+            create_test_receipt(MorphTxType::Legacy).tx_type(),
+            MorphTxType::Legacy
+        );
+        assert_eq!(
+            create_test_receipt(MorphTxType::Eip2930).tx_type(),
+            MorphTxType::Eip2930
+        );
+        assert_eq!(
+            create_test_receipt(MorphTxType::Eip1559).tx_type(),
+            MorphTxType::Eip1559
+        );
+        assert_eq!(
+            create_test_receipt(MorphTxType::Eip7702).tx_type(),
+            MorphTxType::Eip7702
+        );
+        assert_eq!(
+            create_test_receipt(MorphTxType::L1Msg).tx_type(),
+            MorphTxType::L1Msg
+        );
+        assert_eq!(
+            create_test_receipt(MorphTxType::Morph).tx_type(),
+            MorphTxType::Morph
+        );
+    }
+
+    #[test]
+    fn test_status_and_cumulative_gas() {
+        let receipt = create_test_receipt(MorphTxType::Legacy);
+        assert!(receipt.is_success());
+        assert!(receipt.status());
+        assert_eq!(receipt.cumulative_gas_used(), 21000);
+    }
+
+    #[test]
+    fn test_logs_and_bloom() {
+        let receipt = create_test_receipt(MorphTxType::Eip1559);
+        assert_eq!(receipt.logs().len(), 1);
+        // Bloom includes the address even for Address::ZERO, so it's non-zero
+        let bloom = receipt.logs_bloom();
+        assert_ne!(*bloom, Bloom::ZERO);
+    }
+
+    #[test]
+    fn test_as_l1_message_receipt() {
+        let l1_receipt = create_test_receipt(MorphTxType::L1Msg);
+        assert!(l1_receipt.as_l1_message_receipt().is_some());
+        assert!(l1_receipt.as_l1_message_receipt_with_bloom().is_some());
+
+        let non_l1_receipt = create_test_receipt(MorphTxType::Legacy);
+        assert!(non_l1_receipt.as_l1_message_receipt().is_none());
+        assert!(non_l1_receipt.as_l1_message_receipt_with_bloom().is_none());
+    }
+
+    #[test]
+    fn test_type_flag() {
+        assert_eq!(create_test_receipt(MorphTxType::Legacy).type_flag(), None);
+        assert_eq!(
+            create_test_receipt(MorphTxType::Eip2930).type_flag(),
+            Some(1)
+        );
+        assert_eq!(
+            create_test_receipt(MorphTxType::Eip1559).type_flag(),
+            Some(2)
+        );
+        assert_eq!(
+            create_test_receipt(MorphTxType::Eip7702).type_flag(),
+            Some(4)
+        );
+        assert_eq!(
+            create_test_receipt(MorphTxType::L1Msg).type_flag(),
+            Some(0x7e)
+        );
+        assert_eq!(
+            create_test_receipt(MorphTxType::Morph).type_flag(),
+            Some(0x7f)
+        );
+    }
+
+    #[test]
+    fn test_typed2718_ty() {
+        assert_eq!(create_test_receipt(MorphTxType::Legacy).ty(), 0);
+        assert_eq!(create_test_receipt(MorphTxType::Eip2930).ty(), 1);
+        assert_eq!(create_test_receipt(MorphTxType::Eip1559).ty(), 2);
+        assert_eq!(create_test_receipt(MorphTxType::Eip7702).ty(), 4);
+        assert_eq!(create_test_receipt(MorphTxType::L1Msg).ty(), 0x7e);
+        assert_eq!(create_test_receipt(MorphTxType::Morph).ty(), 0x7f);
+    }
+
+    #[test]
+    fn test_eip2718_roundtrip_legacy() {
+        let receipt = create_test_receipt(MorphTxType::Legacy);
+        let mut buf = Vec::new();
+        receipt.encode_2718(&mut buf);
+        let decoded = MorphReceiptEnvelope::decode_2718(&mut buf.as_slice()).unwrap();
+        assert_eq!(receipt, decoded);
+    }
+
+    #[test]
+    fn test_eip2718_roundtrip_eip1559() {
+        let receipt = create_test_receipt(MorphTxType::Eip1559);
+        let mut buf = Vec::new();
+        receipt.encode_2718(&mut buf);
+        let decoded = MorphReceiptEnvelope::decode_2718(&mut buf.as_slice()).unwrap();
+        assert_eq!(receipt, decoded);
+    }
+
+    #[test]
+    fn test_eip2718_roundtrip_l1msg() {
+        let receipt = create_test_receipt(MorphTxType::L1Msg);
+        let mut buf = Vec::new();
+        receipt.encode_2718(&mut buf);
+        let decoded = MorphReceiptEnvelope::decode_2718(&mut buf.as_slice()).unwrap();
+        assert_eq!(receipt, decoded);
+    }
+
+    #[test]
+    fn test_eip2718_roundtrip_morph() {
+        let receipt = create_test_receipt(MorphTxType::Morph);
+        let mut buf = Vec::new();
+        receipt.encode_2718(&mut buf);
+        let decoded = MorphReceiptEnvelope::decode_2718(&mut buf.as_slice()).unwrap();
+        assert_eq!(receipt, decoded);
+    }
+
+    #[test]
+    fn test_rlp_roundtrip() {
+        let receipt = create_test_receipt(MorphTxType::Eip1559);
+        let mut buf = Vec::new();
+        Encodable::encode(&receipt, &mut buf);
+        let decoded = <MorphReceiptEnvelope as Decodable>::decode(&mut buf.as_slice()).unwrap();
+        assert_eq!(receipt, decoded);
+    }
+
+    #[test]
+    fn test_failed_receipt() {
+        let receipt = MorphReceiptEnvelope::from_parts(false, 50000, &[], MorphTxType::Eip1559);
+        assert!(!receipt.is_success());
+        assert!(!receipt.status());
+        assert_eq!(receipt.cumulative_gas_used(), 50000);
+        assert!(receipt.logs().is_empty());
+    }
+
+    #[test]
+    fn test_legacy_is_legacy() {
+        let receipt = create_test_receipt(MorphTxType::Legacy);
+        assert!(receipt.is_legacy());
+    }
+
+    #[test]
+    fn test_non_legacy_not_is_legacy() {
+        let receipt = create_test_receipt(MorphTxType::Eip1559);
+        assert!(!receipt.is_legacy());
+        let receipt = create_test_receipt(MorphTxType::L1Msg);
+        assert!(!receipt.is_legacy());
+        let receipt = create_test_receipt(MorphTxType::Morph);
+        assert!(!receipt.is_legacy());
     }
 }

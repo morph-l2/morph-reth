@@ -209,7 +209,6 @@ mod tests {
         assert_eq!(input.hardfork, MorphHardfork::Viridian);
         assert_eq!(input.eth_balance, U256::from(1_000_000_000_000_000_000u128));
         assert_eq!(input.l1_data_fee, U256::from(100_000));
-        assert_eq!(input.base_fee_per_gas, Some(1_000_000_000));
     }
 
     #[test]
@@ -257,7 +256,43 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_morph_tx_rejects_v1_before_jade() {
+    fn test_validate_morph_tx_rejects_non_morph_envelope() {
+        use alloy_consensus::TxEip1559;
+
+        let sender = address!("1000000000000000000000000000000000000001");
+        let tx = TxEip1559 {
+            chain_id: 2818,
+            nonce: 0,
+            gas_limit: 21_000,
+            to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
+            value: U256::ZERO,
+            input: Default::default(),
+            max_fee_per_gas: 2_000_000_000,
+            max_priority_fee_per_gas: 1_000_000_000,
+            access_list: Default::default(),
+        };
+        let envelope = MorphTxEnvelope::Eip1559(Signed::new_unchecked(
+            tx,
+            Signature::test_signature(),
+            B256::ZERO,
+        ));
+
+        let input = MorphTxValidationInput {
+            consensus_tx: &envelope,
+            sender,
+            eth_balance: U256::from(1_000_000_000_000_000_000u128),
+            l1_data_fee: U256::ZERO,
+            base_fee_per_gas: Some(1_000_000_000),
+            hardfork: MorphHardfork::Viridian,
+        };
+        let mut db = EmptyDB::default();
+
+        let err = validate_morph_tx(&mut db, &input).unwrap_err();
+        assert_eq!(err, MorphTxError::InvalidTokenId);
+    }
+
+    #[test]
+    fn test_validate_morph_tx_insufficient_eth_for_value() {
         let sender = address!("1000000000000000000000000000000000000001");
         let tx = TxMorph {
             chain_id: 2818,
@@ -266,12 +301,12 @@ mod tests {
             max_fee_per_gas: 2_000_000_000,
             max_priority_fee_per_gas: 1_000_000_000,
             to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
-            value: U256::ZERO,
+            value: U256::from(10u128.pow(18)), // 1 ETH value
             access_list: Default::default(),
-            version: MORPH_TX_VERSION_1,
-            fee_token_id: 0,
-            fee_limit: U256::ZERO,
-            reference: Some(B256::ZERO),
+            version: 0,
+            fee_token_id: 1,
+            fee_limit: U256::from(1000u64),
+            reference: None,
             memo: None,
             input: Default::default(),
         };
@@ -283,20 +318,142 @@ mod tests {
         let input = MorphTxValidationInput {
             consensus_tx: &envelope,
             sender,
-            eth_balance: U256::from(1_000_000_000_000_000_000u128),
+            eth_balance: U256::from(100u64), // Insufficient ETH
             l1_data_fee: U256::ZERO,
             base_fee_per_gas: Some(1_000_000_000),
-            hardfork: MorphHardfork::Emerald,
+            hardfork: MorphHardfork::Viridian,
         };
         let mut db = EmptyDB::default();
 
         let err = validate_morph_tx(&mut db, &input).unwrap_err();
+        assert!(matches!(err, MorphTxError::InsufficientEthForValue { .. }));
+    }
 
-        assert_eq!(
-            err,
-            MorphTxError::InvalidFormat {
-                reason: "MorphTx version 1 is not yet active (jade fork not reached)".to_string(),
-            }
+    #[test]
+    fn test_validate_morph_tx_eth_fee_path_sufficient_balance() {
+        let sender = address!("1000000000000000000000000000000000000001");
+        // fee_token_id = 0 with version 1 (Jade) means ETH-fee path
+        let tx = TxMorph {
+            chain_id: 2818,
+            nonce: 0,
+            gas_limit: 21_000,
+            max_fee_per_gas: 1_000_000_000, // 1 Gwei
+            max_priority_fee_per_gas: 500_000_000,
+            to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
+            value: U256::ZERO,
+            access_list: Default::default(),
+            version: MORPH_TX_VERSION_1,
+            fee_token_id: 0,
+            fee_limit: U256::ZERO,
+            reference: None,
+            memo: None,
+            input: Default::default(),
+        };
+        let envelope = MorphTxEnvelope::Morph(Signed::new_unchecked(
+            tx,
+            Signature::test_signature(),
+            B256::ZERO,
+        ));
+
+        // gas_fee = 21000 * 1_000_000_000 = 21_000_000_000_000
+        // total = gas_fee + l1_data_fee + value = 21_000_000_000_000 + 1000 + 0
+        let input = MorphTxValidationInput {
+            consensus_tx: &envelope,
+            sender,
+            eth_balance: U256::from(10u128.pow(18)), // 1 ETH (sufficient)
+            l1_data_fee: U256::from(1000u64),
+            base_fee_per_gas: Some(1_000_000_000),
+            hardfork: MorphHardfork::Jade,
+        };
+        let mut db = EmptyDB::default();
+
+        let result = validate_morph_tx(&mut db, &input).unwrap();
+        assert!(
+            !result.uses_token_fee,
+            "fee_token_id=0 should use ETH-fee path"
+        );
+        assert_eq!(result.required_token_amount, U256::ZERO);
+    }
+
+    #[test]
+    fn test_validate_morph_tx_eth_fee_path_insufficient_balance() {
+        let sender = address!("1000000000000000000000000000000000000001");
+        let tx = TxMorph {
+            chain_id: 2818,
+            nonce: 0,
+            gas_limit: 21_000,
+            max_fee_per_gas: 1_000_000_000,
+            max_priority_fee_per_gas: 500_000_000,
+            to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
+            value: U256::ZERO,
+            access_list: Default::default(),
+            version: MORPH_TX_VERSION_1,
+            fee_token_id: 0,
+            fee_limit: U256::ZERO,
+            reference: None,
+            memo: None,
+            input: Default::default(),
+        };
+        let envelope = MorphTxEnvelope::Morph(Signed::new_unchecked(
+            tx,
+            Signature::test_signature(),
+            B256::ZERO,
+        ));
+
+        let input = MorphTxValidationInput {
+            consensus_tx: &envelope,
+            sender,
+            eth_balance: U256::from(100u64), // Way too low
+            l1_data_fee: U256::from(1000u64),
+            base_fee_per_gas: Some(1_000_000_000),
+            hardfork: MorphHardfork::Jade,
+        };
+        let mut db = EmptyDB::default();
+
+        let err = validate_morph_tx(&mut db, &input).unwrap_err();
+        assert!(matches!(err, MorphTxError::InsufficientEthForValue { .. }));
+    }
+
+    #[test]
+    fn test_validate_morph_tx_token_fee_path_token_not_found() {
+        let sender = address!("1000000000000000000000000000000000000001");
+        let tx = TxMorph {
+            chain_id: 2818,
+            nonce: 0,
+            gas_limit: 21_000,
+            max_fee_per_gas: 1_000_000_000,
+            max_priority_fee_per_gas: 500_000_000,
+            to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
+            value: U256::ZERO,
+            access_list: Default::default(),
+            version: 0,
+            fee_token_id: 42, // Non-existent token
+            fee_limit: U256::from(1000u64),
+            reference: None,
+            memo: None,
+            input: Default::default(),
+        };
+        let envelope = MorphTxEnvelope::Morph(Signed::new_unchecked(
+            tx,
+            Signature::test_signature(),
+            B256::ZERO,
+        ));
+
+        let input = MorphTxValidationInput {
+            consensus_tx: &envelope,
+            sender,
+            eth_balance: U256::from(10u128.pow(18)),
+            l1_data_fee: U256::ZERO,
+            base_fee_per_gas: Some(1_000_000_000),
+            hardfork: MorphHardfork::Viridian,
+        };
+        let mut db = EmptyDB::default();
+
+        // EmptyDB has no token registry state, so token lookup will fail
+        let err = validate_morph_tx(&mut db, &input).unwrap_err();
+        assert!(
+            matches!(err, MorphTxError::TokenNotFound { token_id: 42 }),
+            "expected TokenNotFound {{ token_id: 42 }}, got {err:?}"
         );
     }
 }

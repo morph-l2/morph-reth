@@ -1,0 +1,21 @@
+[profile.default]
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+# E2E integration tests spawn full nodes — give them more time
+[[profile.default.overrides]]
+filter = "package(morph-node) & binary(it)"
+slow-timeout = { period = "120s", terminate-after = 3 }
+
+[profile.ci]
+test-threads = "num-cpus"
+retries = { backoff = "exponential", count = 2, delay = "2s", jitter = true }
+fail-fast = false
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+# E2E integration tests spawn full nodes — each needs exclusive MDBX resources.
+# threads-required = 2 means nextest counts each as needing 2 of the test-threads
+# slots, so only 1 runs at a time on CI (2 slots / 2 required = 1 concurrent).
+[[profile.ci.overrides]]
+filter = "package(morph-node) & binary(it)"
+threads-required = 2
+slow-timeout = { period = "120s", terminate-after = 3 }
