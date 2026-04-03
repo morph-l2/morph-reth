@@ -70,7 +70,7 @@ mod tests {
         });
 
         if let Some(time) = jade_time {
-            genesis_json["config"]["jadeTime"] = json!(time);
+            genesis_json["config"]["jadeForkTime"] = json!(time);
         }
 
         let genesis: Genesis = serde_json::from_value(genesis_json).unwrap();
