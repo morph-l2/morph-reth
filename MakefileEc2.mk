@@ -1,14 +1,16 @@
 # Internal Makefile for building and deploying morph-reth binaries to AWS S3.
 # Mirrors the target naming convention from go-ethereum/MakefileEc2.mk.
 
-DIST_DIR = dist
-BINARY   = morph-reth
-TARBALL  = morph-reth.tar.gz
+DIST_DIR         = dist
+BINARY           = morph-reth
+TARBALL          = morph-reth.tar.gz
+CARGO_TARGET_DIR ?= target
+PROFILE          ?= release
 
 define cargo_build_and_upload
 	if [ ! -d $(DIST_DIR) ]; then mkdir -p $(DIST_DIR); fi
-	cargo build --release --bin $(BINARY)
-	cp target/release/$(BINARY) $(DIST_DIR)/
+	cargo build --bin $(BINARY) --profile "$(PROFILE)" --target-dir "$(CARGO_TARGET_DIR)"
+	cp "$(CARGO_TARGET_DIR)/$(PROFILE)/$(BINARY)" "$(DIST_DIR)/"
 	tar -czvf $(TARBALL) $(DIST_DIR)
 	aws s3 cp $(TARBALL) $(1)
 endef

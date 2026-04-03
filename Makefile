@@ -2,7 +2,7 @@
 .DEFAULT_GOAL := help
 
 GIT_SHA ?= $(shell git rev-parse HEAD)
-GIT_TAG ?= $(shell git describe --tags --abbrev=0)
+GIT_TAG ?= $(shell git describe --tags --abbrev=0 2>/dev/null || git rev-parse --short HEAD)
 BIN_DIR = "dist/bin"
 
 CARGO_TARGET_DIR ?= target
