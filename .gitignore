@@ -5,3 +5,5 @@
 CLAUDE.md
 
 .worktrees/
+.claude/
+.omc/

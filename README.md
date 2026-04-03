@@ -13,7 +13,7 @@ Morph Reth is the next-generation execution client for [Morph](https://www.morph
 
 - **L1 Message Support**: Seamless bridging of assets and messages from Ethereum L1 to Morph L2
 - **Morph Transaction**: Versioned Morph EVM+ transaction with alternative fee-token support and Jade-era reference/memo fields
-- **Morph Hardforks**: Implements Morph hardfork logic through Jade, with bundled Mainnet and Hoodi chainspecs currently scheduled through Emerald
+- **Morph Hardforks**: Implements Morph hardfork logic through Jade, with bundled Mainnet and Hoodi chainspecs scheduled through Jade
 - **Custom Engine API**: L2-specific Engine API for sequencer block building and validation
 - **L1 Fee Validation**: Transaction pool with L1 data fee affordability checks
 
@@ -114,6 +114,7 @@ openssl rand -hex 32 > jwt.hex
 |------|---------|-------------|
 | `--morph.max-tx-payload-bytes` | 122880 (120KB) | Maximum transaction payload bytes per block |
 | `--morph.max-tx-per-block` | None (unlimited) | Maximum number of transactions per block |
+| `--rpc.eth-proof-window` | 0 (disabled) | Max historical blocks for `eth_getProof` (up to 1209600) |
 
 ### Running Tests
 
@@ -175,7 +176,7 @@ Morph Transaction (`0x7f`) is a versioned custom transaction type that extends E
 
 Bernoulli and Curie use block-based activation; Morph203, Viridian, Emerald, and Jade use timestamp-based activation.
 
-The codebase implements hardfork logic through Jade, but the bundled Mainnet and Hoodi chainspecs currently schedule through Emerald.
+The codebase implements hardfork logic through Jade, and the bundled Mainnet and Hoodi chainspecs include activation timestamps through Jade.
 
 | Hardfork | Activation | Description |
 |----------|------------|-------------|
@@ -186,7 +187,7 @@ The codebase implements hardfork logic through Jade, but the bundled Mainnet and
 | Emerald | Timestamp | BLS12-381 and P256verify precompiles |
 | Jade | Timestamp | MPT state root validation, MorphTx V1 with reference and memo fields |
 
-Before Jade, Morph uses ZK-trie state roots, so morph-reth intentionally skips state-root equality checks and only enables MPT state-root validation at Jade.
+Before Jade, Morph uses ZK-trie (Poseidon hash) state roots. morph-reth skips ZK-trie state-root validation pre-Jade and enables MPT state-root validation from Jade onward.
 
 ### Engine API
 
