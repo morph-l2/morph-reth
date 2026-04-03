@@ -56,6 +56,44 @@ mod quantity_opt {
     }
 }
 
+/// Accepts both hex quantity strings (`"0x0"`) and bare JSON numbers (`0`).
+///
+/// morph-reth returns hex strings for `nextL1MessageIndex`; morph-geth may
+/// return bare numbers. This module handles both transparently.
+mod quantity_or_number {
+    use serde::{self, Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(val: &u64, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        // Serialize as hex to be safe (reth format).
+        serializer.serialize_str(&format!("{:#x}", val))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<u64, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match value {
+            serde_json::Value::Number(n) => n
+                .as_u64()
+                .ok_or_else(|| serde::de::Error::custom("number does not fit u64")),
+            serde_json::Value::String(s) => {
+                let s = s
+                    .strip_prefix("0x")
+                    .or_else(|| s.strip_prefix("0X"))
+                    .unwrap_or(&s);
+                u64::from_str_radix(s, 16).map_err(serde::de::Error::custom)
+            }
+            _ => Err(serde::de::Error::custom(
+                "expected number or hex string for quantity_or_number",
+            )),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Engine API types
 // ---------------------------------------------------------------------------
@@ -124,7 +162,10 @@ pub struct ExecutableL2Data {
 
     /// Next L1 message queue index.
     ///
-    /// NOTE: morph-geth serializes this as a bare JSON number, not a hex string.
+    /// morph-reth serializes this as a hex quantity string (like all other numeric
+    /// fields). morph-geth may use a bare JSON number. Use `quantity_or_number` to
+    /// accept both formats.
+    #[serde(with = "quantity_or_number")]
     pub next_l1_message_index: u64,
 
     /// Remaining fields preserved for round-trip fidelity.
