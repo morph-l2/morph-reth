@@ -27,7 +27,7 @@ cd "${REPO_ROOT}"
 : "${SKIP_RETH:=0}"
 : "${RESULTS_DIR:=bench-results/$(date +%Y%m%d-%H%M%S)}"
 : "${RETH_BIN:=./target/release/morph-reth}"
-: "${GETH_BIN:=../morph/go-ethereum/build/bin/geth}"
+: "${GETH_BIN:=../go-ethereum/build/bin/geth}"
 : "${BENCH_BIN:=./target/release/bench-block-exec}"
 : "${JWT_SECRET:=./local-test/jwt-secret.txt}"
 : "${SENDER_KEY:=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}"
@@ -150,7 +150,6 @@ start_geth() {
   "${GETH_BIN}" init --datadir "${datadir}" "${genesis}"
 
   local args=(
-    --morph
     --datadir "${datadir}"
     --gcmode archive
     --syncmode full

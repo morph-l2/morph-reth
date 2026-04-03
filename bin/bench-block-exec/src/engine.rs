@@ -67,8 +67,8 @@ mod quantity_or_number {
     where
         S: Serializer,
     {
-        // Serialize as hex to be safe (reth format).
-        serializer.serialize_str(&format!("{:#x}", val))
+        // Serialize as bare number: geth expects u64, reth accepts both.
+        serializer.serialize_u64(*val)
     }
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<u64, D::Error>

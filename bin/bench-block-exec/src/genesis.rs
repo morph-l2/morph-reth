@@ -57,6 +57,7 @@ pub fn build_genesis(sender: &str, sender_balance: &str) -> eyre::Result<serde_j
             "viridianTime": 0,
             "emeraldTime": 0,
             "jadeTime": 0,
+            "jadeForkTime": 0,
             "terminalTotalDifficulty": 0,
             "morph": {
                 "useZktrie": false,
