@@ -1,0 +1,31 @@
+[package]
+name = "bench-block-exec"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+alloy-consensus = { workspace = true, features = ["std", "k256"] }
+alloy-eips = { workspace = true, features = ["std"] }
+alloy-network = { workspace = true }
+alloy-primitives = { workspace = true, features = ["std", "serde", "rand"] }
+alloy-rlp = { workspace = true }
+alloy-signer = { workspace = true }
+alloy-signer-local = { workspace = true }
+alloy-sol-types = { workspace = true }
+base64 = { version = "0.22" }
+bytes = { workspace = true }
+clap = { workspace = true }
+eyre = { workspace = true }
+jsonrpsee = { workspace = true }
+rand = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true }
+
+[lints]
+workspace = true

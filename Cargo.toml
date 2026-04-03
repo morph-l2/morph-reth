@@ -9,6 +9,7 @@ publish = false
 resolver = "3"
 members = [
     "bin/morph-reth",
+    "bin/bench-block-exec",
     "crates/chainspec",
     "crates/consensus",
     "crates/engine-api",
