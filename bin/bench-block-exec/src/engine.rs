@@ -189,6 +189,59 @@ pub struct BlockTiming {
     pub engine: String,
 }
 
+/// Extended timing record for new benchmark modes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockTimingV2 {
+    pub block_number: u64,
+    pub tx_count: u64,
+    pub expected_tx_count: u64,
+    pub engine: String,
+    pub mode: String,
+    pub workload: String,
+    pub senders: u64,
+    pub warmup_blocks: u64,
+
+    // Timing breakdown (milliseconds)
+    pub submit_ms: f64,
+    pub pool_wait_ms: f64,
+    pub assemble_ms: f64,
+    pub import_ms: f64,
+    pub total_ms: f64,
+
+    // Derived metrics
+    pub gas_used: u64,
+    pub tps: f64,
+    pub mgas_per_sec: f64,
+    pub inclusion_rate: f64,
+
+    // Cumulative (for sustained mode)
+    pub cumulative_blocks: u64,
+    pub cumulative_txs: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rolling_avg_tps_100: Option<f64>,
+
+    // Error flag
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub error: bool,
+}
+
+impl BlockTimingV2 {
+    /// Compute derived fields after timing is recorded.
+    pub fn finalize(&mut self) {
+        self.total_ms = self.submit_ms + self.pool_wait_ms + self.assemble_ms + self.import_ms;
+        if self.total_ms > 0.0 {
+            let secs = self.total_ms / 1000.0;
+            self.tps = self.tx_count as f64 / secs;
+            self.mgas_per_sec = self.gas_used as f64 / secs / 1_000_000.0;
+        }
+        self.inclusion_rate = if self.expected_tx_count > 0 {
+            self.tx_count as f64 / self.expected_tx_count as f64
+        } else {
+            1.0
+        };
+    }
+}
+
 // ---------------------------------------------------------------------------
 // JWT helpers
 // ---------------------------------------------------------------------------
