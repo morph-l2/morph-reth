@@ -125,9 +125,19 @@ docker-build-push-latest: ## Build and push a Docker image tagged with the lates
 docker-build-push-git-sha: ## Build and push a Docker image tagged with the latest git sha.
 	$(call docker_build_push,$(GIT_SHA),$(GIT_SHA))
 
+# Cross-compile binaries for both platforms, then build a multi-arch image
+# using Dockerfile.cross (no QEMU needed).
 define docker_build_push
-	docker buildx build --file ./Dockerfile . \
-		--platform linux/amd64 \
+	$(MAKE) build-x86_64-unknown-linux-gnu
+	mkdir -p $(BIN_DIR)/amd64
+	cp $(CARGO_TARGET_DIR)/x86_64-unknown-linux-gnu/$(PROFILE)/morph-reth $(BIN_DIR)/amd64/morph-reth
+
+	$(MAKE) build-aarch64-unknown-linux-gnu
+	mkdir -p $(BIN_DIR)/arm64
+	cp $(CARGO_TARGET_DIR)/aarch64-unknown-linux-gnu/$(PROFILE)/morph-reth $(BIN_DIR)/arm64/morph-reth
+
+	docker buildx build --file ./Dockerfile.cross . \
+		--platform linux/amd64,linux/arm64 \
 		--tag $(DOCKER_IMAGE_NAME):$(1) \
 		--tag $(DOCKER_IMAGE_NAME):$(2) \
 		--provenance=false \
