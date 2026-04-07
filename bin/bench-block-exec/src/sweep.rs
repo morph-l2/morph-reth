@@ -23,6 +23,9 @@ pub struct SweepArgs {
     #[arg(long)]
     pub jwt_secret: String,
 
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    pub http_rpc: String,
+
     #[arg(long)]
     pub workload: String,
 
@@ -155,6 +158,7 @@ pub async fn run(args: SweepArgs) -> eyre::Result<()> {
         let exec_args = mode_exec::ExecArgs {
             engine_rpc: args.engine_rpc.clone(),
             jwt_secret: args.jwt_secret.clone(),
+            http_rpc: args.http_rpc.clone(),
             workload: args.workload.clone(),
             txs_per_block: txs,
             blocks: args.blocks_per_step,

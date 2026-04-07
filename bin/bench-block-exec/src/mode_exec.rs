@@ -1,10 +1,11 @@
 //! Mode A: Pure execution benchmark.
 //!
-//! Bypasses the txpool entirely and injects transactions directly via
-//! `engine_assembleL2Block`. This isolates block-building + import cost
-//! from transaction propagation / pool overhead.
+//! Measures EVM execution + state commit performance by pre-loading
+//! transactions into the txpool, then timing only the assembleL2Block
+//! and newL2Block calls. Txpool submission time is excluded from TPS.
 
 use crate::engine::{AssembleL2BlockParams, BlockTimingV2, EngineClient};
+use crate::mode_e2e;
 use crate::tx_factory::{self, Workload};
 
 use std::io::Write;
@@ -20,6 +21,10 @@ pub struct ExecArgs {
 
     #[arg(long)]
     pub jwt_secret: String,
+
+    /// HTTP RPC URL for txpool submission.
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    pub http_rpc: String,
 
     #[arg(long)]
     pub workload: String,
@@ -54,38 +59,40 @@ pub async fn run(args: ExecArgs) -> eyre::Result<()> {
     let client = EngineClient::new(&args.engine_rpc, jwt_hex)?;
     let mut senders = tx_factory::generate_senders(1);
 
-    // 2. Pre-generate ALL transactions for ALL blocks upfront (no allocation
-    //    during timing).
-    println!(
-        "Pre-generating {} blocks x {} txs ({} workload) ...",
-        args.blocks, args.txs_per_block, workload
-    );
-    let mut all_block_txs: Vec<Vec<alloy_primitives::Bytes>> =
-        Vec::with_capacity(args.blocks as usize);
-    for _ in 0..args.blocks {
-        let txs =
-            tx_factory::build_block_txs(&mut senders, workload, args.txs_per_block, args.chain_id)?;
-        all_block_txs.push(txs);
-    }
-    println!("Pre-generation complete.");
-
-    // 3. Open output file.
+    // 2. Open output file.
     let mut out_file = std::fs::File::create(&args.output)?;
     let mut consecutive_errors: u64 = 0;
 
-    // 4. Loop through blocks.
-    for (i, txs) in all_block_txs.into_iter().enumerate() {
-        let block_number = (i as u64) + 1;
+    println!(
+        "Mode exec: {} blocks x {} txs ({} workload), txpool path",
+        args.blocks, args.txs_per_block, workload,
+    );
 
+    // 3. Loop through blocks.
+    for i in 0..args.blocks {
+        let block_number = i + 1;
+        let expected_tx_count = args.txs_per_block;
+
+        // Build transactions for this block.
+        let txs = tx_factory::build_block_txs(
+            &mut senders,
+            workload,
+            args.txs_per_block,
+            args.chain_id,
+        )?;
+
+        // Submit to txpool (NOT timed — we only care about execution).
+        // concurrency=1 for single-sender: nonces must arrive in order.
+        mode_e2e::submit_to_txpool(&args.http_rpc, &txs, 1).await?;
+        mode_e2e::wait_for_pool(&args.http_rpc, &senders, 60).await?;
+
+        // --- assemble (TIMED) ---
         let params = AssembleL2BlockParams {
             number: block_number,
-            transactions: txs,
+            transactions: vec![], // empty — pull from txpool
             timestamp: Some(block_number),
         };
 
-        let expected_tx_count = args.txs_per_block;
-
-        // --- assemble ---
         let assemble_result = client.assemble_l2_block(&args.engine_rpc, params).await;
 
         let (assembled, assemble_ms, gas_used, actual_tx_count, error) = match assemble_result {
@@ -100,7 +107,7 @@ pub async fn run(args: ExecArgs) -> eyre::Result<()> {
             }
         };
 
-        // --- import ---
+        // --- import (TIMED) ---
         let (import_ms, error) = if let Some(data) = assembled {
             match client.new_l2_block(&args.engine_rpc, data).await {
                 Ok(ms) => (ms, error),
@@ -120,7 +127,7 @@ pub async fn run(args: ExecArgs) -> eyre::Result<()> {
             consecutive_errors = 0;
         }
 
-        // --- record timing ---
+        // --- record timing (only assemble + import, no submit/pool_wait) ---
         let mut timing = BlockTimingV2 {
             block_number,
             tx_count: actual_tx_count,
@@ -140,7 +147,7 @@ pub async fn run(args: ExecArgs) -> eyre::Result<()> {
             mgas_per_sec: 0.0,
             inclusion_rate: 0.0,
             cumulative_blocks: block_number,
-            cumulative_txs: 0, // not tracked in exec mode
+            cumulative_txs: 0,
             rolling_avg_tps_100: None,
             error,
         };
@@ -152,12 +159,13 @@ pub async fn run(args: ExecArgs) -> eyre::Result<()> {
         // --- progress ---
         if block_number % 10 == 0 || block_number == args.blocks {
             println!(
-                "block {block_number}/{}: assemble={:.1}ms import={:.1}ms total={:.1}ms tps={:.0} included={}/{}",
+                "block {block_number}/{}: asm={:.1}ms imp={:.1}ms total={:.1}ms | {:.0} TPS, {:.0} MGas/s | {}/{}",
                 args.blocks,
                 timing.assemble_ms,
                 timing.import_ms,
                 timing.total_ms,
                 timing.tps,
+                timing.mgas_per_sec,
                 timing.tx_count,
                 timing.expected_tx_count,
             );
