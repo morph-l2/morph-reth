@@ -38,6 +38,17 @@ install: ## Build and install the morph-reth binary under `$(CARGO_HOME)/bin`.
 		--profile "$(PROFILE)" \
 		$(CARGO_INSTALL_EXTRA_FLAGS)
 
+##@ Cross Build (requires Docker + cross: cargo install cross --git https://github.com/cross-rs/cross)
+
+# Pattern rule: cross-build for any target, e.g. `make build-x86_64-unknown-linux-gnu`
+# See: https://github.com/cross-rs/cross/wiki/FAQ#undefined-reference-with-build-std
+build-%: ## Cross-build morph-reth for a specific target (e.g. build-x86_64-unknown-linux-gnu).
+	RUSTFLAGS="-C link-arg=-lgcc -Clink-arg=-static-libgcc" \
+		cross build --bin morph-reth --target $* --profile "$(PROFILE)"
+
+# aarch64 needs larger jemalloc page size (64KB pages on some ARM systems)
+build-aarch64-unknown-linux-gnu: export JEMALLOC_SYS_WITH_LG_PAGE=16
+
 # Create a `.tar.gz` containing the morph-reth binary for a specific target.
 define tarball_release_binary
 	cp $(CARGO_TARGET_DIR)/$(PROFILE)/morph-reth $(BIN_DIR)/morph-reth
