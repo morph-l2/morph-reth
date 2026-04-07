@@ -584,8 +584,11 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
                 ))
             })?;
 
+        // Morph builds blocks synchronously (no external CL timeout), so we
+        // use WaitForPending to wait for the payload builder to finish rather
+        // than racing an empty payload via Earliest.
         self.payload_builder
-            .best_payload(payload_id)
+            .resolve_kind(payload_id, reth_node_api::PayloadKind::WaitForPending)
             .await
             .ok_or_else(|| {
                 MorphEngineApiError::Internal(format!("no payload response for id {payload_id:?}"))
