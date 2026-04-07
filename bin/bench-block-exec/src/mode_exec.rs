@@ -43,6 +43,10 @@ pub struct ExecArgs {
 
     #[arg(long, default_value = "99999")]
     pub chain_id: u64,
+
+    /// Number of senders (more senders avoids txpool per-account limits).
+    #[arg(long, default_value = "1")]
+    pub senders: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -50,14 +54,15 @@ pub struct ExecArgs {
 // ---------------------------------------------------------------------------
 
 pub async fn run(args: ExecArgs) -> eyre::Result<()> {
-    // 1. Parse workload, create client & single sender.
+    // 1. Parse workload, create client & senders.
     let workload: Workload = args.workload.parse()?;
     let jwt_hex = std::fs::read_to_string(&args.jwt_secret)
         .map_err(|e| eyre::eyre!("failed to read JWT secret file: {e}"))?
         .trim()
         .to_string();
     let client = EngineClient::new(&args.engine_rpc, jwt_hex)?;
-    let mut senders = tx_factory::generate_senders(1);
+    let sender_count = std::cmp::max(args.senders, 1) as usize;
+    let mut senders = tx_factory::generate_senders(sender_count);
 
     // 2. Open output file.
     let mut out_file = std::fs::File::create(&args.output)?;
@@ -81,10 +86,17 @@ pub async fn run(args: ExecArgs) -> eyre::Result<()> {
             args.chain_id,
         )?;
 
-        // Submit to txpool (NOT timed — we only care about execution).
-        // concurrency=1 for single-sender: nonces must arrive in order.
-        mode_e2e::submit_to_txpool(&args.http_rpc, &txs, 1).await?;
-        mode_e2e::wait_for_pool(&args.http_rpc, &senders, 60).await?;
+        // Submit to txpool in waves (NOT timed — we only care about execution).
+        // Fire all waves as fast as possible, only wait for pool at the end.
+        let concurrency = std::cmp::min(sender_count, 16);
+        const WAVE_SIZE: usize = 10_000;
+        let num_waves = (txs.len() + WAVE_SIZE - 1) / WAVE_SIZE;
+        for (wi, wave) in txs.chunks(WAVE_SIZE).enumerate() {
+            eprint!("\r  submitting wave {}/{} ({} txs)...", wi + 1, num_waves, wave.len());
+            mode_e2e::submit_to_txpool(&args.http_rpc, wave, concurrency).await?;
+        }
+        eprintln!("\r  waiting for pool to accept all {} txs...", txs.len());
+        mode_e2e::wait_for_pool(&args.http_rpc, &senders, 600).await?;
 
         // --- assemble (TIMED) ---
         let params = AssembleL2BlockParams {

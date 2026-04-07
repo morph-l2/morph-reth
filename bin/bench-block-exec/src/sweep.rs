@@ -165,6 +165,7 @@ pub async fn run(args: SweepArgs) -> eyre::Result<()> {
             output: output_path.clone(),
             engine_name: args.engine_name.clone(),
             chain_id: args.chain_id,
+            senders: 1,
         };
 
         mode_exec::run(exec_args).await?;
