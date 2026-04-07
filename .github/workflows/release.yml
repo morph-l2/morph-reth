@@ -103,7 +103,7 @@ jobs:
         run: cargo install cross --git https://github.com/cross-rs/cross
 
       - name: Build binary
-        run: cross build --release --locked --target ${{ matrix.target }} --bin morph-reth
+        run: make build-${{ matrix.target }}
 
       - name: Package binary
         run: |
