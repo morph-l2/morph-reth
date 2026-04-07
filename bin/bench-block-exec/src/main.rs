@@ -1,6 +1,7 @@
 mod engine;
 mod genesis;
 mod report;
+pub mod tx_factory;
 mod verify;
 mod workload;
 
