@@ -379,35 +379,34 @@ pub async fn run(args: RunWorkloadArgs) -> eyre::Result<()> {
     let mut current_nonce: u64 = 0;
     let mut block_start: u64 = 1;
 
-    // 4. If layer == "erc20-transfer", deploy the contract first via Engine API
-    //    (deployment is a setup step, not part of the timed workload)
+    // 4. If layer == "erc20-transfer", deploy the contract first via txpool
     let contract_addr = if args.layer == "erc20-transfer" {
         let artifact_path = args.contract_artifact.as_deref().ok_or_else(|| {
             eyre::eyre!("--contract-artifact is required for erc20-transfer layer")
         })?;
         let bytecode = read_contract_artifact(artifact_path)?;
 
-        // Build deploy tx (nonce=0) — sent via Engine API directly (setup step)
         let initial_supply = U256::from(1_000_000_000u64) * U256::from(10u64).pow(U256::from(18));
         let deploy_tx =
             build_deploy_tx(&signer, 0, args.chain_id, max_fee_per_gas, &bytecode, initial_supply)?;
 
-        // Assemble block 1 with the deploy tx (L1-style, direct via Engine API)
+        // Send deploy tx to txpool
+        send_txs_to_txpool(&args.http_rpc, &[deploy_tx]).await?;
+        wait_for_txpool(&args.http_rpc, sender_addr, 1, 60).await?;
+
+        // Assemble and import block 1 (node pulls deploy tx from txpool)
         let (assembled, _assemble_ms) = engine
             .assemble_l2_block(
                 &args.engine_rpc,
                 AssembleL2BlockParams {
                     number: 1,
-                    transactions: vec![deploy_tx],
+                    transactions: vec![],
                     timestamp: Some(1),
                 },
             )
             .await?;
-
-        // Import block 1
         engine.new_l2_block(&args.engine_rpc, assembled).await?;
 
-        // Compute contract address: sender.create(0)
         let addr = sender_addr.create(0);
         println!("Deployed ERC20 contract at {addr}");
 
