@@ -4,6 +4,7 @@ pub mod mode_e2e;
 pub mod mode_exec;
 pub mod mode_sustained;
 mod report;
+pub mod sweep;
 pub mod tx_factory;
 mod verify;
 mod workload;
@@ -27,6 +28,8 @@ enum Command {
     VerifyState(verify::VerifyStateArgs),
     /// Aggregate benchmark results into a summary.
     Summarize(report::SummarizeArgs),
+    /// Sweep transaction counts to find peak TPS inflection point.
+    Sweep(sweep::SweepArgs),
 }
 
 #[tokio::main]
@@ -37,5 +40,6 @@ async fn main() -> eyre::Result<()> {
         Command::RunWorkload(args) => workload::run(args).await,
         Command::VerifyState(args) => verify::run(args).await,
         Command::Summarize(args) => report::summarize(args),
+        Command::Sweep(args) => sweep::run(args).await,
     }
 }
