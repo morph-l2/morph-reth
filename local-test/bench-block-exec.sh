@@ -78,8 +78,8 @@ start_reth() {
     --authrpc.port "${AUTH_PORT}"
     --authrpc.jwtsecret "${JWT_SECRET}"
     --nat none
-    --engine.persistence-threshold 4096
-    --engine.memory-block-buffer-target 4096
+    --engine.persistence-threshold 2
+    --engine.memory-block-buffer-target 2
     --morph.max-tx-payload-bytes 1073741824
     --txpool.pending-max-count 100000
     --txpool.basefee-max-count 100000
