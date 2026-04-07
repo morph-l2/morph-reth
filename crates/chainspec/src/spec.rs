@@ -110,7 +110,7 @@ fn build_hardforks(genesis: &Genesis, chain_info: &MorphGenesisInfo) -> ChainHar
         (MorphHardfork::Morph203, hardfork_info.morph203_time),
         (MorphHardfork::Viridian, hardfork_info.viridian_time),
         (MorphHardfork::Emerald, hardfork_info.emerald_time),
-        (MorphHardfork::Jade, hardfork_info.jade_time),
+        (MorphHardfork::Jade, hardfork_info.jade_fork_time),
     ]
     .into_iter()
     .filter_map(|(fork, time)| time.map(|t| (fork, ForkCondition::Timestamp(t))));
