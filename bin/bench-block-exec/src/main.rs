@@ -1,5 +1,6 @@
 mod engine;
 mod genesis;
+pub mod mode_e2e;
 pub mod mode_exec;
 mod report;
 pub mod tx_factory;
