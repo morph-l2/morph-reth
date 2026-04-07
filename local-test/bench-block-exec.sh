@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 #
-# bench-block-exec.sh — Multi-round geth vs reth block-execution benchmark.
+# bench-block-exec.sh — 4-phase max TPS benchmark orchestration.
 #
-# This script is STANDALONE: it does NOT source common.sh because it uses a
-# custom genesis (not mainnet/hoodi) and manages its own data directories.
+# Phases:
+#   1. Sweep      — find the TPS inflection point for each engine × workload
+#   2. Precise    — run exec / e2e / sustained at and around the inflection point
+#   3. Degrade    — sustained test with large warmup to measure state degradation
+#   4. Summarize  — generate summary TSV and charts
 #
 # Usage:
 #   ./local-test/bench-block-exec.sh
 #
 # Override defaults via environment variables, e.g.:
-#   ROUNDS=1 BLOCKS=100 SKIP_GETH=1 ./local-test/bench-block-exec.sh
+#   ENGINES="reth" WORKLOADS="eth-transfer" ./local-test/bench-block-exec.sh
 
 set -euo pipefail
 
@@ -21,102 +24,47 @@ cd "${REPO_ROOT}"
 
 # ─── Configuration (all overridable via environment) ─────────────────────────
 
-: "${ROUNDS:=3}"
-: "${BLOCKS:=500}"
-: "${SKIP_GETH:=0}"
-: "${SKIP_RETH:=0}"
-: "${RESULTS_DIR:=bench-results/$(date +%Y%m%d-%H%M%S)}"
-: "${RETH_BIN:=./target/release/morph-reth}"
-: "${GETH_BIN:=../go-ethereum/build/bin/geth}"
-: "${BENCH_BIN:=./target/release/bench-block-exec}"
-: "${JWT_SECRET:=./local-test/jwt-secret.txt}"
-: "${SENDER_KEY:=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}"
-: "${SENDER_ADDR:=0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266}"
-: "${CONTRACT_ARTIFACT:=./local-test/erc20-bench-contracts/out/BenchToken.sol/BenchToken.json}"
-: "${CHAIN_ID:=99999}"
+RETH_BIN="${RETH_BIN:-./target/release/morph-reth}"
+GETH_BIN="${GETH_BIN:-../go-ethereum/build/bin/geth}"
+BENCH_BIN="${BENCH_BIN:-./target/release/bench-block-exec}"
+JWT_SECRET="${JWT_SECRET:-./local-test/jwt-secret.txt}"
+CHAIN_ID="${CHAIN_ID:-99999}"
+RESULTS_DIR="${RESULTS_DIR:-bench-results/$(date +%Y%m%d-%H%M%S)}"
+FORCE="${FORCE:-0}"
+HTTP_PORT="${HTTP_PORT:-8545}"
+AUTH_PORT="${AUTH_PORT:-8551}"
+WORKLOADS="${WORKLOADS:-eth-transfer erc20-transfer uniswap-swap}"
+ENGINES="${ENGINES:-reth geth}"
 
-: "${ETH_TX_SIZES:=500 1000 2000 3000 5000 8000}"
-: "${ERC20_TX_SIZES:=500 1000 2000 3000 5000}"
+# ─── Contract bytecodes (read from compiled artifacts) ───────────────────────
 
-HTTP_PORT=8545;  AUTH_PORT=8551
-HTTP_PORT_B=9545; AUTH_PORT_B=9551
+BENCH_TOKEN_CODE="$(python3 -c "import json; print(json.load(open('local-test/bench-contracts/out/BenchToken.sol/BenchToken.json'))['deployedBytecode']['object'])")"
+BENCH_SWAP_CODE="$(python3 -c "import json; print(json.load(open('local-test/bench-contracts/out/BenchSwap.sol/BenchSwap.json'))['deployedBytecode']['object'])")"
 
 # ─── Helper functions ────────────────────────────────────────────────────────
 
-check_binary() {
-  local bin_path="$1"
-  local hint="$2"
-  if [[ ! -x "${bin_path}" ]]; then
-    echo "ERROR: Missing executable: ${bin_path}"
-    echo "Build hint: ${hint}"
-    return 1
-  fi
-}
-
-pm2_check() {
-  if ! command -v pm2 &>/dev/null; then
-    echo "ERROR: pm2 is not installed"
-    echo "Install with: npm install -g pm2"
-    return 1
-  fi
-}
-
-pm2_stop() {
-  local name="$1"
-  if pm2 describe "${name}" &>/dev/null; then
-    pm2 stop "${name}" 2>/dev/null || true
-    pm2 delete "${name}" 2>/dev/null || true
-    echo "${name}: stopped"
-  else
-    echo "${name}: not running"
-  fi
-}
-
-wait_for_rpc() {
-  local name="$1"
-  local port="$2"
-  local url="http://127.0.0.1:${port}"
-  local timeout=120
-  local elapsed=0
-
-  echo "Waiting for ${name} RPC on port ${port} (timeout ${timeout}s)..."
-  while (( elapsed < timeout )); do
-    if curl -s -X POST "${url}" \
-         -H "Content-Type: application/json" \
-         -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' \
-         2>/dev/null | grep -q '"result"'; then
-      echo "${name} RPC is ready (${elapsed}s)."
-      return 0
-    fi
-    sleep 1
-    (( elapsed++ )) || true
-  done
-
-  echo "ERROR: ${name} RPC not ready after ${timeout}s"
-  return 1
-}
-
-fresh_datadir() {
-  local dir="$1"
-  rm -rf "${dir}"
-  mkdir -p "${dir}"
-}
-
 generate_genesis() {
-  local output="$1"
+  local senders="$1"
+  local gas_limit="$2"
+  local max_tx="$3"
+  local output="$4"
+
   mkdir -p "$(dirname "${output}")"
   "${BENCH_BIN}" write-genesis \
     --output "${output}" \
-    --sender "${SENDER_ADDR}" \
-    --sender-balance "1000000000000000000000000000"
+    --senders "${senders}" \
+    --gas-limit "${gas_limit}" \
+    --max-tx-per-block "${max_tx}" \
+    --bench-token-code "${BENCH_TOKEN_CODE}" \
+    --bench-swap-code "${BENCH_SWAP_CODE}"
 }
 
 start_reth() {
   local datadir="$1"
   local genesis="$2"
-  local http_port="$3"
-  local auth_port="$4"
-  local name="$5"
+
+  rm -rf "${datadir}"
+  mkdir -p "${datadir}"
 
   local args=(
     node
@@ -124,27 +72,27 @@ start_reth() {
     --datadir "${datadir}"
     --http
     --http.addr 127.0.0.1
-    --http.port "${http_port}"
+    --http.port "${HTTP_PORT}"
     --http.api "web3,debug,eth,txpool,net"
     --authrpc.addr 127.0.0.1
-    --authrpc.port "${auth_port}"
+    --authrpc.port "${AUTH_PORT}"
     --authrpc.jwtsecret "${JWT_SECRET}"
     --nat none
-    --morph.max-tx-payload-bytes 131072000
-    --engine.persistence-threshold 2048
-    --engine.memory-block-buffer-target 2048
+    --engine.persistence-threshold 4096
+    --engine.memory-block-buffer-target 4096
+    --morph.max-tx-payload-bytes 1073741824
   )
 
-  pm2 start "${RETH_BIN}" --name "${name}" -- "${args[@]}"
-  echo "Started ${name} (reth) on http=${http_port} auth=${auth_port}"
+  pm2 start "${RETH_BIN}" --name "bench-node" -- "${args[@]}"
+  echo "Started reth on http=${HTTP_PORT} auth=${AUTH_PORT}"
 }
 
 start_geth() {
   local datadir="$1"
   local genesis="$2"
-  local http_port="$3"
-  local auth_port="$4"
-  local name="$5"
+
+  rm -rf "${datadir}"
+  mkdir -p "${datadir}"
 
   # Initialize geth datadir with genesis
   "${GETH_BIN}" init --datadir "${datadir}" "${genesis}"
@@ -153,85 +101,287 @@ start_geth() {
     --datadir "${datadir}"
     --gcmode archive
     --syncmode full
+    --cache 8192
+    --txpool.globalslots 100000
+    --txpool.accountslots 1000
     --http
     --http.addr 127.0.0.1
-    --http.port "${http_port}"
+    --http.port "${HTTP_PORT}"
     --http.corsdomain "*"
     --http.vhosts "*"
     --http.api "web3,eth,debug,txpool,net,morph,engine"
     --authrpc.addr 127.0.0.1
-    --authrpc.port "${auth_port}"
+    --authrpc.port "${AUTH_PORT}"
     --authrpc.vhosts "*"
     --authrpc.jwtsecret "${JWT_SECRET}"
     --nodiscover
     --maxpeers 0
   )
 
-  pm2 start "${GETH_BIN}" --name "${name}" -- "${args[@]}"
-  echo "Started ${name} (geth) on http=${http_port} auth=${auth_port}"
+  pm2 start "${GETH_BIN}" --name "bench-node" -- "${args[@]}"
+  echo "Started geth on http=${HTTP_PORT} auth=${AUTH_PORT}"
 }
 
-run_workload() {
-  local engine_name="$1"
-  local layer="$2"
-  local txs_per_block="$3"
-  local output="$4"
-  local auth_port="$5"
-  local http_port="$6"
+stop_node() {
+  if pm2 describe "bench-node" &>/dev/null; then
+    pm2 stop "bench-node" 2>/dev/null || true
+    pm2 delete "bench-node" 2>/dev/null || true
+    echo "bench-node: stopped"
+  else
+    echo "bench-node: not running"
+  fi
+}
 
-  mkdir -p "$(dirname "${output}")"
+wait_for_rpc() {
+  local url="http://127.0.0.1:${HTTP_PORT}"
+  local timeout=120
+  local elapsed=0
 
-  local args=(
-    run-workload
-    --engine-rpc "http://127.0.0.1:${auth_port}"
-    --jwt-secret "${JWT_SECRET}"
-    --http-rpc "http://127.0.0.1:${http_port}"
-    --layer "${layer}"
-    --txs-per-block "${txs_per_block}"
-    --blocks "${BLOCKS}"
-    --output "${output}"
-    --engine-name "${engine_name}"
-    --sender-key "${SENDER_KEY}"
-    --chain-id "${CHAIN_ID}"
-  )
+  echo "Waiting for RPC on port ${HTTP_PORT} (timeout ${timeout}s)..."
+  while (( elapsed < timeout )); do
+    if curl -s -X POST "${url}" \
+         -H "Content-Type: application/json" \
+         -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' \
+         2>/dev/null | grep -q '"result"'; then
+      echo "RPC is ready (${elapsed}s)."
+      return 0
+    fi
+    sleep 1
+    (( elapsed++ )) || true
+  done
 
-  # Add contract artifact only for erc20-transfer layer
-  if [[ "${layer}" == "erc20-transfer" ]]; then
-    args+=(--contract-artifact "${CONTRACT_ARTIFACT}")
+  echo "ERROR: RPC not ready after ${timeout}s"
+  return 1
+}
+
+# run_test engine mode workload senders txs blocks warmup
+#
+# Orchestrates a single benchmark run:
+#   1. Generate genesis
+#   2. Start the engine node
+#   3. Run the bench-block-exec subcommand
+#   4. Stop the node and clean up
+#
+# Skips if the output file already exists (unless FORCE=1).
+run_test() {
+  local engine="$1"
+  local mode="$2"
+  local workload="$3"
+  local senders="$4"
+  local txs="$5"
+  local blocks="$6"
+  local warmup="$7"
+
+  local output_dir="${RESULTS_DIR}/${mode}"
+  local output_file="${output_dir}/${engine}-${workload}-s${senders}-w${warmup}.jsonl"
+  local datadir="bench-data/bench-${engine}-${mode}-${workload}"
+  local genesis_file="bench-data/bench-${engine}-${mode}-${workload}-genesis.json"
+
+  # Skip if output exists and FORCE is not set
+  if [[ -f "${output_file}" && "${FORCE}" != "1" ]]; then
+    echo "SKIP: ${output_file} already exists (use FORCE=1 to re-run)"
+    return 0
   fi
 
-  "${BENCH_BIN}" "${args[@]}" || true
+  mkdir -p "${output_dir}"
+
+  echo ""
+  echo "────────────────────────────────────────────────────────────"
+  echo "  [${engine}] mode=${mode} workload=${workload} senders=${senders} txs=${txs} blocks=${blocks} warmup=${warmup}"
+  echo "  output: ${output_file}"
+  echo "────────────────────────────────────────────────────────────"
+
+  # Generate genesis
+  generate_genesis "${senders}" "0x2540BE400" 0 "${genesis_file}"
+
+  # Start engine
+  if [[ "${engine}" == "reth" ]]; then
+    start_reth "${datadir}" "${genesis_file}"
+  else
+    start_geth "${datadir}" "${genesis_file}"
+  fi
+
+  wait_for_rpc
+
+  # Run the appropriate benchmark mode
+  local rc=0
+  case "${mode}" in
+    exec)
+      "${BENCH_BIN}" run exec \
+        --engine-rpc "http://127.0.0.1:${AUTH_PORT}" \
+        --jwt-secret "${JWT_SECRET}" \
+        --workload "${workload}" \
+        --txs-per-block "${txs}" \
+        --blocks "${blocks}" \
+        --output "${output_file}" \
+        --engine-name "${engine}" \
+        --chain-id "${CHAIN_ID}" || rc=$?
+      ;;
+    e2e)
+      "${BENCH_BIN}" run e2e \
+        --engine-rpc "http://127.0.0.1:${AUTH_PORT}" \
+        --jwt-secret "${JWT_SECRET}" \
+        --http-rpc "http://127.0.0.1:${HTTP_PORT}" \
+        --workload "${workload}" \
+        --txs-per-block "${txs}" \
+        --blocks "${blocks}" \
+        --senders "${senders}" \
+        --output "${output_file}" \
+        --engine-name "${engine}" \
+        --chain-id "${CHAIN_ID}" || rc=$?
+      ;;
+    sustained)
+      "${BENCH_BIN}" run sustained \
+        --engine-rpc "http://127.0.0.1:${AUTH_PORT}" \
+        --jwt-secret "${JWT_SECRET}" \
+        --http-rpc "http://127.0.0.1:${HTTP_PORT}" \
+        --workload "${workload}" \
+        --txs-per-block "${txs}" \
+        --blocks "${blocks}" \
+        --warmup-blocks "${warmup}" \
+        --senders "${senders}" \
+        --output "${output_file}" \
+        --engine-name "${engine}" \
+        --chain-id "${CHAIN_ID}" || rc=$?
+      ;;
+    *)
+      echo "ERROR: unknown mode '${mode}'"
+      rc=1
+      ;;
+  esac
+
+  # Stop node and clean up
+  stop_node
+  sleep 2
+  rm -rf "${datadir}"
+
+  if [[ "${rc}" -ne 0 ]]; then
+    echo "WARNING: benchmark exited with code ${rc} (output may be partial)"
+  fi
+
+  return 0
+}
+
+# run_sweep engine workload
+#
+# Runs the sweep subcommand which internally iterates over transaction counts
+# to find the inflection point. Requires starting/stopping the node since
+# sweep runs multiple steps in a single invocation.
+run_sweep() {
+  local engine="$1"
+  local workload="$2"
+
+  local sweep_dir="${RESULTS_DIR}/sweep"
+  local summary_file="${sweep_dir}/${engine}-${workload}-sweep-summary.json"
+  local datadir="bench-data/bench-${engine}-sweep-${workload}"
+  local genesis_file="bench-data/bench-${engine}-sweep-${workload}-genesis.json"
+
+  # Skip if summary already exists and FORCE is not set
+  if [[ -f "${summary_file}" && "${FORCE}" != "1" ]]; then
+    echo "SKIP: ${summary_file} already exists (use FORCE=1 to re-run)"
+    return 0
+  fi
+
+  mkdir -p "${sweep_dir}"
+
+  echo ""
+  echo "════════════════════════════════════════════════════════════"
+  echo "  SWEEP: engine=${engine} workload=${workload}"
+  echo "════════════════════════════════════════════════════════════"
+
+  # Sweep uses exec mode (single sender), so senders=1
+  generate_genesis 1 "0x2540BE400" 0 "${genesis_file}"
+
+  if [[ "${engine}" == "reth" ]]; then
+    start_reth "${datadir}" "${genesis_file}"
+  else
+    start_geth "${datadir}" "${genesis_file}"
+  fi
+
+  wait_for_rpc
+
+  local rc=0
+  "${BENCH_BIN}" sweep \
+    --engine-rpc "http://127.0.0.1:${AUTH_PORT}" \
+    --jwt-secret "${JWT_SECRET}" \
+    --workload "${workload}" \
+    --blocks-per-step 30 \
+    --output-dir "${sweep_dir}" \
+    --engine-name "${engine}" \
+    --chain-id "${CHAIN_ID}" || rc=$?
+
+  stop_node
+  sleep 2
+  rm -rf "${datadir}"
+
+  if [[ "${rc}" -ne 0 ]]; then
+    echo "WARNING: sweep exited with code ${rc}"
+  fi
+}
+
+# get_inflection_txs engine workload
+#
+# Reads the sweep summary JSON and extracts inflection_txs.
+# Defaults to 5000 if the file is missing or the field is absent.
+get_inflection_txs() {
+  local engine="$1"
+  local workload="$2"
+
+  local summary_file="${RESULTS_DIR}/sweep/${engine}-${workload}-sweep-summary.json"
+
+  if [[ -f "${summary_file}" ]]; then
+    local val
+    val="$(python3 -c "import json; print(json.load(open('${summary_file}'))['inflection_txs'])" 2>/dev/null || echo "")"
+    if [[ -n "${val}" && "${val}" != "0" ]]; then
+      echo "${val}"
+      return 0
+    fi
+  fi
+
+  echo "5000"
 }
 
 # ─── Banner ──────────────────────────────────────────────────────────────────
 
 echo "============================================================"
-echo "  bench-block-exec  --  Geth vs Reth Block Execution Bench"
+echo "  bench-block-exec — 4-Phase Max TPS Benchmark"
 echo "============================================================"
 echo ""
-echo "  ROUNDS:           ${ROUNDS}"
-echo "  BLOCKS:           ${BLOCKS}"
-echo "  SKIP_GETH:        ${SKIP_GETH}"
-echo "  SKIP_RETH:        ${SKIP_RETH}"
+echo "  ENGINES:          ${ENGINES}"
+echo "  WORKLOADS:        ${WORKLOADS}"
 echo "  RESULTS_DIR:      ${RESULTS_DIR}"
 echo "  RETH_BIN:         ${RETH_BIN}"
 echo "  GETH_BIN:         ${GETH_BIN}"
 echo "  BENCH_BIN:        ${BENCH_BIN}"
-echo "  ETH_TX_SIZES:     ${ETH_TX_SIZES}"
-echo "  ERC20_TX_SIZES:   ${ERC20_TX_SIZES}"
 echo "  CHAIN_ID:         ${CHAIN_ID}"
+echo "  FORCE:            ${FORCE}"
 echo ""
 
 # ─── Prerequisites ───────────────────────────────────────────────────────────
 
-pm2_check
-check_binary "${BENCH_BIN}" "cargo build --release --bin bench-block-exec"
-if [[ "${SKIP_RETH}" != "1" ]]; then
-  check_binary "${RETH_BIN}" "cargo build --release --bin morph-reth"
+if ! command -v pm2 &>/dev/null; then
+  echo "ERROR: pm2 is not installed. Install with: npm install -g pm2"
+  exit 1
 fi
-if [[ "${SKIP_GETH}" != "1" ]]; then
-  check_binary "${GETH_BIN}" "cd ../morph/go-ethereum && make geth"
+
+if [[ ! -x "${BENCH_BIN}" ]]; then
+  echo "ERROR: Missing executable: ${BENCH_BIN}"
+  echo "Build hint: cargo build --release --bin bench-block-exec"
+  exit 1
 fi
+
+for eng in ${ENGINES}; do
+  if [[ "${eng}" == "reth" && ! -x "${RETH_BIN}" ]]; then
+    echo "ERROR: Missing executable: ${RETH_BIN}"
+    echo "Build hint: cargo build --release --bin morph-reth"
+    exit 1
+  fi
+  if [[ "${eng}" == "geth" && ! -x "${GETH_BIN}" ]]; then
+    echo "ERROR: Missing executable: ${GETH_BIN}"
+    echo "Build hint: cd ../go-ethereum && make geth"
+    exit 1
+  fi
+done
 
 # Generate JWT secret if missing
 if [[ ! -f "${JWT_SECRET}" ]]; then
@@ -240,154 +390,85 @@ if [[ ! -f "${JWT_SECRET}" ]]; then
   openssl rand -hex 32 > "${JWT_SECRET}"
 fi
 
-# Build contract artifact if missing
-if [[ ! -f "${CONTRACT_ARTIFACT}" ]]; then
-  echo "Building ERC20 contract artifact..."
-  (cd local-test/erc20-bench-contracts && forge build)
-fi
-
 mkdir -p "${RESULTS_DIR}"
 
-# ─── Main benchmark loop ────────────────────────────────────────────────────
+# ─── Phase 1: Sweep ─────────────────────────────────────────────────────────
 
-for round in $(seq 1 "${ROUNDS}"); do
-  echo ""
-  echo "============================================================"
-  echo "  Round ${round}/${ROUNDS}"
-  echo "============================================================"
+echo ""
+echo "╔══════════════════════════════════════════════════════════╗"
+echo "║  Phase 1: Sweep — Inflection Point Discovery            ║"
+echo "╚══════════════════════════════════════════════════════════╝"
 
-  # Alternate engine order: odd rounds geth first, even rounds reth first
-  if (( round % 2 == 1 )); then
-    engines=("geth" "reth")
-  else
-    engines=("reth" "geth")
-  fi
+for engine in ${ENGINES}; do
+  for workload in ${WORKLOADS}; do
+    run_sweep "${engine}" "${workload}"
+  done
+done
 
-  for engine in "${engines[@]}"; do
-    # Skip logic
-    if [[ "${engine}" == "geth" && "${SKIP_GETH}" == "1" ]]; then
-      echo "Skipping geth (SKIP_GETH=1)"
-      continue
-    fi
-    if [[ "${engine}" == "reth" && "${SKIP_RETH}" == "1" ]]; then
-      echo "Skipping reth (SKIP_RETH=1)"
-      continue
-    fi
+# ─── Phase 2: Precise Matrix ────────────────────────────────────────────────
 
-    echo ""
-    echo "--- Round ${round} / Engine: ${engine} ---"
+echo ""
+echo "╔══════════════════════════════════════════════════════════╗"
+echo "║  Phase 2: Precise Matrix                                ║"
+echo "╚══════════════════════════════════════════════════════════╝"
 
-    # ── Layer 1: ETH transfers ──
-    for txs in ${ETH_TX_SIZES}; do
-      echo ""
-      echo "[${engine}] eth-transfer  txs_per_block=${txs}  blocks=${BLOCKS}"
+for engine in ${ENGINES}; do
+  for workload in ${WORKLOADS}; do
+    inflection="$(get_inflection_txs "${engine}" "${workload}")"
+    echo "  ${engine}/${workload}: inflection_txs=${inflection}"
 
-      datadir="bench-data/${engine}-eth-${txs}"
-      genesis_file="bench-data/${engine}-eth-${txs}-genesis.json"
-      output_file="${RESULTS_DIR}/round${round}-${engine}-eth-${txs}.json"
+    # Mode A: exec — senders=1, txs=inflection, blocks=50
+    run_test "${engine}" "exec" "${workload}" 1 "${inflection}" 50 0
 
-      fresh_datadir "${datadir}"
-      generate_genesis "${genesis_file}"
-
-      if [[ "${engine}" == "reth" ]]; then
-        start_reth "${datadir}" "${genesis_file}" "${HTTP_PORT}" "${AUTH_PORT}" "morph-reth-bench"
-      else
-        start_geth "${datadir}" "${genesis_file}" "${HTTP_PORT}" "${AUTH_PORT}" "morph-geth-bench"
-      fi
-
-      wait_for_rpc "${engine}" "${HTTP_PORT}"
-      run_workload "${engine}" "eth-transfer" "${txs}" "${output_file}" "${AUTH_PORT}" "${HTTP_PORT}"
-
-      if [[ "${engine}" == "reth" ]]; then
-        pm2_stop "morph-reth-bench" || true
-      else
-        pm2_stop "morph-geth-bench" || true
-      fi
-      sleep 2
+    # Mode B: e2e — senders=1,100,1000, txs=inflection*0.8, blocks=200
+    e2e_txs=$(( inflection * 8 / 10 ))
+    for senders in 1 100 1000; do
+      run_test "${engine}" "e2e" "${workload}" "${senders}" "${e2e_txs}" 200 0
     done
 
-    # ── Layer 2: ERC20 transfers ──
-    for txs in ${ERC20_TX_SIZES}; do
-      echo ""
-      echo "[${engine}] erc20-transfer  txs_per_block=${txs}  blocks=${BLOCKS}"
-
-      datadir="bench-data/${engine}-erc20-${txs}"
-      genesis_file="bench-data/${engine}-erc20-${txs}-genesis.json"
-      output_file="${RESULTS_DIR}/round${round}-${engine}-erc20-${txs}.json"
-
-      fresh_datadir "${datadir}"
-      generate_genesis "${genesis_file}"
-
-      if [[ "${engine}" == "reth" ]]; then
-        start_reth "${datadir}" "${genesis_file}" "${HTTP_PORT}" "${AUTH_PORT}" "morph-reth-bench"
-      else
-        start_geth "${datadir}" "${genesis_file}" "${HTTP_PORT}" "${AUTH_PORT}" "morph-geth-bench"
-      fi
-
-      wait_for_rpc "${engine}" "${HTTP_PORT}"
-      run_workload "${engine}" "erc20-transfer" "${txs}" "${output_file}" "${AUTH_PORT}" "${HTTP_PORT}"
-
-      if [[ "${engine}" == "reth" ]]; then
-        pm2_stop "morph-reth-bench" || true
-      else
-        pm2_stop "morph-geth-bench" || true
-      fi
-      sleep 2
+    # Mode C: sustained — senders=1,100, txs=inflection*0.5, blocks=1000, warmup=0
+    sustained_txs=$(( inflection * 5 / 10 ))
+    for senders in 1 100; do
+      run_test "${engine}" "sustained" "${workload}" "${senders}" "${sustained_txs}" 1000 0
     done
   done
 done
 
-# ─── State Consistency Verification ─────────────────────────────────────────
-
-if [[ "${SKIP_GETH}" != "1" && "${SKIP_RETH}" != "1" ]]; then
-  echo ""
-  echo "============================================================"
-  echo "  State Consistency Verification"
-  echo "============================================================"
-
-  verify_datadir_reth="bench-data/verify-reth"
-  verify_datadir_geth="bench-data/verify-geth"
-  verify_genesis="bench-data/verify-genesis.json"
-
-  fresh_datadir "${verify_datadir_reth}"
-  fresh_datadir "${verify_datadir_geth}"
-  generate_genesis "${verify_genesis}"
-
-  # Start both nodes on different ports simultaneously
-  start_reth "${verify_datadir_reth}" "${verify_genesis}" "${HTTP_PORT}" "${AUTH_PORT}" "morph-reth-verify"
-  start_geth "${verify_datadir_geth}" "${verify_genesis}" "${HTTP_PORT_B}" "${AUTH_PORT_B}" "morph-geth-verify"
-
-  wait_for_rpc "reth-verify" "${HTTP_PORT}"
-  wait_for_rpc "geth-verify" "${HTTP_PORT_B}"
-
-  # Run identical ERC20 workload on each engine
-  echo "Running verification workload on reth..."
-  run_workload "reth" "erc20-transfer" "1000" \
-    "${RESULTS_DIR}/verify-reth.json" "${AUTH_PORT}" "${HTTP_PORT}"
-
-  echo "Running verification workload on geth..."
-  run_workload "geth" "erc20-transfer" "1000" \
-    "${RESULTS_DIR}/verify-geth.json" "${AUTH_PORT_B}" "${HTTP_PORT_B}"
-
-  # Verify state consistency
-  echo "Verifying state consistency..."
-  "${BENCH_BIN}" verify-state \
-    --rpc-a "http://127.0.0.1:${HTTP_PORT}" \
-    --rpc-b "http://127.0.0.1:${HTTP_PORT_B}" \
-    --check-balances 100 \
-    --output "${RESULTS_DIR}/verify-state.json" || true
-
-  pm2_stop "morph-reth-verify" || true
-  pm2_stop "morph-geth-verify" || true
-fi
-
-# ─── Generate Summary ────────────────────────────────────────────────────────
+# ─── Phase 3: State Degradation ─────────────────────────────────────────────
 
 echo ""
+echo "╔══════════════════════════════════════════════════════════╗"
+echo "║  Phase 3: State Degradation                             ║"
+echo "╚══════════════════════════════════════════════════════════╝"
+
+for engine in ${ENGINES}; do
+  for workload in ${WORKLOADS}; do
+    inflection="$(get_inflection_txs "${engine}" "${workload}")"
+    sustained_txs=$(( inflection * 5 / 10 ))
+
+    # Mode C: sustained — senders=100, txs=inflection*0.5, blocks=1000, warmup=500
+    run_test "${engine}" "sustained" "${workload}" 100 "${sustained_txs}" 1000 500
+  done
+done
+
+# ─── Phase 4: Summarize + Plot ──────────────────────────────────────────────
+
+echo ""
+echo "╔══════════════════════════════════════════════════════════╗"
+echo "║  Phase 4: Summarize + Plot                              ║"
+echo "╚══════════════════════════════════════════════════════════╝"
+
 echo "Generating summary..."
 "${BENCH_BIN}" summarize \
   --results-dir "${RESULTS_DIR}" \
-  --output "${RESULTS_DIR}/summary.tsv" || true
+  --output "${RESULTS_DIR}/summary.tsv" \
+  --v2 || true
+
+echo "Generating charts..."
+python3 local-test/bench-plot.py \
+  --input "${RESULTS_DIR}" \
+  --output "${RESULTS_DIR}/charts" \
+  --type all || true
 
 # ─── Done ────────────────────────────────────────────────────────────────────
 
@@ -398,4 +479,5 @@ echo "============================================================"
 echo ""
 echo "  Results:  ${RESULTS_DIR}"
 echo "  Summary:  ${RESULTS_DIR}/summary.tsv"
+echo "  Charts:   ${RESULTS_DIR}/charts/"
 echo ""
