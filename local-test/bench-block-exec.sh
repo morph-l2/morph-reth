@@ -84,7 +84,9 @@ start_reth() {
     --txpool.pending-max-count 100000
     --txpool.basefee-max-count 100000
     --txpool.queued-max-count 100000
-    --txpool.max-account-slots 10000
+    --txpool.max-account-slots 150000
+    --txpool.additional-validation-tasks 8
+    --txpool.disable-transactions-backup
   )
 
   pm2 start "${RETH_BIN}" --name "bench-node" -- "${args[@]}"
