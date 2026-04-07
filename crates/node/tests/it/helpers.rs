@@ -232,7 +232,9 @@ pub(crate) async fn expect_payload_build_failure(
         .await
     {
         Some(Err(e)) => Ok(e.to_string()),
-        Some(Ok(_)) => Err(eyre::eyre!("expected payload build failure, but it succeeded")),
+        Some(Ok(_)) => Err(eyre::eyre!(
+            "expected payload build failure, but it succeeded"
+        )),
         None => Err(eyre::eyre!("no payload response for id {payload_id:?}")),
     }
 }
