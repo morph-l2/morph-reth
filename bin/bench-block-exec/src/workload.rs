@@ -81,7 +81,7 @@ pub fn build_eth_transfer_batch(
             nonce,
             gas_limit: 21_000,
             max_fee_per_gas,
-            max_priority_fee_per_gas: 1_000_000_000, // 1 gwei tip
+            max_priority_fee_per_gas: 0,
             to: TxKind::Call(receiver_address(i)),
             value: U256::from(1),
             access_list: Default::default(),
@@ -132,7 +132,7 @@ pub fn build_erc20_transfer_batch(
             nonce,
             gas_limit: 60_000,
             max_fee_per_gas,
-            max_priority_fee_per_gas: 1_000_000_000, // 1 gwei tip
+            max_priority_fee_per_gas: 0,
             to: TxKind::Call(contract_addr),
             value: U256::ZERO,
             access_list: Default::default(),
@@ -375,7 +375,7 @@ pub async fn run(args: RunWorkloadArgs) -> eyre::Result<()> {
     wait_for_rpc(&args.http_rpc, 60).await?;
     println!("RPC is ready.");
 
-    let max_fee_per_gas: u128 = 2_000_000_000; // 2 gwei — must exceed base fee + priority
+    let max_fee_per_gas: u128 = 1_000_000; // MORPH_BASE_FEE (0.001 gwei)
     let mut current_nonce: u64 = 0;
     let mut block_start: u64 = 1;
 
