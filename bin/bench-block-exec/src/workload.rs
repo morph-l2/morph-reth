@@ -81,7 +81,7 @@ pub fn build_eth_transfer_batch(
             nonce,
             gas_limit: 21_000,
             max_fee_per_gas,
-            max_priority_fee_per_gas: 0,
+            max_priority_fee_per_gas: 1_000_000_000, // 1 gwei tip
             to: TxKind::Call(receiver_address(i)),
             value: U256::from(1),
             access_list: Default::default(),
@@ -132,7 +132,7 @@ pub fn build_erc20_transfer_batch(
             nonce,
             gas_limit: 60_000,
             max_fee_per_gas,
-            max_priority_fee_per_gas: 0,
+            max_priority_fee_per_gas: 1_000_000_000, // 1 gwei tip
             to: TxKind::Call(contract_addr),
             value: U256::ZERO,
             access_list: Default::default(),
@@ -255,6 +255,90 @@ mod hex {
 }
 
 // ---------------------------------------------------------------------------
+// Txpool helpers
+// ---------------------------------------------------------------------------
+
+/// Send a batch of raw transactions to the txpool via `eth_sendRawTransaction`.
+///
+/// Sends all transactions concurrently for maximum throughput.
+async fn send_txs_to_txpool(http_rpc: &str, txs: &[Bytes]) -> eyre::Result<()> {
+    let client = reqwest::Client::new();
+    let mut futures = Vec::with_capacity(txs.len());
+
+    for (i, tx) in txs.iter().enumerate() {
+        let client = client.clone();
+        let url = http_rpc.to_string();
+        let tx_hex = format!("0x{}", alloy_primitives::hex::encode(tx));
+        futures.push(tokio::spawn(async move {
+            let body = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "eth_sendRawTransaction",
+                "params": [tx_hex],
+                "id": i + 1
+            });
+            let resp = client.post(&url).json(&body).send().await?;
+            let json: serde_json::Value = resp.json().await?;
+            if let Some(err) = json.get("error") {
+                return Err(eyre::eyre!("eth_sendRawTransaction[{}] error: {}", i, err));
+            }
+            Ok::<(), eyre::Report>(())
+        }));
+    }
+
+    for f in futures {
+        f.await.map_err(|e| eyre::eyre!("join error: {e}"))??;
+    }
+    Ok(())
+}
+
+/// Wait until the txpool has at least `expected` pending transactions.
+///
+/// Polls `txpool_status` (for geth) or `eth_getTransactionCount` with "pending"
+/// tag (works for both geth and reth) until the pending count matches.
+async fn wait_for_txpool(
+    http_rpc: &str,
+    sender: Address,
+    expected_nonce: u64,
+    timeout_secs: u64,
+) -> eyre::Result<()> {
+    let client = reqwest::Client::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let sender_hex = format!("{:#x}", sender);
+
+    loop {
+        // Use eth_getTransactionCount with "pending" to check how many txs
+        // from this sender have been accepted (pending nonce).
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "eth_getTransactionCount",
+            "params": [sender_hex, "pending"],
+            "id": 1
+        });
+        if let Ok(resp) = client.post(http_rpc).json(&body).send().await {
+            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                if let Some(result) = json.get("result").and_then(|r| r.as_str()) {
+                    let nonce_hex = result.strip_prefix("0x").unwrap_or(result);
+                    if let Ok(pending_nonce) = u64::from_str_radix(nonce_hex, 16) {
+                        if pending_nonce >= expected_nonce {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+
+        if std::time::Instant::now() >= deadline {
+            return Err(eyre::eyre!(
+                "txpool did not reach expected nonce {} within {}s",
+                expected_nonce,
+                timeout_secs
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Main workload runner
 // ---------------------------------------------------------------------------
 
@@ -279,23 +363,24 @@ pub async fn run(args: RunWorkloadArgs) -> eyre::Result<()> {
     wait_for_rpc(&args.http_rpc, 60).await?;
     println!("RPC is ready.");
 
-    let max_fee_per_gas: u128 = 1_000_000; // MORPH_BASE_FEE
+    let max_fee_per_gas: u128 = 2_000_000_000; // 2 gwei — must exceed base fee + priority
     let mut current_nonce: u64 = 0;
     let mut block_start: u64 = 1;
 
-    // 4. If layer == "erc20-transfer", deploy the contract first
+    // 4. If layer == "erc20-transfer", deploy the contract first via Engine API
+    //    (deployment is a setup step, not part of the timed workload)
     let contract_addr = if args.layer == "erc20-transfer" {
         let artifact_path = args.contract_artifact.as_deref().ok_or_else(|| {
             eyre::eyre!("--contract-artifact is required for erc20-transfer layer")
         })?;
         let bytecode = read_contract_artifact(artifact_path)?;
 
-        // Build deploy tx (nonce=0)
+        // Build deploy tx (nonce=0) — sent via Engine API directly (setup step)
         let initial_supply = U256::from(1_000_000_000u64) * U256::from(10u64).pow(U256::from(18));
         let deploy_tx =
             build_deploy_tx(&signer, 0, args.chain_id, max_fee_per_gas, &bytecode, initial_supply)?;
 
-        // Assemble block 1 with the deploy tx
+        // Assemble block 1 with the deploy tx (L1-style, direct via Engine API)
         let (assembled, _assemble_ms) = engine
             .assemble_l2_block(
                 &args.engine_rpc,
@@ -328,6 +413,11 @@ pub async fn run(args: RunWorkloadArgs) -> eyre::Result<()> {
 
     let mut timings: Vec<BlockTiming> = Vec::new();
 
+    println!(
+        "Running workload: {} tx/block x {} blocks (via txpool)",
+        args.txs_per_block, args.blocks
+    );
+
     for block_idx in 0..args.blocks {
         let block_number = block_start + block_idx;
 
@@ -350,19 +440,36 @@ pub async fn run(args: RunWorkloadArgs) -> eyre::Result<()> {
                 max_fee_per_gas,
             )?
         };
+
+        // Send transactions to txpool via eth_sendRawTransaction
+        send_txs_to_txpool(&args.http_rpc, &txs).await?;
+
+        // Wait until all txs are in the txpool
+        let expected_nonce = current_nonce + args.txs_per_block;
+        wait_for_txpool(&args.http_rpc, sender_addr, expected_nonce, 60).await?;
+
         current_nonce += args.txs_per_block;
 
-        // Assemble block
+        // Assemble block — empty transactions array, node pulls from txpool
         let (assembled, assemble_ms) = engine
             .assemble_l2_block(
                 &args.engine_rpc,
                 AssembleL2BlockParams {
                     number: block_number,
-                    transactions: txs,
+                    transactions: vec![],
                     timestamp: Some(block_number),
                 },
             )
             .await?;
+
+        // Verify assembled block has the expected tx count
+        let assembled_tx_count = assembled.transactions.len() as u64;
+        if assembled_tx_count != args.txs_per_block {
+            eprintln!(
+                "  WARNING: block {} assembled {} txs (expected {})",
+                block_number, assembled_tx_count, args.txs_per_block
+            );
+        }
 
         // Import block
         let import_ms = engine.new_l2_block(&args.engine_rpc, assembled).await?;
@@ -370,7 +477,7 @@ pub async fn run(args: RunWorkloadArgs) -> eyre::Result<()> {
         let total_ms = assemble_ms + import_ms;
         let timing = BlockTiming {
             block_number,
-            tx_count: args.txs_per_block,
+            tx_count: assembled_tx_count,
             assemble_ms,
             import_ms,
             total_ms,
@@ -388,7 +495,7 @@ pub async fn run(args: RunWorkloadArgs) -> eyre::Result<()> {
         // Print progress every 50 blocks
         if (block_idx + 1) % 50 == 0 || block_idx + 1 == args.blocks {
             println!(
-                "Block {block_number}: assemble={assemble_ms:.1}ms import={import_ms:.1}ms total={total_ms:.1}ms [{}/{}]",
+                "Block {block_number}: assemble={assemble_ms:.1}ms import={import_ms:.1}ms total={total_ms:.1}ms txs={assembled_tx_count} [{}/{}]",
                 block_idx + 1,
                 args.blocks
             );

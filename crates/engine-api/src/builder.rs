@@ -584,8 +584,11 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
                 ))
             })?;
 
+        // Use resolve_kind to wait for the payload builder to complete,
+        // ensuring pool transactions are included. best_payload may return
+        // before pool transactions are picked up.
         self.payload_builder
-            .best_payload(payload_id)
+            .resolve_kind(payload_id, reth_node_api::PayloadKind::WaitForPending)
             .await
             .ok_or_else(|| {
                 MorphEngineApiError::Internal(format!("no payload response for id {payload_id:?}"))
