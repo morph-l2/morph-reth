@@ -362,6 +362,7 @@ impl EngineClient {
         let client = HttpClientBuilder::default()
             .set_headers(headers)
             .max_response_size(512 * 1024 * 1024) // 512 MB for large block responses
+            .max_request_size(512 * 1024 * 1024)  // 512 MB for large block imports
             .build(url)?;
         Ok(client)
     }
