@@ -61,7 +61,7 @@ pub struct MorphHardforkInfo {
     pub emerald_time: Option<u64>,
     /// Jade hardfork timestamp.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub jade_time: Option<u64>,
+    pub jade_fork_time: Option<u64>,
 }
 
 impl MorphHardforkInfo {
@@ -136,7 +136,7 @@ mod tests {
           "morph203Time": 3000,
           "viridianTime": 4000,
           "emeraldTime": 5000,
-          "jadeTime": 6000
+          "jadeForkTime": 6000
         }
         "#;
 
@@ -151,7 +151,7 @@ mod tests {
                 morph203_time: Some(3000),
                 viridian_time: Some(4000),
                 emerald_time: Some(5000),
-                jade_time: Some(6000),
+                jade_fork_time: Some(6000),
             }
         );
     }

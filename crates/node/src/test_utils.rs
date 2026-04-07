@@ -110,7 +110,7 @@ impl HardforkSchedule {
     /// Apply this schedule's fork timestamps to a mutable genesis JSON value.
     ///
     /// - `AllActive`: no changes (test genesis already has all forks at 0)
-    /// - `PreJade`: set `jadeTime` to `u64::MAX`
+    /// - `PreJade`: set `jadeForkTime` to `u64::MAX`
     /// - `Hoodi`/`Mainnet`: compare each `*Time` key against the reference network;
     ///   forks active now → 0, forks not yet active → `u64::MAX`.
     ///   Block-based forks (`*Block`) are always kept at 0.
@@ -122,13 +122,13 @@ impl HardforkSchedule {
             Self::PreJade => {
                 // Disable only Jade; all other forks remain at 0.
                 let config = genesis["config"].as_object_mut().expect("genesis.config");
-                config.insert("jadeTime".to_string(), serde_json::json!(u64::MAX));
+                config.insert("jadeForkTime".to_string(), serde_json::json!(u64::MAX));
             }
             Self::PreViridian => {
                 let config = genesis["config"].as_object_mut().expect("genesis.config");
                 config.insert("viridianTime".to_string(), serde_json::json!(u64::MAX));
                 config.insert("emeraldTime".to_string(), serde_json::json!(u64::MAX));
-                config.insert("jadeTime".to_string(), serde_json::json!(u64::MAX));
+                config.insert("jadeForkTime".to_string(), serde_json::json!(u64::MAX));
             }
             Self::Hoodi | Self::Mainnet => {
                 let reference_json = self.reference_genesis_json().unwrap();

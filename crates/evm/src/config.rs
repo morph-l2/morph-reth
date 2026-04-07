@@ -38,10 +38,6 @@ impl ConfigureEvm for MorphEvmConfig {
             .with_spec(spec);
         cfg_env.disable_eip7623 = true;
 
-        // Disable EIP-7825 transaction gas limit cap
-        // Morph allows transactions with gas limit > 16777216 (EIP-7825 cap)
-        cfg_env.tx_gas_limit_cap = Some(header.gas_limit());
-
         let fee_recipient = self
             .chain_spec()
             .fee_vault_address()
@@ -86,10 +82,6 @@ impl ConfigureEvm for MorphEvmConfig {
             .with_chain_id(self.chain_spec().chain().id())
             .with_spec(spec);
         cfg_env.disable_eip7623 = true;
-
-        // Disable EIP-7825 transaction gas limit cap
-        // Morph allows transactions with gas limit > 16777216 (EIP-7825 cap)
-        cfg_env.tx_gas_limit_cap = Some(attributes.gas_limit);
 
         let fee_recipient = self
             .chain_spec()
@@ -253,17 +245,6 @@ mod tests {
         let env = config.evm_env(&header).unwrap();
 
         assert!(env.cfg_env.disable_eip7623);
-    }
-
-    #[test]
-    fn test_evm_env_tx_gas_limit_cap_matches_header() {
-        let chain_spec = create_test_chainspec();
-        let config = MorphEvmConfig::new_with_default_factory(chain_spec);
-
-        let header = create_morph_header(100, 1000);
-        let env = config.evm_env(&header).unwrap();
-
-        assert_eq!(env.cfg_env.tx_gas_limit_cap, Some(30_000_000));
     }
 
     #[test]
