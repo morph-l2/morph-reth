@@ -103,7 +103,10 @@ jobs:
         run: cargo install cross --git https://github.com/cross-rs/cross
 
       - name: Build binary
-        run: make build-${{ matrix.target }}
+        env:
+          RUSTFLAGS: "-C link-arg=-lgcc -Clink-arg=-static-libgcc"
+          JEMALLOC_SYS_WITH_LG_PAGE: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '16' || '' }}
+        run: cross build --release --locked --target ${{ matrix.target }} --bin morph-reth
 
       - name: Package binary
         run: |
