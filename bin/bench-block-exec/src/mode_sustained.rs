@@ -57,7 +57,11 @@ pub struct SustainedArgs {
 
 pub async fn run(args: SustainedArgs) -> eyre::Result<()> {
     let workload: Workload = args.workload.parse()?;
-    let client = EngineClient::new(&args.engine_rpc, args.jwt_secret.clone())?;
+    let jwt_hex = std::fs::read_to_string(&args.jwt_secret)
+        .map_err(|e| eyre::eyre!("failed to read JWT secret file: {e}"))?
+        .trim()
+        .to_string();
+    let client = EngineClient::new(&args.engine_rpc, jwt_hex)?;
     let mut senders = tx_factory::generate_senders(args.senders as usize);
 
     println!(

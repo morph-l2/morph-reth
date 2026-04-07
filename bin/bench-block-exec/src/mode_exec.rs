@@ -47,7 +47,11 @@ pub struct ExecArgs {
 pub async fn run(args: ExecArgs) -> eyre::Result<()> {
     // 1. Parse workload, create client & single sender.
     let workload: Workload = args.workload.parse()?;
-    let client = EngineClient::new(&args.engine_rpc, args.jwt_secret.clone())?;
+    let jwt_hex = std::fs::read_to_string(&args.jwt_secret)
+        .map_err(|e| eyre::eyre!("failed to read JWT secret file: {e}"))?
+        .trim()
+        .to_string();
+    let client = EngineClient::new(&args.engine_rpc, jwt_hex)?;
     let mut senders = tx_factory::generate_senders(1);
 
     // 2. Pre-generate ALL transactions for ALL blocks upfront (no allocation
