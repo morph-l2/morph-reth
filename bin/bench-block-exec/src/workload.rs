@@ -258,35 +258,47 @@ mod hex {
 // Txpool helpers
 // ---------------------------------------------------------------------------
 
-/// Send a batch of raw transactions to the txpool via `eth_sendRawTransaction`.
+/// Send a batch of raw transactions to the txpool via batched JSON-RPC.
 ///
-/// Sends all transactions concurrently for maximum throughput.
+/// Uses JSON-RPC batch requests to avoid exhausting local TCP ports.
+/// Splits into chunks of up to 500 per batch to stay within request size limits.
 async fn send_txs_to_txpool(http_rpc: &str, txs: &[Bytes]) -> eyre::Result<()> {
     let client = reqwest::Client::new();
-    let mut futures = Vec::with_capacity(txs.len());
+    let chunk_size = 500;
 
-    for (i, tx) in txs.iter().enumerate() {
-        let client = client.clone();
-        let url = http_rpc.to_string();
-        let tx_hex = format!("0x{}", alloy_primitives::hex::encode(tx));
-        futures.push(tokio::spawn(async move {
-            let body = serde_json::json!({
-                "jsonrpc": "2.0",
-                "method": "eth_sendRawTransaction",
-                "params": [tx_hex],
-                "id": i + 1
-            });
-            let resp = client.post(&url).json(&body).send().await?;
-            let json: serde_json::Value = resp.json().await?;
-            if let Some(err) = json.get("error") {
-                return Err(eyre::eyre!("eth_sendRawTransaction[{}] error: {}", i, err));
+    for chunk in txs.chunks(chunk_size) {
+        let batch: Vec<serde_json::Value> = chunk
+            .iter()
+            .enumerate()
+            .map(|(i, tx)| {
+                let tx_hex = format!("0x{}", alloy_primitives::hex::encode(tx));
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "eth_sendRawTransaction",
+                    "params": [tx_hex],
+                    "id": i + 1
+                })
+            })
+            .collect();
+
+        let resp = client
+            .post(http_rpc)
+            .json(&batch)
+            .send()
+            .await
+            .map_err(|e| eyre::eyre!("batch send failed: {e}"))?;
+
+        let results: Vec<serde_json::Value> = resp
+            .json()
+            .await
+            .map_err(|e| eyre::eyre!("batch response parse failed: {e}"))?;
+
+        // Check for errors in the batch response
+        for result in &results {
+            if let Some(err) = result.get("error") {
+                return Err(eyre::eyre!("eth_sendRawTransaction error: {}", err));
             }
-            Ok::<(), eyre::Report>(())
-        }));
-    }
-
-    for f in futures {
-        f.await.map_err(|e| eyre::eyre!("join error: {e}"))??;
+        }
     }
     Ok(())
 }
