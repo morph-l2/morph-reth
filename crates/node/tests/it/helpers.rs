@@ -8,7 +8,7 @@ use morph_payload_types::{
     MorphBuiltPayload, MorphPayloadAttributes, MorphPayloadBuilderAttributes, MorphPayloadTypes,
 };
 use reth_e2e_test_utils::wallet::Wallet;
-use reth_node_api::{PayloadKind, PayloadTypes};
+use reth_node_api::PayloadTypes;
 use reth_payload_primitives::{BuiltPayload, PayloadBuilderAttributes};
 use reth_provider::BlockReaderIdExt;
 use std::sync::Arc;
@@ -64,17 +64,27 @@ pub(crate) async fn advance_block_with_l1_messages(
         .await?
         .map_err(|e| eyre::eyre!("payload build failed: {e}"))?;
 
-    // Brief delay to let the payload builder process pool transactions before
-    // resolving — without this the build job may finish before L2 txs are queued.
+    // Brief delay before polling to let the payload builder process pool transactions.
+    // Without this, the builder might emit its first result before picking up L2 txs.
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-    let payload = node
-        .inner
-        .payload_builder_handle
-        .resolve_kind(payload_id, PayloadKind::WaitForPending)
-        .await
-        .ok_or_else(|| eyre::eyre!("no payload response for id {payload_id:?}"))?
-        .map_err(|e| eyre::eyre!("payload build error: {e}"))?;
+    // Poll until the payload builder has produced a result (or 10s timeout)
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let payload = loop {
+        if tokio::time::Instant::now() > deadline {
+            return Err(eyre::eyre!("timeout waiting for payload {payload_id:?}"));
+        }
+        match node
+            .inner
+            .payload_builder_handle
+            .best_payload(payload_id)
+            .await
+        {
+            Some(Ok(p)) => break p,
+            Some(Err(e)) => return Err(eyre::eyre!("payload build error: {e}")),
+            None => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
+        }
+    };
 
     // Submit via engine API and wait for canonical head to update
     node.submit_payload(payload.clone()).await?;
@@ -127,12 +137,22 @@ pub(crate) async fn build_block_no_submit(
 
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    node.inner
-        .payload_builder_handle
-        .resolve_kind(payload_id, PayloadKind::WaitForPending)
-        .await
-        .ok_or_else(|| eyre::eyre!("no payload response for id {payload_id:?}"))?
-        .map_err(|e| eyre::eyre!("payload build error: {e}"))
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if tokio::time::Instant::now() > deadline {
+            return Err(eyre::eyre!("timeout waiting for payload"));
+        }
+        match node
+            .inner
+            .payload_builder_handle
+            .best_payload(payload_id)
+            .await
+        {
+            Some(Ok(p)) => return Ok(p),
+            Some(Err(e)) => return Err(eyre::eyre!("payload build error: {e}")),
+            None => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
+        }
+    }
 }
 
 /// Craft a block by modifying a valid payload, then try to import it via engine API.
@@ -225,16 +245,26 @@ pub(crate) async fn expect_payload_build_failure(
 
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    match node
-        .inner
-        .payload_builder_handle
-        .resolve_kind(payload_id, PayloadKind::WaitForPending)
-        .await
-    {
-        Some(Err(e)) => Ok(e.to_string()),
-        Some(Ok(_)) => Err(eyre::eyre!(
-            "expected payload build failure, but it succeeded"
-        )),
-        None => Err(eyre::eyre!("no payload response for id {payload_id:?}")),
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if tokio::time::Instant::now() > deadline {
+            return Err(eyre::eyre!(
+                "timeout — payload builder neither succeeded nor failed"
+            ));
+        }
+        match node
+            .inner
+            .payload_builder_handle
+            .best_payload(payload_id)
+            .await
+        {
+            Some(Err(e)) => return Ok(e.to_string()),
+            Some(Ok(_)) => {
+                return Err(eyre::eyre!(
+                    "expected payload build failure, but it succeeded"
+                ));
+            }
+            None => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
+        }
     }
 }
