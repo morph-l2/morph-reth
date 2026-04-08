@@ -301,21 +301,22 @@ pub fn build_block_txs(
     let base_per_sender = total_txs / num_senders;
     let remainder = total_txs % num_senders;
 
-    // Build per-sender batches.
-    let mut per_sender_txs: Vec<Vec<Bytes>> = Vec::with_capacity(senders.len());
-    for (idx, sender) in senders.iter_mut().enumerate() {
-        let count = base_per_sender + if (idx as u64) < remainder { 1 } else { 0 };
-        if count == 0 {
-            per_sender_txs.push(Vec::new());
-            continue;
-        }
-        let batch = match workload {
-            Workload::EthTransfer => build_eth_transfers(sender, count, chain_id)?,
-            Workload::Erc20Transfer => build_erc20_transfers(sender, count, chain_id)?,
-            Workload::UniswapSwap => build_swap_txs(sender, count, chain_id)?,
-        };
-        per_sender_txs.push(batch);
-    }
+    // Build + sign per-sender batches in parallel across all cores.
+    let per_sender_txs: Vec<Vec<Bytes>> = senders
+        .par_iter_mut()
+        .enumerate()
+        .map(|(idx, sender)| {
+            let count = base_per_sender + if (idx as u64) < remainder { 1 } else { 0 };
+            if count == 0 {
+                return Ok(Vec::new());
+            }
+            match workload {
+                Workload::EthTransfer => build_eth_transfers(sender, count, chain_id),
+                Workload::Erc20Transfer => build_erc20_transfers(sender, count, chain_id),
+                Workload::UniswapSwap => build_swap_txs(sender, count, chain_id),
+            }
+        })
+        .collect::<eyre::Result<Vec<Vec<Bytes>>>>()?;
 
     // Interleave round-robin: take one tx from each sender in turn.
     // Convert each inner Vec into a drain iterator to avoid cloning Bytes.
