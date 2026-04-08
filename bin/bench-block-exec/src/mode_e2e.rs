@@ -71,10 +71,14 @@ pub async fn submit_to_txpool(
     concurrency: usize,
 ) -> eyre::Result<f64> {
     let client = reqwest::Client::new();
-    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency));
+    // Use many small batches with high concurrency to maximize validation
+    // parallelism. reth's validation workers compete for jobs from a shared
+    // channel — more concurrent HTTP requests = more parallel validation.
+    let effective_concurrency = std::cmp::max(concurrency, 32);
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(effective_concurrency));
     let start = Instant::now();
 
-    let chunk_size = 500;
+    let chunk_size = 100;
     let mut handles = Vec::new();
 
     for (chunk_idx, chunk) in txs.chunks(chunk_size).enumerate() {
