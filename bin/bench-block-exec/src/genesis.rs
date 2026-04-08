@@ -1,7 +1,7 @@
 use alloy_primitives::U256;
 use clap::Args;
 use eyre::ensure;
-use serde_json::{json, Map};
+use serde_json::{Map, json};
 
 use crate::tx_factory;
 
@@ -58,10 +58,7 @@ pub fn build_genesis(args: &WriteGenesisArgs) -> eyre::Result<serde_json::Value>
     let mut alloc = Map::new();
 
     // Always include the fee vault with zero balance so the account exists.
-    alloc.insert(
-        FEE_VAULT_ADDR.to_string(),
-        json!({ "balance": "0x0" }),
-    );
+    alloc.insert(FEE_VAULT_ADDR.to_string(), json!({ "balance": "0x0" }));
 
     // Collect all sender addresses for contract storage population.
     let mut sender_addresses = Vec::new();
@@ -78,9 +75,9 @@ pub fn build_genesis(args: &WriteGenesisArgs) -> eyre::Result<serde_json::Value>
         );
         alloc.insert(normalized.clone(), json!({ "balance": &hex_balance }));
         // Parse as Address for contract storage.
-        let addr: alloy_primitives::Address = sender.parse().map_err(|e| {
-            eyre::eyre!("failed to parse sender address: {e}")
-        })?;
+        let addr: alloy_primitives::Address = sender
+            .parse()
+            .map_err(|e| eyre::eyre!("failed to parse sender address: {e}"))?;
         sender_addresses.push(addr);
     }
 
@@ -265,7 +262,12 @@ mod tests {
         let alloc = genesis.get("alloc").expect("alloc must exist");
         let alloc_obj = alloc.as_object().expect("alloc is object");
         // 3 senders + 1 fee vault = 4 accounts.
-        assert_eq!(alloc_obj.len(), 4, "expected 4 alloc entries, got {}", alloc_obj.len());
+        assert_eq!(
+            alloc_obj.len(),
+            4,
+            "expected 4 alloc entries, got {}",
+            alloc_obj.len()
+        );
     }
 
     #[test]

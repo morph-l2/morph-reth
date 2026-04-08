@@ -2,7 +2,7 @@
 ///
 /// This module implements a JWT-authenticated client that talks to the Engine API
 /// (`engine_assembleL2Block`, `engine_newL2Block`) and measures per-call timing.
-use alloy_primitives::{Bytes, B256};
+use alloy_primitives::{B256, Bytes};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use eyre::ensure;
 use jsonrpsee::{
@@ -27,7 +27,10 @@ mod quantity {
 
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
         let s = String::deserialize(d)?;
-        let s = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(&s);
+        let s = s
+            .strip_prefix("0x")
+            .or_else(|| s.strip_prefix("0X"))
+            .unwrap_or(&s);
         u64::from_str_radix(s, 16).map_err(serde::de::Error::custom)
     }
 }
@@ -48,9 +51,13 @@ mod quantity_opt {
         match opt {
             None => Ok(None),
             Some(s) => {
-                let s =
-                    s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(&s);
-                u64::from_str_radix(s, 16).map(Some).map_err(serde::de::Error::custom)
+                let s = s
+                    .strip_prefix("0x")
+                    .or_else(|| s.strip_prefix("0X"))
+                    .unwrap_or(&s);
+                u64::from_str_radix(s, 16)
+                    .map(Some)
+                    .map_err(serde::de::Error::custom)
             }
         }
     }
@@ -200,6 +207,8 @@ pub struct BlockTimingV2 {
     pub workload: String,
     pub senders: u64,
     pub warmup_blocks: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
 
     // Timing breakdown (milliseconds)
     pub submit_ms: f64,
@@ -329,8 +338,15 @@ fn hex_decode(hex: &str) -> eyre::Result<Vec<u8>> {
 // ---------------------------------------------------------------------------
 
 /// JWT-authenticated client for the Morph L2 Engine API.
+///
+/// Caches the [`HttpClient`] per URL so that repeated calls to the same
+/// endpoint reuse the TCP connection pool and avoid re-generating JWT tokens
+/// on every request.  The JWT is refreshed every 30 seconds (well within the
+/// typical 60-second validity window).
 pub struct EngineClient {
     jwt_secret_hex: String,
+    /// Cached (url, client, created_at).
+    cached: std::sync::Mutex<Option<(String, HttpClient, Instant)>>,
 }
 
 impl EngineClient {
@@ -340,19 +356,31 @@ impl EngineClient {
     /// the actual URL is passed per-call so callers can target different nodes.
     pub fn new(_engine_rpc_url: &str, jwt_secret_hex: String) -> eyre::Result<Self> {
         // Validate the secret eagerly.
-        let stripped = jwt_secret_hex
-            .strip_prefix("0x")
-            .unwrap_or(&jwt_secret_hex);
+        let stripped = jwt_secret_hex.strip_prefix("0x").unwrap_or(&jwt_secret_hex);
         ensure!(
             stripped.len() == 64,
             "JWT secret must be 32 bytes (64 hex chars), got {} hex chars",
             stripped.len()
         );
-        Ok(Self { jwt_secret_hex })
+        Ok(Self {
+            jwt_secret_hex,
+            cached: std::sync::Mutex::new(None),
+        })
     }
 
-    /// Build a fresh [`HttpClient`] with a Bearer JWT Authorization header.
+    /// How often to refresh the JWT token / rebuild the HTTP client.
+    const JWT_REFRESH_SECS: u64 = 30;
+
+    /// Return a cached [`HttpClient`] for `url`, refreshing the JWT token
+    /// every [`Self::JWT_REFRESH_SECS`] seconds.
     fn authed_client(&self, url: &str) -> eyre::Result<HttpClient> {
+        let mut guard = self.cached.lock().unwrap();
+        if let Some((ref cached_url, ref client, created_at)) = *guard {
+            if cached_url == url && created_at.elapsed().as_secs() < Self::JWT_REFRESH_SECS {
+                return Ok(client.clone());
+            }
+        }
+
         let token = create_jwt_token(&self.jwt_secret_hex)?;
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -362,8 +390,9 @@ impl EngineClient {
         let client = HttpClientBuilder::default()
             .set_headers(headers)
             .max_response_size(512 * 1024 * 1024) // 512 MB for large block responses
-            .max_request_size(512 * 1024 * 1024)  // 512 MB for large block imports
+            .max_request_size(512 * 1024 * 1024) // 512 MB for large block imports
             .build(url)?;
+        *guard = Some((url.to_string(), client.clone(), Instant::now()));
         Ok(client)
     }
 
@@ -376,19 +405,13 @@ impl EngineClient {
     ) -> eyre::Result<(ExecutableL2Data, f64)> {
         let client = self.authed_client(url)?;
         let start = Instant::now();
-        let data: ExecutableL2Data = client
-            .request("engine_assembleL2Block", (params,))
-            .await?;
+        let data: ExecutableL2Data = client.request("engine_assembleL2Block", (params,)).await?;
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
         Ok((data, elapsed_ms))
     }
 
     /// Call `engine_newL2Block` and return the elapsed milliseconds.
-    pub async fn new_l2_block(
-        &self,
-        url: &str,
-        data: ExecutableL2Data,
-    ) -> eyre::Result<f64> {
+    pub async fn new_l2_block(&self, url: &str, data: ExecutableL2Data) -> eyre::Result<f64> {
         let client = self.authed_client(url)?;
         let start = Instant::now();
         let _: () = client.request("engine_newL2Block", (data,)).await?;

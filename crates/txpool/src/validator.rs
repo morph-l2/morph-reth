@@ -306,7 +306,9 @@ where
             );
         }
 
-        let outcome = self.inner.validate_one_with_state(origin, transaction, state);
+        let outcome = self
+            .inner
+            .validate_one_with_state(origin, transaction, state);
         if outcome.is_invalid() || outcome.is_error() {
             tracing::trace!(target: "morph::txpool", ?outcome, "tx pool validation failed");
             return outcome;

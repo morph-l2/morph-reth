@@ -26,6 +26,7 @@ DPI = 150
 COLOR_RETH = "#2196F3"
 COLOR_GETH = "#FF9800"
 ENGINE_COLORS = {"reth": COLOR_RETH, "geth": COLOR_GETH}
+FINAL_MODE_DIRS = ("exec", "e2e", "sustained", "openloop")
 
 
 # ---------------------------------------------------------------------------
@@ -48,13 +49,15 @@ def _load_jsonl(path: Path) -> list[dict]:
 
 
 def _load_all_jsonl(input_dir: Path) -> list[dict]:
-    """Recursively load all *.jsonl AND *.json files (JSON-lines format)."""
+    """Load only final matrix records from final mode directories."""
     records = []
-    for pattern in ("*.jsonl", "*.json"):
-        for p in sorted(input_dir.rglob(pattern)):
-            # Skip sweep summary files (they have a different schema)
-            if "sweep-summary" in p.name:
-                continue
+
+    mode_dirs = [input_dir / mode for mode in FINAL_MODE_DIRS if (input_dir / mode).is_dir()]
+    if not mode_dirs and input_dir.name in FINAL_MODE_DIRS:
+        mode_dirs = [input_dir]
+
+    for mode_dir in mode_dirs:
+        for p in sorted(mode_dir.rglob("*.jsonl")):
             records.extend(_load_jsonl(p))
     return records
 

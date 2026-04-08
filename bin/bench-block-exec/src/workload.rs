@@ -197,8 +197,8 @@ pub fn read_contract_artifact(path: &str) -> eyre::Result<Bytes> {
         .ok_or_else(|| eyre::eyre!("artifact missing bytecode.object field"))?;
 
     let hex_str = hex_str.strip_prefix("0x").unwrap_or(hex_str);
-    let bytes = hex::decode(hex_str)
-        .map_err(|e| eyre::eyre!("failed to decode bytecode hex: {e}"))?;
+    let bytes =
+        hex::decode(hex_str).map_err(|e| eyre::eyre!("failed to decode bytecode hex: {e}"))?;
     Ok(Bytes::from(bytes))
 }
 
@@ -387,8 +387,14 @@ pub async fn run(args: RunWorkloadArgs) -> eyre::Result<()> {
         let bytecode = read_contract_artifact(artifact_path)?;
 
         let initial_supply = U256::from(1_000_000_000u64) * U256::from(10u64).pow(U256::from(18));
-        let deploy_tx =
-            build_deploy_tx(&signer, 0, args.chain_id, max_fee_per_gas, &bytecode, initial_supply)?;
+        let deploy_tx = build_deploy_tx(
+            &signer,
+            0,
+            args.chain_id,
+            max_fee_per_gas,
+            &bytecode,
+            initial_supply,
+        )?;
 
         // Send deploy tx to txpool
         send_txs_to_txpool(&args.http_rpc, &[deploy_tx]).await?;
@@ -531,7 +537,10 @@ pub async fn run(args: RunWorkloadArgs) -> eyre::Result<()> {
         println!("Blocks:         {}", timings.len());
         println!("Avg total:      {avg_total:.1}ms");
         println!("Effective TPS:  {effective_tps:.0}");
-        println!("<=300ms:        {under_300ms}/{} ({compliance_pct:.1}%)", timings.len());
+        println!(
+            "<=300ms:        {under_300ms}/{} ({compliance_pct:.1}%)",
+            timings.len()
+        );
     }
 
     Ok(())

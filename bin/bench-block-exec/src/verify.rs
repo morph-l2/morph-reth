@@ -99,9 +99,7 @@ pub async fn run(args: VerifyStateArgs) -> eyre::Result<()> {
 
     // 2. Compare block numbers.
     if number_a != number_b {
-        mismatches.push(format!(
-            "block number mismatch: A={number_a}, B={number_b}"
-        ));
+        mismatches.push(format!("block number mismatch: A={number_a}, B={number_b}"));
     }
 
     // 3. Compare state roots.

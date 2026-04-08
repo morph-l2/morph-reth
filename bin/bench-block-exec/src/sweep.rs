@@ -6,6 +6,10 @@
 //! median TPS is reported as the peak.
 
 use crate::engine::BlockTimingV2;
+use crate::mode_e2e::{
+    DEFAULT_POOL_POLL_BATCH_SIZE, DEFAULT_POOL_POLL_INTERVAL_MS, DEFAULT_SUBMIT_BATCH_SIZE,
+    DEFAULT_SUBMIT_CONCURRENCY,
+};
 use crate::mode_exec;
 use crate::report::percentile;
 
@@ -40,6 +44,18 @@ pub struct SweepArgs {
 
     #[arg(long, default_value = "99999")]
     pub chain_id: u64,
+
+    #[arg(long, default_value_t = DEFAULT_SUBMIT_BATCH_SIZE)]
+    pub submit_batch_size: usize,
+
+    #[arg(long, default_value_t = DEFAULT_SUBMIT_CONCURRENCY)]
+    pub submit_concurrency: usize,
+
+    #[arg(long, default_value_t = DEFAULT_POOL_POLL_BATCH_SIZE)]
+    pub pool_poll_batch_size: usize,
+
+    #[arg(long, default_value_t = DEFAULT_POOL_POLL_INTERVAL_MS)]
+    pub pool_poll_interval_ms: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -71,24 +87,43 @@ pub struct SweepPoint {
 // Helpers
 // ---------------------------------------------------------------------------
 
+struct ReadTimingsResult {
+    valid: Vec<BlockTimingV2>,
+    total_rows: usize,
+}
+
 /// Read a JSONL file of `BlockTimingV2` records, filtering out error rows.
-fn read_timings(path: &str) -> eyre::Result<Vec<BlockTimingV2>> {
+fn read_timings(path: &str) -> eyre::Result<ReadTimingsResult> {
     let file = std::fs::File::open(path)?;
     let reader = BufReader::new(file);
     let mut timings = Vec::new();
+    let mut total_rows = 0;
     for line in reader.lines() {
         let line = line?;
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
+        total_rows += 1;
         if let Ok(t) = serde_json::from_str::<BlockTimingV2>(trimmed) {
             if !t.error {
                 timings.push(t);
             }
         }
     }
-    Ok(timings)
+    Ok(ReadTimingsResult {
+        valid: timings,
+        total_rows,
+    })
+}
+
+fn step_had_errors_or_stopped_early(
+    valid_rows: usize,
+    total_rows: usize,
+    expected_blocks: u64,
+) -> bool {
+    let expected_rows = expected_blocks as usize;
+    valid_rows != expected_rows || total_rows != expected_rows
 }
 
 /// Compute a `SweepPoint` from a set of per-block timings at a given txs_per_block.
@@ -143,6 +178,7 @@ pub async fn run(args: SweepArgs) -> eyre::Result<()> {
 
     let mut points: Vec<SweepPoint> = Vec::new();
     let mut min_per_tx_us: f64 = f64::MAX;
+    let mut exec_state = mode_exec::ExecRunState::new(1);
 
     for &txs in coarse_points {
         let output_path = format!(
@@ -166,18 +202,44 @@ pub async fn run(args: SweepArgs) -> eyre::Result<()> {
             engine_name: args.engine_name.clone(),
             chain_id: args.chain_id,
             senders: 1,
+            submit_batch_size: args.submit_batch_size,
+            submit_concurrency: args.submit_concurrency,
+            pool_poll_batch_size: args.pool_poll_batch_size,
+            pool_poll_interval_ms: args.pool_poll_interval_ms,
         };
 
-        mode_exec::run(exec_args).await?;
+        if let Err(err) = mode_exec::run_with_state(&exec_args, &mut exec_state).await {
+            eprintln!(
+                "  Sweep step at {} txs/block failed: {err}. Writing partial summary from prior successful points.",
+                txs
+            );
+            break;
+        }
 
         // Read results and compute stats.
         let timings = read_timings(&output_path)?;
 
-        let point = match compute_point(txs, &timings) {
+        if step_had_errors_or_stopped_early(
+            timings.valid.len(),
+            timings.total_rows,
+            args.blocks_per_step,
+        ) {
+            println!(
+                "  Step at {} txs/block ended early or produced error rows (valid_rows={}/{} total_rows={}/{}). Stopping sweep to keep state consistent.",
+                txs,
+                timings.valid.len(),
+                args.blocks_per_step,
+                timings.total_rows,
+                args.blocks_per_step
+            );
+            break;
+        }
+
+        let point = match compute_point(txs, &timings.valid) {
             Some(p) => p,
             None => {
                 println!("  No valid timings at {} txs/block, skipping.", txs);
-                continue;
+                break;
             }
         };
 
@@ -242,4 +304,24 @@ pub async fn run(args: SweepArgs) -> eyre::Result<()> {
     println!("  Summary:        {}", summary_path);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sweep_stops_on_partial_step() {
+        assert!(step_had_errors_or_stopped_early(29, 30, 30));
+    }
+
+    #[test]
+    fn sweep_stops_on_error_rows() {
+        assert!(step_had_errors_or_stopped_early(29, 29, 30));
+    }
+
+    #[test]
+    fn sweep_accepts_complete_step() {
+        assert!(!step_had_errors_or_stopped_early(30, 30, 30));
+    }
 }

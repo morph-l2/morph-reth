@@ -3,6 +3,7 @@ use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{Address, Bytes, TxKind, U256, keccak256};
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
+use rayon::prelude::*;
 
 /// Concrete envelope type (EIP-4844 variant required by the generic).
 type TxEnvelope = EthereumTxEnvelope<TxEip4844>;
@@ -13,18 +14,19 @@ type TxEnvelope = EthereumTxEnvelope<TxEip4844>;
 
 /// Pre-determined address for the BenchToken ERC20 contract.
 pub const BENCH_TOKEN_ADDR: Address = Address::new([
-    0x55, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x01,
+    0x55, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x01,
 ]);
 
 /// Pre-determined address for the BenchSwap contract.
 pub const BENCH_SWAP_ADDR: Address = Address::new([
-    0x55, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x02,
+    0x55, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x02,
 ]);
 
 /// Max fee per gas used for all benchmark transactions (1M wei = 0.001 gwei).
 pub const BENCH_MAX_FEE_PER_GAS: u128 = 1_000_000;
+const PARALLEL_SIGN_THRESHOLD: usize = 64;
 
 // ---------------------------------------------------------------------------
 // Workload enum
@@ -159,6 +161,23 @@ fn sign_and_encode(
     Ok(Bytes::from(envelope.encoded_2718()))
 }
 
+fn sign_batch(
+    signer: &PrivateKeySigner,
+    txs: Vec<TxEip1559>,
+    chain_id: u64,
+) -> eyre::Result<Vec<Bytes>> {
+    if txs.len() < PARALLEL_SIGN_THRESHOLD {
+        return txs.into_iter().map(|tx| sign_and_encode(signer, tx, chain_id)).collect();
+    }
+
+    txs.into_par_iter()
+        .map_init(
+            || signer.clone(),
+            move |signer, tx| sign_and_encode(signer, tx, chain_id),
+        )
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Transaction builders
 // ---------------------------------------------------------------------------
@@ -172,11 +191,11 @@ pub fn build_eth_transfers(
     count: u64,
     chain_id: u64,
 ) -> eyre::Result<Vec<Bytes>> {
-    let mut txs = Vec::with_capacity(count as usize);
-    for i in 0..count {
-        let tx = TxEip1559 {
+    let start_nonce = sender.nonce;
+    let txs = (0..count)
+        .map(|i| TxEip1559 {
             chain_id,
-            nonce: sender.nonce,
+            nonce: start_nonce + i,
             gas_limit: 21_000,
             max_fee_per_gas: BENCH_MAX_FEE_PER_GAS,
             max_priority_fee_per_gas: 0,
@@ -184,11 +203,10 @@ pub fn build_eth_transfers(
             value: U256::from(1),
             access_list: Default::default(),
             input: Bytes::new(),
-        };
-        txs.push(sign_and_encode(&sender.signer, tx, chain_id)?);
-        sender.nonce += 1;
-    }
-    Ok(txs)
+        })
+        .collect();
+    sender.nonce += count;
+    sign_batch(&sender.signer, txs, chain_id)
 }
 
 /// Build `count` signed ERC20 `transfer(address,uint256)` transactions from `sender`.
@@ -200,19 +218,20 @@ pub fn build_erc20_transfers(
     count: u64,
     chain_id: u64,
 ) -> eyre::Result<Vec<Bytes>> {
-    let mut txs = Vec::with_capacity(count as usize);
-    for i in 0..count {
-        let to = receiver_address(i);
+    let start_nonce = sender.nonce;
+    let txs = (0..count)
+        .map(|i| {
+            let to = receiver_address(i);
 
-        // transfer(address,uint256) selector: 0xa9059cbb
-        let mut calldata = vec![0xa9, 0x05, 0x9c, 0xbb];
-        calldata.extend_from_slice(&[0u8; 12]); // left-pad address to 32 bytes
-        calldata.extend_from_slice(to.as_slice());
-        calldata.extend_from_slice(&U256::from(1).to_be_bytes::<32>());
+            // transfer(address,uint256) selector: 0xa9059cbb
+            let mut calldata = vec![0xa9, 0x05, 0x9c, 0xbb];
+            calldata.extend_from_slice(&[0u8; 12]); // left-pad address to 32 bytes
+            calldata.extend_from_slice(to.as_slice());
+            calldata.extend_from_slice(&U256::from(1).to_be_bytes::<32>());
 
-        let tx = TxEip1559 {
+            TxEip1559 {
             chain_id,
-            nonce: sender.nonce,
+            nonce: start_nonce + i,
             gas_limit: 60_000,
             max_fee_per_gas: BENCH_MAX_FEE_PER_GAS,
             max_priority_fee_per_gas: 0,
@@ -220,11 +239,11 @@ pub fn build_erc20_transfers(
             value: U256::ZERO,
             access_list: Default::default(),
             input: Bytes::from(calldata),
-        };
-        txs.push(sign_and_encode(&sender.signer, tx, chain_id)?);
-        sender.nonce += 1;
-    }
-    Ok(txs)
+            }
+        })
+        .collect();
+    sender.nonce += count;
+    sign_batch(&sender.signer, txs, chain_id)
 }
 
 /// Build `count` signed `BenchSwap.swap0For1(uint256)` transactions from `sender`.
@@ -237,16 +256,16 @@ pub fn build_swap_txs(
     chain_id: u64,
 ) -> eyre::Result<Vec<Bytes>> {
     let selector = &keccak256(b"swap0For1(uint256)")[..4];
+    let start_nonce = sender.nonce;
+    let txs = (0..count)
+        .map(|_| {
+            let mut calldata = Vec::with_capacity(4 + 32);
+            calldata.extend_from_slice(selector);
+            calldata.extend_from_slice(&U256::from(1).to_be_bytes::<32>());
 
-    let mut txs = Vec::with_capacity(count as usize);
-    for _i in 0..count {
-        let mut calldata = Vec::with_capacity(4 + 32);
-        calldata.extend_from_slice(selector);
-        calldata.extend_from_slice(&U256::from(1).to_be_bytes::<32>());
-
-        let tx = TxEip1559 {
+            TxEip1559 {
             chain_id,
-            nonce: sender.nonce,
+            nonce: start_nonce,
             gas_limit: 150_000,
             max_fee_per_gas: BENCH_MAX_FEE_PER_GAS,
             max_priority_fee_per_gas: 0,
@@ -254,11 +273,16 @@ pub fn build_swap_txs(
             value: U256::ZERO,
             access_list: Default::default(),
             input: Bytes::from(calldata),
-        };
-        txs.push(sign_and_encode(&sender.signer, tx, chain_id)?);
-        sender.nonce += 1;
-    }
-    Ok(txs)
+            }
+        })
+        .enumerate()
+        .map(|(offset, mut tx)| {
+            tx.nonce += offset as u64;
+            tx
+        })
+        .collect();
+    sender.nonce += count;
+    sign_batch(&sender.signer, txs, chain_id)
 }
 
 /// Build a full block's worth of transactions, distributed round-robin across senders.
@@ -294,13 +318,22 @@ pub fn build_block_txs(
     }
 
     // Interleave round-robin: take one tx from each sender in turn.
+    // Convert each inner Vec into a drain iterator to avoid cloning Bytes.
+    let mut iters: Vec<std::vec::IntoIter<Bytes>> = per_sender_txs
+        .into_iter()
+        .map(|v| v.into_iter())
+        .collect();
     let mut result = Vec::with_capacity(total_txs as usize);
-    let max_len = per_sender_txs.iter().map(|v| v.len()).max().unwrap_or(0);
-    for tx_idx in 0..max_len {
-        for sender_txs in &per_sender_txs {
-            if tx_idx < sender_txs.len() {
-                result.push(sender_txs[tx_idx].clone());
+    loop {
+        let mut any = false;
+        for iter in &mut iters {
+            if let Some(tx) = iter.next() {
+                result.push(tx);
+                any = true;
             }
+        }
+        if !any {
+            break;
         }
     }
 
@@ -315,7 +348,13 @@ pub fn build_block_txs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_consensus::Transaction as _;
+    use alloy_eips::eip2718::Decodable2718;
     use std::collections::HashSet;
+
+    fn decode_nonce(tx: &Bytes) -> u64 {
+        TxEnvelope::decode_2718_exact(tx.as_ref()).unwrap().nonce()
+    }
 
     #[test]
     fn generate_senders_produces_unique_addresses() {
@@ -354,7 +393,11 @@ mod tests {
 
     #[test]
     fn workload_roundtrip() {
-        for w in [Workload::EthTransfer, Workload::Erc20Transfer, Workload::UniswapSwap] {
+        for w in [
+            Workload::EthTransfer,
+            Workload::Erc20Transfer,
+            Workload::UniswapSwap,
+        ] {
             let parsed: Workload = w.as_str().parse().unwrap();
             assert_eq!(parsed, w);
         }
@@ -371,6 +414,8 @@ mod tests {
         let txs = build_eth_transfers(&mut senders[0], 5, 99999).unwrap();
         assert_eq!(txs.len(), 5);
         assert_eq!(senders[0].nonce, 5);
+        assert_eq!(decode_nonce(&txs[0]), 0);
+        assert_eq!(decode_nonce(&txs[4]), 4);
     }
 
     #[test]
@@ -379,6 +424,8 @@ mod tests {
         let txs = build_erc20_transfers(&mut senders[0], 3, 99999).unwrap();
         assert_eq!(txs.len(), 3);
         assert_eq!(senders[0].nonce, 3);
+        assert_eq!(decode_nonce(&txs[0]), 0);
+        assert_eq!(decode_nonce(&txs[2]), 2);
     }
 
     #[test]
@@ -387,6 +434,8 @@ mod tests {
         let txs = build_swap_txs(&mut senders[0], 4, 99999).unwrap();
         assert_eq!(txs.len(), 4);
         assert_eq!(senders[0].nonce, 4);
+        assert_eq!(decode_nonce(&txs[0]), 0);
+        assert_eq!(decode_nonce(&txs[3]), 3);
     }
 
     #[test]
@@ -416,8 +465,18 @@ mod tests {
 
     #[test]
     fn bench_constants_are_correct() {
-        assert_eq!(BENCH_TOKEN_ADDR, "0x5500000000000000000000000000000000000001".parse::<Address>().unwrap());
-        assert_eq!(BENCH_SWAP_ADDR, "0x5500000000000000000000000000000000000002".parse::<Address>().unwrap());
+        assert_eq!(
+            BENCH_TOKEN_ADDR,
+            "0x5500000000000000000000000000000000000001"
+                .parse::<Address>()
+                .unwrap()
+        );
+        assert_eq!(
+            BENCH_SWAP_ADDR,
+            "0x5500000000000000000000000000000000000002"
+                .parse::<Address>()
+                .unwrap()
+        );
         assert_eq!(BENCH_MAX_FEE_PER_GAS, 1_000_000);
     }
 }

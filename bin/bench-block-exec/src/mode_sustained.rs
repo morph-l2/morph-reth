@@ -5,9 +5,14 @@
 //! - Phase 2 (measurement): Produce `blocks` blocks with full timing and rolling TPS.
 
 use crate::engine::{AssembleL2BlockParams, BlockTimingV2, EngineClient};
-use crate::mode_e2e::{submit_to_txpool, wait_for_pool};
+use crate::mode_e2e::{
+    DEFAULT_POOL_POLL_BATCH_SIZE, DEFAULT_POOL_POLL_INTERVAL_MS, DEFAULT_SUBMIT_BATCH_SIZE,
+    DEFAULT_SUBMIT_CONCURRENCY, PoolWaitOptions, SubmitOptions, build_http_client,
+    submit_to_txpool_with_client, wait_for_pool_with_client,
+};
 use crate::tx_factory::{self, Workload};
 
+use std::cmp;
 use std::collections::VecDeque;
 use std::io::Write;
 
@@ -49,6 +54,18 @@ pub struct SustainedArgs {
 
     #[arg(long, default_value = "99999")]
     pub chain_id: u64,
+
+    #[arg(long, default_value_t = DEFAULT_SUBMIT_BATCH_SIZE)]
+    pub submit_batch_size: usize,
+
+    #[arg(long, default_value_t = DEFAULT_SUBMIT_CONCURRENCY)]
+    pub submit_concurrency: usize,
+
+    #[arg(long, default_value_t = DEFAULT_POOL_POLL_BATCH_SIZE)]
+    pub pool_poll_batch_size: usize,
+
+    #[arg(long, default_value_t = DEFAULT_POOL_POLL_INTERVAL_MS)]
+    pub pool_poll_interval_ms: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -63,6 +80,18 @@ pub async fn run(args: SustainedArgs) -> eyre::Result<()> {
         .to_string();
     let client = EngineClient::new(&args.engine_rpc, jwt_hex)?;
     let mut senders = tx_factory::generate_senders(args.senders as usize);
+    let submit_options = SubmitOptions {
+        batch_size: args.submit_batch_size,
+        concurrency: args.submit_concurrency,
+    };
+    let pool_wait_options = PoolWaitOptions {
+        batch_size: args.pool_poll_batch_size,
+        poll_interval_ms: args.pool_poll_interval_ms,
+    };
+    let http_client = build_http_client(cmp::max(
+        submit_options.concurrency,
+        pool_wait_options.batch_size,
+    ))?;
 
     println!(
         "Mode C (sustained): {} warmup + {} measured blocks x {} txs/block, {} senders, {} workload",
@@ -81,18 +110,21 @@ pub async fn run(args: SustainedArgs) -> eyre::Result<()> {
         let block_number = block_idx + 1;
 
         // Build transactions.
-        let txs = tx_factory::build_block_txs(
-            &mut senders,
-            workload,
-            args.txs_per_block,
-            args.chain_id,
-        )?;
+        let txs =
+            tx_factory::build_block_txs(&mut senders, workload, args.txs_per_block, args.chain_id)?;
 
         // Submit to txpool.
-        submit_to_txpool(&args.http_rpc, &txs, 4).await?;
+        submit_to_txpool_with_client(&http_client, &args.http_rpc, &txs, submit_options).await?;
 
         // Wait for pool acceptance.
-        wait_for_pool(&args.http_rpc, &senders, 60).await?;
+        wait_for_pool_with_client(
+            &http_client,
+            &args.http_rpc,
+            &senders,
+            60,
+            pool_wait_options,
+        )
+        .await?;
 
         // Assemble block (pulls from pool).
         let assemble_params = AssembleL2BlockParams {
@@ -130,31 +162,38 @@ pub async fn run(args: SustainedArgs) -> eyre::Result<()> {
         let measured_block = block_idx + 1;
 
         // --- build transactions ---
-        let txs = tx_factory::build_block_txs(
-            &mut senders,
-            workload,
-            args.txs_per_block,
-            args.chain_id,
-        )?;
+        let txs =
+            tx_factory::build_block_txs(&mut senders, workload, args.txs_per_block, args.chain_id)?;
 
         let expected_tx_count = txs.len() as u64;
 
         // --- submit to txpool (timed) ---
-        let submit_ms = match submit_to_txpool(&args.http_rpc, &txs, 4).await {
-            Ok(ms) => ms,
-            Err(e) => {
-                eprintln!("block {block_number}: submit error: {e}");
-                consecutive_errors += 1;
-                if consecutive_errors >= 5 {
-                    eprintln!("5 consecutive errors - aborting.");
-                    break;
+        let submit_ms =
+            match submit_to_txpool_with_client(&http_client, &args.http_rpc, &txs, submit_options)
+                .await
+            {
+                Ok(ms) => ms,
+                Err(e) => {
+                    eprintln!("block {block_number}: submit error: {e}");
+                    consecutive_errors += 1;
+                    if consecutive_errors >= 5 {
+                        eprintln!("5 consecutive errors - aborting.");
+                        break;
+                    }
+                    continue;
                 }
-                continue;
-            }
-        };
+            };
 
         // --- wait for pool acceptance (timed) ---
-        let pool_wait_ms = match wait_for_pool(&args.http_rpc, &senders, 60).await {
+        let pool_wait_ms = match wait_for_pool_with_client(
+            &http_client,
+            &args.http_rpc,
+            &senders,
+            60,
+            pool_wait_options,
+        )
+        .await
+        {
             Ok(ms) => ms,
             Err(e) => {
                 eprintln!("block {block_number}: pool wait error: {e}");
@@ -174,18 +213,20 @@ pub async fn run(args: SustainedArgs) -> eyre::Result<()> {
             timestamp: Some(block_number),
         };
 
-        let (assembled, assemble_ms, gas_used, actual_tx_count, error) =
-            match client.assemble_l2_block(&args.engine_rpc, assemble_params).await {
-                Ok((data, ms)) => {
-                    let gas = data.gas_used;
-                    let count = data.transactions.len() as u64;
-                    (Some(data), ms, gas, count, false)
-                }
-                Err(e) => {
-                    eprintln!("block {block_number}: assemble error: {e}");
-                    (None, 0.0, 0, 0, true)
-                }
-            };
+        let (assembled, assemble_ms, gas_used, actual_tx_count, error) = match client
+            .assemble_l2_block(&args.engine_rpc, assemble_params)
+            .await
+        {
+            Ok((data, ms)) => {
+                let gas = data.gas_used;
+                let count = data.transactions.len() as u64;
+                (Some(data), ms, gas, count, false)
+            }
+            Err(e) => {
+                eprintln!("block {block_number}: assemble error: {e}");
+                (None, 0.0, 0, 0, true)
+            }
+        };
 
         // --- import block ---
         let (import_ms, error) = if let Some(data) = assembled {
@@ -220,6 +261,7 @@ pub async fn run(args: SustainedArgs) -> eyre::Result<()> {
             workload: workload.to_string(),
             senders: args.senders,
             warmup_blocks: args.warmup_blocks,
+            phase: None,
             submit_ms,
             pool_wait_ms,
             assemble_ms,

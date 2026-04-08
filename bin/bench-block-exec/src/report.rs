@@ -60,6 +60,94 @@ fn walkdir(dir: &Path) -> eyre::Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+fn is_raw_sweep_result(path: &Path) -> bool {
+    path.components()
+        .any(|component| component.as_os_str() == "sweep")
+}
+
+fn mean(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        0.0
+    } else {
+        values.iter().sum::<f64>() / values.len() as f64
+    }
+}
+
+fn mean_tps(data: &[&BlockTimingV2]) -> f64 {
+    if data.is_empty() {
+        0.0
+    } else {
+        data.iter().map(|t| t.tps).sum::<f64>() / data.len() as f64
+    }
+}
+
+fn realized_tps(data: &[&BlockTimingV2]) -> f64 {
+    let total_ms: f64 = data.iter().map(|t| t.total_ms).sum();
+    let total_txs: u64 = data.iter().map(|t| t.tx_count).sum();
+
+    if total_ms > 0.0 {
+        total_txs as f64 / (total_ms / 1000.0)
+    } else {
+        0.0
+    }
+}
+
+fn openloop_phase_split_stats(
+    mode: &str,
+    data: &[&BlockTimingV2],
+) -> (usize, f64, f64, usize, f64, f64) {
+    if mode != "openloop" {
+        return (0, 0.0, 0.0, 0, 0.0, 0.0);
+    }
+
+    let mut active = Vec::new();
+    let mut drain = Vec::new();
+
+    for timing in data {
+        match timing.phase.as_deref() {
+            Some("active") => active.push(*timing),
+            Some("drain") => drain.push(*timing),
+            Some(_) => {}
+            None if timing.tx_count > 0 => active.push(*timing),
+            None => drain.push(*timing),
+        }
+    }
+
+    (
+        active.len(),
+        mean_tps(&active),
+        realized_tps(&active),
+        drain.len(),
+        mean_tps(&drain),
+        realized_tps(&drain),
+    )
+}
+
+fn tps_window_stats(data: &[&BlockTimingV2]) -> (f64, f64, f64, f64) {
+    if data.is_empty() {
+        return (0.0, 0.0, 0.0, 0.0);
+    }
+
+    let window_len = (data.len() / 3).max(1);
+    let early: Vec<f64> = data.iter().take(window_len).map(|t| t.tps).collect();
+    let late: Vec<f64> = data.iter().rev().take(window_len).map(|t| t.tps).collect();
+
+    let mid_start = data.len().saturating_sub(window_len) / 2;
+    let mid_end = (mid_start + window_len).min(data.len());
+    let mid: Vec<f64> = data[mid_start..mid_end].iter().map(|t| t.tps).collect();
+
+    let early_tps = mean(&early);
+    let mid_tps = mean(&mid);
+    let late_tps = mean(&late);
+    let late_vs_early_pct = if early_tps > 0.0 {
+        (late_tps / early_tps - 1.0) * 100.0
+    } else {
+        0.0
+    };
+
+    (early_tps, mid_tps, late_tps, late_vs_early_pct)
+}
+
 pub fn summarize(args: SummarizeArgs) -> eyre::Result<()> {
     if args.v2 {
         return summarize_v2(&args.results_dir, args.output.as_deref());
@@ -99,8 +187,7 @@ pub fn summarize(args: SummarizeArgs) -> eyre::Result<()> {
     }
 
     // 4. Build the TSV output.
-    let header =
-        "engine\tlayer\ttx/blk\tavg_asm_ms\tavg_imp_ms\tavg_tot_ms\tp50_ms\tp95_ms\tp99_ms\teff_tps\t<300ms%";
+    let header = "engine\tlayer\ttx/blk\tavg_asm_ms\tavg_imp_ms\tavg_tot_ms\tp50_ms\tp95_ms\tp99_ms\teff_tps\t<300ms%";
 
     let mut rows: Vec<String> = vec![header.to_string()];
 
@@ -180,6 +267,7 @@ fn summarize_v2(results_dir: &str, output: Option<&str>) -> eyre::Result<()> {
         .filter(|p| {
             p.extension()
                 .is_some_and(|ext| ext == "jsonl" || ext == "json")
+                && !is_raw_sweep_result(p)
         })
         .collect();
 
@@ -200,8 +288,8 @@ fn summarize_v2(results_dir: &str, output: Option<&str>) -> eyre::Result<()> {
         }
     }
 
-    // 3. Group by (engine, mode, workload, senders, warmup_blocks).
-    type GroupKey = (String, String, String, u64, u64);
+    // 3. Group by (engine, mode, workload, senders, warmup_blocks, txs_per_block).
+    type GroupKey = (String, String, String, u64, u64, u64);
     let mut groups: BTreeMap<GroupKey, Vec<BlockTimingV2>> = BTreeMap::new();
     for t in all_timings {
         groups
@@ -211,17 +299,18 @@ fn summarize_v2(results_dir: &str, output: Option<&str>) -> eyre::Result<()> {
                 t.workload.clone(),
                 t.senders,
                 t.warmup_blocks,
+                t.expected_tx_count,
             ))
             .or_default()
             .push(t);
     }
 
     // 4. Build TSV output.
-    let header = "engine\tmode\tworkload\tsenders\twarmup\tblocks\tavg_txs\tinclusion%\tavg_asm_ms\tavg_imp_ms\tavg_tot_ms\tp50_ms\tp95_ms\tp99_ms\tpeak_tps\tavg_tps\tavg_mgas_s\tdegradation%\terrors";
+    let header = "engine\tmode\tworkload\tsenders\twarmup\ttxs_per_block\tblocks\tavg_txs\tinclusion%\tavg_asm_ms\tavg_imp_ms\tavg_tot_ms\tp50_ms\tp95_ms\tp99_ms\tpeak_tps\tavg_tps\trealized_tps\tavg_mgas_s\tearly_tps\tmid_tps\tlate_tps\tlate_vs_early%\tactive_blocks\tactive_avg_tps\tactive_realized_tps\tdrain_blocks\tdrain_avg_tps\tdrain_realized_tps\tdegradation%\terrors";
 
     let mut rows: Vec<String> = vec![header.to_string()];
 
-    for ((engine, mode, workload, senders, warmup), entries) in &groups {
+    for ((engine, mode, workload, senders, warmup, txs_per_block), entries) in &groups {
         // Skip first 10 entries as warmup.
         let data: Vec<&BlockTimingV2> = entries.iter().skip(10).collect();
         if data.is_empty() {
@@ -233,8 +322,7 @@ fn summarize_v2(results_dir: &str, output: Option<&str>) -> eyre::Result<()> {
 
         // Averages
         let avg_txs: f64 = data.iter().map(|t| t.tx_count as f64).sum::<f64>() / n;
-        let avg_inclusion: f64 =
-            data.iter().map(|t| t.inclusion_rate).sum::<f64>() / n * 100.0;
+        let avg_inclusion: f64 = data.iter().map(|t| t.inclusion_rate).sum::<f64>() / n * 100.0;
         let avg_asm: f64 = data.iter().map(|t| t.assemble_ms).sum::<f64>() / n;
         let avg_imp: f64 = data.iter().map(|t| t.import_ms).sum::<f64>() / n;
         let avg_tot: f64 = data.iter().map(|t| t.total_ms).sum::<f64>() / n;
@@ -248,24 +336,29 @@ fn summarize_v2(results_dir: &str, output: Option<&str>) -> eyre::Result<()> {
 
         // TPS
         let tps_values: Vec<f64> = data.iter().map(|t| t.tps).collect();
-        let peak_tps = tps_values
-            .iter()
-            .cloned()
-            .fold(f64::NEG_INFINITY, f64::max);
+        let peak_tps = tps_values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         let avg_tps: f64 = tps_values.iter().sum::<f64>() / n;
+        let realized_tps = realized_tps(&data);
 
         // Mgas/s
         let avg_mgas_s: f64 = data.iter().map(|t| t.mgas_per_sec).sum::<f64>() / n;
 
+        let (early_tps, mid_tps, late_tps, late_vs_early_pct) = tps_window_stats(&data);
+        let (
+            active_blocks,
+            active_avg_tps,
+            active_realized_tps,
+            drain_blocks,
+            drain_avg_tps,
+            drain_realized_tps,
+        ) =
+            openloop_phase_split_stats(mode, &data);
+
         // Degradation: for runs with 200+ entries, compare first 100 vs last 100
         let degradation_pct = if data.len() >= 200 {
-            let first100_avg: f64 =
-                data[..100].iter().map(|t| t.tps).sum::<f64>() / 100.0;
-            let last100_avg: f64 = data[data.len() - 100..]
-                .iter()
-                .map(|t| t.tps)
-                .sum::<f64>()
-                / 100.0;
+            let first100_avg: f64 = data[..100].iter().map(|t| t.tps).sum::<f64>() / 100.0;
+            let last100_avg: f64 =
+                data[data.len() - 100..].iter().map(|t| t.tps).sum::<f64>() / 100.0;
             if first100_avg > 0.0 {
                 (last100_avg / first100_avg - 1.0) * 100.0
             } else {
@@ -285,12 +378,13 @@ fn summarize_v2(results_dir: &str, output: Option<&str>) -> eyre::Result<()> {
         };
 
         rows.push(format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{:.1}\t{:.1}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.1}\t{:.1}\t{:.2}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.1}\t{:.1}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.1}\t{:.1}\t{:.1}\t{:.2}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{}\t{:.1}\t{:.1}\t{}\t{:.1}\t{:.1}\t{}\t{}",
             engine,
             mode,
             workload,
             senders,
             warmup,
+            txs_per_block,
             blocks,
             avg_txs,
             avg_inclusion,
@@ -302,7 +396,18 @@ fn summarize_v2(results_dir: &str, output: Option<&str>) -> eyre::Result<()> {
             p99,
             peak_tps,
             avg_tps,
+            realized_tps,
             avg_mgas_s,
+            early_tps,
+            mid_tps,
+            late_tps,
+            late_vs_early_pct,
+            active_blocks,
+            active_avg_tps,
+            active_realized_tps,
+            drain_blocks,
+            drain_avg_tps,
+            drain_realized_tps,
             deg_str,
             errors,
         ));
@@ -329,6 +434,11 @@ fn summarize_v2(results_dir: &str, output: Option<&str>) -> eyre::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     #[test]
     fn percentile_calculation_is_correct() {
@@ -353,5 +463,280 @@ mod tests {
     #[test]
     fn percentile_empty() {
         assert_eq!(percentile(&[], 50.0), 0.0);
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("bench-block-exec-{name}-{nanos}"))
+    }
+
+    fn write_rows(path: &Path, txs_per_block: u64, tps: f64) {
+        write_rows_with_tps(path, txs_per_block, vec![tps; 12]);
+    }
+
+    fn write_rows_with_tps(path: &Path, txs_per_block: u64, tps_values: Vec<f64>) {
+        let parent = path.parent().unwrap();
+        fs::create_dir_all(parent).unwrap();
+
+        let rows: Vec<String> = tps_values
+            .into_iter()
+            .enumerate()
+            .map(|(idx, tps)| {
+                serde_json::to_string(&BlockTimingV2 {
+                    block_number: idx as u64 + 1,
+                    tx_count: txs_per_block,
+                    expected_tx_count: txs_per_block,
+                    engine: "reth".to_string(),
+                    mode: "exec".to_string(),
+                    workload: "eth-transfer".to_string(),
+                    senders: 1,
+                    warmup_blocks: 0,
+                    phase: None,
+                    submit_ms: 0.0,
+                    pool_wait_ms: 0.0,
+                    assemble_ms: 10.0,
+                    import_ms: 5.0,
+                    total_ms: 15.0,
+                    gas_used: txs_per_block * 21_000,
+                    tps,
+                    mgas_per_sec: 21.0,
+                    inclusion_rate: 1.0,
+                    cumulative_blocks: idx as u64 + 1,
+                    cumulative_txs: (idx as u64 + 1) * txs_per_block,
+                    rolling_avg_tps_100: None,
+                    error: false,
+                })
+                .unwrap()
+            })
+            .collect();
+
+        fs::write(path, rows.join("\n")).unwrap();
+    }
+
+    #[test]
+    fn summarize_v2_skips_sweep_inputs_and_separates_tx_counts() {
+        let dir = temp_dir("summary-v2");
+        let output = dir.join("summary.tsv");
+
+        write_rows(
+            &dir.join("exec/reth-eth-transfer-1000.jsonl"),
+            1000,
+            10_000.0,
+        );
+        write_rows(
+            &dir.join("exec/reth-eth-transfer-2000.jsonl"),
+            2000,
+            20_000.0,
+        );
+        write_rows(
+            &dir.join("sweep/reth-eth-transfer-3000.jsonl"),
+            3000,
+            30_000.0,
+        );
+
+        summarize_v2(dir.to_str().unwrap(), Some(output.to_str().unwrap())).unwrap();
+
+        let summary = fs::read_to_string(&output).unwrap();
+        let lines: Vec<&str> = summary.lines().collect();
+
+        assert!(lines[0].contains("txs_per_block"));
+        assert!(lines[0].contains("early_tps"));
+        assert!(lines[0].contains("mid_tps"));
+        assert!(lines[0].contains("late_tps"));
+        assert!(lines[0].contains("late_vs_early%"));
+        assert_eq!(
+            lines.len(),
+            3,
+            "expected header plus two exec rows: {summary}"
+        );
+        assert!(summary.contains("\t1000\t"));
+        assert!(summary.contains("\t2000\t"));
+        assert!(
+            !summary.contains("\t3000\t"),
+            "raw sweep rows must stay out of summary"
+        );
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn summarize_v2_reports_early_mid_late_tps_windows() {
+        let dir = temp_dir("summary-v2-windows");
+        let output = dir.join("summary.tsv");
+
+        let mut tps_values = vec![1000.0; 10];
+        tps_values.extend(vec![900.0; 10]);
+        tps_values.extend(vec![700.0; 10]);
+        write_rows_with_tps(
+            &dir.join("e2e/reth-eth-transfer-4000.jsonl"),
+            4000,
+            tps_values,
+        );
+
+        summarize_v2(dir.to_str().unwrap(), Some(output.to_str().unwrap())).unwrap();
+
+        let summary = fs::read_to_string(&output).unwrap();
+        let row = summary.lines().nth(1).unwrap();
+        assert!(
+            row.contains("\t900.0\t"),
+            "expected early window avg TPS in row: {row}"
+        );
+        assert!(
+            row.contains("\t700.0\t"),
+            "expected late window avg TPS in row: {row}"
+        );
+        assert!(
+            row.contains("\t-22.2"),
+            "expected late-vs-early drop in row: {row}"
+        );
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn summarize_v2_reports_openloop_active_and_drain_splits() {
+        let dir = temp_dir("summary-v2-openloop");
+        let output = dir.join("summary.tsv");
+        let path = dir.join("openloop/reth-eth-transfer.jsonl");
+        let parent = path.parent().unwrap();
+        fs::create_dir_all(parent).unwrap();
+
+        let mut rows = Vec::new();
+        for idx in 0..10 {
+            rows.push(
+                serde_json::json!({
+                    "block_number": idx + 1,
+                    "tx_count": 100,
+                    "expected_tx_count": 1000,
+                    "engine": "reth",
+                    "mode": "openloop",
+                    "workload": "eth-transfer",
+                    "senders": 2000,
+                    "warmup_blocks": 0,
+                    "phase": "active",
+                    "submit_ms": 0.0,
+                    "pool_wait_ms": 0.0,
+                    "assemble_ms": 5.0,
+                    "import_ms": 5.0,
+                    "total_ms": 100.0,
+                    "gas_used": 2_100_000,
+                    "tps": 1000.0,
+                    "mgas_per_sec": 21.0,
+                    "inclusion_rate": 1.0,
+                    "cumulative_blocks": idx + 1,
+                    "cumulative_txs": (idx + 1) * 100,
+                    "error": false
+                })
+                .to_string(),
+            );
+        }
+
+        for idx in 0..3 {
+            rows.push(
+                serde_json::json!({
+                    "block_number": 11 + idx,
+                    "tx_count": 120,
+                    "expected_tx_count": 1000,
+                    "engine": "reth",
+                    "mode": "openloop",
+                    "workload": "eth-transfer",
+                    "senders": 2000,
+                    "warmup_blocks": 0,
+                    "phase": "active",
+                    "submit_ms": 0.0,
+                    "pool_wait_ms": 0.0,
+                    "assemble_ms": 5.0,
+                    "import_ms": 5.0,
+                    "total_ms": 100.0,
+                    "gas_used": 2_520_000,
+                    "tps": 1200.0,
+                    "mgas_per_sec": 25.2,
+                    "inclusion_rate": 1.0,
+                    "cumulative_blocks": 11 + idx,
+                    "cumulative_txs": 1000 + ((idx + 1) * 120),
+                    "error": false
+                })
+                .to_string(),
+            );
+        }
+
+        for idx in 0..3 {
+            rows.push(
+                serde_json::json!({
+                    "block_number": 14 + idx,
+                    "tx_count": 0,
+                    "expected_tx_count": 1000,
+                    "engine": "reth",
+                    "mode": "openloop",
+                    "workload": "eth-transfer",
+                    "senders": 2000,
+                    "warmup_blocks": 0,
+                    "phase": "drain",
+                    "submit_ms": 0.0,
+                    "pool_wait_ms": 0.0,
+                    "assemble_ms": 2.0,
+                    "import_ms": 1.0,
+                    "total_ms": 10.0,
+                    "gas_used": 0,
+                    "tps": 0.0,
+                    "mgas_per_sec": 0.0,
+                    "inclusion_rate": 1.0,
+                    "cumulative_blocks": 14 + idx,
+                    "cumulative_txs": 1360,
+                    "error": false
+                })
+                .to_string(),
+            );
+        }
+
+        fs::write(&path, rows.join("\n")).unwrap();
+
+        summarize_v2(dir.to_str().unwrap(), Some(output.to_str().unwrap())).unwrap();
+
+        let summary = fs::read_to_string(&output).unwrap();
+        let header: Vec<&str> = summary.lines().next().unwrap().split('\t').collect();
+        let row: Vec<&str> = summary.lines().nth(1).unwrap().split('\t').collect();
+
+        let active_blocks_idx = header
+            .iter()
+            .position(|field| *field == "active_blocks")
+            .expect("missing active_blocks column");
+        let active_avg_tps_idx = header
+            .iter()
+            .position(|field| *field == "active_avg_tps")
+            .expect("missing active_avg_tps column");
+        let drain_blocks_idx = header
+            .iter()
+            .position(|field| *field == "drain_blocks")
+            .expect("missing drain_blocks column");
+        let drain_avg_tps_idx = header
+            .iter()
+            .position(|field| *field == "drain_avg_tps")
+            .expect("missing drain_avg_tps column");
+        let realized_tps_idx = header
+            .iter()
+            .position(|field| *field == "realized_tps")
+            .expect("missing realized_tps column");
+        let active_realized_tps_idx = header
+            .iter()
+            .position(|field| *field == "active_realized_tps")
+            .expect("missing active_realized_tps column");
+        let drain_realized_tps_idx = header
+            .iter()
+            .position(|field| *field == "drain_realized_tps")
+            .expect("missing drain_realized_tps column");
+
+        assert_eq!(row[active_blocks_idx], "3");
+        assert_eq!(row[active_avg_tps_idx], "1200.0");
+        assert_eq!(row[drain_blocks_idx], "3");
+        assert_eq!(row[drain_avg_tps_idx], "0.0");
+        assert_eq!(row[realized_tps_idx], "1090.9");
+        assert_eq!(row[active_realized_tps_idx], "1200.0");
+        assert_eq!(row[drain_realized_tps_idx], "0.0");
+
+        fs::remove_dir_all(dir).unwrap();
     }
 }

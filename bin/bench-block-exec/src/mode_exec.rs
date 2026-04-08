@@ -6,8 +6,9 @@
 
 use crate::engine::{AssembleL2BlockParams, BlockTimingV2, EngineClient};
 use crate::mode_e2e;
-use crate::tx_factory::{self, Workload};
+use crate::tx_factory::{self, BenchSender, Workload};
 
+use std::cmp;
 use std::io::Write;
 
 // ---------------------------------------------------------------------------
@@ -47,6 +48,48 @@ pub struct ExecArgs {
     /// Number of senders (more senders avoids txpool per-account limits).
     #[arg(long, default_value = "1")]
     pub senders: u64,
+
+    #[arg(long, default_value_t = mode_e2e::DEFAULT_SUBMIT_BATCH_SIZE)]
+    pub submit_batch_size: usize,
+
+    #[arg(long, default_value_t = mode_e2e::DEFAULT_SUBMIT_CONCURRENCY)]
+    pub submit_concurrency: usize,
+
+    #[arg(long, default_value_t = mode_e2e::DEFAULT_POOL_POLL_BATCH_SIZE)]
+    pub pool_poll_batch_size: usize,
+
+    #[arg(long, default_value_t = mode_e2e::DEFAULT_POOL_POLL_INTERVAL_MS)]
+    pub pool_poll_interval_ms: u64,
+}
+
+pub(crate) struct ExecRunState {
+    senders: Vec<BenchSender>,
+    next_block_number: u64,
+}
+
+impl ExecRunState {
+    pub(crate) fn new(sender_count: usize) -> Self {
+        Self {
+            senders: tx_factory::generate_senders(sender_count.max(1)),
+            next_block_number: 1,
+        }
+    }
+
+    pub(crate) fn senders(&self) -> &[BenchSender] {
+        &self.senders
+    }
+
+    pub(crate) fn senders_mut(&mut self) -> &mut [BenchSender] {
+        &mut self.senders
+    }
+
+    pub(crate) fn current_block_number(&self) -> u64 {
+        self.next_block_number
+    }
+
+    pub(crate) fn advance_block_number(&mut self) {
+        self.next_block_number += 1;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -54,6 +97,12 @@ pub struct ExecArgs {
 // ---------------------------------------------------------------------------
 
 pub async fn run(args: ExecArgs) -> eyre::Result<()> {
+    let sender_count = std::cmp::max(args.senders, 1) as usize;
+    let mut state = ExecRunState::new(sender_count);
+    run_with_state(&args, &mut state).await
+}
+
+pub(crate) async fn run_with_state(args: &ExecArgs, state: &mut ExecRunState) -> eyre::Result<()> {
     // 1. Parse workload, create client & senders.
     let workload: Workload = args.workload.parse()?;
     let jwt_hex = std::fs::read_to_string(&args.jwt_secret)
@@ -61,12 +110,21 @@ pub async fn run(args: ExecArgs) -> eyre::Result<()> {
         .trim()
         .to_string();
     let client = EngineClient::new(&args.engine_rpc, jwt_hex)?;
-    let sender_count = std::cmp::max(args.senders, 1) as usize;
-    let mut senders = tx_factory::generate_senders(sender_count);
+    let submit_options = mode_e2e::SubmitOptions {
+        batch_size: args.submit_batch_size,
+        concurrency: args.submit_concurrency,
+    };
+    let pool_wait_options = mode_e2e::PoolWaitOptions {
+        batch_size: args.pool_poll_batch_size,
+        poll_interval_ms: args.pool_poll_interval_ms,
+    };
+    let http_client = mode_e2e::build_http_client(cmp::max(
+        submit_options.concurrency,
+        pool_wait_options.batch_size,
+    ))?;
 
     // 2. Open output file.
     let mut out_file = std::fs::File::create(&args.output)?;
-    let mut consecutive_errors: u64 = 0;
 
     println!(
         "Mode exec: {} blocks x {} txs ({} workload), txpool path",
@@ -75,12 +133,13 @@ pub async fn run(args: ExecArgs) -> eyre::Result<()> {
 
     // 3. Loop through blocks.
     for i in 0..args.blocks {
-        let block_number = i + 1;
+        let display_block_number = i + 1;
+        let engine_block_number = state.current_block_number();
         let expected_tx_count = args.txs_per_block;
 
         // Build transactions for this block.
         let txs = tx_factory::build_block_txs(
-            &mut senders,
+            state.senders_mut(),
             workload,
             args.txs_per_block,
             args.chain_id,
@@ -88,21 +147,38 @@ pub async fn run(args: ExecArgs) -> eyre::Result<()> {
 
         // Submit to txpool in waves (NOT timed — we only care about execution).
         // Fire all waves as fast as possible, only wait for pool at the end.
-        let concurrency = std::cmp::min(sender_count, 16);
         const WAVE_SIZE: usize = 10_000;
         let num_waves = (txs.len() + WAVE_SIZE - 1) / WAVE_SIZE;
         for (wi, wave) in txs.chunks(WAVE_SIZE).enumerate() {
-            eprint!("\r  submitting wave {}/{} ({} txs)...", wi + 1, num_waves, wave.len());
-            mode_e2e::submit_to_txpool(&args.http_rpc, wave, concurrency).await?;
+            eprint!(
+                "\r  submitting wave {}/{} ({} txs)...",
+                wi + 1,
+                num_waves,
+                wave.len()
+            );
+            mode_e2e::submit_to_txpool_with_client(
+                &http_client,
+                &args.http_rpc,
+                wave,
+                submit_options,
+            )
+            .await?;
         }
         eprintln!("\r  waiting for pool to accept all {} txs...", txs.len());
-        mode_e2e::wait_for_pool(&args.http_rpc, &senders, 600).await?;
+        mode_e2e::wait_for_pool_with_client(
+            &http_client,
+            &args.http_rpc,
+            state.senders(),
+            600,
+            pool_wait_options,
+        )
+        .await?;
 
         // --- assemble (TIMED) ---
         let params = AssembleL2BlockParams {
-            number: block_number,
+            number: engine_block_number,
             transactions: vec![], // empty — pull from txpool
-            timestamp: Some(block_number),
+            timestamp: Some(engine_block_number),
         };
 
         let assemble_result = client.assemble_l2_block(&args.engine_rpc, params).await;
@@ -114,7 +190,7 @@ pub async fn run(args: ExecArgs) -> eyre::Result<()> {
                 (Some(data), ms, gas, count, false)
             }
             Err(e) => {
-                eprintln!("block {block_number}: assemble error: {e}");
+                eprintln!("block {display_block_number}: assemble error: {e}");
                 (None, 0.0, 0, 0, true)
             }
         };
@@ -124,7 +200,7 @@ pub async fn run(args: ExecArgs) -> eyre::Result<()> {
             match client.new_l2_block(&args.engine_rpc, data).await {
                 Ok(ms) => (ms, error),
                 Err(e) => {
-                    eprintln!("block {block_number}: import error: {e}");
+                    eprintln!("block {display_block_number}: import error: {e}");
                     (0.0, true)
                 }
             }
@@ -132,23 +208,17 @@ pub async fn run(args: ExecArgs) -> eyre::Result<()> {
             (0.0, true)
         };
 
-        // --- error tracking ---
-        if error {
-            consecutive_errors += 1;
-        } else {
-            consecutive_errors = 0;
-        }
-
         // --- record timing (only assemble + import, no submit/pool_wait) ---
         let mut timing = BlockTimingV2 {
-            block_number,
+            block_number: display_block_number,
             tx_count: actual_tx_count,
             expected_tx_count,
             engine: args.engine_name.clone(),
             mode: "exec".to_string(),
             workload: workload.to_string(),
-            senders: 1,
+            senders: args.senders.max(1),
             warmup_blocks: 0,
+            phase: None,
             submit_ms: 0.0,
             pool_wait_ms: 0.0,
             assemble_ms,
@@ -158,7 +228,7 @@ pub async fn run(args: ExecArgs) -> eyre::Result<()> {
             tps: 0.0,
             mgas_per_sec: 0.0,
             inclusion_rate: 0.0,
-            cumulative_blocks: block_number,
+            cumulative_blocks: display_block_number,
             cumulative_txs: 0,
             rolling_avg_tps_100: None,
             error,
@@ -169,9 +239,9 @@ pub async fn run(args: ExecArgs) -> eyre::Result<()> {
         writeln!(out_file, "{line}")?;
 
         // --- progress ---
-        if block_number % 10 == 0 || block_number == args.blocks {
+        if display_block_number % 10 == 0 || display_block_number == args.blocks {
             println!(
-                "block {block_number}/{}: asm={:.1}ms imp={:.1}ms total={:.1}ms | {:.0} TPS, {:.0} MGas/s | {}/{}",
+                "block {display_block_number}/{}: asm={:.1}ms imp={:.1}ms total={:.1}ms | {:.0} TPS, {:.0} MGas/s | {}/{}",
                 args.blocks,
                 timing.assemble_ms,
                 timing.import_ms,
@@ -183,13 +253,70 @@ pub async fn run(args: ExecArgs) -> eyre::Result<()> {
             );
         }
 
-        // --- bail on repeated failures ---
-        if consecutive_errors >= 5 {
-            eprintln!("5 consecutive errors — aborting.");
+        if error {
+            eprintln!(
+                "block {display_block_number}: stopping exec run after error to keep block-number state consistent."
+            );
             break;
         }
+
+        state.advance_block_number();
     }
 
     println!("Results written to {}", args.output);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exec_run_state_only_advances_block_number_after_success() {
+        let mut state = ExecRunState::new(1);
+
+        assert_eq!(state.current_block_number(), 1);
+        let txs = tx_factory::build_block_txs(
+            state.senders_mut(),
+            Workload::EthTransfer,
+            1_000,
+            99_999,
+        )
+        .unwrap();
+        assert_eq!(txs.len(), 1_000);
+        assert_eq!(state.current_block_number(), 1);
+
+        state.advance_block_number();
+        assert_eq!(state.current_block_number(), 2);
+    }
+
+    #[test]
+    fn exec_run_state_preserves_block_and_nonce_progression_across_steps() {
+        let mut state = ExecRunState::new(1);
+
+        assert_eq!(state.current_block_number(), 1);
+        let txs = tx_factory::build_block_txs(
+            state.senders_mut(),
+            Workload::EthTransfer,
+            1_000,
+            99_999,
+        )
+        .unwrap();
+        assert_eq!(txs.len(), 1_000);
+        state.advance_block_number();
+        assert_eq!(state.current_block_number(), 2);
+
+        let txs = tx_factory::build_block_txs(
+            state.senders_mut(),
+            Workload::EthTransfer,
+            2_000,
+            99_999,
+        )
+        .unwrap();
+        assert_eq!(txs.len(), 2_000);
+        state.advance_block_number();
+
+        assert_eq!(state.senders()[0].nonce, 3_000);
+        assert_eq!(state.current_block_number(), 3);
+    }
 }

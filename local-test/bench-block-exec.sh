@@ -35,6 +35,24 @@ HTTP_PORT="${HTTP_PORT:-8545}"
 AUTH_PORT="${AUTH_PORT:-8551}"
 WORKLOADS="${WORKLOADS:-eth-transfer erc20-transfer uniswap-swap}"
 ENGINES="${ENGINES:-reth geth}"
+SUBMIT_BATCH_SIZE="${SUBMIT_BATCH_SIZE:-64}"
+SUBMIT_CONCURRENCY="${SUBMIT_CONCURRENCY:-64}"
+POOL_POLL_BATCH_SIZE="${POOL_POLL_BATCH_SIZE:-256}"
+POOL_POLL_INTERVAL_MS="${POOL_POLL_INTERVAL_MS:-10}"
+RETH_TXPOOL_VALIDATION_TASKS="${RETH_TXPOOL_VALIDATION_TASKS:-12}"
+RETH_TXPOOL_MAX_BATCH_SIZE="${RETH_TXPOOL_MAX_BATCH_SIZE:-128}"
+SWEEP_BLOCKS_PER_STEP="${SWEEP_BLOCKS_PER_STEP:-30}"
+EXEC_BLOCKS="${EXEC_BLOCKS:-200}"
+E2E_BLOCKS="${E2E_BLOCKS:-500}"
+SUSTAINED_BLOCKS="${SUSTAINED_BLOCKS:-1500}"
+DEGRADE_WARMUP_BLOCKS="${DEGRADE_WARMUP_BLOCKS:-1000}"
+DEGRADE_BLOCKS="${DEGRADE_BLOCKS:-1500}"
+RUN_OPEN_LOOP="${RUN_OPEN_LOOP:-1}"
+OPEN_LOOP_SENDERS="${OPEN_LOOP_SENDERS:-100}"
+OPEN_LOOP_TARGET_TPS="${OPEN_LOOP_TARGET_TPS:-20000}"
+OPEN_LOOP_DURATION_SECS="${OPEN_LOOP_DURATION_SECS:-30}"
+OPEN_LOOP_SUBMIT_HTTP_RPCS="${OPEN_LOOP_SUBMIT_HTTP_RPCS:-}"
+OPEN_LOOP_SUBMIT_BUFFER_TICKS="${OPEN_LOOP_SUBMIT_BUFFER_TICKS:-32}"
 
 # ─── Contract bytecodes (read from compiled artifacts) ───────────────────────
 
@@ -88,7 +106,8 @@ start_reth() {
     --txpool.queued-max-count 1000000
     --txpool.queued-max-size 4096
     --txpool.max-account-slots 1000000
-    --txpool.additional-validation-tasks 8
+    --txpool.additional-validation-tasks "${RETH_TXPOOL_VALIDATION_TASKS}"
+    --txpool.max-batch-size "${RETH_TXPOOL_MAX_BATCH_SIZE}"
     --txpool.disable-transactions-backup
     --rpc.max-request-size 1024
     --rpc.max-response-size 1024
@@ -96,7 +115,7 @@ start_reth() {
   )
 
   pm2 start "${RETH_BIN}" --name "bench-node" -- "${args[@]}"
-  echo "Started reth on http=${HTTP_PORT} auth=${AUTH_PORT}"
+  echo "Started reth on http=${HTTP_PORT} auth=${AUTH_PORT} val_tasks=${RETH_TXPOOL_VALIDATION_TASKS} max_batch=${RETH_TXPOOL_MAX_BATCH_SIZE}"
 }
 
 start_geth() {
@@ -186,6 +205,9 @@ run_test() {
 
   local output_dir="${RESULTS_DIR}/${mode}"
   local output_file="${output_dir}/${engine}-${workload}-s${senders}-w${warmup}.jsonl"
+  if [[ "${mode}" == "openloop" ]]; then
+    output_file="${output_dir}/${engine}-${workload}-s${senders}-tps${txs}-d${blocks}.jsonl"
+  fi
   local datadir="bench-data/bench-${engine}-${mode}-${workload}"
   local genesis_file="bench-data/bench-${engine}-${mode}-${workload}-genesis.json"
 
@@ -222,12 +244,17 @@ run_test() {
       "${BENCH_BIN}" run exec \
         --engine-rpc "http://127.0.0.1:${AUTH_PORT}" \
         --jwt-secret "${JWT_SECRET}" \
+        --http-rpc "http://127.0.0.1:${HTTP_PORT}" \
         --workload "${workload}" \
         --txs-per-block "${txs}" \
         --blocks "${blocks}" \
         --output "${output_file}" \
         --engine-name "${engine}" \
-        --chain-id "${CHAIN_ID}" || rc=$?
+        --chain-id "${CHAIN_ID}" \
+        --submit-batch-size "${SUBMIT_BATCH_SIZE}" \
+        --submit-concurrency "${SUBMIT_CONCURRENCY}" \
+        --pool-poll-batch-size "${POOL_POLL_BATCH_SIZE}" \
+        --pool-poll-interval-ms "${POOL_POLL_INTERVAL_MS}" || rc=$?
       ;;
     e2e)
       "${BENCH_BIN}" run e2e \
@@ -240,7 +267,11 @@ run_test() {
         --senders "${senders}" \
         --output "${output_file}" \
         --engine-name "${engine}" \
-        --chain-id "${CHAIN_ID}" || rc=$?
+        --chain-id "${CHAIN_ID}" \
+        --submit-batch-size "${SUBMIT_BATCH_SIZE}" \
+        --submit-concurrency "${SUBMIT_CONCURRENCY}" \
+        --pool-poll-batch-size "${POOL_POLL_BATCH_SIZE}" \
+        --pool-poll-interval-ms "${POOL_POLL_INTERVAL_MS}" || rc=$?
       ;;
     sustained)
       "${BENCH_BIN}" run sustained \
@@ -254,7 +285,32 @@ run_test() {
         --senders "${senders}" \
         --output "${output_file}" \
         --engine-name "${engine}" \
-        --chain-id "${CHAIN_ID}" || rc=$?
+        --chain-id "${CHAIN_ID}" \
+        --submit-batch-size "${SUBMIT_BATCH_SIZE}" \
+        --submit-concurrency "${SUBMIT_CONCURRENCY}" \
+        --pool-poll-batch-size "${POOL_POLL_BATCH_SIZE}" \
+        --pool-poll-interval-ms "${POOL_POLL_INTERVAL_MS}" || rc=$?
+      ;;
+    openloop)
+      local openloop_submit_rpc_args=()
+      if [[ -n "${OPEN_LOOP_SUBMIT_HTTP_RPCS}" ]]; then
+        openloop_submit_rpc_args+=(--submit-http-rpc "${OPEN_LOOP_SUBMIT_HTTP_RPCS}")
+      fi
+      "${BENCH_BIN}" run openloop \
+        --engine-rpc "http://127.0.0.1:${AUTH_PORT}" \
+        --jwt-secret "${JWT_SECRET}" \
+        --http-rpc "http://127.0.0.1:${HTTP_PORT}" \
+        --workload "${workload}" \
+        --target-tps "${OPEN_LOOP_TARGET_TPS}" \
+        --duration-secs "${OPEN_LOOP_DURATION_SECS}" \
+        --senders "${senders}" \
+        --output "${output_file}" \
+        --engine-name "${engine}" \
+        --chain-id "${CHAIN_ID}" \
+        --submit-batch-size "${SUBMIT_BATCH_SIZE}" \
+        --submit-concurrency "${SUBMIT_CONCURRENCY}" \
+        --submit-buffer-ticks "${OPEN_LOOP_SUBMIT_BUFFER_TICKS}" \
+        "${openloop_submit_rpc_args[@]}" || rc=$?
       ;;
     *)
       echo "ERROR: unknown mode '${mode}'"
@@ -316,11 +372,16 @@ run_sweep() {
   "${BENCH_BIN}" sweep \
     --engine-rpc "http://127.0.0.1:${AUTH_PORT}" \
     --jwt-secret "${JWT_SECRET}" \
+    --http-rpc "http://127.0.0.1:${HTTP_PORT}" \
     --workload "${workload}" \
-    --blocks-per-step 30 \
+    --blocks-per-step "${SWEEP_BLOCKS_PER_STEP}" \
     --output-dir "${sweep_dir}" \
     --engine-name "${engine}" \
-    --chain-id "${CHAIN_ID}" || rc=$?
+    --chain-id "${CHAIN_ID}" \
+    --submit-batch-size "${SUBMIT_BATCH_SIZE}" \
+    --submit-concurrency "${SUBMIT_CONCURRENCY}" \
+    --pool-poll-batch-size "${POOL_POLL_BATCH_SIZE}" \
+    --pool-poll-interval-ms "${POOL_POLL_INTERVAL_MS}" || rc=$?
 
   stop_node
   sleep 2
@@ -367,6 +428,24 @@ echo "  GETH_BIN:         ${GETH_BIN}"
 echo "  BENCH_BIN:        ${BENCH_BIN}"
 echo "  CHAIN_ID:         ${CHAIN_ID}"
 echo "  FORCE:            ${FORCE}"
+echo "  SUBMIT_BATCH:     ${SUBMIT_BATCH_SIZE}"
+echo "  SUBMIT_CONC:      ${SUBMIT_CONCURRENCY}"
+echo "  POLL_BATCH:       ${POOL_POLL_BATCH_SIZE}"
+echo "  POLL_INTERVAL_MS: ${POOL_POLL_INTERVAL_MS}"
+echo "  RETH_VAL_TASKS:   ${RETH_TXPOOL_VALIDATION_TASKS}"
+echo "  RETH_MAX_BATCH:   ${RETH_TXPOOL_MAX_BATCH_SIZE}"
+echo "  SWEEP_BLOCKS:     ${SWEEP_BLOCKS_PER_STEP}"
+echo "  EXEC_BLOCKS:      ${EXEC_BLOCKS}"
+echo "  E2E_BLOCKS:       ${E2E_BLOCKS}"
+echo "  SUSTAINED_BLOCKS: ${SUSTAINED_BLOCKS}"
+echo "  DEGRADE_WARMUP:   ${DEGRADE_WARMUP_BLOCKS}"
+echo "  DEGRADE_BLOCKS:   ${DEGRADE_BLOCKS}"
+echo "  RUN_OPEN_LOOP:    ${RUN_OPEN_LOOP}"
+echo "  OPEN_LOOP_SENDERS:${OPEN_LOOP_SENDERS}"
+echo "  OPEN_LOOP_TPS:    ${OPEN_LOOP_TARGET_TPS}"
+echo "  OPEN_LOOP_SECS:   ${OPEN_LOOP_DURATION_SECS}"
+echo "  OPEN_LOOP_BUFFER: ${OPEN_LOOP_SUBMIT_BUFFER_TICKS}"
+echo "  OPEN_LOOP_RPCS:   ${OPEN_LOOP_SUBMIT_HTTP_RPCS:-<default http_rpc>}"
 echo ""
 
 # ─── Prerequisites ───────────────────────────────────────────────────────────
@@ -429,22 +508,37 @@ for engine in ${ENGINES}; do
     inflection="$(get_inflection_txs "${engine}" "${workload}")"
     echo "  ${engine}/${workload}: inflection_txs=${inflection}"
 
-    # Mode A: exec — senders=1, txs=inflection, blocks=50
-    run_test "${engine}" "exec" "${workload}" 1 "${inflection}" 50 0
+    # Mode A: exec — senders=1, txs=inflection, blocks=${EXEC_BLOCKS}
+    run_test "${engine}" "exec" "${workload}" 1 "${inflection}" "${EXEC_BLOCKS}" 0
 
-    # Mode B: e2e — senders=1,100,1000, txs=inflection*0.8, blocks=200
+    # Mode B: e2e — senders=1,100,1000, txs=inflection*0.8, blocks=${E2E_BLOCKS}
     e2e_txs=$(( inflection * 8 / 10 ))
     for senders in 1 100 1000; do
-      run_test "${engine}" "e2e" "${workload}" "${senders}" "${e2e_txs}" 200 0
+      run_test "${engine}" "e2e" "${workload}" "${senders}" "${e2e_txs}" "${E2E_BLOCKS}" 0
     done
 
-    # Mode C: sustained — senders=1,100, txs=inflection*0.5, blocks=1000, warmup=0
+    # Mode C: sustained — senders=1,100, txs=inflection*0.5, blocks=${SUSTAINED_BLOCKS}, warmup=0
     sustained_txs=$(( inflection * 5 / 10 ))
     for senders in 1 100; do
-      run_test "${engine}" "sustained" "${workload}" "${senders}" "${sustained_txs}" 1000 0
+      run_test "${engine}" "sustained" "${workload}" "${senders}" "${sustained_txs}" "${SUSTAINED_BLOCKS}" 0
     done
   done
 done
+
+# ─── Phase 2.5: Open Loop ──────────────────────────────────────────────────
+
+if [[ "${RUN_OPEN_LOOP}" == "1" ]]; then
+  echo ""
+  echo "╔══════════════════════════════════════════════════════════╗"
+  echo "║  Phase 2.5: Open Loop                                   ║"
+  echo "╚══════════════════════════════════════════════════════════╝"
+
+  for engine in ${ENGINES}; do
+    for workload in ${WORKLOADS}; do
+      run_test "${engine}" "openloop" "${workload}" "${OPEN_LOOP_SENDERS}" "${OPEN_LOOP_TARGET_TPS}" "${OPEN_LOOP_DURATION_SECS}" 0
+    done
+  done
+fi
 
 # ─── Phase 3: State Degradation ─────────────────────────────────────────────
 
@@ -458,8 +552,8 @@ for engine in ${ENGINES}; do
     inflection="$(get_inflection_txs "${engine}" "${workload}")"
     sustained_txs=$(( inflection * 5 / 10 ))
 
-    # Mode C: sustained — senders=100, txs=inflection*0.5, blocks=1000, warmup=500
-    run_test "${engine}" "sustained" "${workload}" 100 "${sustained_txs}" 1000 500
+    # Mode C: sustained — senders=100, txs=inflection*0.5, blocks=${DEGRADE_BLOCKS}, warmup=${DEGRADE_WARMUP_BLOCKS}
+    run_test "${engine}" "sustained" "${workload}" 100 "${sustained_txs}" "${DEGRADE_BLOCKS}" "${DEGRADE_WARMUP_BLOCKS}"
   done
 done
 
