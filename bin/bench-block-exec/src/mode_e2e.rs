@@ -60,65 +60,77 @@ fn hex_encode(data: &[u8]) -> String {
 // Txpool helpers
 // ---------------------------------------------------------------------------
 
-/// Send raw transactions to the txpool via batched JSON-RPC.
+/// Send raw transactions to the txpool via concurrent individual JSON-RPC calls.
 ///
-/// Splits `txs` into chunks of 500 and sends them concurrently with a
-/// concurrency limit controlled by a semaphore. Returns elapsed time in
-/// milliseconds.
+/// Each transaction is sent as its own HTTP POST request with high concurrency,
+/// matching Tempo's approach. This maximizes reth's validation worker parallelism
+/// since each individual `eth_sendRawTransaction` becomes an independent validation
+/// job that can be processed by a separate worker.
+///
+/// Pre-encodes all request bodies before timing starts to isolate HTTP throughput.
 pub async fn submit_to_txpool(
     http_rpc: &str,
     txs: &[Bytes],
-    concurrency: usize,
+    _concurrency: usize,
 ) -> eyre::Result<f64> {
-    let client = reqwest::Client::new();
-    // Use many small batches with high concurrency to maximize validation
-    // parallelism. reth's validation workers compete for jobs from a shared
-    // channel — more concurrent HTTP requests = more parallel validation.
-    let effective_concurrency = std::cmp::max(concurrency, 32);
-    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(effective_concurrency));
+    // Small JSON-RPC batches (20 txs each) with high concurrency (128).
+    // This balances TCP overhead (fewer connections than individual sends)
+    // with validation parallelism (each small batch → one validation job
+    // for one worker; many batches → many workers active in parallel).
+    let chunk_size = 20;
+    let concurrency = 128;
+
+    // Pre-encode all batch request bodies.
+    let bodies: Vec<Vec<u8>> = txs
+        .chunks(chunk_size)
+        .enumerate()
+        .map(|(ci, chunk)| {
+            let batch: Vec<serde_json::Value> = chunk
+                .iter()
+                .enumerate()
+                .map(|(i, tx)| {
+                    let tx_hex = format!("0x{}", hex_encode(tx));
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": "eth_sendRawTransaction",
+                        "params": [tx_hex],
+                        "id": ci * chunk_size + i + 1
+                    })
+                })
+                .collect();
+            serde_json::to_vec(&batch).expect("json serialization")
+        })
+        .collect();
+
+    let client = reqwest::Client::builder()
+        .pool_max_idle_per_host(200)
+        .build()?;
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency));
     let start = Instant::now();
 
-    let chunk_size = 100;
-    let mut handles = Vec::new();
+    let mut handles = Vec::with_capacity(bodies.len());
 
-    for (chunk_idx, chunk) in txs.chunks(chunk_size).enumerate() {
+    for body in bodies {
         let sem = semaphore.clone();
         let client = client.clone();
         let url = http_rpc.to_string();
 
-        let batch: Vec<serde_json::Value> = chunk
-            .iter()
-            .enumerate()
-            .map(|(i, tx)| {
-                let tx_hex = format!("0x{}", hex_encode(tx));
-                serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "method": "eth_sendRawTransaction",
-                    "params": [tx_hex],
-                    "id": chunk_idx * chunk_size + i + 1
-                })
-            })
-            .collect();
-
-        let handle = tokio::spawn(async move {
-            let _permit = sem
-                .acquire()
-                .await
-                .map_err(|e| eyre::eyre!("semaphore error: {e}"))?;
+        handles.push(tokio::spawn(async move {
+            let _permit = sem.acquire().await.map_err(|e| eyre::eyre!("{e}"))?;
 
             let resp = client
                 .post(&url)
-                .json(&batch)
+                .header("Content-Type", "application/json")
+                .body(body)
                 .send()
                 .await
-                .map_err(|e| eyre::eyre!("batch send failed: {e}"))?;
+                .map_err(|e| eyre::eyre!("send failed: {e}"))?;
 
             let results: Vec<serde_json::Value> = resp
                 .json()
                 .await
-                .map_err(|e| eyre::eyre!("batch response parse failed: {e}"))?;
+                .map_err(|e| eyre::eyre!("parse failed: {e}"))?;
 
-            // Check for errors in the batch response.
             for result in &results {
                 if let Some(err) = result.get("error") {
                     return Err(eyre::eyre!("eth_sendRawTransaction error: {}", err));
@@ -126,17 +138,14 @@ pub async fn submit_to_txpool(
             }
 
             Ok::<(), eyre::Report>(())
-        });
-
-        handles.push(handle);
+        }));
     }
 
     for handle in handles {
-        handle.await.map_err(|e| eyre::eyre!("join error: {e}"))??;
+        handle.await.map_err(|e| eyre::eyre!("join: {e}"))??;
     }
 
-    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-    Ok(elapsed_ms)
+    Ok(start.elapsed().as_secs_f64() * 1000.0)
 }
 
 /// Wait until each sender's pending nonce reaches its expected value.

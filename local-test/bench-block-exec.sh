@@ -81,12 +81,18 @@ start_reth() {
     --engine.persistence-threshold 2
     --engine.memory-block-buffer-target 2
     --morph.max-tx-payload-bytes 1073741824
-    --txpool.pending-max-count 100000
-    --txpool.basefee-max-count 100000
-    --txpool.queued-max-count 100000
-    --txpool.max-account-slots 150000
+    --txpool.pending-max-count 1000000
+    --txpool.pending-max-size 4096
+    --txpool.basefee-max-count 1000000
+    --txpool.basefee-max-size 4096
+    --txpool.queued-max-count 1000000
+    --txpool.queued-max-size 4096
+    --txpool.max-account-slots 1000000
     --txpool.additional-validation-tasks 8
     --txpool.disable-transactions-backup
+    --rpc.max-request-size 1024
+    --rpc.max-response-size 1024
+    --rpc.max-connections 1000
   )
 
   pm2 start "${RETH_BIN}" --name "bench-node" -- "${args[@]}"
