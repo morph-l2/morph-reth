@@ -201,11 +201,14 @@ where
         fork_timestamps.dedup();
 
         let latest_ts = latest.timestamp();
+        // If no timestamp fork is active yet (e.g. we're still in the block-based fork era,
+        // like early Bernoulli/Curie blocks), use the current block's timestamp so that
+        // the fork config reflects the current chain state (pre-Morph203, useZktrie=true).
         let current_fork_timestamp = fork_timestamps
             .iter()
             .copied()
             .rfind(|&ts| ts <= latest_ts)
-            .ok_or_else(|| RethError::msg("no active timestamp fork found"))?;
+            .unwrap_or(latest_ts);
         let next_fork_timestamp = fork_timestamps.iter().copied().find(|&ts| ts > latest_ts);
 
         let current = self.build_fork_config_at(current_fork_timestamp, current_precompiles);
