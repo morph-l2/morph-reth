@@ -10,10 +10,13 @@ JWT_SECRET="./local-test/jwt-secret.txt"
 GENESIS="/tmp/bench-genesis-erc20-2k.json"
 RESULTS_DIR="/tmp/bench-results/comparison"
 
-TARGET_TPS=500000   # High enough to saturate both engines
+TARGET_TPS=200000   # High enough to saturate both engines
 DURATION=60         # Seconds
 SENDERS=2000
 RUNS=3
+# geth can't handle 256 concurrent HTTP connections; use conservative settings
+SUBMIT_CONCURRENCY=32
+SUBMIT_BATCH_SIZE=500
 
 mkdir -p "$RESULTS_DIR"
 
@@ -72,8 +75,8 @@ run_bench() {
         --output "$output" \
         --engine-name "$engine" \
         --chain-id 99999 \
-        --submit-batch-size 2048 \
-        --submit-concurrency 256 \
+        --submit-batch-size "$SUBMIT_BATCH_SIZE" \
+        --submit-concurrency "$SUBMIT_CONCURRENCY" \
         --submit-buffer-ticks 64 \
         --submit-tick-ms 50 \
         --producer-idle-ms 5 \

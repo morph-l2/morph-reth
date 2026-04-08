@@ -24,8 +24,9 @@ pub const BENCH_SWAP_ADDR: Address = Address::new([
     0x00, 0x00, 0x00, 0x02,
 ]);
 
-/// Max fee per gas used for all benchmark transactions (1M wei = 0.001 gwei).
-pub const BENCH_MAX_FEE_PER_GAS: u128 = 1_000_000;
+/// Max fee per gas used for all benchmark transactions (1 gwei).
+/// Must exceed the chain's baseFeePerGas for geth compatibility.
+pub const BENCH_MAX_FEE_PER_GAS: u128 = 1_000_000_000;
 const PARALLEL_SIGN_THRESHOLD: usize = 64;
 
 // ---------------------------------------------------------------------------
@@ -478,6 +479,6 @@ mod tests {
                 .parse::<Address>()
                 .unwrap()
         );
-        assert_eq!(BENCH_MAX_FEE_PER_GAS, 1_000_000);
+        assert_eq!(BENCH_MAX_FEE_PER_GAS, 1_000_000_000);
     }
 }
