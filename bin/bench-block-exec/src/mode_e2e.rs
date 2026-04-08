@@ -8,6 +8,7 @@ use crate::engine::{AssembleL2BlockParams, BlockTimingV2, EngineClient};
 use crate::tx_factory::{self, BenchSender, Workload};
 
 use alloy_primitives::{Bytes, hex};
+use rayon::prelude::*;
 use std::{cmp, io::Write, time::Instant};
 
 pub(crate) const DEFAULT_SUBMIT_BATCH_SIZE: usize = 64;
@@ -95,8 +96,9 @@ pub struct E2eArgs {
 }
 
 pub(crate) fn build_submit_bodies(txs: &[Bytes], batch_size: usize) -> Vec<Vec<u8>> {
-    txs.chunks(batch_size)
-        .enumerate()
+    let chunks: Vec<(usize, &[Bytes])> = txs.chunks(batch_size).enumerate().collect();
+    chunks
+        .par_iter()
         .map(|(ci, chunk)| {
             let mut body = Vec::with_capacity(chunk.len() * 256);
             body.push(b'[');
@@ -259,7 +261,10 @@ pub(crate) async fn submit_prebuilt_bodies_with_target_cursor(
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire().await.map_err(|e| eyre::eyre!("{e}"))?;
 
-            let resp = client
+            // Fire-and-forget: send the request, check HTTP status, but skip
+            // reading/parsing the response body. The pool_wait phase will
+            // confirm all txs landed via nonce polling.
+            client
                 .post(&url)
                 .header("Content-Type", "application/json")
                 .body(body)
@@ -268,12 +273,6 @@ pub(crate) async fn submit_prebuilt_bodies_with_target_cursor(
                 .map_err(|e| eyre::eyre!("send failed: {e}"))?
                 .error_for_status()
                 .map_err(|e| eyre::eyre!("http error: {e}"))?;
-
-            let body = resp
-                .bytes()
-                .await
-                .map_err(|e| eyre::eyre!("read failed: {e}"))?;
-            ensure_submit_batch_success(body.as_ref())?;
 
             Ok::<(), eyre::Report>(())
         }));
