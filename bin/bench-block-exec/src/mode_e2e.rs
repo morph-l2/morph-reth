@@ -22,7 +22,7 @@ pub(crate) struct SubmitOptions {
 }
 
 impl SubmitOptions {
-    fn sanitized(self) -> Self {
+    pub(crate) fn sanitized(self) -> Self {
         Self {
             batch_size: self.batch_size.max(1),
             concurrency: self.concurrency.max(1),
@@ -37,7 +37,7 @@ pub(crate) struct PoolWaitOptions {
 }
 
 impl PoolWaitOptions {
-    fn sanitized(self) -> Self {
+    pub(crate) fn sanitized(self) -> Self {
         Self {
             batch_size: self.batch_size.max(1),
             poll_interval_ms: self.poll_interval_ms.max(1),
@@ -137,7 +137,7 @@ pub(crate) fn build_http_client(pool_max_idle_per_host: usize) -> eyre::Result<r
         .map_err(Into::into)
 }
 
-fn ensure_submit_batch_success(body: &[u8]) -> eyre::Result<()> {
+pub(crate) fn ensure_submit_batch_success(body: &[u8]) -> eyre::Result<()> {
     if !body
         .windows(br#""error""#.len())
         .any(|w| w == br#""error""#)

@@ -7,7 +7,8 @@
 use crate::engine::{AssembleL2BlockParams, BlockTimingV2, EngineClient};
 use crate::mode_e2e::{
     DEFAULT_SUBMIT_BATCH_SIZE, DEFAULT_SUBMIT_CONCURRENCY, SubmitOptions, build_http_client,
-    build_submit_bodies, submit_prebuilt_bodies_with_target_cursor,
+    build_submit_bodies, ensure_submit_batch_success,
+    submit_prebuilt_bodies_with_target_cursor,
 };
 use crate::tx_factory::{self, BenchSender, Workload};
 
@@ -115,31 +116,59 @@ pub async fn run(args: OpenLoopArgs) -> eyre::Result<()> {
     let submitted_txs = Arc::new(AtomicU64::new(0));
     let submit_targets = resolve_submit_targets(&args.http_rpc, &args.submit_http_rpcs);
     let tick_plan = build_tick_plan(args.target_tps, args.duration_secs, args.submit_tick_ms);
-    let tick_txs = spawn_tick_tx_generator(
-        tx_factory::generate_senders(args.senders as usize),
-        workload,
-        tick_plan,
-        args.chain_id,
-        args.submit_buffer_ticks,
-        Arc::clone(&abort),
-    );
-    let tick_batches = spawn_tick_submit_batch_serializer(
-        tick_txs,
-        args.submit_batch_size,
-        args.submit_buffer_ticks,
-        Arc::clone(&abort),
-    );
-    let mut out_file = std::fs::File::create(&args.output)?;
+    let total_txs: u64 = tick_plan.iter().sum();
+    let num_ticks = tick_plan.len();
 
+    // ── Pre-generate ALL transactions and serialize to JSON-RPC bodies ──
+    // This moves ECDSA signing out of the hot submit loop so the submit
+    // cadence is limited only by HTTP throughput, not by signing speed.
     println!(
-        "Mode D (openloop): target={} TPS, duration={}s, {} senders, {} workload, {} submit target(s), buffer={} ticks",
-        args.target_tps,
-        args.duration_secs,
-        args.senders,
-        workload,
-        submit_targets.len(),
-        args.submit_buffer_ticks
+        "Mode D (openloop): target={} TPS, duration={}s, {} senders, {} workload, {} submit target(s)",
+        args.target_tps, args.duration_secs, args.senders, workload, submit_targets.len(),
     );
+    println!("  Pre-generating {total_txs} txs across {num_ticks} ticks...");
+
+    let batch_size = args.submit_batch_size;
+    let senders_count = args.senders as usize;
+    let chain_id = args.chain_id;
+    let pregen_start = Instant::now();
+
+    let prebuilt_ticks: Vec<PrebuiltSubmitBatch> = tokio::task::spawn_blocking(move || {
+        let mut senders = tx_factory::generate_senders(senders_count);
+        let mut next_sender_idx = 0usize;
+        let mut ticks = Vec::with_capacity(num_ticks);
+
+        for total in tick_plan {
+            let txs = build_tick_txs(&mut senders, workload, total, chain_id, &mut next_sender_idx)
+                .expect("tx generation should not fail");
+            let bodies = build_submit_bodies(&txs, batch_size);
+            ticks.push(PrebuiltSubmitBatch {
+                tx_count: txs.len() as u64,
+                bodies,
+            });
+        }
+        ticks
+    })
+    .await
+    .map_err(|e| eyre::eyre!("pre-generation failed: {e}"))?;
+
+    let pregen_ms = pregen_start.elapsed().as_secs_f64() * 1000.0;
+    println!(
+        "  Pre-generated {total_txs} txs in {pregen_ms:.0}ms ({:.0} txs/s)",
+        total_txs as f64 / (pregen_ms / 1000.0)
+    );
+
+    // Feed pre-built ticks into a channel for the submit loop.
+    let (tick_tx, tick_batches) = mpsc::channel(args.submit_buffer_ticks.max(1));
+    tokio::spawn(async move {
+        for batch in prebuilt_ticks {
+            if tick_tx.send(Ok(batch)).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut out_file = std::fs::File::create(&args.output)?;
     let pool_client = build_http_client(1)?;
 
     let submit_future = drive_submit_loop(
@@ -193,6 +222,9 @@ pub async fn run(args: OpenLoopArgs) -> eyre::Result<()> {
     Ok(())
 }
 
+/// Fire-and-forget submit: each tick spawns HTTP sends without waiting for
+/// responses, so the next tick's batch can start sending immediately.  A
+/// background `JoinSet` collects errors; the first fatal error aborts.
 async fn drive_submit_loop(
     mut tick_batches: mpsc::Receiver<eyre::Result<PrebuiltSubmitBatch>>,
     duration_secs: u64,
@@ -209,16 +241,23 @@ async fn drive_submit_loop(
     let mut next_tick = tokio::time::Instant::now();
     let mut next_target_idx = 0usize;
     let mut summary = SubmitSummary::default();
+    let options = submit_options.sanitized();
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(options.concurrency));
+    let mut inflight: tokio::task::JoinSet<eyre::Result<()>> = tokio::task::JoinSet::new();
 
-    let result = async {
+    let result: eyre::Result<SubmitSummary> = async {
         loop {
             if abort.load(Ordering::SeqCst) {
                 break;
             }
 
-            let now = tokio::time::Instant::now();
-            if now >= deadline {
+            if tokio::time::Instant::now() >= deadline {
                 break;
+            }
+
+            // Drain completed inflight tasks, propagate first error.
+            while let Some(result) = inflight.try_join_next() {
+                result.map_err(|e| eyre::eyre!("join: {e}"))??;
             }
 
             let batch = match tick_batches.recv().await {
@@ -227,14 +266,35 @@ async fn drive_submit_loop(
             };
 
             if batch.tx_count > 0 {
-                submit_prebuilt_bodies_with_target_cursor(
-                    &http_client,
-                    &submit_targets,
-                    batch.bodies,
-                    submit_options,
-                    &mut next_target_idx,
-                )
-                .await?;
+                // Fire-and-forget: spawn all HTTP sends for this tick without awaiting.
+                let target_count = submit_targets.len();
+                let body_count = batch.bodies.len();
+                for (offset, body) in batch.bodies.into_iter().enumerate() {
+                    let sem = semaphore.clone();
+                    let client = http_client.clone();
+                    let url = submit_targets[(next_target_idx + offset) % target_count].clone();
+
+                    inflight.spawn(async move {
+                        let _permit = sem.acquire().await.map_err(|e| eyre::eyre!("{e}"))?;
+                        let resp = client
+                            .post(&url)
+                            .header("Content-Type", "application/json")
+                            .body(body)
+                            .send()
+                            .await
+                            .map_err(|e| eyre::eyre!("send failed: {e}"))?
+                            .error_for_status()
+                            .map_err(|e| eyre::eyre!("http error: {e}"))?;
+                        let body = resp
+                            .bytes()
+                            .await
+                            .map_err(|e| eyre::eyre!("read failed: {e}"))?;
+                        ensure_submit_batch_success(body.as_ref())?;
+                        Ok(())
+                    });
+                }
+                next_target_idx = (next_target_idx + body_count.max(1)) % target_count.max(1);
+
                 summary.submitted_txs += batch.tx_count;
                 summary.submit_calls += 1;
                 submitted_txs.store(summary.submitted_txs, Ordering::SeqCst);
@@ -247,7 +307,12 @@ async fn drive_submit_loop(
             }
         }
 
-        Ok::<_, eyre::Report>(summary)
+        // Wait for all inflight requests to finish.
+        while let Some(result) = inflight.join_next().await {
+            result.map_err(|e| eyre::eyre!("join: {e}"))??;
+        }
+
+        Ok(summary)
     }
     .await;
 
@@ -458,22 +523,37 @@ fn spawn_tick_tx_generator(
 
     tokio::task::spawn_blocking(move || {
         let mut next_sender_idx = 0usize;
-        for total_txs in tick_plan {
+        let mut slow_ticks = 0u64;
+        for (tick_idx, total_txs) in tick_plan.iter().enumerate() {
             if abort.load(Ordering::SeqCst) {
                 break;
             }
 
+            let start = Instant::now();
             let batch = build_tick_txs(
                 &mut senders,
                 workload,
-                total_txs,
+                *total_txs,
                 chain_id,
                 &mut next_sender_idx,
             );
+            let gen_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+            if gen_ms > 20.0 {
+                slow_ticks += 1;
+                if slow_ticks <= 5 || slow_ticks % 50 == 0 {
+                    eprintln!(
+                        "  [tx-gen] tick {tick_idx}: {total_txs} txs took {gen_ms:.1}ms (slow #{slow_ticks})"
+                    );
+                }
+            }
 
             if tx.blocking_send(batch).is_err() {
                 break;
             }
+        }
+        if slow_ticks > 0 {
+            eprintln!("  [tx-gen] total slow ticks (>20ms): {slow_ticks}");
         }
     });
 
