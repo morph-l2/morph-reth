@@ -79,5 +79,4 @@ unknown-registry = "warn"
 unknown-git = "deny"
 allow-git = [
     "https://github.com/morph-l2/reth",
-    "https://github.com/rustyhorde/vergen",
 ]
