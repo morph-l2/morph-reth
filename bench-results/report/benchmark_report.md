@@ -1,6 +1,6 @@
 # morph-reth vs morph-geth Execution Benchmark Report
 
-**Generated**: 2026-04-09 18:11
+**Generated**: 2026-04-09 18:20
 
 ## 1. Test Environment
 
@@ -77,7 +77,7 @@ Measures only `assembleL2Block` + `newL2Block` time. Transaction submission is e
 
 | Engine | Workload | Median TPS | P95 TPS | Peak TPS | Mgas/s | Stddev |
 |--------|----------|-----------|---------|----------|--------|--------|
-| geth | erc20-transfer | 18,370 | 22,535 | 23,778 | 627 | ±3,095 |
+| geth | erc20-transfer | 16,995 | 22,423 | 23,778 | 583 | ±728 |
 | geth | eth-transfer | 26,911 | 30,745 | 35,301 | 554 | ±422 |
 | reth | erc20-transfer | 68,806 | 87,613 | 105,957 | 2,352 | ±2,122 |
 | reth | eth-transfer | 73,110 | 81,495 | 140,596 | 1,493 | ±4,552 |
@@ -91,7 +91,7 @@ Measures only `assembleL2Block` + `newL2Block` time. Transaction submission is e
 | Mode | Workload | reth TPS | geth TPS | reth/geth |
 |------|----------|---------|---------|-----------|
 | Openloop | eth-transfer | 73,110 | 26,911 | **2.7x** |
-| Openloop | erc20-transfer | 68,806 | 18,370 | **3.7x** |
+| Openloop | erc20-transfer | 68,806 | 16,995 | **4.0x** |
 
 ### Key Findings
 

@@ -187,15 +187,15 @@ def plot_sustained(data):
                 alpha=0.15, color=COLORS[engine]
             )
 
-            # Cumulative throughput
-            cumulative_txs = []
-            txs_sum = 0
+            # Cumulative wall-clock time (shows how fast each engine processes the same workload)
+            cumulative_time = []
+            time_sum = 0
             for run in runs[:1]:  # First run
                 for b in run:
-                    txs_sum += b["tx_count"]
-                    cumulative_txs.append(txs_sum)
-            if cumulative_txs:
-                ax2.plot(range(len(cumulative_txs)), [t / 1e6 for t in cumulative_txs],
+                    time_sum += b["total_ms"]
+                    cumulative_time.append(time_sum)
+            if cumulative_time:
+                ax2.plot(range(len(cumulative_time)), [t / 1000 for t in cumulative_time],
                          label=engine, color=COLORS[engine], linewidth=2)
 
         ax1.set_xlabel("Block Index")
@@ -206,8 +206,8 @@ def plot_sustained(data):
         ax1.get_yaxis().set_major_formatter(ticker.FuncFormatter(lambda x, _: f"{x:,.0f}"))
 
         ax2.set_xlabel("Block Index")
-        ax2.set_ylabel("Cumulative Txs (millions)")
-        ax2.set_title("Cumulative Throughput")
+        ax2.set_ylabel("Cumulative Time (seconds)")
+        ax2.set_title("Time to Process 100 Blocks × 50k txs")
         ax2.legend()
         ax2.grid(True, alpha=0.3)
 
@@ -307,7 +307,7 @@ def plot_openloop(data):
             colors.append(COLORS[engine])
 
         if box_data:
-            bp = ax.boxplot(box_data, labels=labels, patch_artist=True, showfliers=False)
+            bp = ax.boxplot(box_data, tick_labels=labels, patch_artist=True, showfliers=False)
             for patch, color in zip(bp["boxes"], colors):
                 patch.set_facecolor(color)
                 patch.set_alpha(0.7)
@@ -386,8 +386,8 @@ def plot_summary(exec_data, sustained_data, openloop_data):
     bars2 = ax.bar(x + width / 2, geth_vals, width, label="geth", color=COLORS["geth"],
                    edgecolor="black", linewidth=0.5)
 
-    ax.bar_label(bars1, fmt="{:,.0f}", fontsize=8, rotation=45)
-    ax.bar_label(bars2, fmt="{:,.0f}", fontsize=8, rotation=45)
+    ax.bar_label(bars1, fmt="{:,.0f}", fontsize=9, fontweight="bold", padding=3)
+    ax.bar_label(bars2, fmt="{:,.0f}", fontsize=9, fontweight="bold", padding=3)
 
     ax.set_ylabel("TPS")
     ax.set_xticks(x)
