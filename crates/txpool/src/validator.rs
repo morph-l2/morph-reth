@@ -246,6 +246,22 @@ where
         origin: TransactionOrigin,
         transaction: Tx,
     ) -> TransactionValidationOutcome<Tx> {
+        self.validate_one_with_state(origin, transaction, &mut None)
+    }
+
+    /// Validates a single transaction, reusing an optional state provider.
+    ///
+    /// When `state` is `None`, a fresh provider is fetched from the database on
+    /// first use and stored back into `state` for reuse by subsequent calls.
+    /// This avoids creating a new [`StateProvider`] for every transaction in a
+    /// batch, which is the main source of txpool validation slowdown as the
+    /// state trie grows.
+    pub fn validate_one_with_state(
+        &self,
+        origin: TransactionOrigin,
+        transaction: Tx,
+        state: &mut Option<Box<dyn reth_storage_api::AccountInfoReader + Send>>,
+    ) -> TransactionValidationOutcome<Tx> {
         // Reject EIP-4844 blob transactions - not supported on L2
         if transaction.is_eip4844() {
             return TransactionValidationOutcome::Invalid(
@@ -290,7 +306,9 @@ where
             );
         }
 
-        let outcome = self.inner.validate_one(origin, transaction);
+        let outcome = self
+            .inner
+            .validate_one_with_state(origin, transaction, state);
         if outcome.is_invalid() || outcome.is_error() {
             tracing::trace!(target: "morph::txpool", ?outcome, "tx pool validation failed");
             return outcome;
@@ -435,7 +453,7 @@ where
         Ok(result)
     }
 
-    /// Validates all given transactions.
+    /// Validates all given transactions, reusing a single state provider across the batch.
     ///
     /// Returns all outcomes for the given transactions in the same order.
     ///
@@ -444,9 +462,10 @@ where
         &self,
         transactions: Vec<(TransactionOrigin, Tx)>,
     ) -> Vec<TransactionValidationOutcome<Tx>> {
+        let mut state = None;
         transactions
             .into_iter()
-            .map(|(origin, tx)| self.validate_one(origin, tx))
+            .map(|(origin, tx)| self.validate_one_with_state(origin, tx, &mut state))
             .collect()
     }
 }
