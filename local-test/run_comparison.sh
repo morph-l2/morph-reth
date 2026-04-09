@@ -48,7 +48,7 @@ start_geth() {
         --datadir /tmp/bench-geth-data --networkid 99999 --nodiscover --maxpeers 0 \
         --http --http.addr 127.0.0.1 --http.port 8545 --http.api "web3,debug,eth,txpool,net" \
         --authrpc.addr 127.0.0.1 --authrpc.port 8551 --authrpc.jwtsecret "$JWT_SECRET" \
-        --gcmode archive \
+        --gcmode archive --cache 8192 \
         --txpool.globalslots 1000000 --txpool.accountslots 1000000 \
         --txpool.globalqueue 1000000 --txpool.accountqueue 1000000 \
         --rpc.txfeecap 0 --rpc.gascap 0 \
