@@ -138,11 +138,10 @@ def analyze_sustained():
         engine = parts[1]
         workload = "-".join(parts[2:-1])
         blocks = load_jsonl(str(f))
-        nonempty = [b for b in blocks if b["tx_count"] > 0 and b.get("warmup_blocks", 0) == 0]
-        # Filter to measurement phase only (phase != warmup)
-        measured = [b for b in nonempty if b.get("phase") != "warmup"]
-        if not measured:
-            measured = nonempty
+        nonempty = [b for b in blocks if b["tx_count"] > 0]
+        # Sustained mode: warmup_blocks field indicates how many warmup blocks were used.
+        # All blocks in the output file are measurement blocks (warmup is excluded by the bench tool).
+        measured = nonempty
 
         data[(engine, workload)].append(measured)
 
