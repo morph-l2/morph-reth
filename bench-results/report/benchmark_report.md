@@ -40,12 +40,12 @@ Morph L2 正在从 morph-geth（Go 实现）向 morph-reth（Rust 实现）迁�
 | 交易类型 | Gas 消耗 | 测试目的 |
 |---------|---------|---------|
 | **ETH Transfer** | 21,000 gas | 最简单的交易，只有余额转移，无 EVM 字节码执行。测试引擎的基础开销（state read/write, trie update）。 |
-| **ERC20 Transfer** | ~60,000 gas | 需要执行 EVM 字节码、读写合约 storage（balanceOf mapping）、发射 event log。代表真实 DeFi 交易的最小复杂度。 |
+| **ERC20 Transfer** | ~34,000 gas | 需要执行 EVM 字节码、读写合约 storage（balanceOf mapping）、发射 event log。代表真实 DeFi 交易的最小复杂度。 |
 
 选择这两种而非 Uniswap swap 等更复杂的交易，是因为：
 - 简单交易能更清晰地分离引擎层面的性能差异，不会被合约逻辑的复杂度掩盖
 - ERC20 transfer 是链上最常见的交易类型（占 L2 交易量的 40-60%）
-- 两者的 gas 消耗比为 1:3，可以观察到从"纯 state 操作"到"EVM 执行 + state 操作"的性能变化
+- 两者的 gas 消耗比为 1:1.6，可以观察到从"纯 state 操作"到"EVM 执行 + state 操作"的性能变化
 
 ---
 
@@ -262,8 +262,8 @@ Openloop 模式是最接近真实 L2 sequencer 运行状态的测试。交易提
 
 #### Openloop 性能对比
 
-| Engine | Workload | Median TPS | P95 TPS | Peak TPS | Mgas/s | Stddev |
-|--------|----------|-----------|---------|----------|--------|--------|
+| Engine | Workload | Median TPS | P95 TPS | Peak TPS | Mgas/s | Run Stddev (n=3) |
+|--------|----------|-----------|---------|----------|--------|-----------------|
 | **reth** | ETH Transfer | **73,110** | 81,495 | 140,596 | 1,493 | ±4,552 |
 | **reth** | ERC20 Transfer | **68,806** | 87,613 | 105,957 | 2,352 | ±2,122 |
 | geth | ETH Transfer | 26,911 | 30,745 | 35,301 | 554 | ±422 |
@@ -356,7 +356,7 @@ geth 的 EVM 执行更慢，ERC20 的额外 EVM 开销（CALL + SLOAD + SSTORE +
 ### 1. 交易生成器 (tx_factory)
 
 要求：
-- 支持多种 workload: ETH transfer (21k gas), ERC20 transfer (60k gas)
+- 支持多种 workload: ETH transfer (21k gas), ERC20 transfer (~34k gas)
 - 预生成大量签名交易（数百万级），使用 ECDSA secp256k1
 - 签名必须并行化（rayon 或类似方案），目标 >200k txs/s
 - 支持多 sender（2000+），round-robin 分配确保 nonce 连续

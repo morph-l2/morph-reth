@@ -55,7 +55,7 @@ impl Workload {
     pub fn gas_per_tx(&self) -> u64 {
         match self {
             Self::EthTransfer => 21_000,
-            Self::Erc20Transfer => 60_000,
+            Self::Erc20Transfer => 34_300,
             Self::UniswapSwap => 150_000,
         }
     }
