@@ -167,24 +167,9 @@ jobs:
           fi
 
           cat <<ENDBODY > release_notes.md
-          ## Testing Checklist (DELETE ME)
-
-          - [ ] Run on testnet for 1-3 days.
-          - [ ] Resync a node from genesis.
-          - [ ] Ensure all CI checks pass.
-
-          ## Release Checklist (DELETE ME)
-
-          - [ ] Ensure version has been bumped in \`Cargo.toml\`.
-          - [ ] Write the summary below.
-          - [ ] Ensure all binaries have been added.
-
           ## Summary
 
-          <!-- Add a summary of the release, including:
-          - Critical bug fixes
-          - New features
-          - Any breaking changes -->
+          <!-- Add a summary of the release, including critical bug fixes, new features, and breaking changes. -->
 
           ## All Changes
 
