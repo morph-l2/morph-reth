@@ -9,7 +9,7 @@ PROFILE          ?= release
 
 define cargo_build_and_upload
 	if [ ! -d $(DIST_DIR) ]; then mkdir -p $(DIST_DIR); fi
-	cargo build --bin $(BINARY) --profile "$(PROFILE)" --target-dir "$(CARGO_TARGET_DIR)"
+	CARGO_NET_GIT_FETCH_WITH_CLI=true cargo build --bin $(BINARY) --profile "$(PROFILE)" --target-dir "$(CARGO_TARGET_DIR)"
 	cp "$(CARGO_TARGET_DIR)/$(PROFILE)/$(BINARY)" "$(DIST_DIR)/"
 	tar -czvf $(TARBALL) $(DIST_DIR)
 	aws s3 cp $(TARBALL) $(1)
