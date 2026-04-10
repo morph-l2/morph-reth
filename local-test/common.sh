@@ -56,11 +56,9 @@ fi
 : "${RETH_LOG_FILE:=./local-test/${MORPH_NETWORK}/reth.log}"
 : "${RETH_HTTP_ADDR:=0.0.0.0}"
 : "${RETH_HTTP_PORT:=8545}"
-: "${RETH_AUTHRPC_ADDR:=127.0.0.1}"
+: "${RETH_AUTHRPC_ADDR:=0.0.0.0}"
 : "${RETH_AUTHRPC_PORT:=8551}"
-: "${RETH_BOOTNODES:=}"
-: "${MORPH_MAX_TX_PAYLOAD_BYTES:=122880}"
-: "${MORPH_MAX_TX_PER_BLOCK:=}"
+: "${RETH_TRUSTED_PEERS:=}"
 
 # ─── Helper functions ─────────────────────────────────────────────────────────
 

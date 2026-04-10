@@ -31,27 +31,18 @@ args=(
   --http
   --http.addr "${RETH_HTTP_ADDR}"
   --http.port "${RETH_HTTP_PORT}"
-  --http.api "web3,debug,eth,txpool,net,trace"
+  --http.api "web3,debug,eth,txpool,net,trace,admin"
   --authrpc.addr "${RETH_AUTHRPC_ADDR}"
   --authrpc.port "${RETH_AUTHRPC_PORT}"
   --authrpc.jwtsecret "${JWT_SECRET}"
   --log.file.directory "$(dirname "${RETH_LOG_FILE}")"
   --log.file.filter info
-  --morph.max-tx-payload-bytes "${MORPH_MAX_TX_PAYLOAD_BYTES}"
-  --nat none
-  --engine.legacy-state-root
-  --engine.persistence-threshold 256
-  --engine.memory-block-buffer-target 16
+  --rpc.eth-proof-window 1209600 
 )
 
-# Add optional max-tx-per-block if configured
-if [[ -n "${MORPH_MAX_TX_PER_BLOCK}" ]]; then
-  args+=(--morph.max-tx-per-block "${MORPH_MAX_TX_PER_BLOCK}")
-fi
-
-# Add bootnodes if configured
-if [[ -n "${RETH_BOOTNODES}" ]]; then
-  args+=(--bootnodes "${RETH_BOOTNODES}")
+# Add trusted peers if configured (persistent TCP connections, like geth static-nodes.json)
+if [[ -n "${RETH_TRUSTED_PEERS}" ]]; then
+  args+=(--trusted-peers "${RETH_TRUSTED_PEERS}")
 fi
 
 # Start morph-reth with pm2

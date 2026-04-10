@@ -408,7 +408,11 @@ impl EthChainSpec for MorphChainSpec {
     }
 
     fn bootnodes(&self) -> Option<Vec<NodeRecord>> {
-        self.inner.bootnodes()
+        match self.inner.chain.id() {
+            crate::MORPH_MAINNET_CHAIN_ID => Some(crate::bootnodes::morph_mainnet_nodes()),
+            crate::MORPH_HOODI_CHAIN_ID => Some(crate::bootnodes::morph_hoodi_nodes()),
+            _ => self.inner.bootnodes(),
+        }
     }
 
     fn final_paris_total_difficulty(&self) -> Option<U256> {

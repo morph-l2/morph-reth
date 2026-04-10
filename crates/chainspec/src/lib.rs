@@ -47,6 +47,7 @@
 // to silence the unused_crate_dependencies warning.
 use alloy_consensus as _;
 
+mod bootnodes;
 pub mod constants;
 pub mod genesis;
 pub mod hardfork;
