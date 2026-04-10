@@ -67,15 +67,16 @@ All defaults can be overridden via environment variables. Common ones:
 | `MORPHNODE_BIN` | `../morph/node/build/bin/morphnode` | Path to morphnode binary |
 | `RETH_HTTP_PORT` | `8545` | HTTP RPC port |
 | `RETH_AUTHRPC_PORT` | `8551` | Engine API auth RPC port |
-| `RETH_BOOTNODES` | *(empty)* | Comma-separated enode URLs |
+| `RETH_TRUSTED_PEERS` | *(empty)* | Comma-separated enode URLs for persistent P2P connections (like geth's `static-nodes.json`) |
 | `MORPH_NODE_L1_RPC` | *(per-network default)* | L1 Ethereum RPC endpoint |
-| `MORPH_MAX_TX_PAYLOAD_BYTES` | `122880` | Max transaction payload size |
 
 Example with overrides:
 
 ```bash
-RETH_HTTP_PORT=9545 RETH_BOOTNODES="enode://abc@1.2.3.4:30303" ./local-test/start-all.sh hoodi
+RETH_HTTP_PORT=9545 RETH_TRUSTED_PEERS="enode://abc@1.2.3.4:30303" ./local-test/start-all.sh hoodi
 ```
+
+> **Note**: Morph bootnodes are hardcoded in the chainspec — no need to pass `--bootnodes` manually.
 
 ## Monitoring
 
