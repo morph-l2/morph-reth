@@ -10,11 +10,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     let build_builder = BuildBuilder::default().build_timestamp(true).build()?;
     emitter.add_instructions(&build_builder)?;
 
-    let cargo_builder = CargoBuilder::default().features(true).target_triple(true).build()?;
+    let cargo_builder = CargoBuilder::default()
+        .features(true)
+        .target_triple(true)
+        .build()?;
     emitter.add_instructions(&cargo_builder)?;
 
-    let git_builder =
-        Git2Builder::default().describe(false, true, None).dirty(true).sha(false).build()?;
+    let git_builder = Git2Builder::default()
+        .describe(false, true, None)
+        .dirty(true)
+        .sha(false)
+        .build()?;
     emitter.add_instructions(&git_builder)?;
 
     emitter.emit_and_set()?;
@@ -25,8 +31,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let is_dirty = env::var("VERGEN_GIT_DIRTY")? == "true";
     // if not on a tag: v0.2.1-4-gabcdef1
     // if on a tag:     v0.2.1
-    let not_on_tag =
-        env::var("VERGEN_GIT_DESCRIBE")?.ends_with(&format!("-g{sha_short}"));
+    let not_on_tag = env::var("VERGEN_GIT_DESCRIBE")?.ends_with(&format!("-g{sha_short}"));
     let version_suffix = if is_dirty || not_on_tag { "-dev" } else { "" };
 
     println!("cargo:rustc-env=MORPH_VERSION_SUFFIX={version_suffix}");

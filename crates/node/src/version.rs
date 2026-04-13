@@ -37,6 +37,10 @@ pub fn version_metadata() -> RethCliVersionConsts {
         )),
         build_profile_name: Cow::Borrowed(env!("MORPH_BUILD_PROFILE")),
         p2p_client_version: Cow::Borrowed(env!("MORPH_P2P_CLIENT_VERSION")),
-        extra_data: Cow::Owned(format!("morph-reth/v{}/{}", env!("CARGO_PKG_VERSION"), env::consts::OS)),
+        extra_data: Cow::Owned(format!(
+            "morph-reth/v{}/{}",
+            env!("CARGO_PKG_VERSION"),
+            env::consts::OS
+        )),
     }
 }
