@@ -37,6 +37,11 @@ impl ConfigureEvm for MorphEvmConfig {
             .with_chain_id(self.chain_spec().chain().id())
             .with_spec(spec);
         cfg_env.disable_eip7623 = true;
+        // Morph does not enforce EIP-7825 transaction gas limit cap. Historical mainnet
+        // transactions (e.g. block 20459477, gas_limit=21,165,068) exceed the EIP-7825
+        // cap of 2^24 (16,777,216). Cap at block gas limit instead so all valid
+        // transactions can execute regardless of which SpecId is active.
+        cfg_env.tx_gas_limit_cap = Some(header.gas_limit());
 
         let fee_recipient = self
             .chain_spec()
@@ -82,6 +87,8 @@ impl ConfigureEvm for MorphEvmConfig {
             .with_chain_id(self.chain_spec().chain().id())
             .with_spec(spec);
         cfg_env.disable_eip7623 = true;
+        // Morph does not enforce EIP-7825 transaction gas limit cap — see evm_env() above.
+        cfg_env.tx_gas_limit_cap = Some(attributes.gas_limit);
 
         let fee_recipient = self
             .chain_spec()
