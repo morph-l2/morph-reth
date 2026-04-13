@@ -58,7 +58,6 @@ fi
 : "${RETH_HTTP_PORT:=8545}"
 : "${RETH_AUTHRPC_ADDR:=0.0.0.0}"
 : "${RETH_AUTHRPC_PORT:=8551}"
-: "${RETH_TRUSTED_PEERS:=}"
 
 # ─── Helper functions ─────────────────────────────────────────────────────────
 

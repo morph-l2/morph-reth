@@ -37,13 +37,8 @@ args=(
   --authrpc.jwtsecret "${JWT_SECRET}"
   --log.file.directory "$(dirname "${RETH_LOG_FILE}")"
   --log.file.filter info
-  --rpc.eth-proof-window 1209600 
+  --rpc.eth-proof-window 1209600
 )
-
-# Add trusted peers if configured (persistent TCP connections, like geth static-nodes.json)
-if [[ -n "${RETH_TRUSTED_PEERS}" ]]; then
-  args+=(--trusted-peers "${RETH_TRUSTED_PEERS}")
-fi
 
 # Start morph-reth with pm2
 pm2 start "${RETH_BIN}" --name morph-reth -- "${args[@]}"
