@@ -35,7 +35,7 @@ use reth_ethereum_primitives as _;
 pub use attributes::{MorphPayloadAttributes, MorphPayloadBuilderAttributes};
 pub use built::MorphBuiltPayload;
 pub use executable_l2_data::ExecutableL2Data;
-pub use params::{AssembleL2BlockParams, GenericResponse};
+pub use params::{AssembleL2BlockParams, BatchSignature, GenericResponse};
 pub use safe_l2_data::SafeL2Data;
 
 // =============================================================================
