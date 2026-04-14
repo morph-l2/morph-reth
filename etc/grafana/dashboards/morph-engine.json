@@ -224,7 +224,7 @@
         {
           "expr": "rate(morph_engine_validate_l2_block_failures_total[$__rate_interval])",
           "legendFormat": "validateL2Block"
-        },
+        }
       ]
     },
     {
