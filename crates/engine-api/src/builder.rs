@@ -2,7 +2,9 @@
 //!
 //! This module provides the concrete Morph L2 Engine API implementation and supporting helpers.
 
-use crate::{EngineApiResult, MorphEngineApiError, MorphL2EngineApi, metrics::MorphEngineApiMetrics};
+use crate::{
+    EngineApiResult, MorphEngineApiError, MorphL2EngineApi, metrics::MorphEngineApiMetrics,
+};
 use alloy_consensus::{
     BlockHeader, EMPTY_OMMER_ROOT_HASH, Header, proofs::calculate_transaction_root,
 };
@@ -203,7 +205,9 @@ where
     ) -> EngineApiResult<ExecutableL2Data> {
         let started = Instant::now();
         let result = self.build_l2_payload(params, None, None).await;
-        self.metrics.assemble_l2_block_duration_seconds.record(started.elapsed());
+        self.metrics
+            .assemble_l2_block_duration_seconds
+            .record(started.elapsed());
 
         let built_payload = result.inspect_err(|_| {
             self.metrics.assemble_l2_block_failures_total.increment(1);
@@ -272,7 +276,9 @@ where
                     "failed to convert executable data for validation"
                 );
                 self.metrics.validate_l2_block_failures_total.increment(1);
-                self.metrics.validate_l2_block_duration_seconds.record(validate_started.elapsed());
+                self.metrics
+                    .validate_l2_block_duration_seconds
+                    .record(validate_started.elapsed());
                 return Ok(GenericResponse { success: false });
             }
         };
@@ -289,7 +295,9 @@ where
                     "engine new_payload failed during validate_l2_block"
                 );
                 self.metrics.validate_l2_block_failures_total.increment(1);
-                self.metrics.validate_l2_block_duration_seconds.record(validate_started.elapsed());
+                self.metrics
+                    .validate_l2_block_duration_seconds
+                    .record(validate_started.elapsed());
                 return Ok(GenericResponse { success: false });
             }
         };
@@ -319,7 +327,9 @@ where
             "validate_l2_block timing"
         );
 
-        self.metrics.validate_l2_block_duration_seconds.record(validate_started.elapsed());
+        self.metrics
+            .validate_l2_block_duration_seconds
+            .record(validate_started.elapsed());
         if !success {
             self.metrics.validate_l2_block_failures_total.increment(1);
         }
@@ -362,7 +372,9 @@ where
                 "cannot new block with discontinuous block number"
             );
             self.metrics.new_l2_block_failures_total.increment(1);
-            self.metrics.new_l2_block_duration_seconds.record(started.elapsed());
+            self.metrics
+                .new_l2_block_duration_seconds
+                .record(started.elapsed());
             return Err(MorphEngineApiError::DiscontinuousBlockNumber {
                 expected: expected_number,
                 actual: data.number,
@@ -378,7 +390,9 @@ where
                 "wrong parent hash"
             );
             self.metrics.new_l2_block_failures_total.increment(1);
-            self.metrics.new_l2_block_duration_seconds.record(started.elapsed());
+            self.metrics
+                .new_l2_block_duration_seconds
+                .record(started.elapsed());
             return Err(MorphEngineApiError::WrongParentHash {
                 expected: current_head.hash,
                 actual: data.parent_hash,
@@ -388,12 +402,18 @@ where
         let block_hash = data.hash;
         let block_number = data.number;
         let block_timestamp = data.timestamp;
-        self.import_l2_block_via_engine(data).await.inspect_err(|_| {
-            self.metrics.new_l2_block_failures_total.increment(1);
-            self.metrics.new_l2_block_duration_seconds.record(started.elapsed());
-        })?;
+        self.import_l2_block_via_engine(data)
+            .await
+            .inspect_err(|_| {
+                self.metrics.new_l2_block_failures_total.increment(1);
+                self.metrics
+                    .new_l2_block_duration_seconds
+                    .record(started.elapsed());
+            })?;
 
-        self.metrics.new_l2_block_duration_seconds.record(started.elapsed());
+        self.metrics
+            .new_l2_block_duration_seconds
+            .record(started.elapsed());
         self.record_head_metrics(block_timestamp);
 
         tracing::debug!(
@@ -419,7 +439,9 @@ where
 
         if data.number != latest_number + 1 {
             self.metrics.new_safe_l2_block_failures_total.increment(1);
-            self.metrics.new_safe_l2_block_duration_seconds.record(started.elapsed());
+            self.metrics
+                .new_safe_l2_block_duration_seconds
+                .record(started.elapsed());
             return Err(MorphEngineApiError::DiscontinuousBlockNumber {
                 expected: latest_number + 1,
                 actual: data.number,
@@ -441,7 +463,9 @@ where
             .await
             .inspect_err(|_| {
                 self.metrics.new_safe_l2_block_failures_total.increment(1);
-                self.metrics.new_safe_l2_block_duration_seconds.record(started.elapsed());
+                self.metrics
+                    .new_safe_l2_block_duration_seconds
+                    .record(started.elapsed());
             })?;
         let executable_data = built_payload.executable_data;
         // Save hash before moving executable_data into the import call.
@@ -449,12 +473,19 @@ where
 
         // 3. Import the block through reth engine tree and return the in-path header
         // (do not rely on immediate DB visibility after FCU).
-        let header = self.import_l2_block_via_engine(executable_data).await.inspect_err(|_| {
-            self.metrics.new_safe_l2_block_failures_total.increment(1);
-            self.metrics.new_safe_l2_block_duration_seconds.record(started.elapsed());
-        })?;
+        let header = self
+            .import_l2_block_via_engine(executable_data)
+            .await
+            .inspect_err(|_| {
+                self.metrics.new_safe_l2_block_failures_total.increment(1);
+                self.metrics
+                    .new_safe_l2_block_duration_seconds
+                    .record(started.elapsed());
+            })?;
 
-        self.metrics.new_safe_l2_block_duration_seconds.record(started.elapsed());
+        self.metrics
+            .new_safe_l2_block_duration_seconds
+            .record(started.elapsed());
         self.record_head_metrics(block_timestamp);
 
         // Update safe block tag and seed finalized for memory cleanup.

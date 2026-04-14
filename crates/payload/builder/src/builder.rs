@@ -1,5 +1,6 @@
 //! Morph payload builder implementation.
 
+use crate::metrics::MorphPayloadBuilderMetrics;
 use crate::{MorphBuilderConfig, MorphPayloadBuilderError, config::PayloadBuildingBreaker};
 use alloy_consensus::{BlockHeader, Transaction, Typed2718};
 use alloy_eips::eip2718::Encodable2718;
@@ -31,7 +32,6 @@ use reth_revm::{database::StateProviderDatabase, db::State};
 use reth_storage_api::{StateProvider, StateProviderFactory};
 use reth_transaction_pool::{BestTransactionsAttributes, PoolTransaction, TransactionPool};
 use revm::context_interface::Block as RevmBlock;
-use crate::metrics::MorphPayloadBuilderMetrics;
 use std::{sync::Arc, time::Instant};
 
 /// Reads the withdraw trie root from the L2MessageQueue contract storage.
@@ -368,7 +368,9 @@ impl MorphPayloadBuilderCtx {
                     return Err(PayloadBuilderError::EvmExecutionError(Box::new(err)));
                 }
             };
-            self.metrics.commit_tx_apply_duration_seconds.record(apply_started.elapsed());
+            self.metrics
+                .commit_tx_apply_duration_seconds
+                .record(apply_started.elapsed());
 
             // For L1 messages, track the next L1 message index.
             // L1 gas is prepaid on L1, so no fees are collected here.
@@ -521,7 +523,9 @@ impl MorphPayloadBuilderCtx {
                     return Err(PayloadBuilderError::EvmExecutionError(Box::new(err)));
                 }
             };
-            self.metrics.commit_tx_apply_duration_seconds.record(apply_started.elapsed());
+            self.metrics
+                .commit_tx_apply_duration_seconds
+                .record(apply_started.elapsed());
 
             // Update execution info
             info.cumulative_gas_used += gas_used;
@@ -682,8 +686,12 @@ where
     }
 
     // Record total transaction execution time and per-block tx count.
-    ctx.metrics.commit_txs_all_duration_seconds.record(txs_all_started.elapsed());
-    ctx.metrics.block_transactions.set(info.transaction_count as f64);
+    ctx.metrics
+        .commit_txs_all_duration_seconds
+        .record(txs_all_started.elapsed());
+    ctx.metrics
+        .block_transactions
+        .set(info.transaction_count as f64);
 
     // Check if this payload is better than the previous one
     if !ctx.is_better_payload(info.total_fees) {
@@ -770,7 +778,9 @@ where
         Some(executed),
     );
 
-    ctx.metrics.payload_build_duration_seconds.record(build_started.elapsed());
+    ctx.metrics
+        .payload_build_duration_seconds
+        .record(build_started.elapsed());
 
     Ok(BuildOutcomeKind::Better { payload })
 }
