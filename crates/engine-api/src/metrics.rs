@@ -1,8 +1,8 @@
 //! Metrics for the Morph L2 Engine API.
 //!
 //! Tracks per-method latency and failure counts for custom Morph Engine API
-//! endpoints, plus chain head health gauges analogous to geth's
-//! `chain/head/block` and `chain/head/timegap`.
+//! endpoints, plus a chain head health gauge analogous to geth's
+//! `chain/head/timegap`.
 
 use reth_metrics::{
     Metrics,
@@ -15,9 +15,8 @@ use reth_metrics::{
 /// - A latency histogram (`*_duration_seconds`)
 /// - A failure counter (`*_failures_total`)
 ///
-/// Additionally, two chain-head gauges are updated after each successful block
-/// import (equivalent to geth's `chain/head/block` and `chain/head/timegap`):
-/// - `head_block_number`
+/// Additionally, a chain-head gauge is updated after each successful block
+/// import (equivalent to geth's `chain/head/timegap`):
 /// - `head_block_timegap_seconds`
 #[derive(Metrics, Clone)]
 #[metrics(scope = "morph.engine")]

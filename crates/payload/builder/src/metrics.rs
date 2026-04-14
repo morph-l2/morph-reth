@@ -18,8 +18,8 @@ use reth_metrics::{
 /// | `l1_tx_gas_limit_exceeded_total` | Counter | `miner/skipped_txs/l1/gas_limit_exceeded` |
 /// | `l1_tx_strange_err_total` | Counter | `miner/skipped_txs/l1/strange_err` |
 /// | `commit_txs_all_duration_seconds` | Histogram | `miner/commit/txs_all` |
-/// | `commit_tx_duration_seconds` | Histogram | `miner/commit/tx_all` |
 /// | `commit_tx_apply_duration_seconds` | Histogram | `miner/commit/tx_apply` |
+/// | `payload_build_duration_seconds` | Histogram | tempo-inspired |
 /// | `block_transactions` | Gauge | `processor/block/transactions` |
 #[derive(Metrics, Clone)]
 #[metrics(scope = "morph.payload_builder")]
@@ -85,6 +85,12 @@ pub(crate) struct MorphPayloadBuilderMetrics {
 
 impl MorphPayloadBuilderMetrics {
     /// Increments the pool transaction skip counter with the given reason label.
+    ///
+    /// Uses the `metrics::counter!` macro directly (rather than a struct field) to
+    /// attach a `reason` label. The metric name uses underscores
+    /// (`morph_payload_builder_*`) to match the Prometheus output of the
+    /// auto-generated metrics whose scope `morph.payload_builder` is also converted
+    /// to underscores.
     ///
     /// Inspired by tempo's `pool_transactions_skipped_total` with `reason` label.
     #[inline]
