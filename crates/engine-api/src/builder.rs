@@ -245,6 +245,10 @@ where
                 actual = data.number,
                 "cannot validate block with discontinuous block number"
             );
+            self.metrics.validate_l2_block_failures_total.increment(1);
+            self.metrics
+                .validate_l2_block_duration_seconds
+                .record(validate_started.elapsed());
             return Err(MorphEngineApiError::DiscontinuousBlockNumber {
                 expected: current_head.number + 1,
                 actual: data.number,
@@ -258,6 +262,10 @@ where
                 actual = %data.parent_hash,
                 "parent hash mismatch"
             );
+            self.metrics.validate_l2_block_failures_total.increment(1);
+            self.metrics
+                .validate_l2_block_duration_seconds
+                .record(validate_started.elapsed());
             return Err(MorphEngineApiError::WrongParentHash {
                 expected: current_head.hash,
                 actual: data.parent_hash,
@@ -362,6 +370,9 @@ where
                     current_number = current_number,
                     "ignoring past block number"
                 );
+                self.metrics
+                    .new_l2_block_duration_seconds
+                    .record(started.elapsed());
                 return Ok(());
             }
             // Discontinuous block number

@@ -685,13 +685,10 @@ where
         );
     }
 
-    // Record total transaction execution time and per-block tx count.
+    // Record total transaction execution time.
     ctx.metrics
         .commit_txs_all_duration_seconds
         .record(txs_all_started.elapsed());
-    ctx.metrics
-        .block_transactions
-        .set(info.transaction_count as f64);
 
     // Check if this payload is better than the previous one
     if !ctx.is_better_payload(info.total_fees) {
@@ -778,6 +775,10 @@ where
         Some(executed),
     );
 
+    // Only record block_transactions for successfully built payloads (not Aborted or Cancelled).
+    ctx.metrics
+        .block_transactions
+        .set(info.transaction_count as f64);
     ctx.metrics
         .payload_build_duration_seconds
         .record(build_started.elapsed());

@@ -76,9 +76,10 @@ pub(crate) struct MorphPayloadBuilderMetrics {
     // -------------------------------------------------------------------------
     // Block summary gauges
     // -------------------------------------------------------------------------
-    /// Number of transactions included in the most recently built block.
+    /// Number of transactions included in the most recently successfully built block.
     ///
-    /// Set once per successful block build.
+    /// Only updated when a payload reaches `BuildOutcomeKind::Better`; Aborted and
+    /// Cancelled builds do not update this gauge.
     /// Analogous to geth's `processor/block/transactions`.
     pub(crate) block_transactions: Gauge,
 }

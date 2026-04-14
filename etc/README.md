@@ -21,8 +21,9 @@ the [docker docs](https://reth.rs/installation/docker#using-docker-compose).
 
 To set up a new metric in Reth and its Grafana dashboard (this assumes running Reth and Grafana instances):
 
-1. Add the metric to the codebase following the [metrics section](../docs/design/metrics.md#creating-metrics)
-   documentation.
+1. Add the metric to the codebase using `#[derive(Metrics)]` from `reth-metrics`.
+   See `crates/engine-api/src/metrics.rs` or `crates/payload/builder/src/metrics.rs`
+   for examples.
 
 1. Access Grafana:
 

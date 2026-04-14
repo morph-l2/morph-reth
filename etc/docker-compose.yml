@@ -12,18 +12,20 @@ services:
       - "8545:8545"   # rpc
       - "8551:8551"   # engine (authrpc)
     volumes:
-      - morph_data:/root/.local/share/reth/morph
-      - logs:/root/logs
-      - ./jwttoken:/root/jwt/:ro
+      # Dockerfile: USER morph-reth, WORKDIR /var/lib/morph-reth
+      - morph_data:/var/lib/morph-reth/data
+      - logs:/var/lib/morph-reth/logs
+      - ./jwttoken:/var/lib/morph-reth/jwt:ro
     pid: host
     command: >
       node
       --chain morph
+      --datadir /var/lib/morph-reth/data
       --metrics 0.0.0.0:9001
-      --log.file.directory /root/logs
+      --log.file.directory /var/lib/morph-reth/logs
       --authrpc.addr 0.0.0.0
       --authrpc.port 8551
-      --authrpc.jwtsecret /root/jwt/jwt.hex
+      --authrpc.jwtsecret /var/lib/morph-reth/jwt/jwt.hex
       --http --http.addr 0.0.0.0 --http.port 8545
       --http.api "eth,net,web3"
 
