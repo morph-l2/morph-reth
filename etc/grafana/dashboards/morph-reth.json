@@ -8689,7 +8689,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "description": "Tracks the entries, byte size, failed inserts and file deletes of the blob store",
           "fieldConfig": {
@@ -8771,7 +8771,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
@@ -8787,7 +8787,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
@@ -8804,7 +8804,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
@@ -8821,7 +8821,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
@@ -8842,7 +8842,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "description": "Tracks a heuristic of the memory footprint of the various transaction pool sub-pools",
           "fieldConfig": {
@@ -8924,7 +8924,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "builder",
               "expr": "reth_transaction_pool_basefee_pool_size_bytes{$instance_label=\"$instance\"}",
@@ -8935,7 +8935,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "builder",
               "expr": "reth_transaction_pool_pending_pool_size_bytes{$instance_label=\"$instance\"}",
@@ -8947,7 +8947,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "builder",
               "expr": "reth_transaction_pool_queued_pool_size_bytes{$instance_label=\"$instance\"}",
@@ -8959,7 +8959,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "builder",
               "expr": "reth_transaction_pool_blob_pool_size_bytes{$instance_label=\"$instance\"}",
@@ -8974,7 +8974,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "description": "Transaction pool maintenance metrics",
           "fieldConfig": {
@@ -9056,7 +9056,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
@@ -9072,7 +9072,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
@@ -9089,7 +9089,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
@@ -9106,7 +9106,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
@@ -9127,7 +9127,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "description": "Tracks the number of transactions in the various transaction pool sub-pools",
           "fieldConfig": {
@@ -9208,7 +9208,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "builder",
               "expr": "reth_transaction_pool_basefee_pool_transactions{$instance_label=\"$instance\"}",
@@ -9219,7 +9219,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "builder",
               "expr": "reth_transaction_pool_pending_pool_transactions{$instance_label=\"$instance\"}",
@@ -9231,7 +9231,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "builder",
               "expr": "reth_transaction_pool_queued_pool_transactions{$instance_label=\"$instance\"}",
@@ -9243,7 +9243,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "builder",
               "expr": "reth_transaction_pool_blob_pool_transactions{$instance_label=\"$instance\"}",
@@ -9258,7 +9258,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "description": "Tracks the number of transactions per second that are inserted and removed from the transaction pool, as well as the number of invalid transactions per second.\n\nBad transactions are a subset of invalid transactions, these will never be successfully imported. The remaining invalid transactions have a chance of being imported, for example transactions with nonce gaps.\n\n",
           "fieldConfig": {
@@ -9353,7 +9353,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
@@ -9368,7 +9368,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
@@ -9384,7 +9384,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
@@ -9400,7 +9400,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
@@ -9421,7 +9421,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "description": "Number of transactions about to be imported into the pool.",
           "fieldConfig": {
@@ -9502,7 +9502,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "builder",
               "expr": "reth_network_pending_pool_imports{$instance_label=\"$instance\"}",
@@ -9518,7 +9518,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "description": "Tracks the number of incoming transaction messages in the channel from the network to the transaction pool.\n\nMempool messages sent over this channel are `GetPooledTransactions` requests, `NewPooledTransactionHashes` announcements (gossip), and `Transactions` (gossip)\n\nTx - `NetworkManager`\n\\nRx - `TransactionsManager`",
           "fieldConfig": {
@@ -9625,7 +9625,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "builder",
               "expr": "rate(reth_network_pool_transactions_messages_sent_total{$instance_label=\"$instance\"}[$__rate_interval])",
@@ -9638,7 +9638,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "builder",
               "expr": "rate(reth_network_pool_transactions_messages_received_total{$instance_label=\"$instance\"}[$__rate_interval])",
@@ -9650,7 +9650,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
               "expr": "reth_network_pool_transactions_messages_sent_total{$instance_label=\"$instance\"} - reth_network_pool_transactions_messages_received_total{$instance_label=\"$instance\"}",
@@ -9666,7 +9666,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "description": "Measures the message send rate (MPS) for queued outgoing messages. Outgoing messages are added to the queue before being sent to other peers, and this metric helps track the rate of message dispatch.",
           "fieldConfig": {
@@ -9748,7 +9748,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
@@ -9768,7 +9768,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "description": "All Transactions metrics",
           "fieldConfig": {
@@ -9849,7 +9849,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
@@ -9865,7 +9865,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
@@ -9882,7 +9882,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
@@ -9899,7 +9899,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
@@ -9920,7 +9920,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "description": "Egress RLPx capability traffic (default only `eth` capability)\n\nDropped - session channels are bounded, if there's no capacity, the message will be dropped.",
           "fieldConfig": {
@@ -10002,7 +10002,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
@@ -10022,7 +10022,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "description": "Total number of times a transaction is sent/announced that is already in the local pool.\n\nThis reflects the redundancy in the mempool.",
           "fieldConfig": {
@@ -10104,7 +10104,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
@@ -10121,7 +10121,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
@@ -10142,7 +10142,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "description": "Currently active outgoing GetPooledTransactions requests.",
           "fieldConfig": {
@@ -10223,7 +10223,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "builder",
               "expr": "reth_network_inflight_transaction_requests{$instance_label=\"$instance\"}",
@@ -10239,7 +10239,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "description": "Duration of one call to poll `TransactionsManager` future, and its nested function calls.\n\nNetwork Events - stream peer session updates from `NetworkManager`;\nTransaction Events - stream txns gossip from `NetworkManager`;\nPending Transactions - stream hashes of txns successfully inserted into pending set in `TransactionPool`;\nPending Pool Imports - flush txns to pool from `TransactionsManager`;\nFetch Events - stream fetch txn events (success case wraps a tx) from `TransactionFetcher`;\nFetch Pending Hashes - search for hashes announced by an idle peer in cache for hashes pending fetch;\n(Transactions Commands - stream commands from testnet to fetch/serve/propagate txns)\n",
           "fieldConfig": {
@@ -10321,7 +10321,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
@@ -10338,7 +10338,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
@@ -10355,7 +10355,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
@@ -10373,7 +10373,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
@@ -10390,7 +10390,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
@@ -10407,7 +10407,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
@@ -10424,7 +10424,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
@@ -10441,7 +10441,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
@@ -10462,7 +10462,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "description": "",
           "fieldConfig": {
@@ -10543,7 +10543,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "code",
@@ -10559,7 +10559,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "code",
@@ -10576,7 +10576,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
               "expr": "sum(reth_network_hashes_inflight_transaction_requests{$instance_label=\"$instance\"}) + sum(reth_network_hashes_pending_fetch{$instance_label=\"$instance\"})",
@@ -10593,7 +10593,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "description": "Durations of one call to poll `NetworkManager` future, and its nested function calls.\n\nNetwork Handle Message - stream network handle messages from `TransactionsManager`;\nSwarm Events - stream transaction gossip from `Swarm`",
           "fieldConfig": {
@@ -10675,7 +10675,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
@@ -10692,7 +10692,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
@@ -10709,7 +10709,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
@@ -10730,7 +10730,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "description": "Frequency of a peer sending a transaction that has already been marked as seen by that peer. This could for example be the case if a transaction is sent/announced to the peer at the same time that the peer sends/announces the same transaction to us.\n\nThis reflects the latency in the mempool.",
           "fieldConfig": {
@@ -10812,7 +10812,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
@@ -10829,7 +10829,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
@@ -10850,7 +10850,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "description": "Number of all transactions of all sub-pools by type",
           "fieldConfig": {
@@ -10932,7 +10932,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "code",
@@ -10949,7 +10949,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "code",
@@ -10966,7 +10966,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "code",
@@ -10983,7 +10983,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "code",
@@ -11000,7 +11000,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "code",
@@ -11021,7 +11021,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "description": "Duration of one call to `TransactionFetcher::on_fetch_pending_hashes`.\n\nFind Peer - find an idle fallback peer for a hash pending fetch.\n\nFill Request - fill `GetPooledTransactions` request, for the found peer, with more hashes from cache of hashes pending fetch. ",
           "fieldConfig": {
@@ -11103,7 +11103,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
@@ -11120,7 +11120,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
@@ -11141,7 +11141,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "description": "Frequency of transaction types seen in announcements",
           "fieldConfig": {
@@ -11223,7 +11223,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
@@ -11240,7 +11240,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
@@ -11257,7 +11257,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
@@ -11274,7 +11274,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
@@ -11291,7 +11291,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
@@ -11312,7 +11312,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "description": "Number of transactions evicted in each pool",
           "fieldConfig": {
@@ -11403,13 +11403,13 @@
               "useBackend": false,
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               }
             },
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
               "expr": "reth_transaction_pool_basefee_transactions_evicted{$instance_label=\"$instance\"}",
@@ -11422,7 +11422,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
               "expr": "reth_transaction_pool_blob_transactions_evicted{$instance_label=\"$instance\"}",
@@ -11435,7 +11435,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
               "expr": "reth_transaction_pool_queued_transactions_evicted{$instance_label=\"$instance\"}",
@@ -11452,7 +11452,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "description": "The number of tracked peers in the discovery modules (dnsdisc and discv4)",
           "fieldConfig": {
@@ -11533,7 +11533,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "builder",
               "expr": "reth_network_tracked_peers{$instance_label=\"$instance\"}",
@@ -11548,7 +11548,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "description": "The number of incoming and outgoing connections, as well as the number of peers we are currently connected to. Outgoing and incoming connections also count peers we are trying to connect to.",
           "fieldConfig": {
@@ -11629,7 +11629,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "builder",
               "expr": "reth_network_pending_outgoing_connections{$instance_label=\"$instance\"}",
@@ -11640,7 +11640,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "builder",
               "expr": "reth_network_outgoing_connections{$instance_label=\"$instance\"}",
@@ -11651,7 +11651,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "builder",
               "expr": "reth_network_total_pending_connections{$instance_label=\"$instance\"}",
@@ -11662,7 +11662,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "builder",
               "expr": "reth_network_incoming_connections{$instance_label=\"$instance\"}",
@@ -11674,7 +11674,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "builder",
               "expr": "reth_network_connected_peers{$instance_label=\"$instance\"}",
@@ -11690,7 +11690,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "description": "Internal errors in the P2P module. These are expected to happen from time to time. High error rates should not cause alarm if the node is peering otherwise.",
           "fieldConfig": {
@@ -11776,7 +11776,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "builder",
               "expr": "rate(reth_p2pstream_disconnected_errors{$instance_label=\"$instance\"}[$__rate_interval])",
@@ -11787,7 +11787,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "builder",
               "expr": "rate(reth_network_pending_session_failures{$instance_label=\"$instance\"}[$__rate_interval])",
@@ -11799,7 +11799,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "builder",
               "expr": "rate(reth_network_invalid_messages_received_total{$instance_label=\"$instance\"}[$__rate_interval])",
@@ -11815,7 +11815,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -11863,7 +11863,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "builder",
               "expr": "reth_network_useless_peer{$instance_label=\"$instance\"}",
@@ -11874,7 +11874,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "builder",
               "expr": "reth_network_subprotocol_specific{$instance_label=\"$instance\"}",
@@ -11886,7 +11886,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "builder",
               "expr": "reth_network_already_connected{$instance_label=\"$instance\"}",
@@ -11898,7 +11898,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "builder",
               "expr": "reth_network_client_quitting{$instance_label=\"$instance\"}",
@@ -11910,7 +11910,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "builder",
               "expr": "reth_network_unexpected_identity{$instance_label=\"$instance\"}",
@@ -11922,7 +11922,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "builder",
               "expr": "reth_network_disconnect_requested{$instance_label=\"$instance\"}",
@@ -11934,7 +11934,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "builder",
               "expr": "reth_network_null_node_identity{$instance_label=\"$instance\"}",
@@ -11946,7 +11946,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "builder",
               "expr": "reth_network_tcp_subsystem_error{$instance_label=\"$instance\"}",
@@ -11958,7 +11958,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "builder",
               "expr": "reth_network_incompatible{$instance_label=\"$instance\"}",
@@ -11970,7 +11970,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "builder",
               "expr": "reth_network_protocol_breach{$instance_label=\"$instance\"}",
@@ -11982,7 +11982,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "builder",
               "expr": "reth_network_too_many_peers{$instance_label=\"$instance\"}",
@@ -11998,7 +11998,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "description": "Number of successful outgoing dial attempts.",
           "fieldConfig": {
@@ -12079,7 +12079,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "builder",
               "expr": "reth_network_total_dial_successes{$instance_label=\"$instance\"}",
@@ -12094,7 +12094,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "description": "Peers managed by underlying sigp/discv5 node. \n\nOnly peers in the kbuckets are queried in FINDNODE lookups, and included in NODES responses to other peers.\n\nNot all peers with an established session will make it into the kbuckets, due to e.g. reachability issues (NAT) and capacity of kbuckets furthest log2distance away from local node (XOR metrics).",
           "fieldConfig": {
@@ -12206,11 +12206,11 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_discv5_kbucket_peers_raw_total{instance=\"$instance\"}",
+              "expr": "reth_discv5_kbucket_peers_raw_total{$instance_label=\"$instance\"}",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "instant": false,
@@ -12222,11 +12222,11 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_discv5_sessions_raw_total{instance=\"$instance\"}",
+              "expr": "reth_discv5_sessions_raw_total{$instance_label=\"$instance\"}",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -12243,7 +12243,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "description": "Frequency of session establishment and kbuckets insertions.\n\nSince discv5 favours long-lived connections, kbuckets insertions are expected to be less frequent the longer the node stays online.\n\nSome incoming connections may be from peers with unreachable ENRs, ENRs that don't advertise a  UDP socket. These peers are not useful for the discv5 node, nor for RLPx.\n\nDiscovered peers are filtered w.r.t. what they advertise in their ENR. By default peers advertising 'eth2' are filtered out. Unreachable ENRs are also filtered out. Only peers that pass the filter are useful. These peers get passed up the node, to attempt an RLPx connection.\n\nSessions will succeed to peers that advertise no UDP socket in their ENR. This allows peers to discover their reachable socket. On the other hand, for DoS protection, peers that advertise a different socket than the socket from which they make the connection, are denied a sigp/discv5 session. These peers have an unverifiable ENR. The peers are passed to RLPx nonetheless (some EL implementations of discv5 are more lax about ENR and source socket matching). ",
           "fieldConfig": {
@@ -12416,11 +12416,11 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "rate(reth_discv5_inserted_kbucket_peers_raw_total{instance=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_discv5_inserted_kbucket_peers_raw_total{$instance_label=\"$instance\"}[$__rate_interval])",
               "fullMetaSearch": false,
               "includeNullMetadata": false,
               "instant": false,
@@ -12432,11 +12432,11 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "rate(reth_discv5_established_sessions_raw_total{instance=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_discv5_established_sessions_raw_total{$instance_label=\"$instance\"}[$__rate_interval])",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -12449,11 +12449,11 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "rate(reth_discv5_established_sessions_unreachable_enr_total{instance=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_discv5_established_sessions_unreachable_enr_total{$instance_label=\"$instance\"}[$__rate_interval])",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -12466,11 +12466,11 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "rate(reth_discv5_established_sessions_raw_total{instance=\"$instance\"}[$__rate_interval]) - rate(reth_discv5_established_sessions_custom_filtered_total{instance=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_discv5_established_sessions_raw_total{$instance_label=\"$instance\"}[$__rate_interval]) - rate(reth_discv5_established_sessions_custom_filtered_total{$instance_label=\"$instance\"}[$__rate_interval])",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -12483,11 +12483,11 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "rate(reth_discv5_unverifiable_enrs_raw_total{instance=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_discv5_unverifiable_enrs_raw_total{$instance_label=\"$instance\"}[$__rate_interval])",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -12504,7 +12504,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "description": "Frequency of discovering peers from some popular network stacks.\n\nSome nodes miss advertising a fork ID kv-pair in their ENR. They will be counted as 'unknown', but may belong to a popular network.",
           "fieldConfig": {
@@ -12647,11 +12647,11 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "code",
-              "expr": "rate(reth_discv5_eth{instance=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_discv5_eth{$instance_label=\"$instance\"}[$__rate_interval])",
               "fullMetaSearch": false,
               "includeNullMetadata": false,
               "instant": false,
@@ -12663,11 +12663,11 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "code",
-              "expr": "rate(reth_discv5_eth2{instance=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_discv5_eth2{$instance_label=\"$instance\"}[$__rate_interval])",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -12680,11 +12680,11 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "code",
-              "expr": "rate(reth_discv5_opel{instance=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_discv5_opel{$instance_label=\"$instance\"}[$__rate_interval])",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -12697,11 +12697,11 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "code",
-              "expr": "rate(reth_discv5_opstack{instance=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_discv5_opstack{$instance_label=\"$instance\"}[$__rate_interval])",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -12714,11 +12714,11 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "disableTextWrap": false,
               "editorMode": "code",
-              "expr": "(rate(reth_discv5_established_sessions_raw_total{instance=\"$instance\"}[$__rate_interval]) + rate(reth_discv5_unverifiable_enrs_raw_total{instance=\"$instance\"}[$__rate_interval])) - (rate(reth_discv5_eth{instance=\"$instance\"}[$__rate_interval]) + rate(reth_discv5_eth2{instance=\"$instance\"}[$__rate_interval]) + rate(reth_discv5_opstack{instance=\"$instance\"}[$__rate_interval]) + rate(reth_discv5_opel{instance=\"$instance\"}[$__rate_interval]))",
+              "expr": "(rate(reth_discv5_established_sessions_raw_total{$instance_label=\"$instance\"}[$__rate_interval]) + rate(reth_discv5_unverifiable_enrs_raw_total{$instance_label=\"$instance\"}[$__rate_interval])) - (rate(reth_discv5_eth{$instance_label=\"$instance\"}[$__rate_interval]) + rate(reth_discv5_eth2{$instance_label=\"$instance\"}[$__rate_interval]) + rate(reth_discv5_opstack{$instance_label=\"$instance\"}[$__rate_interval]) + rate(reth_discv5_opel{$instance_label=\"$instance\"}[$__rate_interval]))",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -12749,7 +12749,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -12830,10 +12830,10 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "avg(delta(reth_db_table_size{instance=~\"$instance\", table=\"PlainAccountState\"}[$interval]))",
+              "expr": "avg(delta(reth_db_table_size{$instance_label=~\"$instance\", table=\"PlainAccountState\"}[$interval]))",
               "instant": false,
               "interval": "$interval",
               "legendFormat": "Account",
@@ -12843,10 +12843,10 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "avg(delta(reth_db_table_size{instance=~\"$instance\", table=\"PlainStorageState\"}[$interval]))",
+              "expr": "avg(delta(reth_db_table_size{$instance_label=~\"$instance\", table=\"PlainStorageState\"}[$interval]))",
               "hide": false,
               "instant": false,
               "interval": "$interval",
@@ -12857,10 +12857,10 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "avg(delta(reth_db_table_size{instance=~\"$instance\", table=\"Bytecodes\"}[$interval]))",
+              "expr": "avg(delta(reth_db_table_size{$instance_label=~\"$instance\", table=\"Bytecodes\"}[$interval]))",
               "hide": false,
               "instant": false,
               "interval": "$interval",
@@ -12871,10 +12871,10 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "avg(delta(reth_db_table_size{instance=~\"$instance\", table=\"PlainAccountState\"}[$interval])) + avg(delta(reth_db_table_size{instance=~\"$instance\", table=\"PlainStorageState\"}[$interval])) + avg(delta(reth_db_table_size{instance=~\"$instance\", table=\"Bytecodes\"}[$interval]))",
+              "expr": "avg(delta(reth_db_table_size{$instance_label=~\"$instance\", table=\"PlainAccountState\"}[$interval])) + avg(delta(reth_db_table_size{$instance_label=~\"$instance\", table=\"PlainStorageState\"}[$interval])) + avg(delta(reth_db_table_size{$instance_label=~\"$instance\", table=\"Bytecodes\"}[$interval]))",
               "hide": false,
               "instant": false,
               "interval": "$interval",
@@ -12889,7 +12889,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -12970,10 +12970,10 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum(reth_db_table_size{instance=~\"$instance\", table=\"PlainAccountState\"})",
+              "expr": "sum(reth_db_table_size{$instance_label=~\"$instance\", table=\"PlainAccountState\"})",
               "instant": false,
               "interval": "$interval",
               "legendFormat": "Account",
@@ -12983,10 +12983,10 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum(reth_db_table_size{instance=~\"$instance\", table=\"PlainStorageState\"})",
+              "expr": "sum(reth_db_table_size{$instance_label=~\"$instance\", table=\"PlainStorageState\"})",
               "hide": false,
               "instant": false,
               "interval": "$interval",
@@ -12997,10 +12997,10 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum(reth_db_table_size{instance=~\"$instance\", table=\"Bytecodes\"})",
+              "expr": "sum(reth_db_table_size{$instance_label=~\"$instance\", table=\"Bytecodes\"})",
               "hide": false,
               "instant": false,
               "interval": "$interval",
@@ -13011,10 +13011,10 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum(reth_db_table_size{instance=~\"$instance\", table=~\"PlainAccountState|PlainStorageState|Bytecodes\"})",
+              "expr": "sum(reth_db_table_size{$instance_label=~\"$instance\", table=~\"PlainAccountState|PlainStorageState|Bytecodes\"})",
               "hide": false,
               "instant": false,
               "interval": "$interval",
@@ -13029,7 +13029,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -13108,10 +13108,10 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "avg(delta(reth_db_table_size{instance=~\"$instance\", table=\"PlainAccountState\"}[$interval]))",
+              "expr": "avg(delta(reth_db_table_size{$instance_label=~\"$instance\", table=\"PlainAccountState\"}[$interval]))",
               "instant": false,
               "interval": "$interval",
               "legendFormat": "__auto",
@@ -13125,7 +13125,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -13204,10 +13204,10 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "avg(delta(reth_db_table_size{instance=~\"$instance\", table=\"PlainStorageState\"}[$interval]))",
+              "expr": "avg(delta(reth_db_table_size{$instance_label=~\"$instance\", table=\"PlainStorageState\"}[$interval]))",
               "instant": false,
               "interval": "$interval",
               "legendFormat": "__auto",
@@ -13221,7 +13221,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -13300,10 +13300,10 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "avg(delta(reth_db_table_size{instance=~\"$instance\", table=\"Bytecodes\"}[$interval]))",
+              "expr": "avg(delta(reth_db_table_size{$instance_label=~\"$instance\", table=\"Bytecodes\"}[$interval]))",
               "instant": false,
               "interval": "$interval",
               "legendFormat": "__auto",
@@ -13317,7 +13317,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -13398,10 +13398,10 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "avg(delta(reth_db_table_size{instance=~\"$instance\", table=\"Headers\"}[$interval])) + avg(delta(reth_static_files_segment_size{instance=~\"$instance\", segment=\"headers\"}[$interval]))",
+              "expr": "avg(delta(reth_db_table_size{$instance_label=~\"$instance\", table=\"Headers\"}[$interval])) + avg(delta(reth_static_files_segment_size{$instance_label=~\"$instance\", segment=\"headers\"}[$interval]))",
               "instant": false,
               "interval": "$interval",
               "legendFormat": "Headers",
@@ -13411,10 +13411,10 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "avg(delta(reth_db_table_size{instance=~\"$instance\", table=\"Receipts\"}[$interval])) + avg(delta(reth_static_files_segment_size{instance=~\"$instance\", segment=\"receipts\"}[$interval]))",
+              "expr": "avg(delta(reth_db_table_size{$instance_label=~\"$instance\", table=\"Receipts\"}[$interval])) + avg(delta(reth_static_files_segment_size{$instance_label=~\"$instance\", segment=\"receipts\"}[$interval]))",
               "hide": false,
               "instant": false,
               "interval": "$interval",
@@ -13425,10 +13425,10 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "avg(delta(reth_db_table_size{instance=~\"$instance\", table=\"Transactions\"}[$interval])) + avg(delta(reth_static_files_segment_size{instance=~\"$instance\", segment=\"transactions\"}[$interval]))",
+              "expr": "avg(delta(reth_db_table_size{$instance_label=~\"$instance\", table=\"Transactions\"}[$interval])) + avg(delta(reth_static_files_segment_size{$instance_label=~\"$instance\", segment=\"transactions\"}[$interval]))",
               "hide": false,
               "instant": false,
               "interval": "$interval",
@@ -13464,7 +13464,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -13545,10 +13545,10 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum(reth_db_table_size{instance=~\"$instance\", table=\"Headers\"}) + sum(reth_static_files_segment_size{instance=~\"$instance\", segment=\"headers\"})",
+              "expr": "sum(reth_db_table_size{$instance_label=~\"$instance\", table=\"Headers\"}) + sum(reth_static_files_segment_size{$instance_label=~\"$instance\", segment=\"headers\"})",
               "instant": false,
               "interval": "$interval",
               "legendFormat": "Headers",
@@ -13558,10 +13558,10 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum(reth_db_table_size{instance=~\"$instance\", table=\"Receipts\"}) + sum(reth_static_files_segment_size{instance=~\"$instance\", segment=\"receipts\"})",
+              "expr": "sum(reth_db_table_size{$instance_label=~\"$instance\", table=\"Receipts\"}) + sum(reth_static_files_segment_size{$instance_label=~\"$instance\", segment=\"receipts\"})",
               "hide": false,
               "instant": false,
               "interval": "$interval",
@@ -13572,10 +13572,10 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum(reth_db_table_size{instance=~\"$instance\", table=\"Transactions\"}) + sum(reth_static_files_segment_size{instance=~\"$instance\", segment=\"transactions\"})",
+              "expr": "sum(reth_db_table_size{$instance_label=~\"$instance\", table=\"Transactions\"}) + sum(reth_static_files_segment_size{$instance_label=~\"$instance\", segment=\"transactions\"})",
               "hide": false,
               "instant": false,
               "interval": "$interval",
@@ -13606,7 +13606,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -13685,10 +13685,10 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "avg(delta(reth_db_table_size{instance=~\"$instance\", table=\"Headers\"}[$interval])) + avg(delta(reth_static_files_segment_size{instance=~\"$instance\", segment=\"headers\"}[$interval]))",
+              "expr": "avg(delta(reth_db_table_size{$instance_label=~\"$instance\", table=\"Headers\"}[$interval])) + avg(delta(reth_static_files_segment_size{$instance_label=~\"$instance\", segment=\"headers\"}[$interval]))",
               "instant": false,
               "interval": "$interval",
               "legendFormat": "__auto",
@@ -13702,7 +13702,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -13781,10 +13781,10 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "avg(delta(reth_db_table_size{instance=~\"$instance\", table=\"Receipts\"}[$interval])) + avg(delta(reth_static_files_segment_size{instance=~\"$instance\", segment=\"receipts\"}[$interval]))",
+              "expr": "avg(delta(reth_db_table_size{$instance_label=~\"$instance\", table=\"Receipts\"}[$interval])) + avg(delta(reth_static_files_segment_size{$instance_label=~\"$instance\", segment=\"receipts\"}[$interval]))",
               "instant": false,
               "interval": "$interval",
               "legendFormat": "__auto",
@@ -13798,7 +13798,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "fieldConfig": {
             "defaults": {
@@ -13877,10 +13877,10 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${DS_PROMETHEUS}"
+                "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "avg(delta(reth_db_table_size{instance=~\"$instance\", table=\"Transactions\"}[$interval])) + avg(delta(reth_static_files_segment_size{instance=~\"$instance\", segment=\"transactions\"}[$interval]))",
+              "expr": "avg(delta(reth_db_table_size{$instance_label=~\"$instance\", table=\"Transactions\"}[$interval])) + avg(delta(reth_static_files_segment_size{$instance_label=~\"$instance\", segment=\"transactions\"}[$interval]))",
               "instant": false,
               "interval": "$interval",
               "legendFormat": "__auto",
@@ -15190,6 +15190,72 @@
         "refresh": 2,
         "sort": 1,
         "type": "query"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": "10m",
+          "value": "10m"
+        },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Interval",
+        "multi": false,
+        "name": "interval",
+        "options": [
+          {
+            "selected": false,
+            "text": "5m",
+            "value": "5m"
+          },
+          {
+            "selected": true,
+            "text": "10m",
+            "value": "10m"
+          },
+          {
+            "selected": false,
+            "text": "30m",
+            "value": "30m"
+          },
+          {
+            "selected": false,
+            "text": "1h",
+            "value": "1h"
+          },
+          {
+            "selected": false,
+            "text": "6h",
+            "value": "6h"
+          },
+          {
+            "selected": false,
+            "text": "12h",
+            "value": "12h"
+          },
+          {
+            "selected": false,
+            "text": "1d",
+            "value": "1d"
+          },
+          {
+            "selected": false,
+            "text": "7d",
+            "value": "7d"
+          },
+          {
+            "selected": false,
+            "text": "14d",
+            "value": "14d"
+          },
+          {
+            "selected": false,
+            "text": "30d",
+            "value": "30d"
+          }
+        ],
+        "query": "5m,10m,30m,1h,6h,12h,1d,7d,14d,30d",
+        "type": "custom"
       }
     ]
   },

@@ -6,4 +6,5 @@ CLAUDE.md
 
 .worktrees/
 .claude/
-.omc/
+.omc/local-test/jwt.hex
+local-test/__pycache__/

@@ -1,5 +1,21 @@
 {
-  "annotations": { "list": [] },
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "datasource",
+          "uid": "grafana"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Morph-reth Engine API and Payload Builder metrics dashboard",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -7,385 +23,990 @@
   "panels": [
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
       "id": 100,
-      "title": "Chain Head Health",
+      "title": "Overview",
       "type": "row"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 0,
+        "y": 1
+      },
+      "id": 1,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "title": "Block Import Rate (blocks/s)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "rate(reth_morph_engine_new_l2_block_duration_seconds_count{chain=\"$chain\", service=~\"$service\"}[$__rate_interval])",
+          "legendFormat": "{{service}} newL2Block"
+        },
+        {
+          "expr": "rate(reth_morph_engine_new_safe_l2_block_duration_seconds_count{chain=\"$chain\", service=~\"$service\"}[$__rate_interval])",
+          "legendFormat": "{{service}} newSafe"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
           "thresholds": {
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "yellow", "value": 5 },
-              { "color": "red", "value": 30 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 5
+              },
+              {
+                "color": "red",
+                "value": 30
+              }
             ]
           },
           "unit": "s"
         },
         "overrides": []
       },
-      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 1 },
-      "id": 1,
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 8,
+        "y": 1
+      },
+      "id": 2,
       "options": {
         "colorMode": "background",
         "graphMode": "area",
-        "reduceOptions": { "calcs": ["lastNotNull"] }
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
       },
       "title": "Head Block Timegap",
       "description": "Seconds since last imported block. >30s = node is falling behind.",
       "type": "stat",
       "targets": [
         {
-          "expr": "morph_engine_head_block_timegap_seconds",
-          "legendFormat": "timegap"
+          "expr": "reth_morph_engine_head_block_timegap_seconds{chain=\"$chain\", service=~\"$service\"}",
+          "legendFormat": "{{service}}"
         }
       ]
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "fieldConfig": {
-        "defaults": { "unit": "short" },
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "unit": "s"
+        },
         "overrides": []
       },
-      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 1 },
-      "id": 2,
-      "title": "Head Block Timegap (over time)",
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 16,
+        "y": 1
+      },
+      "id": 3,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "title": "Head Block Timegap By Role",
       "type": "timeseries",
       "targets": [
         {
-          "expr": "morph_engine_head_block_timegap_seconds",
-          "legendFormat": "timegap (s)"
-        }
-      ]
-    },
-    {
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "fieldConfig": {
-        "defaults": { "unit": "short" },
-        "overrides": []
-      },
-      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 1 },
-      "id": 3,
-      "title": "Block Transactions (last built)",
-      "type": "stat",
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "reduceOptions": { "calcs": ["lastNotNull"] }
-      },
-      "targets": [
-        {
-          "expr": "morph_payload_builder_block_transactions",
-          "legendFormat": "tx count"
+          "expr": "reth_morph_engine_head_block_timegap_seconds{chain=\"$chain\", role=~\"$role\"}",
+          "legendFormat": "{{service}}"
         }
       ]
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 7 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 10
+      },
       "id": 101,
       "title": "Engine API Latency",
       "type": "row"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "fieldConfig": {
-        "defaults": { "unit": "s" },
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "unit": "s"
+        },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 11
+      },
       "id": 10,
-      "title": "newL2Block Latency (p50 / p95 / p99)",
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "title": "newL2Block Latency",
       "type": "timeseries",
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, rate(morph_engine_new_l2_block_duration_seconds_bucket[$__rate_interval]))",
-          "legendFormat": "p50"
+          "expr": "rate(reth_morph_engine_new_l2_block_duration_seconds_sum{chain=\"$chain\", service=~\"$service\"}[$__rate_interval]) / rate(reth_morph_engine_new_l2_block_duration_seconds_count{chain=\"$chain\", service=~\"$service\"}[$__rate_interval])",
+          "legendFormat": "{{service}} avg"
         },
         {
-          "expr": "histogram_quantile(0.95, rate(morph_engine_new_l2_block_duration_seconds_bucket[$__rate_interval]))",
-          "legendFormat": "p95"
-        },
-        {
-          "expr": "histogram_quantile(0.99, rate(morph_engine_new_l2_block_duration_seconds_bucket[$__rate_interval]))",
-          "legendFormat": "p99"
+          "expr": "reth_morph_engine_new_l2_block_duration_seconds{chain=\"$chain\", service=~\"$service\", quantile=\"$quantile\"}",
+          "legendFormat": "{{service}} p{{quantile}}"
         }
       ]
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "fieldConfig": {
-        "defaults": { "unit": "s" },
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "unit": "s"
+        },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 11
+      },
       "id": 11,
-      "title": "newSafeL2Block Latency (p50 / p95 / p99)",
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "title": "newSafeL2Block Latency",
       "type": "timeseries",
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, rate(morph_engine_new_safe_l2_block_duration_seconds_bucket[$__rate_interval]))",
-          "legendFormat": "p50"
+          "expr": "rate(reth_morph_engine_new_safe_l2_block_duration_seconds_sum{chain=\"$chain\", service=~\"$service\"}[$__rate_interval]) / rate(reth_morph_engine_new_safe_l2_block_duration_seconds_count{chain=\"$chain\", service=~\"$service\"}[$__rate_interval])",
+          "legendFormat": "{{service}} avg"
         },
         {
-          "expr": "histogram_quantile(0.95, rate(morph_engine_new_safe_l2_block_duration_seconds_bucket[$__rate_interval]))",
-          "legendFormat": "p95"
-        },
-        {
-          "expr": "histogram_quantile(0.99, rate(morph_engine_new_safe_l2_block_duration_seconds_bucket[$__rate_interval]))",
-          "legendFormat": "p99"
+          "expr": "reth_morph_engine_new_safe_l2_block_duration_seconds{chain=\"$chain\", service=~\"$service\", quantile=\"$quantile\"}",
+          "legendFormat": "{{service}} p{{quantile}}"
         }
       ]
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "fieldConfig": {
-        "defaults": { "unit": "s" },
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "unit": "s"
+        },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 20
+      },
       "id": 12,
-      "title": "assembleL2Block Latency (p50 / p95 / p99)",
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "title": "assembleL2Block Latency",
       "type": "timeseries",
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, rate(morph_engine_assemble_l2_block_duration_seconds_bucket[$__rate_interval]))",
-          "legendFormat": "p50"
+          "expr": "rate(reth_morph_engine_assemble_l2_block_duration_seconds_sum{chain=\"$chain\", service=~\"$service\"}[$__rate_interval]) / rate(reth_morph_engine_assemble_l2_block_duration_seconds_count{chain=\"$chain\", service=~\"$service\"}[$__rate_interval])",
+          "legendFormat": "{{service}} avg"
         },
         {
-          "expr": "histogram_quantile(0.95, rate(morph_engine_assemble_l2_block_duration_seconds_bucket[$__rate_interval]))",
-          "legendFormat": "p95"
-        },
-        {
-          "expr": "histogram_quantile(0.99, rate(morph_engine_assemble_l2_block_duration_seconds_bucket[$__rate_interval]))",
-          "legendFormat": "p99"
+          "expr": "reth_morph_engine_assemble_l2_block_duration_seconds{chain=\"$chain\", service=~\"$service\", quantile=\"$quantile\"}",
+          "legendFormat": "{{service}} p{{quantile}}"
         }
       ]
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "fieldConfig": {
-        "defaults": { "unit": "s" },
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "unit": "s"
+        },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 20
+      },
       "id": 13,
-      "title": "validateL2Block Latency (p50 / p95 / p99)",
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "title": "validateL2Block Latency",
       "type": "timeseries",
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, rate(morph_engine_validate_l2_block_duration_seconds_bucket[$__rate_interval]))",
-          "legendFormat": "p50"
+          "expr": "rate(reth_morph_engine_validate_l2_block_duration_seconds_sum{chain=\"$chain\", service=~\"$service\"}[$__rate_interval]) / rate(reth_morph_engine_validate_l2_block_duration_seconds_count{chain=\"$chain\", service=~\"$service\"}[$__rate_interval])",
+          "legendFormat": "{{service}} avg"
         },
         {
-          "expr": "histogram_quantile(0.95, rate(morph_engine_validate_l2_block_duration_seconds_bucket[$__rate_interval]))",
-          "legendFormat": "p95"
-        },
-        {
-          "expr": "histogram_quantile(0.99, rate(morph_engine_validate_l2_block_duration_seconds_bucket[$__rate_interval]))",
-          "legendFormat": "p99"
+          "expr": "reth_morph_engine_validate_l2_block_duration_seconds{chain=\"$chain\", service=~\"$service\", quantile=\"$quantile\"}",
+          "legendFormat": "{{service}} p{{quantile}}"
         }
       ]
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 24 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 29
+      },
       "id": 102,
       "title": "Engine API Failures",
       "type": "row"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "fieldConfig": {
-        "defaults": { "unit": "short" },
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "unit": "short"
+        },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 25 },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 30
+      },
       "id": 20,
-      "title": "Engine API Failure Rate (per second)",
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "title": "Engine API Failures (per second)",
       "type": "timeseries",
       "targets": [
         {
-          "expr": "rate(morph_engine_new_l2_block_failures_total[$__rate_interval])",
-          "legendFormat": "newL2Block"
+          "expr": "rate(reth_morph_engine_assemble_l2_block_failures_total{chain=\"$chain\", service=~\"$service\"}[$__rate_interval])",
+          "legendFormat": "{{service}} assemble"
         },
         {
-          "expr": "rate(morph_engine_new_safe_l2_block_failures_total[$__rate_interval])",
-          "legendFormat": "newSafeL2Block"
+          "expr": "rate(reth_morph_engine_validate_l2_block_failures_total{chain=\"$chain\", service=~\"$service\"}[$__rate_interval])",
+          "legendFormat": "{{service}} validate"
         },
         {
-          "expr": "rate(morph_engine_assemble_l2_block_failures_total[$__rate_interval])",
-          "legendFormat": "assembleL2Block"
+          "expr": "rate(reth_morph_engine_new_l2_block_failures_total{chain=\"$chain\", service=~\"$service\"}[$__rate_interval])",
+          "legendFormat": "{{service}} newL2Block"
         },
         {
-          "expr": "rate(morph_engine_validate_l2_block_failures_total[$__rate_interval])",
-          "legendFormat": "validateL2Block"
+          "expr": "rate(reth_morph_engine_new_safe_l2_block_failures_total{chain=\"$chain\", service=~\"$service\"}[$__rate_interval])",
+          "legendFormat": "{{service}} newSafe"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 30
+      },
+      "id": 21,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "title": "Engine API Failures By Role",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum by (service) (rate(reth_morph_engine_assemble_l2_block_failures_total{chain=\"$chain\", role=~\"$role\"}[$__rate_interval]) + rate(reth_morph_engine_validate_l2_block_failures_total{chain=\"$chain\", role=~\"$role\"}[$__rate_interval]) + rate(reth_morph_engine_new_l2_block_failures_total{chain=\"$chain\", role=~\"$role\"}[$__rate_interval]) + rate(reth_morph_engine_new_safe_l2_block_failures_total{chain=\"$chain\", role=~\"$role\"}[$__rate_interval]))",
+          "legendFormat": "{{service}}"
         }
       ]
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 33 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 39
+      },
       "id": 103,
       "title": "Payload Builder",
       "type": "row"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "fieldConfig": {
-        "defaults": { "unit": "s" },
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "unit": "s"
+        },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 34 },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 40
+      },
       "id": 30,
-      "title": "Payload Build Duration (end-to-end, p50 / p95)",
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "title": "Payload Build Duration",
+      "description": "End-to-end payload build duration (state setup + tx execution + finalize + seal).",
       "type": "timeseries",
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, rate(morph_payload_builder_payload_build_duration_seconds_bucket[$__rate_interval]))",
-          "legendFormat": "p50"
+          "expr": "rate(reth_morph_payload_builder_payload_build_duration_seconds_sum{chain=\"$chain\", service=~\"$service\"}[$__rate_interval]) / rate(reth_morph_payload_builder_payload_build_duration_seconds_count{chain=\"$chain\", service=~\"$service\"}[$__rate_interval])",
+          "legendFormat": "{{service}} avg"
         },
         {
-          "expr": "histogram_quantile(0.95, rate(morph_payload_builder_payload_build_duration_seconds_bucket[$__rate_interval]))",
-          "legendFormat": "p95"
+          "expr": "reth_morph_payload_builder_payload_build_duration_seconds{chain=\"$chain\", service=~\"$service\", quantile=\"$quantile\"}",
+          "legendFormat": "{{service}} p{{quantile}}"
         }
       ]
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "fieldConfig": {
-        "defaults": { "unit": "s" },
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "unit": "s"
+        },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 34 },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 40
+      },
       "id": 31,
-      "title": "Tx Execution Duration (commit_txs_all, p50 / p95)",
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "title": "Tx Execution Duration (commit_txs_all)",
+      "description": "Total time to execute all transactions (L1 messages + pool) for one block.",
       "type": "timeseries",
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, rate(morph_payload_builder_commit_txs_all_duration_seconds_bucket[$__rate_interval]))",
-          "legendFormat": "p50"
+          "expr": "rate(reth_morph_payload_builder_commit_txs_all_duration_seconds_sum{chain=\"$chain\", service=~\"$service\"}[$__rate_interval]) / rate(reth_morph_payload_builder_commit_txs_all_duration_seconds_count{chain=\"$chain\", service=~\"$service\"}[$__rate_interval])",
+          "legendFormat": "{{service}} avg"
         },
         {
-          "expr": "histogram_quantile(0.95, rate(morph_payload_builder_commit_txs_all_duration_seconds_bucket[$__rate_interval]))",
-          "legendFormat": "p95"
+          "expr": "reth_morph_payload_builder_commit_txs_all_duration_seconds{chain=\"$chain\", service=~\"$service\", quantile=\"$quantile\"}",
+          "legendFormat": "{{service}} p{{quantile}}"
         }
       ]
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "fieldConfig": {
-        "defaults": { "unit": "s" },
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "unit": "s"
+        },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 42 },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 49
+      },
       "id": 32,
-      "title": "Per-Tx EVM Apply Duration (p50 / p95 / p99)",
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "title": "Per-Tx EVM Apply Duration",
+      "description": "Time for the EVM execution of a single transaction.",
       "type": "timeseries",
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, rate(morph_payload_builder_commit_tx_apply_duration_seconds_bucket[$__rate_interval]))",
-          "legendFormat": "p50"
+          "expr": "rate(reth_morph_payload_builder_commit_tx_apply_duration_seconds_sum{chain=\"$chain\", service=~\"$service\"}[$__rate_interval]) / rate(reth_morph_payload_builder_commit_tx_apply_duration_seconds_count{chain=\"$chain\", service=~\"$service\"}[$__rate_interval])",
+          "legendFormat": "{{service}} avg"
         },
         {
-          "expr": "histogram_quantile(0.95, rate(morph_payload_builder_commit_tx_apply_duration_seconds_bucket[$__rate_interval]))",
-          "legendFormat": "p95"
-        },
-        {
-          "expr": "histogram_quantile(0.99, rate(morph_payload_builder_commit_tx_apply_duration_seconds_bucket[$__rate_interval]))",
-          "legendFormat": "p99"
+          "expr": "reth_morph_payload_builder_commit_tx_apply_duration_seconds{chain=\"$chain\", service=~\"$service\", quantile=\"$quantile\"}",
+          "legendFormat": "{{service}} p{{quantile}}"
         }
       ]
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "fieldConfig": {
-        "defaults": { "unit": "short" },
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "unit": "short"
+        },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 42 },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 49
+      },
       "id": 33,
-      "title": "Pool Tx Skipped (by reason)",
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "title": "Block Transactions (last built)",
       "type": "timeseries",
       "targets": [
         {
-          "expr": "rate(morph_payload_builder_pool_transactions_skipped_total[$__rate_interval])",
-          "legendFormat": "{{reason}}"
+          "expr": "reth_morph_payload_builder_block_transactions{chain=\"$chain\", service=~\"$service\"}",
+          "legendFormat": "{{service}}"
         }
       ]
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 50 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 58
+      },
       "id": 104,
-      "title": "L1 Message Processing",
+      "title": "L1 Message & Pool Tx Processing",
       "type": "row"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "fieldConfig": {
-        "defaults": { "unit": "short" },
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "unit": "short"
+        },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 51 },
-      "id": 40,
-      "title": "L1 Tx Gas Limit Exceeded (total)",
-      "type": "stat",
-      "options": {
-        "colorMode": "background",
-        "graphMode": "area",
-        "reduceOptions": { "calcs": ["lastNotNull"] }
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 59
       },
+      "id": 40,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "title": "L1 Tx Skip Counters",
+      "type": "timeseries",
       "targets": [
         {
-          "expr": "morph_payload_builder_l1_tx_gas_limit_exceeded_total",
-          "legendFormat": "gas limit exceeded"
+          "expr": "reth_morph_payload_builder_l1_tx_gas_limit_exceeded_total{chain=\"$chain\", service=~\"$service\"}",
+          "legendFormat": "{{service}} gas_limit_exceeded"
+        },
+        {
+          "expr": "reth_morph_payload_builder_l1_tx_strange_err_total{chain=\"$chain\", service=~\"$service\"}",
+          "legendFormat": "{{service}} strange_err"
         }
       ]
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "fieldConfig": {
-        "defaults": { "unit": "short" },
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "unit": "short"
+        },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 51 },
-      "id": 41,
-      "title": "L1 Tx Strange Errors (total)",
-      "type": "stat",
-      "options": {
-        "colorMode": "background",
-        "graphMode": "area",
-        "reduceOptions": { "calcs": ["lastNotNull"] }
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 59
       },
+      "id": 41,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "title": "Pool Tx Skipped By Role",
+      "type": "timeseries",
       "targets": [
         {
-          "expr": "morph_payload_builder_l1_tx_strange_err_total",
-          "legendFormat": "strange errors"
+          "expr": "rate(reth_morph_payload_builder_pool_transactions_skipped_total{chain=\"$chain\", role=~\"$role\"}[$__rate_interval])",
+          "legendFormat": "{{service}} ({{reason}})"
         }
       ]
     }
   ],
   "schemaVersion": 39,
-  "tags": ["morph", "engine-api", "payload-builder"],
+  "tags": [
+    "morph",
+    "reth",
+    "engine-api",
+    "payload-builder"
+  ],
   "templating": {
     "list": [
       {
-        "current": { "selected": false, "text": "Prometheus", "value": "Prometheus" },
+        "current": {
+          "selected": false,
+          "text": "Prometheus",
+          "value": "Prometheus"
+        },
         "hide": 0,
         "includeAll": false,
+        "label": "Datasource",
         "name": "datasource",
         "query": "prometheus",
+        "refresh": 1,
         "type": "datasource"
+      },
+      {
+        "current": {
+          "text": "morph-devnet",
+          "value": "morph-devnet"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "definition": "label_values(reth_morph_engine_head_block_timegap_seconds, chain)",
+        "description": "morph-reth chain",
+        "hide": 0,
+        "includeAll": false,
+        "label": "chain",
+        "name": "chain",
+        "query": "label_values(reth_morph_engine_head_block_timegap_seconds, chain)",
+        "refresh": 2,
+        "type": "query"
+      },
+      {
+        "current": {
+          "text": "0.95",
+          "value": "0.95"
+        },
+        "hide": 0,
+        "includeAll": false,
+        "label": "quantile",
+        "name": "quantile",
+        "options": [
+          {
+            "selected": false,
+            "text": "0.5",
+            "value": "0.5"
+          },
+          {
+            "selected": false,
+            "text": "0.9",
+            "value": "0.9"
+          },
+          {
+            "selected": true,
+            "text": "0.95",
+            "value": "0.95"
+          },
+          {
+            "selected": false,
+            "text": "0.99",
+            "value": "0.99"
+          },
+          {
+            "selected": false,
+            "text": "0.999",
+            "value": "0.999"
+          }
+        ],
+        "query": "0.5, 0.9, 0.95, 0.99, 0.999",
+        "type": "custom"
+      },
+      {
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "definition": "label_values(reth_morph_engine_head_block_timegap_seconds{chain=\"$chain\", role=~\"$role\"}, service)",
+        "hide": 0,
+        "includeAll": true,
+        "multi": true,
+        "label": "service",
+        "name": "service",
+        "query": "label_values(reth_morph_engine_head_block_timegap_seconds{chain=\"$chain\", role=~\"$role\"}, service)",
+        "refresh": 2,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "definition": "label_values(reth_morph_engine_head_block_timegap_seconds{chain=\"$chain\"}, role)",
+        "hide": 0,
+        "includeAll": true,
+        "multi": false,
+        "label": "role",
+        "name": "role",
+        "query": "label_values(reth_morph_engine_head_block_timegap_seconds{chain=\"$chain\"}, role)",
+        "refresh": 2,
+        "sort": 1,
+        "type": "query"
       }
     ]
   },
-  "time": { "from": "now-1h", "to": "now" },
-  "title": "Morph Engine API & Payload Builder",
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "title": "Morph Reth Engine API",
   "uid": "morph-engine-api",
   "version": 1
 }

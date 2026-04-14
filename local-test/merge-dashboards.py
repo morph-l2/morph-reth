@@ -19,6 +19,8 @@ from pathlib import Path
 
 GRID_WIDTH = 24
 ROW_HEIGHT = 1
+UNIFIED_DATASOURCE_UID = "${datasource}"
+LEGACY_DATASOURCE_UID = "${DS_PROMETHEUS}"
 
 WORKTREE_ROOT = Path(__file__).resolve().parents[1]
 DASHBOARDS_DIR = WORKTREE_ROOT / "etc/grafana/dashboards"
@@ -230,6 +232,7 @@ def load_dashboard_template() -> dict:
                 "Sync, System"
             )
             normalize_dashboard_variables(dashboard)
+            ensure_interval_variable(dashboard)
             dashboard["panels"] = []
             return dashboard
     raise SystemExit("no dashboard template found")
@@ -273,12 +276,70 @@ def normalize_dashboard_variables(dashboard: dict) -> None:
     raise SystemExit("dashboard template is missing the 'instance' variable")
 
 
+_INTERVAL_VARIABLE = {
+    "current": {"selected": True, "text": "10m", "value": "10m"},
+    "hide": 0,
+    "includeAll": False,
+    "label": "Interval",
+    "multi": False,
+    "name": "interval",
+    "options": [
+        {"selected": False, "text": "5m",  "value": "5m"},
+        {"selected": True,  "text": "10m", "value": "10m"},
+        {"selected": False, "text": "30m", "value": "30m"},
+        {"selected": False, "text": "1h",  "value": "1h"},
+        {"selected": False, "text": "6h",  "value": "6h"},
+        {"selected": False, "text": "12h", "value": "12h"},
+        {"selected": False, "text": "1d",  "value": "1d"},
+        {"selected": False, "text": "7d",  "value": "7d"},
+        {"selected": False, "text": "14d", "value": "14d"},
+        {"selected": False, "text": "30d", "value": "30d"},
+    ],
+    "query": "5m,10m,30m,1h,6h,12h,1d,7d,14d,30d",
+    "type": "custom",
+}
+
+
+def ensure_interval_variable(dashboard: dict) -> None:
+    """Add $interval variable used by state-growth panels if not present."""
+    templating = dashboard.setdefault("templating", {}).setdefault("list", [])
+    if any(v.get("name") == "interval" for v in templating):
+        return
+    templating.append(copy.deepcopy(_INTERVAL_VARIABLE))
+
+
 def rename_panel(source: RowSource, title: str) -> str:
     return PANEL_RENAMES.get((source.dashboard, source.row_title, title), title)
 
 
+def normalize_panel_string(value: str) -> str:
+    return (
+        value.replace(LEGACY_DATASOURCE_UID, UNIFIED_DATASOURCE_UID)
+        .replace('instance=~"$instance"', '$instance_label=~"$instance"')
+        .replace('instance="$instance"', '$instance_label="$instance"')
+    )
+
+
+def normalize_panel_references(value):
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if isinstance(child, str):
+                value[key] = normalize_panel_string(child)
+            else:
+                normalize_panel_references(child)
+        return
+
+    if isinstance(value, list):
+        for index, child in enumerate(value):
+            if isinstance(child, str):
+                value[index] = normalize_panel_string(child)
+            else:
+                normalize_panel_references(child)
+
+
 def prepare_panel(source: RowSource, panel: dict) -> dict:
     panel = copy.deepcopy(panel)
+    normalize_panel_references(panel)
     panel["title"] = rename_panel(source, panel["title"])
     panel.pop("collapsed", None)
     panel.pop("panels", None)
@@ -486,6 +547,8 @@ def validate_dashboard(dashboard: dict) -> None:
     assert_unique_panel_ids(panels)
     assert_no_panel_overlaps(panels)
     assert_safe_instance_variable(dashboard)
+    assert_no_legacy_datasource_refs(dashboard)
+    assert_no_raw_instance_filters_when_instance_is_service(dashboard)
 
 
 def assert_safe_instance_variable(dashboard: dict) -> None:
@@ -511,6 +574,42 @@ def assert_safe_instance_variable(dashboard: dict) -> None:
         raise SystemExit(
             "instance variable cannot allow multi-select or All while panels "
             "still use exact `label=\"$instance\"` matching"
+        )
+
+
+def assert_no_legacy_datasource_refs(dashboard: dict) -> None:
+    if LEGACY_DATASOURCE_UID in json.dumps(dashboard):
+        raise SystemExit(
+            "dashboard still contains legacy datasource placeholder "
+            f"{LEGACY_DATASOURCE_UID}"
+        )
+
+
+def assert_no_raw_instance_filters_when_instance_is_service(dashboard: dict) -> None:
+    variables = {
+        variable.get("name"): variable
+        for variable in dashboard.get("templating", {}).get("list", [])
+        if variable.get("name")
+    }
+    instance = variables.get("instance")
+    if instance is None:
+        raise SystemExit("dashboard is missing the 'instance' variable")
+
+    instance_query = instance.get("query", "")
+    if "service" not in instance_query:
+        return
+
+    raw_instance_filters = 0
+    for panel in iter_non_row_panels(dashboard["panels"]):
+        for target in panel.get("targets", []):
+            expr = target.get("expr", "")
+            raw_instance_filters += expr.count('instance=~"$instance"')
+            raw_instance_filters += expr.count('instance="$instance"')
+
+    if raw_instance_filters:
+        raise SystemExit(
+            "dashboard still contains raw instance filters even though the "
+            "'instance' variable is populated from service labels"
         )
 
 
