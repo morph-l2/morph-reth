@@ -31,7 +31,8 @@ use reth_revm::{database::StateProviderDatabase, db::State};
 use reth_storage_api::{StateProvider, StateProviderFactory};
 use reth_transaction_pool::{BestTransactionsAttributes, PoolTransaction, TransactionPool};
 use revm::context_interface::Block as RevmBlock;
-use std::sync::Arc;
+use crate::metrics::MorphPayloadBuilderMetrics;
+use std::{sync::Arc, time::Instant};
 
 /// Reads the withdraw trie root from the L2MessageQueue contract storage.
 fn read_withdraw_trie_root<DB: revm::Database>(db: &mut DB) -> Result<B256, DB::Error> {
@@ -177,6 +178,7 @@ where
             cancel,
             best_payload,
             builder_config: self.config.clone(),
+            metrics: MorphPayloadBuilderMetrics::default(),
         };
 
         let state_provider = self.client.state_by_block_hash(ctx.parent().hash())?;
@@ -247,6 +249,8 @@ struct MorphPayloadBuilderCtx {
     best_payload: Option<MorphBuiltPayload>,
     /// Builder configuration with limits.
     builder_config: MorphBuilderConfig,
+    /// Prometheus metrics for this payload build job.
+    metrics: MorphPayloadBuilderMetrics,
 }
 
 impl MorphPayloadBuilderCtx {
@@ -311,6 +315,7 @@ impl MorphPayloadBuilderCtx {
 
             // Check if adding this transaction would exceed block gas limit
             if info.cumulative_gas_used + tx_gas > block_gas_limit {
+                self.metrics.l1_tx_gas_limit_exceeded_total.increment(1);
                 gas_spent_by_transactions.push(tx_gas);
                 return Err(PayloadBuilderError::other(
                     MorphPayloadBuilderError::BlockGasLimitExceededBySequencerTransactions {
@@ -320,13 +325,15 @@ impl MorphPayloadBuilderCtx {
                 ));
             }
 
-            // Execute the transaction
+            // Execute the transaction and record EVM execution time.
+            let apply_started = Instant::now();
             let gas_used = match builder.execute_transaction(recovered_tx.clone()) {
                 Ok(gas_used) => gas_used,
                 Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
                     error,
                     ..
                 })) => {
+                    self.metrics.l1_tx_strange_err_total.increment(1);
                     tracing::warn!(
                         target: "payload_builder",
                         tx_index = tx_idx,
@@ -341,6 +348,7 @@ impl MorphPayloadBuilderCtx {
                     ));
                 }
                 Err(BlockExecutionError::Validation(err)) => {
+                    self.metrics.l1_tx_strange_err_total.increment(1);
                     tracing::warn!(
                         target: "payload_builder",
                         tx_index = tx_idx,
@@ -355,10 +363,12 @@ impl MorphPayloadBuilderCtx {
                     ));
                 }
                 Err(err) => {
+                    self.metrics.l1_tx_strange_err_total.increment(1);
                     // Fatal error - this is a bug or misconfiguration
                     return Err(PayloadBuilderError::EvmExecutionError(Box::new(err)));
                 }
             };
+            self.metrics.commit_tx_apply_duration_seconds.record(apply_started.elapsed());
 
             // For L1 messages, track the next L1 message index.
             // L1 gas is prepaid on L1, so no fees are collected here.
@@ -446,6 +456,7 @@ impl MorphPayloadBuilderCtx {
 
             // Skip blob transactions and L1 messages from pool
             if tx.is_eip4844() || tx.is_l1_msg() {
+                self.metrics.inc_pool_tx_skipped("invalid_type");
                 best_txs.mark_invalid(tx.signer(), tx.nonce());
                 continue;
             }
@@ -457,11 +468,12 @@ impl MorphPayloadBuilderCtx {
                 block_gas_limit,
                 self.builder_config.max_da_block_size,
             ) {
+                self.metrics.inc_pool_tx_skipped("over_limits");
                 best_txs.mark_invalid(tx.signer(), tx.nonce());
                 continue;
             }
 
-            // Execute the transaction
+            let apply_started = Instant::now();
             let gas_used = match builder.execute_transaction(tx.clone()) {
                 Ok(gas_used) => gas_used,
                 Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
@@ -471,6 +483,7 @@ impl MorphPayloadBuilderCtx {
                     if error.is_nonce_too_low() {
                         // If the nonce is too low, we can skip this transaction
                         // but don't mark as invalid - the sender may have other valid txs
+                        self.metrics.inc_pool_tx_skipped("nonce_too_low");
                         tracing::trace!(
                             target: "payload_builder",
                             %error,
@@ -480,6 +493,7 @@ impl MorphPayloadBuilderCtx {
                     } else {
                         // If the transaction is invalid for other reasons,
                         // skip it and all of its descendants from this sender
+                        self.metrics.inc_pool_tx_skipped("invalid_tx");
                         tracing::trace!(
                             target: "payload_builder",
                             %error,
@@ -492,6 +506,7 @@ impl MorphPayloadBuilderCtx {
                 }
                 Err(BlockExecutionError::Validation(err)) => {
                     // Other validation errors - skip transaction and descendants
+                    self.metrics.inc_pool_tx_skipped("validation_error");
                     tracing::trace!(
                         target: "payload_builder",
                         %err,
@@ -506,6 +521,7 @@ impl MorphPayloadBuilderCtx {
                     return Err(PayloadBuilderError::EvmExecutionError(Box::new(err)));
                 }
             };
+            self.metrics.commit_tx_apply_duration_seconds.record(apply_started.elapsed());
 
             // Update execution info
             info.cumulative_gas_used += gas_used;
@@ -583,6 +599,7 @@ where
     DB: Database<Error = reth_evm::execute::ProviderError>,
     BestTxs: PayloadTransactions<Transaction: PoolTransaction<Consensus = MorphTxEnvelope>> + 'a,
 {
+    let build_started = Instant::now();
     let attributes = ctx.attributes();
 
     tracing::debug!(
@@ -633,6 +650,7 @@ where
     let breaker = ctx.builder_config.breaker(block_gas_limit);
 
     // Execute L1 message transactions (must be first, with sequential queue indices)
+    let txs_all_started = Instant::now();
     let mut executed_txs = ctx.execute_l1_messages(&mut builder, &mut info)?;
 
     // Always execute pool transactions (L2 transactions from mempool)
@@ -662,6 +680,10 @@ where
             "breaker stopped pool execution, finalizing payload"
         );
     }
+
+    // Record total transaction execution time and per-block tx count.
+    ctx.metrics.commit_txs_all_duration_seconds.record(txs_all_started.elapsed());
+    ctx.metrics.block_transactions.set(info.transaction_count as f64);
 
     // Check if this payload is better than the previous one
     if !ctx.is_better_payload(info.total_fees) {
@@ -747,6 +769,8 @@ where
         executable_data,
         Some(executed),
     );
+
+    ctx.metrics.payload_build_duration_seconds.record(build_started.elapsed());
 
     Ok(BuildOutcomeKind::Better { payload })
 }
@@ -957,6 +981,7 @@ mod tests {
             cancel: Default::default(),
             best_payload,
             builder_config: MorphBuilderConfig::default(),
+            metrics: MorphPayloadBuilderMetrics::default(),
         }
     }
 

@@ -23,6 +23,7 @@
 mod api;
 mod builder;
 mod error;
+mod metrics;
 mod rpc;
 mod validator;
 
