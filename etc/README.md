@@ -12,8 +12,20 @@ up to date.
 
 ### Docker Compose
 
-To run Reth, Grafana or Prometheus with Docker Compose, refer to
-the [docker docs](https://reth.rs/installation/docker#using-docker-compose).
+The [`docker-compose.yml`](./docker-compose.yml) in this directory brings up a
+local morph-reth node together with Prometheus and Grafana. The `morph-reth`
+service runs with `--chain morph` and exposes metrics on port `9001`,
+which Prometheus scrapes with the labels defined in
+[`prometheus/prometheus.yml`](./prometheus/prometheus.yml).
+
+```bash
+./etc/generate-jwt.sh
+docker compose -f etc/docker-compose.yml up -d
+```
+
+Grafana is available at <http://localhost:3000> (default admin/admin) and
+will auto-provision the unified Morph dashboard from
+[`grafana/dashboards/`](./grafana/dashboards/).
 
 ### Grafana
 

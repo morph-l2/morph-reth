@@ -60,7 +60,6 @@ services:
       sh -c "cp -r /etc/grafana/provisioning_temp/dashboards/. /etc/grafana/provisioning/dashboards &&
              find /etc/grafana/provisioning/dashboards/ -name '*.json' -exec sed -i 's/$${DS_PROMETHEUS}/Prometheus/g' {} \+ &&
              find /etc/grafana/provisioning/dashboards/ -name '*.json' -exec sed -i 's/$${datasource}/Prometheus/g' {} \+ &&
-             find /etc/grafana/provisioning/dashboards/ -name '*.json' -exec sed -i 's/$${VAR_INSTANCE_LABEL}/instance/g' {} \+ &&
              /run.sh"
 
 volumes:
