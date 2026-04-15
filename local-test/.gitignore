@@ -1,0 +1,17 @@
+# Per-network data directories (mainnet/, hoodi/)
+mainnet/
+hoodi/
+
+# Runtime files
+jwt-secret.txt
+*.pid
+*.log
+
+# Log rotation directories (numeric names like 2818/)
+[0-9]*/
+
+# Downloaded artifacts
+mainnet-data.zip
+hoodi-data.zip
+.config-extract/
+config-prep.*/
