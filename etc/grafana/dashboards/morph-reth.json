@@ -3199,7 +3199,7 @@
               },
               "editorMode": "code",
               "exemplar": false,
-              "expr": "avg(rate(reth_database_transaction_close_duration_seconds_sum{service=~\"$service\", outcome=\"commit\"}[$__rate_interval]) / rate(reth_database_transaction_close_duration_seconds_count{service=~\"$service\", outcome=\"commit\"}[$__rate_interval]) >= 0)",
+              "expr": "avg(rate(reth_database_transaction_close_duration_seconds_sum{service=~\"$service\", outcome=\"commit\"}[$__rate_interval]) / clamp_min(rate(reth_database_transaction_close_duration_seconds_count{service=~\"$service\", outcome=\"commit\"}[$__rate_interval]), 1))",
               "format": "time_series",
               "instant": false,
               "legendFormat": "Commit time",
