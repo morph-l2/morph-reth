@@ -58,18 +58,17 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 3,
-        "w": 4,
+        "h": 5,
+        "w": 24,
         "x": 0,
         "y": 1
       },
       "id": 2,
       "options": {
         "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "vertical",
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
@@ -79,10 +78,10 @@
         },
         "showPercentChange": false,
         "text": {
-          "valueSize": 20
+          "valueSize": 14
         },
         "textMode": "name",
-        "wideLayout": true
+        "wideLayout": false
       },
       "pluginVersion": "12.2.1",
       "targets": [
@@ -91,16 +90,63 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "editorMode": "builder",
           "exemplar": false,
-          "expr": "reth_info{$instance_label=\"$instance\"}",
+          "expr": "max by (version) (reth_info{$instance_label=~\"$instance\"})",
           "instant": true,
-          "legendFormat": "{{version}}",
+          "legendFormat": "Version: {{version}}",
           "range": false,
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "exemplar": false,
+          "expr": "max by (build_timestamp) (reth_info{$instance_label=~\"$instance\"})",
+          "instant": true,
+          "legendFormat": "Timestamp: {{build_timestamp}}",
+          "range": false,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "exemplar": false,
+          "expr": "max by (git_sha) (reth_info{$instance_label=~\"$instance\"})",
+          "instant": true,
+          "legendFormat": "Git SHA: {{git_sha}}",
+          "range": false,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "exemplar": false,
+          "expr": "max by (build_profile) (reth_info{$instance_label=~\"$instance\"})",
+          "instant": true,
+          "legendFormat": "Profile: {{build_profile}}",
+          "range": false,
+          "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "exemplar": false,
+          "expr": "max by (target_triple) (reth_info{$instance_label=~\"$instance\"})",
+          "instant": true,
+          "legendFormat": "Target: {{target_triple}}",
+          "range": false,
+          "refId": "E"
         }
       ],
-      "title": "Version",
+      "title": "Build Info",
       "transparent": true,
       "type": "stat"
     },
@@ -111,118 +157,43 @@
       },
       "fieldConfig": {
         "defaults": {
-          "color": {
-            "mode": "thresholds"
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "spanNulls": true,
+            "showPoints": "auto",
+            "fillOpacity": 10
           },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
+          "color": {
+            "mode": "palette-classic"
           }
         },
         "overrides": []
       },
       "gridPos": {
-        "h": 3,
-        "w": 4,
-        "x": 4,
-        "y": 1
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 6
       },
       "id": 3,
       "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "right",
+          "showLegend": true,
           "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
+            "lastNotNull",
+            "max"
+          ]
         },
-        "showPercentChange": false,
-        "text": {
-          "valueSize": 20
-        },
-        "textMode": "name",
-        "wideLayout": true
-      },
-      "pluginVersion": "12.2.1",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "builder",
-          "exemplar": false,
-          "expr": "reth_info{$instance_label=\"$instance\"}",
-          "instant": true,
-          "legendFormat": "{{build_timestamp}}",
-          "range": false,
-          "refId": "A"
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
         }
-      ],
-      "title": "Build Timestamp",
-      "transparent": true,
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 3,
-        "w": 4,
-        "x": 8,
-        "y": 1
-      },
-      "id": 4,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "text": {
-          "valueSize": 20
-        },
-        "textMode": "name",
-        "wideLayout": true
       },
       "pluginVersion": "12.2.1",
       "targets": [
@@ -233,414 +204,16 @@
           },
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "reth_info{$instance_label=\"$instance\"}",
+          "expr": "reth_network_connected_peers{$instance_label=~\"$instance\"}",
           "instant": true,
-          "legendFormat": "{{git_sha}}",
-          "range": false,
-          "refId": "A"
-        }
-      ],
-      "title": "Git SHA",
-      "transparent": true,
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 3,
-        "w": 4,
-        "x": 12,
-        "y": 1
-      },
-      "id": 5,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "text": {
-          "valueSize": 20
-        },
-        "textMode": "name",
-        "wideLayout": true
-      },
-      "pluginVersion": "12.2.1",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "builder",
-          "exemplar": false,
-          "expr": "reth_info{$instance_label=\"$instance\"}",
-          "instant": true,
-          "legendFormat": "{{build_profile}}",
-          "range": false,
-          "refId": "A"
-        }
-      ],
-      "title": "Build Profile",
-      "transparent": true,
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 3,
-        "w": 4,
-        "x": 16,
-        "y": 1
-      },
-      "id": 6,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "text": {
-          "valueSize": 20
-        },
-        "textMode": "name",
-        "wideLayout": true
-      },
-      "pluginVersion": "12.2.1",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "builder",
-          "exemplar": false,
-          "expr": "reth_info{$instance_label=\"$instance\"}",
-          "instant": true,
-          "legendFormat": "{{target_triple}}",
-          "range": false,
-          "refId": "A"
-        }
-      ],
-      "title": "Target Triple",
-      "transparent": true,
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 3,
-        "w": 4,
-        "x": 20,
-        "y": 1
-      },
-      "id": 7,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "text": {
-          "valueSize": 20
-        },
-        "textMode": "name",
-        "wideLayout": true
-      },
-      "pluginVersion": "12.2.1",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "builder",
-          "exemplar": false,
-          "expr": "reth_info{$instance_label=\"$instance\"}",
-          "instant": true,
-          "legendFormat": "{{cargo_features}}",
-          "range": false,
-          "refId": "A"
-        }
-      ],
-      "title": "Cargo Features",
-      "transparent": true,
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [],
-          "max": 100,
-          "min": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "dark-red",
-                "value": 0
-              },
-              {
-                "color": "semi-dark-orange",
-                "value": 10
-              },
-              {
-                "color": "semi-dark-yellow",
-                "value": 20
-              },
-              {
-                "color": "semi-dark-green",
-                "value": 30
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 9,
-        "w": 8,
-        "x": 0,
-        "y": 4
-      },
-      "id": 8,
-      "options": {
-        "minVizHeight": 75,
-        "minVizWidth": 75,
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showThresholdLabels": false,
-        "showThresholdMarkers": true,
-        "sizing": "auto"
-      },
-      "pluginVersion": "12.2.1",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "builder",
-          "exemplar": false,
-          "expr": "reth_network_connected_peers{$instance_label=\"$instance\"}",
-          "instant": true,
-          "legendFormat": "__auto",
+          "legendFormat": "{{service}}",
           "range": false,
           "refId": "A"
         }
       ],
       "title": "Connected peers",
       "transparent": true,
-      "type": "gauge"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "description": "The checkpoints mark the last block a stage can recover from in the case of a crash or shutdown of the node",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "continuous-RdYlGr"
-          },
-          "mappings": [],
-          "min": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 9,
-        "w": 8,
-        "x": 8,
-        "y": 4
-      },
-      "id": 9,
-      "options": {
-        "displayMode": "lcd",
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": false
-        },
-        "maxVizHeight": 300,
-        "minVizHeight": 16,
-        "minVizWidth": 8,
-        "namePlacement": "auto",
-        "orientation": "horizontal",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showUnfilled": true,
-        "sizing": "auto",
-        "valueMode": "color"
-      },
-      "pluginVersion": "12.2.1",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "builder",
-          "exemplar": false,
-          "expr": "max by (stage) (reth_sync_checkpoint{$instance_label=\"$instance\"})",
-          "instant": true,
-          "legendFormat": "{{stage}}",
-          "range": false,
-          "refId": "A"
-        }
-      ],
-      "title": "Stage checkpoints",
-      "transformations": [
-        {
-          "id": "joinByField",
-          "options": {
-            "mode": "outer"
-          }
-        },
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {},
-            "includeByName": {},
-            "indexByName": {
-              "AccountHashing": 6,
-              "Bodies": 1,
-              "Execution": 3,
-              "Finish": 13,
-              "Headers": 0,
-              "IndexAccountHistory": 11,
-              "IndexStorageHistory": 10,
-              "MerkleExecute": 8,
-              "MerkleUnwind": 5,
-              "Prune": 12,
-              "PruneSenderRecovery": 4,
-              "SenderRecovery": 2,
-              "StorageHashing": 7,
-              "Time": 14,
-              "TransactionLookup": 9
-            },
-            "renameByName": {}
-          }
-        }
-      ],
-      "transparent": true,
-      "type": "bargauge"
+      "type": "timeseries"
     },
     {
       "datasource": {
@@ -668,16 +241,16 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 9,
-        "w": 8,
-        "x": 16,
-        "y": 4
+        "x": 12,
+        "y": 6,
+        "w": 3,
+        "h": 6
       },
-      "id": 10,
+      "id": 128,
       "options": {
         "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto",
+        "graphMode": "none",
+        "justifyMode": "center",
         "orientation": "auto",
         "percentChangeColorMode": "standard",
         "reduceOptions": {
@@ -689,7 +262,7 @@
         },
         "showPercentChange": false,
         "textMode": "auto",
-        "wideLayout": true
+        "wideLayout": false
       },
       "pluginVersion": "12.2.1",
       "targets": [
@@ -699,52 +272,13 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(reth_db_table_size{$instance_label=\"$instance\"})",
+          "expr": "sum(reth_db_table_size{$instance_label=~\"$instance\"})",
           "legendFormat": "Database",
           "range": true,
           "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "sum(reth_db_freelist{$instance_label=\"$instance\"} * reth_db_page_size{$instance_label=\"$instance\"})",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "Freelist",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "sum(reth_static_files_segment_size{$instance_label=\"$instance\"})",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "Static Files",
-          "range": true,
-          "refId": "C"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "sum(reth_db_table_size{$instance_label=\"$instance\"}) + sum(reth_db_freelist{$instance_label=\"$instance\"} * reth_db_page_size{$instance_label=\"$instance\"}) + sum(reth_static_files_segment_size{$instance_label=\"$instance\"})",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "Total",
-          "range": true,
-          "refId": "D"
         }
       ],
-      "title": "Storage size",
+      "title": "Database",
       "transparent": true,
       "type": "stat"
     },
@@ -753,48 +287,13 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
+      "description": "",
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 0,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "showValues": false,
-            "spanNulls": true,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
+            "mode": "thresholds"
           },
           "mappings": [],
-          "max": 1,
-          "min": 0,
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -804,29 +303,33 @@
               }
             ]
           },
-          "unit": "percentunit"
+          "unit": "bytes"
         },
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 13
+        "x": 15,
+        "y": 6,
+        "w": 3,
+        "h": 6
       },
-      "id": 11,
+      "id": 129,
       "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
         },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "single",
-          "sort": "none"
-        }
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": false
       },
       "pluginVersion": "12.2.1",
       "targets": [
@@ -835,59 +338,29 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "editorMode": "builder",
-          "expr": "avg by (stage) (reth_sync_entities_processed{$instance_label=\"$instance\"} / reth_sync_entities_total{$instance_label=\"$instance\"})",
-          "legendFormat": "{{stage}}",
+          "editorMode": "code",
+          "expr": "sum(reth_db_freelist{$instance_label=~\"$instance\"} * reth_db_page_size{$instance_label=~\"$instance\"})",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "Freelist",
           "range": true,
-          "refId": "A"
+          "refId": "B"
         }
       ],
-      "title": "Sync progress (stage progress in %)",
-      "type": "timeseries"
+      "title": "Freelist",
+      "transparent": true,
+      "type": "stat"
     },
     {
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
+      "description": "",
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 0,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "showValues": false,
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
+            "mode": "thresholds"
           },
           "mappings": [],
           "thresholds": {
@@ -896,35 +369,36 @@
               {
                 "color": "green",
                 "value": 0
-              },
-              {
-                "color": "red",
-                "value": 80
               }
             ]
-          }
+          },
+          "unit": "bytes"
         },
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 13
+        "x": 18,
+        "y": 6,
+        "w": 3,
+        "h": 6
       },
-      "id": 12,
+      "id": 130,
       "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
         },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "single",
-          "sort": "none"
-        }
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": false
       },
       "pluginVersion": "12.2.1",
       "targets": [
@@ -933,15 +407,87 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "editorMode": "builder",
-          "expr": "max by (stage) (reth_sync_checkpoint{$instance_label=\"$instance\"})",
-          "legendFormat": "{{stage}}",
+          "editorMode": "code",
+          "expr": "sum(reth_static_files_segment_size{$instance_label=~\"$instance\"})",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "Static Files",
           "range": true,
-          "refId": "A"
+          "refId": "C"
         }
       ],
-      "title": "Sync progress (stage progress as highest block number reached)",
-      "type": "timeseries"
+      "title": "Static Files",
+      "transparent": true,
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 21,
+        "y": 6,
+        "w": 3,
+        "h": 6
+      },
+      "id": 131,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": false
+      },
+      "pluginVersion": "12.2.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(reth_db_table_size{$instance_label=~\"$instance\"}) + sum(reth_db_freelist{$instance_label=~\"$instance\"} * reth_db_page_size{$instance_label=~\"$instance\"}) + sum(reth_static_files_segment_size{$instance_label=~\"$instance\"})",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "Total",
+          "range": true,
+          "refId": "D"
+        }
+      ],
+      "title": "Total",
+      "transparent": true,
+      "type": "stat"
     },
     {
       "datasource": {
@@ -1003,12 +549,12 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
+        "h": 9,
         "w": 12,
         "x": 0,
-        "y": 21
+        "y": 12
       },
-      "id": 13,
+      "id": 5,
       "options": {
         "legend": {
           "calcs": [],
@@ -1030,7 +576,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_sync_execution_gas_per_second{$instance_label=\"$instance\"}",
+          "expr": "reth_sync_execution_gas_per_second{$instance_label=~\"$instance\"}",
           "legendFormat": "Gas/s",
           "range": true,
           "refId": "A"
@@ -1042,7 +588,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "builder",
-          "expr": "avg_over_time(reth_sync_execution_gas_per_second{$instance_label=\"$instance\"}[1m])",
+          "expr": "avg_over_time(reth_sync_execution_gas_per_second{$instance_label=~\"$instance\"}[1m])",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -1058,7 +604,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "builder",
-          "expr": "avg_over_time(reth_sync_execution_gas_per_second{$instance_label=\"$instance\"}[5m])",
+          "expr": "avg_over_time(reth_sync_execution_gas_per_second{$instance_label=~\"$instance\"}[5m])",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -1074,7 +620,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "builder",
-          "expr": "avg_over_time(reth_sync_execution_gas_per_second{$instance_label=\"$instance\"}[10m])",
+          "expr": "avg_over_time(reth_sync_execution_gas_per_second{$instance_label=~\"$instance\"}[10m])",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -1090,7 +636,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "builder",
-          "expr": "avg_over_time(reth_sync_execution_gas_per_second{$instance_label=\"$instance\"}[30m])",
+          "expr": "avg_over_time(reth_sync_execution_gas_per_second{$instance_label=~\"$instance\"}[30m])",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -1106,7 +652,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "builder",
-          "expr": "avg_over_time(reth_sync_execution_gas_per_second{$instance_label=\"$instance\"}[1h])",
+          "expr": "avg_over_time(reth_sync_execution_gas_per_second{$instance_label=~\"$instance\"}[1h])",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -1122,7 +668,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "builder",
-          "expr": "avg_over_time(reth_sync_execution_gas_per_second{$instance_label=\"$instance\"}[24h])",
+          "expr": "avg_over_time(reth_sync_execution_gas_per_second{$instance_label=~\"$instance\"}[24h])",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -1159,11 +705,11 @@
       },
       "gridPos": {
         "h": 9,
-        "w": 8,
+        "w": 12,
         "x": 12,
-        "y": 21
+        "y": 12
       },
-      "id": 14,
+      "id": 6,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -1220,11 +766,11 @@
       },
       "gridPos": {
         "h": 9,
-        "w": 8,
+        "w": 12,
         "x": 0,
-        "y": 30
+        "y": 21
       },
-      "id": 15,
+      "id": 7,
       "options": {
         "colorMode": "background",
         "graphMode": "area",
@@ -1268,11 +814,11 @@
       },
       "gridPos": {
         "h": 9,
-        "w": 8,
-        "x": 8,
-        "y": 30
+        "w": 12,
+        "x": 12,
+        "y": 21
       },
-      "id": 16,
+      "id": 8,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -1299,9 +845,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 39
+        "y": 33
       },
-      "id": 17,
+      "id": 9,
       "panels": [],
       "title": "Morph Engine API",
       "type": "row"
@@ -1332,9 +878,9 @@
         "h": 9,
         "w": 12,
         "x": 0,
-        "y": 40
+        "y": 34
       },
-      "id": 18,
+      "id": 10,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -1385,9 +931,9 @@
         "h": 9,
         "w": 12,
         "x": 12,
-        "y": 40
+        "y": 34
       },
-      "id": 19,
+      "id": 11,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -1438,9 +984,9 @@
         "h": 9,
         "w": 12,
         "x": 0,
-        "y": 49
+        "y": 43
       },
-      "id": 20,
+      "id": 12,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -1491,9 +1037,9 @@
         "h": 9,
         "w": 12,
         "x": 12,
-        "y": 49
+        "y": 43
       },
-      "id": 21,
+      "id": 13,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -1544,9 +1090,9 @@
         "h": 9,
         "w": 12,
         "x": 0,
-        "y": 58
+        "y": 52
       },
-      "id": 22,
+      "id": 14,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -1605,9 +1151,9 @@
         "h": 9,
         "w": 12,
         "x": 12,
-        "y": 58
+        "y": 52
       },
-      "id": 23,
+      "id": 15,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -1634,9 +1180,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 67
+        "y": 61
       },
-      "id": 24,
+      "id": 16,
       "panels": [],
       "title": "Morph Payload Builder",
       "type": "row"
@@ -1667,9 +1213,9 @@
         "h": 9,
         "w": 12,
         "x": 0,
-        "y": 68
+        "y": 62
       },
-      "id": 25,
+      "id": 17,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -1721,9 +1267,9 @@
         "h": 9,
         "w": 12,
         "x": 12,
-        "y": 68
+        "y": 62
       },
-      "id": 26,
+      "id": 18,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -1775,9 +1321,9 @@
         "h": 9,
         "w": 12,
         "x": 0,
-        "y": 77
+        "y": 71
       },
-      "id": 27,
+      "id": 19,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -1829,9 +1375,9 @@
         "h": 9,
         "w": 12,
         "x": 12,
-        "y": 77
+        "y": 71
       },
-      "id": 28,
+      "id": 20,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -1878,9 +1424,9 @@
         "h": 9,
         "w": 12,
         "x": 0,
-        "y": 86
+        "y": 80
       },
-      "id": 29,
+      "id": 21,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -1931,9 +1477,9 @@
         "h": 9,
         "w": 12,
         "x": 12,
-        "y": 86
+        "y": 80
       },
-      "id": 30,
+      "id": 22,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -1955,311 +1501,14 @@
       ]
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "description": "Number of active jobs",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 0,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 3,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "showValues": false,
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 95
-      },
-      "id": 31,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "12.2.1",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "builder",
-          "expr": "reth_payloads_active_jobs{$instance_label=\"$instance\"}",
-          "legendFormat": "Active Jobs",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "title": "Reth Builder Active Jobs",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "description": "Total number of initiated jobs",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 0,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 3,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "showValues": false,
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 95
-      },
-      "id": 32,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "12.2.1",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "builder",
-          "expr": "reth_payloads_initiated_jobs{$instance_label=\"$instance\"}",
-          "legendFormat": "Initiated Jobs",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "title": "Reth Builder Initiated Jobs",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "description": "Total number of failed jobs",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 0,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 3,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "showValues": false,
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 103
-      },
-      "id": 33,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "12.2.1",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "builder",
-          "expr": "reth_payloads_failed_jobs{$instance_label=\"$instance\"}",
-          "legendFormat": "Failed Jobs",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "title": "Reth Builder Failed Jobs",
-      "type": "timeseries"
-    },
-    {
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 111
+        "y": 89
       },
-      "id": 34,
+      "id": 23,
       "panels": [],
       "title": "Execution & State Root",
       "type": "row"
@@ -2330,9 +1579,9 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 112
+        "y": 90
       },
-      "id": 35,
+      "id": 24,
       "options": {
         "legend": {
           "calcs": [],
@@ -2355,7 +1604,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "builder",
-          "expr": "reth_sync_block_validation_state_root_duration{$instance_label=\"$instance\"}",
+          "expr": "reth_sync_block_validation_state_root_duration{$instance_label=~\"$instance\"}",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
@@ -2371,7 +1620,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "builder",
-          "expr": "reth_sync_execution_execution_duration{$instance_label=\"$instance\"}",
+          "expr": "reth_sync_execution_execution_duration{$instance_label=~\"$instance\"}",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -2451,9 +1700,9 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 112
+        "y": 90
       },
-      "id": 36,
+      "id": 25,
       "options": {
         "legend": {
           "calcs": [],
@@ -2476,7 +1725,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "reth_sync_caching_account_cache_hits{$instance_label=\"$instance\"} / (reth_sync_caching_account_cache_hits{$instance_label=\"$instance\"} + reth_sync_caching_account_cache_misses{$instance_label=\"$instance\"})",
+          "expr": "reth_sync_caching_account_cache_hits{$instance_label=~\"$instance\"} / (reth_sync_caching_account_cache_hits{$instance_label=~\"$instance\"} + reth_sync_caching_account_cache_misses{$instance_label=~\"$instance\"})",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -2493,7 +1742,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "reth_sync_caching_storage_cache_hits{$instance_label=\"$instance\"} / (reth_sync_caching_storage_cache_hits{$instance_label=\"$instance\"} + reth_sync_caching_storage_cache_misses{$instance_label=\"$instance\"})",
+          "expr": "reth_sync_caching_storage_cache_hits{$instance_label=~\"$instance\"} / (reth_sync_caching_storage_cache_hits{$instance_label=~\"$instance\"} + reth_sync_caching_storage_cache_misses{$instance_label=~\"$instance\"})",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -2510,7 +1759,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "reth_sync_caching_code_cache_hits{$instance_label=\"$instance\"} / (reth_sync_caching_code_cache_hits{$instance_label=\"$instance\"} + reth_sync_caching_code_cache_misses{$instance_label=\"$instance\"})",
+          "expr": "reth_sync_caching_code_cache_hits{$instance_label=~\"$instance\"} / (reth_sync_caching_code_cache_hits{$instance_label=~\"$instance\"} + reth_sync_caching_code_cache_misses{$instance_label=~\"$instance\"})",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -2591,9 +1840,9 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 120
+        "y": 98
       },
-      "id": 37,
+      "id": 26,
       "options": {
         "legend": {
           "calcs": [],
@@ -2616,7 +1865,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "reth_sync_block_validation_trie_input_duration{$instance_label=\"$instance\", quantile=~\"(0|0.5|0.9|0.95|1)\"}",
+          "expr": "reth_sync_block_validation_trie_input_duration{$instance_label=~\"$instance\", quantile=~\"(0|0.5|0.9|0.95|1)\"}",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -2722,9 +1971,9 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 120
+        "y": 98
       },
-      "id": 38,
+      "id": 27,
       "options": {
         "legend": {
           "calcs": [],
@@ -2747,7 +1996,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "reth_sync_caching_precompile_cache_hits{$instance_label=\"$instance\"} / (reth_sync_caching_precompile_cache_hits{$instance_label=\"$instance\"} + reth_sync_caching_precompile_cache_misses{$instance_label=\"$instance\"})",
+          "expr": "reth_sync_caching_precompile_cache_hits{$instance_label=~\"$instance\"} / (reth_sync_caching_precompile_cache_hits{$instance_label=~\"$instance\"} + reth_sync_caching_precompile_cache_misses{$instance_label=~\"$instance\"})",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -2826,9 +2075,9 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 128
+        "y": 106
       },
-      "id": 39,
+      "id": 28,
       "options": {
         "legend": {
           "calcs": [],
@@ -2850,7 +2099,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_tree_root_proofs_processed_histogram{$instance_label=\"$instance\",quantile=~\"(0|0.5|0.9|0.95|1)\"}",
+          "expr": "reth_tree_root_proofs_processed_histogram{$instance_label=~\"$instance\",quantile=~\"(0|0.5|0.9|0.95|1)\"}",
           "instant": false,
           "legendFormat": "{{quantile}} percentile",
           "range": true,
@@ -2926,9 +2175,9 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 128
+        "y": 106
       },
-      "id": 40,
+      "id": 29,
       "options": {
         "legend": {
           "calcs": [],
@@ -2950,7 +2199,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_tree_root_proof_calculation_duration_histogram{$instance_label=\"$instance\",quantile=~\"(0|0.5|0.9|0.95|1)\"}",
+          "expr": "reth_tree_root_proof_calculation_duration_histogram{$instance_label=~\"$instance\",quantile=~\"(0|0.5|0.9|0.95|1)\"}",
           "instant": false,
           "legendFormat": "{{quantile}} percentile",
           "range": true,
@@ -3026,9 +2275,9 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 136
+        "y": 114
       },
-      "id": 41,
+      "id": 30,
       "options": {
         "legend": {
           "calcs": [],
@@ -3050,7 +2299,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_tree_root_pending_account_multiproofs_histogram{$instance_label=\"$instance\", quantile=\"0.5\"}",
+          "expr": "reth_tree_root_pending_account_multiproofs_histogram{$instance_label=~\"$instance\", quantile=\"0.5\"}",
           "instant": false,
           "legendFormat": "accounts p50",
           "range": true,
@@ -3062,7 +2311,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_tree_root_pending_account_multiproofs_histogram{$instance_label=\"$instance\", quantile=\"0.9\"}",
+          "expr": "reth_tree_root_pending_account_multiproofs_histogram{$instance_label=~\"$instance\", quantile=\"0.9\"}",
           "hide": false,
           "instant": false,
           "legendFormat": "accounts p90",
@@ -3075,7 +2324,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_tree_root_pending_account_multiproofs_histogram{$instance_label=\"$instance\", quantile=\"0.95\"}",
+          "expr": "reth_tree_root_pending_account_multiproofs_histogram{$instance_label=~\"$instance\", quantile=\"0.95\"}",
           "hide": false,
           "instant": false,
           "legendFormat": "accounts p95",
@@ -3088,7 +2337,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_tree_root_pending_account_multiproofs_histogram{$instance_label=\"$instance\", quantile=\"0.99\"}",
+          "expr": "reth_tree_root_pending_account_multiproofs_histogram{$instance_label=~\"$instance\", quantile=\"0.99\"}",
           "hide": false,
           "instant": false,
           "legendFormat": "accounts p99",
@@ -3101,7 +2350,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_tree_root_pending_storage_multiproofs_histogram{$instance_label=\"$instance\", quantile=\"0.5\"}",
+          "expr": "reth_tree_root_pending_storage_multiproofs_histogram{$instance_label=~\"$instance\", quantile=\"0.5\"}",
           "hide": false,
           "instant": false,
           "legendFormat": "storage p50",
@@ -3114,7 +2363,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_tree_root_pending_storage_multiproofs_histogram{$instance_label=\"$instance\", quantile=\"0.9\"}",
+          "expr": "reth_tree_root_pending_storage_multiproofs_histogram{$instance_label=~\"$instance\", quantile=\"0.9\"}",
           "hide": false,
           "instant": false,
           "legendFormat": "storage p90",
@@ -3127,7 +2376,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_tree_root_pending_storage_multiproofs_histogram{$instance_label=\"$instance\", quantile=\"0.95\"}",
+          "expr": "reth_tree_root_pending_storage_multiproofs_histogram{$instance_label=~\"$instance\", quantile=\"0.95\"}",
           "hide": false,
           "instant": false,
           "legendFormat": "storage p95",
@@ -3140,7 +2389,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_tree_root_pending_storage_multiproofs_histogram{$instance_label=\"$instance\", quantile=\"0.99\"}",
+          "expr": "reth_tree_root_pending_storage_multiproofs_histogram{$instance_label=~\"$instance\", quantile=\"0.99\"}",
           "hide": false,
           "instant": false,
           "legendFormat": "storage p99",
@@ -3217,9 +2466,9 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 136
+        "y": 114
       },
-      "id": 42,
+      "id": 31,
       "options": {
         "legend": {
           "calcs": [],
@@ -3241,7 +2490,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_tree_root_active_account_workers_histogram{$instance_label=\"$instance\",quantile=\"0.5\"}",
+          "expr": "reth_tree_root_active_account_workers_histogram{$instance_label=~\"$instance\",quantile=\"0.5\"}",
           "instant": false,
           "legendFormat": "accounts p50",
           "range": true,
@@ -3253,7 +2502,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_tree_root_active_account_workers_histogram{$instance_label=\"$instance\",quantile=\"0.9\"}",
+          "expr": "reth_tree_root_active_account_workers_histogram{$instance_label=~\"$instance\",quantile=\"0.9\"}",
           "hide": false,
           "instant": false,
           "legendFormat": "accounts p90",
@@ -3266,7 +2515,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_tree_root_active_account_workers_histogram{$instance_label=\"$instance\",quantile=\"0.95\"}",
+          "expr": "reth_tree_root_active_account_workers_histogram{$instance_label=~\"$instance\",quantile=\"0.95\"}",
           "hide": false,
           "instant": false,
           "legendFormat": "accounts p95",
@@ -3279,7 +2528,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_tree_root_active_account_workers_histogram{$instance_label=\"$instance\",quantile=\"0.99\"}",
+          "expr": "reth_tree_root_active_account_workers_histogram{$instance_label=~\"$instance\",quantile=\"0.99\"}",
           "hide": false,
           "instant": false,
           "legendFormat": "accounts p99",
@@ -3292,7 +2541,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_tree_root_active_storage_workers_histogram{$instance_label=\"$instance\",quantile=\"0.5\"}",
+          "expr": "reth_tree_root_active_storage_workers_histogram{$instance_label=~\"$instance\",quantile=\"0.5\"}",
           "instant": false,
           "legendFormat": "storages p50",
           "range": true,
@@ -3304,7 +2553,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_tree_root_active_storage_workers_histogram{$instance_label=\"$instance\",quantile=\"0.9\"}",
+          "expr": "reth_tree_root_active_storage_workers_histogram{$instance_label=~\"$instance\",quantile=\"0.9\"}",
           "hide": false,
           "instant": false,
           "legendFormat": "storages p90",
@@ -3317,7 +2566,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_tree_root_active_storage_workers_histogram{$instance_label=\"$instance\",quantile=\"0.95\"}",
+          "expr": "reth_tree_root_active_storage_workers_histogram{$instance_label=~\"$instance\",quantile=\"0.95\"}",
           "hide": false,
           "instant": false,
           "legendFormat": "storages p95",
@@ -3330,7 +2579,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_tree_root_active_storage_workers_histogram{$instance_label=\"$instance\",quantile=\"0.99\"}",
+          "expr": "reth_tree_root_active_storage_workers_histogram{$instance_label=~\"$instance\",quantile=\"0.99\"}",
           "hide": false,
           "instant": false,
           "legendFormat": "storages p99",
@@ -3407,9 +2656,9 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 144
+        "y": 122
       },
-      "id": 43,
+      "id": 32,
       "options": {
         "legend": {
           "calcs": [],
@@ -3431,7 +2680,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_sparse_state_trie_multiproof_total_account_nodes{$instance_label=\"$instance\",quantile=~\"(0|0.5|0.9|0.95|1)\"}",
+          "expr": "reth_sparse_state_trie_multiproof_total_account_nodes{$instance_label=~\"$instance\",quantile=~\"(0|0.5|0.9|0.95|1)\"}",
           "instant": false,
           "legendFormat": "Account {{quantile}} percentile",
           "range": true,
@@ -3507,9 +2756,9 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 144
+        "y": 122
       },
-      "id": 44,
+      "id": 33,
       "options": {
         "legend": {
           "calcs": [],
@@ -3531,7 +2780,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_sparse_state_trie_multiproof_total_storage_nodes{$instance_label=\"$instance\",quantile=~\"(0|0.5|0.9|0.95|1)\"}",
+          "expr": "reth_sparse_state_trie_multiproof_total_storage_nodes{$instance_label=~\"$instance\",quantile=~\"(0|0.5|0.9|0.95|1)\"}",
           "instant": false,
           "legendFormat": "Storage {{quantile}} percentile",
           "range": true,
@@ -3607,9 +2856,9 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 152
+        "y": 130
       },
-      "id": 45,
+      "id": 34,
       "options": {
         "legend": {
           "calcs": [],
@@ -3631,7 +2880,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_sparse_state_trie_multiproof_skipped_account_nodes{$instance_label=\"$instance\",quantile=~\"(0|0.5|0.9|0.95|1)\"}",
+          "expr": "reth_sparse_state_trie_multiproof_skipped_account_nodes{$instance_label=~\"$instance\",quantile=~\"(0|0.5|0.9|0.95|1)\"}",
           "hide": false,
           "instant": false,
           "legendFormat": "Account {{quantile}} percentile",
@@ -3708,9 +2957,9 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 152
+        "y": 130
       },
-      "id": 46,
+      "id": 35,
       "options": {
         "legend": {
           "calcs": [],
@@ -3732,7 +2981,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_sparse_state_trie_multiproof_skipped_storage_nodes{$instance_label=\"$instance\",quantile=~\"(0|0.5|0.9|0.95|1)\"}",
+          "expr": "reth_sparse_state_trie_multiproof_skipped_storage_nodes{$instance_label=~\"$instance\",quantile=~\"(0|0.5|0.9|0.95|1)\"}",
           "instant": false,
           "legendFormat": "Storage {{quantile}} percentile",
           "range": true,
@@ -3809,9 +3058,9 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 160
+        "y": 138
       },
-      "id": 47,
+      "id": 36,
       "options": {
         "legend": {
           "calcs": [],
@@ -3833,7 +3082,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_tree_root_multiproof_task_total_duration_histogram{$instance_label=\"$instance\",quantile=~\"(0|0.5|0.9|0.95|1)\"}",
+          "expr": "reth_tree_root_multiproof_task_total_duration_histogram{$instance_label=~\"$instance\",quantile=~\"(0|0.5|0.9|0.95|1)\"}",
           "hide": false,
           "instant": false,
           "legendFormat": "Task duration {{quantile}} percentile",
@@ -3911,9 +3160,9 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 160
+        "y": 138
       },
-      "id": 48,
+      "id": 37,
       "options": {
         "legend": {
           "calcs": [],
@@ -3936,7 +3185,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "builder",
-          "expr": "reth_sync_block_validation_state_root_histogram{$instance_label=\"$instance\"}",
+          "expr": "reth_sync_block_validation_state_root_histogram{$instance_label=~\"$instance\"}",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
@@ -3955,9 +3204,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 168
+        "y": 146
       },
-      "id": 49,
+      "id": 38,
       "panels": [
         {
           "datasource": {
@@ -4023,9 +3272,9 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 169
+            "y": 147
           },
-          "id": 50,
+          "id": 39,
           "options": {
             "legend": {
               "calcs": [],
@@ -4048,7 +3297,7 @@
               },
               "editorMode": "code",
               "exemplar": false,
-              "expr": "avg(rate(reth_database_transaction_close_duration_seconds_sum{$instance_label=\"$instance\", outcome=\"commit\"}[$__rate_interval]) / rate(reth_database_transaction_close_duration_seconds_count{$instance_label=\"$instance\", outcome=\"commit\"}[$__rate_interval]) >= 0)",
+              "expr": "avg(rate(reth_database_transaction_close_duration_seconds_sum{$instance_label=~\"$instance\", outcome=\"commit\"}[$__rate_interval]) / rate(reth_database_transaction_close_duration_seconds_count{$instance_label=~\"$instance\", outcome=\"commit\"}[$__rate_interval]) >= 0)",
               "format": "time_series",
               "instant": false,
               "legendFormat": "Commit time",
@@ -4084,9 +3333,9 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 169
+            "y": 147
           },
-          "id": 51,
+          "id": 40,
           "maxDataPoints": 25,
           "options": {
             "calculate": false,
@@ -4138,7 +3387,7 @@
               },
               "editorMode": "code",
               "exemplar": false,
-              "expr": "avg(max_over_time(reth_database_transaction_close_duration_seconds{$instance_label=\"$instance\", outcome=\"commit\"}[$__rate_interval])) by (quantile)",
+              "expr": "avg(max_over_time(reth_database_transaction_close_duration_seconds{$instance_label=~\"$instance\", outcome=\"commit\"}[$__rate_interval])) by (quantile)",
               "format": "time_series",
               "instant": false,
               "legendFormat": "{{quantile}}",
@@ -4213,9 +3462,9 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 177
+            "y": 155
           },
-          "id": 52,
+          "id": 41,
           "options": {
             "legend": {
               "calcs": [],
@@ -4238,7 +3487,7 @@
               },
               "editorMode": "code",
               "exemplar": false,
-              "expr": "sum(rate(reth_database_transaction_open_duration_seconds_sum{$instance_label=\"$instance\", outcome!=\"\"}[$__rate_interval]) / rate(reth_database_transaction_open_duration_seconds_count{$instance_label=\"$instance\", outcome!=\"\"}[$__rate_interval])) by (outcome, mode)",
+              "expr": "sum(rate(reth_database_transaction_open_duration_seconds_sum{$instance_label=~\"$instance\", outcome!=\"\"}[$__rate_interval]) / rate(reth_database_transaction_open_duration_seconds_count{$instance_label=~\"$instance\", outcome!=\"\"}[$__rate_interval])) by (outcome, mode)",
               "format": "time_series",
               "instant": false,
               "legendFormat": "{{mode}}, {{outcome}}",
@@ -4312,9 +3561,9 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 177
+            "y": 155
           },
-          "id": 53,
+          "id": 42,
           "options": {
             "legend": {
               "calcs": [],
@@ -4337,7 +3586,7 @@
               },
               "editorMode": "code",
               "exemplar": false,
-              "expr": "max(max_over_time(reth_database_transaction_open_duration_seconds{$instance_label=\"$instance\", outcome!=\"\", quantile=\"1\"}[$__interval])) by (outcome, mode)",
+              "expr": "max(max_over_time(reth_database_transaction_open_duration_seconds{$instance_label=~\"$instance\", outcome!=\"\", quantile=\"1\"}[$__interval])) by (outcome, mode)",
               "format": "time_series",
               "instant": false,
               "legendFormat": "{{mode}}, {{outcome}}",
@@ -4445,9 +3694,9 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 185
+            "y": 163
           },
-          "id": 54,
+          "id": 43,
           "options": {
             "legend": {
               "calcs": [],
@@ -4471,7 +3720,7 @@
               "disableTextWrap": false,
               "editorMode": "code",
               "exemplar": false,
-              "expr": "sum(reth_database_transaction_opened_total{$instance_label=\"$instance\", mode=\"read-write\"})",
+              "expr": "sum(reth_database_transaction_opened_total{$instance_label=~\"$instance\", mode=\"read-write\"})",
               "format": "time_series",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
@@ -4488,7 +3737,7 @@
               },
               "editorMode": "code",
               "exemplar": false,
-              "expr": "sum(reth_database_transaction_closed_total{$instance_label=\"$instance\", mode=\"read-write\"})",
+              "expr": "sum(reth_database_transaction_closed_total{$instance_label=~\"$instance\", mode=\"read-write\"})",
               "format": "time_series",
               "instant": false,
               "legendFormat": "Closed {{mode}}",
@@ -4606,9 +3855,9 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 185
+            "y": 163
           },
-          "id": 55,
+          "id": 44,
           "options": {
             "legend": {
               "calcs": [],
@@ -4632,7 +3881,7 @@
               "disableTextWrap": false,
               "editorMode": "builder",
               "exemplar": false,
-              "expr": "reth_database_transaction_opened_total{$instance_label=\"$instance\", mode=\"read-only\"}",
+              "expr": "reth_database_transaction_opened_total{$instance_label=~\"$instance\", mode=\"read-only\"}",
               "format": "time_series",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
@@ -4650,7 +3899,7 @@
               "disableTextWrap": false,
               "editorMode": "builder",
               "exemplar": false,
-              "expr": "sum(reth_database_transaction_closed_total{$instance_label=\"$instance\", mode=\"read-only\"})",
+              "expr": "sum(reth_database_transaction_closed_total{$instance_label=~\"$instance\", mode=\"read-only\"})",
               "format": "time_series",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
@@ -4701,9 +3950,9 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 193
+            "y": 171
           },
-          "id": 56,
+          "id": 45,
           "options": {
             "displayLabels": [
               "name"
@@ -4739,7 +3988,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_db_table_size{$instance_label=\"$instance\"}",
+              "expr": "reth_db_table_size{$instance_label=~\"$instance\"}",
               "interval": "",
               "legendFormat": "{{table}}",
               "range": true,
@@ -4816,9 +4065,9 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 193
+            "y": 171
           },
-          "id": 57,
+          "id": 46,
           "options": {
             "legend": {
               "calcs": [],
@@ -4841,7 +4090,7 @@
               },
               "editorMode": "code",
               "exemplar": false,
-              "expr": "max(max_over_time(reth_database_operation_large_value_duration_seconds{$instance_label=\"$instance\", quantile=\"1\"}[$__interval]) > 0) by (table)",
+              "expr": "max(max_over_time(reth_database_operation_large_value_duration_seconds{$instance_label=~\"$instance\", quantile=\"1\"}[$__interval]) > 0) by (table)",
               "format": "time_series",
               "instant": false,
               "legendFormat": "{{table}}",
@@ -4879,9 +4128,9 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 201
+            "y": 179
           },
-          "id": 58,
+          "id": 47,
           "options": {
             "legend": {
               "displayMode": "table",
@@ -4914,7 +4163,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "sum by (type) ( reth_db_table_pages{$instance_label=\"$instance\"} )",
+              "expr": "sum by (type) ( reth_db_table_pages{$instance_label=~\"$instance\"} )",
               "legendFormat": "__auto",
               "range": true,
               "refId": "A"
@@ -4991,9 +4240,9 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 201
+            "y": 179
           },
-          "id": 59,
+          "id": 48,
           "options": {
             "legend": {
               "calcs": [],
@@ -5015,7 +4264,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum by (job) ( reth_db_table_size{$instance_label=\"$instance\"} )",
+              "expr": "sum by (job) ( reth_db_table_size{$instance_label=~\"$instance\"} )",
               "legendFormat": "Size ({{job}})",
               "range": true,
               "refId": "A"
@@ -5091,9 +4340,9 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 209
+            "y": 187
           },
-          "id": 60,
+          "id": 49,
           "options": {
             "legend": {
               "calcs": [],
@@ -5115,7 +4364,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum(reth_db_freelist{$instance_label=\"$instance\"}) by (job)",
+              "expr": "sum(reth_db_freelist{$instance_label=~\"$instance\"}) by (job)",
               "legendFormat": "Pages ({{job}})",
               "range": true,
               "refId": "A"
@@ -5254,9 +4503,9 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 209
+            "y": 187
           },
-          "id": 61,
+          "id": 50,
           "options": {
             "cellHeight": "sm",
             "showHeader": true
@@ -5270,7 +4519,7 @@
               },
               "editorMode": "code",
               "exemplar": false,
-              "expr": "sort_desc(reth_db_table_pages{$instance_label=\"$instance\", type=\"overflow\"} != 0)",
+              "expr": "sort_desc(reth_db_table_pages{$instance_label=~\"$instance\", type=\"overflow\"} != 0)",
               "format": "table",
               "instant": true,
               "legendFormat": "__auto",
@@ -5308,9 +4557,9 @@
             "h": 8,
             "w": 8,
             "x": 0,
-            "y": 217
+            "y": 195
           },
-          "id": 62,
+          "id": 51,
           "options": {
             "displayLabels": [
               "name"
@@ -5346,7 +4595,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "reth_static_files_segment_size{$instance_label=\"$instance\"}",
+              "expr": "reth_static_files_segment_size{$instance_label=~\"$instance\"}",
               "interval": "",
               "legendFormat": "{{segment}}",
               "range": true,
@@ -5474,9 +4723,9 @@
             "h": 8,
             "w": 8,
             "x": 8,
-            "y": 217
+            "y": 195
           },
-          "id": 63,
+          "id": 52,
           "options": {
             "cellHeight": "sm",
             "showHeader": true
@@ -5490,7 +4739,7 @@
               },
               "editorMode": "code",
               "exemplar": false,
-              "expr": "reth_static_files_segment_entries{$instance_label=\"$instance\"}",
+              "expr": "reth_static_files_segment_entries{$instance_label=~\"$instance\"}",
               "format": "table",
               "instant": true,
               "legendFormat": "__auto",
@@ -5619,9 +4868,9 @@
             "h": 8,
             "w": 8,
             "x": 16,
-            "y": 217
+            "y": 195
           },
-          "id": 64,
+          "id": 53,
           "options": {
             "cellHeight": "sm",
             "showHeader": true
@@ -5635,7 +4884,7 @@
               },
               "editorMode": "code",
               "exemplar": false,
-              "expr": "reth_static_files_segment_files{$instance_label=\"$instance\"}",
+              "expr": "reth_static_files_segment_files{$instance_label=~\"$instance\"}",
               "format": "table",
               "instant": true,
               "legendFormat": "__auto",
@@ -5713,9 +4962,9 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 225
+            "y": 203
           },
-          "id": 65,
+          "id": 54,
           "options": {
             "legend": {
               "calcs": [],
@@ -5737,7 +4986,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum by (job) ( reth_static_files_segment_size{$instance_label=\"$instance\"} )",
+              "expr": "sum by (job) ( reth_static_files_segment_size{$instance_label=~\"$instance\"} )",
               "legendFormat": "__auto",
               "range": true,
               "refId": "A"
@@ -5813,9 +5062,9 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 225
+            "y": 203
           },
-          "id": 66,
+          "id": 55,
           "options": {
             "legend": {
               "calcs": [],
@@ -5837,7 +5086,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "max(max_over_time(reth_static_files_jar_provider_write_duration_seconds{$instance_label=\"$instance\", operation=\"commit-writer\", quantile=\"1\"}[$__interval]) > 0) by (segment)",
+              "expr": "max(max_over_time(reth_static_files_jar_provider_write_duration_seconds{$instance_label=~\"$instance\", operation=\"commit-writer\", quantile=\"1\"}[$__interval]) > 0) by (segment)",
               "legendFormat": "{{segment}}",
               "range": true,
               "refId": "A"
@@ -5912,9 +5161,9 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 233
+            "y": 211
           },
-          "id": 67,
+          "id": 56,
           "options": {
             "legend": {
               "calcs": [],
@@ -5936,7 +5185,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_blockchain_tree_canonical_chain_height{$instance_label=\"$instance\"}",
+              "expr": "reth_blockchain_tree_canonical_chain_height{$instance_label=~\"$instance\"}",
               "hide": false,
               "legendFormat": "Canonical chain height",
               "range": true,
@@ -6012,9 +5261,9 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 233
+            "y": 211
           },
-          "id": 68,
+          "id": 57,
           "options": {
             "legend": {
               "calcs": [],
@@ -6036,7 +5285,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_blockchain_tree_block_buffer_blocks{$instance_label=\"$instance\"}",
+              "expr": "reth_blockchain_tree_block_buffer_blocks{$instance_label=~\"$instance\"}",
               "hide": false,
               "legendFormat": "Buffered blocks",
               "range": true,
@@ -6112,9 +5361,9 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 241
+            "y": 219
           },
-          "id": 69,
+          "id": 58,
           "options": {
             "legend": {
               "calcs": [],
@@ -6136,7 +5385,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "increase(reth_blockchain_tree_reorgs{$instance_label=\"$instance\"}[$__rate_interval])",
+              "expr": "increase(reth_blockchain_tree_reorgs{$instance_label=~\"$instance\"}[$__rate_interval])",
               "instant": false,
               "legendFormat": "__auto",
               "range": true,
@@ -6212,9 +5461,9 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 241
+            "y": 219
           },
-          "id": 70,
+          "id": 59,
           "options": {
             "legend": {
               "calcs": [],
@@ -6236,7 +5485,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "reth_blockchain_tree_latest_reorg_depth{$instance_label=\"$instance\"}",
+              "expr": "reth_blockchain_tree_latest_reorg_depth{$instance_label=~\"$instance\"}",
               "instant": false,
               "legendFormat": "__auto",
               "range": true,
@@ -6256,9 +5505,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 249
+        "y": 227
       },
-      "id": 71,
+      "id": 60,
       "panels": [
         {
           "datasource": {
@@ -6352,9 +5601,9 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 250
+            "y": 228
           },
-          "id": 72,
+          "id": 61,
           "options": {
             "legend": {
               "calcs": [],
@@ -6377,7 +5626,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "code",
-              "expr": "sum(reth_rpc_server_connections_connections_opened_total{$instance_label=\"$instance\"} - reth_rpc_server_connections_connections_closed_total{$instance_label=\"$instance\"}) by (transport)",
+              "expr": "sum(reth_rpc_server_connections_connections_opened_total{$instance_label=~\"$instance\"} - reth_rpc_server_connections_connections_closed_total{$instance_label=~\"$instance\"}) by (transport)",
               "format": "time_series",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
@@ -6415,9 +5664,9 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 250
+            "y": 228
           },
-          "id": 73,
+          "id": 62,
           "maxDataPoints": 25,
           "options": {
             "calculate": false,
@@ -6469,7 +5718,7 @@
               },
               "editorMode": "code",
               "exemplar": false,
-              "expr": "avg(max_over_time(reth_rpc_server_connections_request_time_seconds{$instance_label=\"$instance\"}[$__rate_interval]) > 0) by (quantile)",
+              "expr": "avg(max_over_time(reth_rpc_server_connections_request_time_seconds{$instance_label=~\"$instance\"}[$__rate_interval]) > 0) by (quantile)",
               "format": "time_series",
               "instant": false,
               "legendFormat": "__auto",
@@ -6546,9 +5795,9 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 258
+            "y": 236
           },
-          "id": 74,
+          "id": 63,
           "options": {
             "legend": {
               "calcs": [],
@@ -6570,7 +5819,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "max(max_over_time(reth_rpc_server_calls_time_seconds{$instance_label=\"$instance\"}[$__rate_interval])) by (method) > 0",
+              "expr": "max(max_over_time(reth_rpc_server_calls_time_seconds{$instance_label=~\"$instance\"}[$__rate_interval])) by (method) > 0",
               "instant": false,
               "legendFormat": "__auto",
               "range": true,
@@ -6605,9 +5854,9 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 258
+            "y": 236
           },
-          "id": 75,
+          "id": 64,
           "maxDataPoints": 25,
           "options": {
             "calculate": false,
@@ -6659,7 +5908,7 @@
               },
               "editorMode": "code",
               "exemplar": false,
-              "expr": "avg(max_over_time(reth_rpc_server_calls_time_seconds{$instance_label=\"$instance\"}[$__rate_interval]) > 0) by (quantile)",
+              "expr": "avg(max_over_time(reth_rpc_server_calls_time_seconds{$instance_label=~\"$instance\"}[$__rate_interval]) > 0) by (quantile)",
               "format": "time_series",
               "instant": false,
               "legendFormat": "{{quantile}}",
@@ -6772,9 +6021,9 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 266
+            "y": 244
           },
-          "id": 76,
+          "id": 65,
           "options": {
             "legend": {
               "calcs": [],
@@ -6797,7 +6046,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_rpc_eth_cache_cached_count{$instance_label=\"$instance\", cache=\"headers\"}",
+              "expr": "reth_rpc_eth_cache_cached_count{$instance_label=~\"$instance\", cache=\"headers\"}",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "instant": false,
@@ -6813,7 +6062,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_rpc_eth_cache_queued_consumers_count{$instance_label=\"$instance\", cache=\"receipts\"}",
+              "expr": "reth_rpc_eth_cache_queued_consumers_count{$instance_label=~\"$instance\", cache=\"receipts\"}",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -6830,7 +6079,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_rpc_eth_cache_queued_consumers_count{$instance_label=\"$instance\", cache=\"headers\"}",
+              "expr": "reth_rpc_eth_cache_queued_consumers_count{$instance_label=~\"$instance\", cache=\"headers\"}",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -6847,7 +6096,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_rpc_eth_cache_queued_consumers_count{$instance_label=\"$instance\", cache=\"blocks\"}",
+              "expr": "reth_rpc_eth_cache_queued_consumers_count{$instance_label=~\"$instance\", cache=\"blocks\"}",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -6864,7 +6113,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_rpc_eth_cache_memory_usage{$instance_label=\"$instance\", cache=\"blocks\"}",
+              "expr": "reth_rpc_eth_cache_memory_usage{$instance_label=~\"$instance\", cache=\"blocks\"}",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -6881,7 +6130,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_rpc_eth_cache_cached_count{$instance_label=\"$instance\", cache=\"receipts\"}",
+              "expr": "reth_rpc_eth_cache_cached_count{$instance_label=~\"$instance\", cache=\"receipts\"}",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -6898,7 +6147,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_rpc_eth_cache_memory_usage{$instance_label=\"$instance\", cache=\"receipts\"}",
+              "expr": "reth_rpc_eth_cache_memory_usage{$instance_label=~\"$instance\", cache=\"receipts\"}",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -6915,7 +6164,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_rpc_eth_cache_cached_count{$instance_label=\"$instance\", cache=\"blocks\"}",
+              "expr": "reth_rpc_eth_cache_cached_count{$instance_label=~\"$instance\", cache=\"blocks\"}",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -6995,9 +6244,9 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 266
+            "y": 244
           },
-          "id": 77,
+          "id": 66,
           "options": {
             "legend": {
               "calcs": [],
@@ -7019,7 +6268,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum(rate(reth_rpc_server_calls_successful_total{$instance_label=\"$instance\"}[$__rate_interval])) by (method) > 0",
+              "expr": "sum(rate(reth_rpc_server_calls_successful_total{$instance_label=~\"$instance\"}[$__rate_interval])) by (method) > 0",
               "instant": false,
               "legendFormat": "{{method}}",
               "range": true,
@@ -7039,9 +6288,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 274
+        "y": 252
       },
-      "id": 78,
+      "id": 67,
       "panels": [
         {
           "datasource": {
@@ -7133,9 +6382,9 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 275
+            "y": 253
           },
-          "id": 79,
+          "id": 68,
           "options": {
             "legend": {
               "calcs": [],
@@ -7157,7 +6406,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_downloaders_headers_total_downloaded{$instance_label=\"$instance\"}",
+              "expr": "reth_downloaders_headers_total_downloaded{$instance_label=~\"$instance\"}",
               "legendFormat": "Downloaded",
               "range": true,
               "refId": "A"
@@ -7168,7 +6417,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_downloaders_headers_total_flushed{$instance_label=\"$instance\"}",
+              "expr": "reth_downloaders_headers_total_flushed{$instance_label=~\"$instance\"}",
               "hide": false,
               "legendFormat": "Flushed",
               "range": true,
@@ -7180,7 +6429,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "rate(reth_downloaders_headers_total_downloaded{$instance_label=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_downloaders_headers_total_downloaded{$instance_label=~\"$instance\"}[$__rate_interval])",
               "hide": false,
               "instant": false,
               "legendFormat": "Downloaded/s",
@@ -7193,7 +6442,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "rate(reth_downloaders_headers_total_flushed{$instance_label=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_downloaders_headers_total_flushed{$instance_label=~\"$instance\"}[$__rate_interval])",
               "hide": false,
               "legendFormat": "Flushed/s",
               "range": true,
@@ -7270,9 +6519,9 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 275
+            "y": 253
           },
-          "id": 80,
+          "id": 69,
           "options": {
             "legend": {
               "calcs": [],
@@ -7294,7 +6543,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "rate(reth_downloaders_headers_timeout_errors{$instance_label=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_downloaders_headers_timeout_errors{$instance_label=~\"$instance\"}[$__rate_interval])",
               "legendFormat": "Request timed out",
               "range": true,
               "refId": "A"
@@ -7305,7 +6554,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "rate(reth_downloaders_headers_unexpected_errors{$instance_label=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_downloaders_headers_unexpected_errors{$instance_label=~\"$instance\"}[$__rate_interval])",
               "hide": false,
               "legendFormat": "Unexpected error",
               "range": true,
@@ -7317,7 +6566,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "rate(reth_downloaders_headers_validation_errors{$instance_label=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_downloaders_headers_validation_errors{$instance_label=~\"$instance\"}[$__rate_interval])",
               "hide": false,
               "legendFormat": "Invalid response",
               "range": true,
@@ -7393,9 +6642,9 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 283
+            "y": 261
           },
-          "id": 81,
+          "id": 70,
           "options": {
             "legend": {
               "calcs": [],
@@ -7417,7 +6666,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_downloaders_headers_in_flight_requests{$instance_label=\"$instance\"}",
+              "expr": "reth_downloaders_headers_in_flight_requests{$instance_label=~\"$instance\"}",
               "legendFormat": "In flight requests",
               "range": true,
               "refId": "A"
@@ -7428,7 +6677,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_network_connected_peers{$instance_label=\"$instance\"}",
+              "expr": "reth_network_connected_peers{$instance_label=~\"$instance\"}",
               "hide": false,
               "legendFormat": "Connected peers",
               "range": true,
@@ -7538,9 +6787,9 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 283
+            "y": 261
           },
-          "id": 82,
+          "id": 71,
           "options": {
             "legend": {
               "calcs": [],
@@ -7562,7 +6811,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_downloaders_bodies_total_downloaded{$instance_label=\"$instance\"}",
+              "expr": "reth_downloaders_bodies_total_downloaded{$instance_label=~\"$instance\"}",
               "legendFormat": "Downloaded",
               "range": true,
               "refId": "A"
@@ -7573,7 +6822,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_downloaders_bodies_total_flushed{$instance_label=\"$instance\"}",
+              "expr": "reth_downloaders_bodies_total_flushed{$instance_label=~\"$instance\"}",
               "hide": false,
               "legendFormat": "Flushed",
               "range": true,
@@ -7585,7 +6834,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "rate(reth_downloaders_bodies_total_flushed{$instance_label=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_downloaders_bodies_total_flushed{$instance_label=~\"$instance\"}[$__rate_interval])",
               "hide": false,
               "legendFormat": "Flushed/s",
               "range": true,
@@ -7597,7 +6846,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "rate(reth_downloaders_bodies_total_downloaded{$instance_label=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_downloaders_bodies_total_downloaded{$instance_label=~\"$instance\"}[$__rate_interval])",
               "hide": false,
               "legendFormat": "Downloaded/s",
               "range": true,
@@ -7609,7 +6858,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_downloaders_bodies_buffered_responses{$instance_label=\"$instance\"}",
+              "expr": "reth_downloaders_bodies_buffered_responses{$instance_label=~\"$instance\"}",
               "hide": false,
               "legendFormat": "Buffered responses",
               "range": true,
@@ -7621,7 +6870,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_downloaders_bodies_buffered_blocks{$instance_label=\"$instance\"}",
+              "expr": "reth_downloaders_bodies_buffered_blocks{$instance_label=~\"$instance\"}",
               "hide": false,
               "legendFormat": "Buffered blocks",
               "range": true,
@@ -7633,7 +6882,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_downloaders_bodies_queued_blocks{$instance_label=\"$instance\"}",
+              "expr": "reth_downloaders_bodies_queued_blocks{$instance_label=~\"$instance\"}",
               "hide": false,
               "legendFormat": "Queued blocks",
               "range": true,
@@ -7707,9 +6956,9 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 291
+            "y": 269
           },
-          "id": 83,
+          "id": 72,
           "options": {
             "legend": {
               "calcs": [],
@@ -7731,7 +6980,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "rate(reth_downloaders_bodies_timeout_errors{$instance_label=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_downloaders_bodies_timeout_errors{$instance_label=~\"$instance\"}[$__rate_interval])",
               "legendFormat": "Request timed out",
               "range": true,
               "refId": "A"
@@ -7742,7 +6991,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "rate(reth_downloaders_bodies_unexpected_errors{$instance_label=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_downloaders_bodies_unexpected_errors{$instance_label=~\"$instance\"}[$__rate_interval])",
               "hide": false,
               "legendFormat": "Unexpected error",
               "range": true,
@@ -7754,7 +7003,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "rate(reth_downloaders_bodies_validation_errors{$instance_label=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_downloaders_bodies_validation_errors{$instance_label=~\"$instance\"}[$__rate_interval])",
               "hide": false,
               "legendFormat": "Invalid response",
               "range": true,
@@ -7830,9 +7079,9 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 291
+            "y": 269
           },
-          "id": 84,
+          "id": 73,
           "options": {
             "legend": {
               "calcs": [],
@@ -7854,7 +7103,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_downloaders_bodies_in_flight_requests{$instance_label=\"$instance\"}",
+              "expr": "reth_downloaders_bodies_in_flight_requests{$instance_label=~\"$instance\"}",
               "legendFormat": "In flight requests",
               "range": true,
               "refId": "A"
@@ -7865,7 +7114,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_network_connected_peers{$instance_label=\"$instance\"}",
+              "expr": "reth_network_connected_peers{$instance_label=~\"$instance\"}",
               "hide": false,
               "legendFormat": "Connected peers",
               "range": true,
@@ -7959,9 +7208,9 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 299
+            "y": 277
           },
-          "id": 85,
+          "id": 74,
           "options": {
             "legend": {
               "calcs": [],
@@ -7983,7 +7232,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_downloaders_bodies_buffered_blocks_size_bytes{$instance_label=\"$instance\"}",
+              "expr": "reth_downloaders_bodies_buffered_blocks_size_bytes{$instance_label=~\"$instance\"}",
               "hide": false,
               "legendFormat": "Buffered blocks size ",
               "range": true,
@@ -7995,7 +7244,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_downloaders_bodies_buffered_blocks{$instance_label=\"$instance\"}",
+              "expr": "reth_downloaders_bodies_buffered_blocks{$instance_label=~\"$instance\"}",
               "hide": false,
               "legendFormat": "Buffered blocks",
               "range": true,
@@ -8089,9 +7338,9 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 299
+            "y": 277
           },
-          "id": 86,
+          "id": 75,
           "options": {
             "legend": {
               "calcs": [],
@@ -8113,7 +7362,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "reth_downloaders_bodies_response_response_size_bytes{$instance_label=\"$instance\"}",
+              "expr": "reth_downloaders_bodies_response_response_size_bytes{$instance_label=~\"$instance\"}",
               "hide": false,
               "legendFormat": "Response size",
               "range": true,
@@ -8125,7 +7374,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_downloaders_bodies_response_response_length{$instance_label=\"$instance\"}",
+              "expr": "reth_downloaders_bodies_response_response_length{$instance_label=~\"$instance\"}",
               "hide": false,
               "legendFormat": "Individual response length (number of bodies in response)",
               "range": true,
@@ -8137,7 +7386,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_downloaders_bodies_response_response_size_bytes / reth_downloaders_bodies_response_response_length{$instance_label=\"$instance\"}",
+              "expr": "reth_downloaders_bodies_response_response_size_bytes / reth_downloaders_bodies_response_response_length{$instance_label=~\"$instance\"}",
               "hide": false,
               "instant": false,
               "legendFormat": "Mean body size in response",
@@ -8240,9 +7489,9 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 307
+            "y": 285
           },
-          "id": 87,
+          "id": 76,
           "options": {
             "legend": {
               "calcs": [],
@@ -8266,7 +7515,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "rate(reth_network_eth_headers_requests_received_total{$instance_label=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_network_eth_headers_requests_received_total{$instance_label=~\"$instance\"}[$__rate_interval])",
               "format": "time_series",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
@@ -8371,9 +7620,9 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 307
+            "y": 285
           },
-          "id": 88,
+          "id": 77,
           "options": {
             "legend": {
               "calcs": [],
@@ -8397,7 +7646,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "rate(reth_network_eth_receipts_requests_received_total{$instance_label=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_network_eth_receipts_requests_received_total{$instance_label=~\"$instance\"}[$__rate_interval])",
               "format": "time_series",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
@@ -8502,9 +7751,9 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 315
+            "y": 293
           },
-          "id": 89,
+          "id": 78,
           "options": {
             "legend": {
               "calcs": [],
@@ -8528,7 +7777,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "rate(reth_network_eth_bodies_requests_received_total{$instance_label=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_network_eth_bodies_requests_received_total{$instance_label=~\"$instance\"}[$__rate_interval])",
               "format": "time_series",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
@@ -8633,9 +7882,9 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 315
+            "y": 293
           },
-          "id": 90,
+          "id": 79,
           "options": {
             "legend": {
               "calcs": [],
@@ -8659,7 +7908,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "rate(reth_network_eth_node_data_requests_received_total{$instance_label=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_network_eth_node_data_requests_received_total{$instance_label=~\"$instance\"}[$__rate_interval])",
               "format": "time_series",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
@@ -8682,9 +7931,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 323
+        "y": 301
       },
-      "id": 91,
+      "id": 80,
       "panels": [
         {
           "datasource": {
@@ -8752,9 +8001,9 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 324
+            "y": 302
           },
-          "id": 92,
+          "id": 81,
           "options": {
             "legend": {
               "calcs": [],
@@ -8775,7 +8024,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_transaction_pool_blobstore_entries{$instance_label=\"$instance\"}",
+              "expr": "reth_transaction_pool_blobstore_entries{$instance_label=~\"$instance\"}",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "instant": false,
@@ -8791,7 +8040,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_transaction_pool_blobstore_byte_size{$instance_label=\"$instance\"}",
+              "expr": "reth_transaction_pool_blobstore_byte_size{$instance_label=~\"$instance\"}",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -8808,7 +8057,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_transaction_pool_blobstore_failed_inserts{$instance_label=\"$instance\"}",
+              "expr": "reth_transaction_pool_blobstore_failed_inserts{$instance_label=~\"$instance\"}",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -8825,7 +8074,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_transaction_pool_blobstore_failed_deletes{$instance_label=\"$instance\"}",
+              "expr": "reth_transaction_pool_blobstore_failed_deletes{$instance_label=~\"$instance\"}",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -8905,9 +8154,9 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 324
+            "y": 302
           },
-          "id": 93,
+          "id": 82,
           "options": {
             "legend": {
               "calcs": [],
@@ -8927,7 +8176,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_transaction_pool_basefee_pool_size_bytes{$instance_label=\"$instance\"}",
+              "expr": "reth_transaction_pool_basefee_pool_size_bytes{$instance_label=~\"$instance\"}",
               "legendFormat": "Base Fee Pool Size",
               "range": true,
               "refId": "A"
@@ -8938,7 +8187,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_transaction_pool_pending_pool_size_bytes{$instance_label=\"$instance\"}",
+              "expr": "reth_transaction_pool_pending_pool_size_bytes{$instance_label=~\"$instance\"}",
               "hide": false,
               "legendFormat": "Pending Pool Size",
               "range": true,
@@ -8950,7 +8199,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_transaction_pool_queued_pool_size_bytes{$instance_label=\"$instance\"}",
+              "expr": "reth_transaction_pool_queued_pool_size_bytes{$instance_label=~\"$instance\"}",
               "hide": false,
               "legendFormat": "Queued Pool Size",
               "range": true,
@@ -8962,7 +8211,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_transaction_pool_blob_pool_size_bytes{$instance_label=\"$instance\"}",
+              "expr": "reth_transaction_pool_blob_pool_size_bytes{$instance_label=~\"$instance\"}",
               "legendFormat": "Blob Pool Size",
               "range": true,
               "refId": "D"
@@ -9037,9 +8286,9 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 332
+            "y": 310
           },
-          "id": 94,
+          "id": 83,
           "options": {
             "legend": {
               "calcs": [],
@@ -9060,7 +8309,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_transaction_pool_dirty_accounts{$instance_label=\"$instance\"}",
+              "expr": "reth_transaction_pool_dirty_accounts{$instance_label=~\"$instance\"}",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "instant": false,
@@ -9076,7 +8325,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_transaction_pool_drift_count{$instance_label=\"$instance\"}",
+              "expr": "reth_transaction_pool_drift_count{$instance_label=~\"$instance\"}",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -9093,7 +8342,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_transaction_pool_reinserted_transactions{$instance_label=\"$instance\"}",
+              "expr": "reth_transaction_pool_reinserted_transactions{$instance_label=~\"$instance\"}",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -9110,7 +8359,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_transaction_pool_deleted_tracked_finalized_blobs{$instance_label=\"$instance\"}",
+              "expr": "reth_transaction_pool_deleted_tracked_finalized_blobs{$instance_label=~\"$instance\"}",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -9189,9 +8438,9 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 332
+            "y": 310
           },
-          "id": 95,
+          "id": 84,
           "options": {
             "legend": {
               "calcs": [],
@@ -9211,7 +8460,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_transaction_pool_basefee_pool_transactions{$instance_label=\"$instance\"}",
+              "expr": "reth_transaction_pool_basefee_pool_transactions{$instance_label=~\"$instance\"}",
               "legendFormat": "Base Fee Pool Transactions",
               "range": true,
               "refId": "A"
@@ -9222,7 +8471,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_transaction_pool_pending_pool_transactions{$instance_label=\"$instance\"}",
+              "expr": "reth_transaction_pool_pending_pool_transactions{$instance_label=~\"$instance\"}",
               "hide": false,
               "legendFormat": "Pending Pool Transactions",
               "range": true,
@@ -9234,7 +8483,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_transaction_pool_queued_pool_transactions{$instance_label=\"$instance\"}",
+              "expr": "reth_transaction_pool_queued_pool_transactions{$instance_label=~\"$instance\"}",
               "hide": false,
               "legendFormat": "Queued Pool Transactions",
               "range": true,
@@ -9246,7 +8495,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_transaction_pool_blob_pool_transactions{$instance_label=\"$instance\"}",
+              "expr": "reth_transaction_pool_blob_pool_transactions{$instance_label=~\"$instance\"}",
               "legendFormat": "Blob Pool Transactions",
               "range": true,
               "refId": "D"
@@ -9334,9 +8583,9 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 340
+            "y": 318
           },
-          "id": 96,
+          "id": 85,
           "options": {
             "legend": {
               "calcs": [],
@@ -9357,7 +8606,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "rate(reth_transaction_pool_inserted_transactions{$instance_label=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_transaction_pool_inserted_transactions{$instance_label=~\"$instance\"}[$__rate_interval])",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "legendFormat": "Inserted Transactions",
@@ -9372,7 +8621,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "rate(reth_transaction_pool_removed_transactions{$instance_label=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_transaction_pool_removed_transactions{$instance_label=~\"$instance\"}[$__rate_interval])",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -9388,7 +8637,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "rate(reth_transaction_pool_invalid_transactions{$instance_label=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_transaction_pool_invalid_transactions{$instance_label=~\"$instance\"}[$__rate_interval])",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -9404,7 +8653,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "rate(reth_network_bad_imports{$instance_label=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_network_bad_imports{$instance_label=~\"$instance\"}[$__rate_interval])",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -9483,9 +8732,9 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 340
+            "y": 318
           },
-          "id": 97,
+          "id": 86,
           "options": {
             "legend": {
               "calcs": [],
@@ -9505,7 +8754,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_network_pending_pool_imports{$instance_label=\"$instance\"}",
+              "expr": "reth_network_pending_pool_imports{$instance_label=~\"$instance\"}",
               "hide": false,
               "legendFormat": "Transactions Pending Import",
               "range": true,
@@ -9606,9 +8855,9 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 348
+            "y": 326
           },
-          "id": 98,
+          "id": 87,
           "options": {
             "legend": {
               "calcs": [],
@@ -9628,7 +8877,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "rate(reth_network_pool_transactions_messages_sent_total{$instance_label=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_network_pool_transactions_messages_sent_total{$instance_label=~\"$instance\"}[$__rate_interval])",
               "hide": false,
               "instant": false,
               "legendFormat": "Tx",
@@ -9641,7 +8890,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "rate(reth_network_pool_transactions_messages_received_total{$instance_label=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_network_pool_transactions_messages_received_total{$instance_label=~\"$instance\"}[$__rate_interval])",
               "hide": false,
               "legendFormat": "Rx",
               "range": true,
@@ -9653,7 +8902,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "reth_network_pool_transactions_messages_sent_total{$instance_label=\"$instance\"} - reth_network_pool_transactions_messages_received_total{$instance_label=\"$instance\"}",
+              "expr": "reth_network_pool_transactions_messages_sent_total{$instance_label=~\"$instance\"} - reth_network_pool_transactions_messages_received_total{$instance_label=~\"$instance\"}",
               "hide": false,
               "legendFormat": "Messages in Channel",
               "range": true,
@@ -9729,9 +8978,9 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 348
+            "y": 326
           },
-          "id": 99,
+          "id": 88,
           "options": {
             "legend": {
               "calcs": [],
@@ -9752,7 +9001,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "rate(reth_network_queued_outgoing_messages{$instance_label=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_network_queued_outgoing_messages{$instance_label=~\"$instance\"}[$__rate_interval])",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "instant": false,
@@ -9830,9 +9079,9 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 356
+            "y": 334
           },
-          "id": 100,
+          "id": 89,
           "options": {
             "legend": {
               "calcs": [],
@@ -9853,7 +9102,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_transaction_pool_all_transactions_by_hash{$instance_label=\"$instance\"}",
+              "expr": "reth_transaction_pool_all_transactions_by_hash{$instance_label=~\"$instance\"}",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "instant": false,
@@ -9869,7 +9118,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_transaction_pool_all_transactions_by_id{$instance_label=\"$instance\"}",
+              "expr": "reth_transaction_pool_all_transactions_by_id{$instance_label=~\"$instance\"}",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -9886,7 +9135,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_transaction_pool_all_transactions_by_all_senders{$instance_label=\"$instance\"}",
+              "expr": "reth_transaction_pool_all_transactions_by_all_senders{$instance_label=~\"$instance\"}",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -9903,7 +9152,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_transaction_pool_blob_transactions_nonce_gaps{$instance_label=\"$instance\"}",
+              "expr": "reth_transaction_pool_blob_transactions_nonce_gaps{$instance_label=~\"$instance\"}",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -9983,9 +9232,9 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 356
+            "y": 334
           },
-          "id": 101,
+          "id": 90,
           "options": {
             "legend": {
               "calcs": [],
@@ -10006,7 +9255,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "rate(reth_network_total_outgoing_peer_messages_dropped{$instance_label=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_network_total_outgoing_peer_messages_dropped{$instance_label=~\"$instance\"}[$__rate_interval])",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "instant": false,
@@ -10085,9 +9334,9 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 364
+            "y": 342
           },
-          "id": 102,
+          "id": 91,
           "options": {
             "legend": {
               "calcs": [],
@@ -10108,7 +9357,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "rate(reth_network_occurrences_hashes_already_in_pool{$instance_label=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_network_occurrences_hashes_already_in_pool{$instance_label=~\"$instance\"}[$__rate_interval])",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -10125,7 +9374,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "rate(reth_network_occurrences_transactions_already_in_pool{$instance_label=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_network_occurrences_transactions_already_in_pool{$instance_label=~\"$instance\"}[$__rate_interval])",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -10204,9 +9453,9 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 364
+            "y": 342
           },
-          "id": 103,
+          "id": 92,
           "options": {
             "legend": {
               "calcs": [],
@@ -10226,7 +9475,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_network_inflight_transaction_requests{$instance_label=\"$instance\"}",
+              "expr": "reth_network_inflight_transaction_requests{$instance_label=~\"$instance\"}",
               "hide": false,
               "legendFormat": "Inflight Transaction Requests",
               "range": true,
@@ -10302,9 +9551,9 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 372
+            "y": 350
           },
-          "id": 104,
+          "id": 93,
           "options": {
             "legend": {
               "calcs": [],
@@ -10325,7 +9574,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_network_acc_duration_poll_network_events{$instance_label=\"$instance\"}",
+              "expr": "reth_network_acc_duration_poll_network_events{$instance_label=~\"$instance\"}",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -10342,7 +9591,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_network_acc_duration_poll_transaction_events{$instance_label=\"$instance\"}",
+              "expr": "reth_network_acc_duration_poll_transaction_events{$instance_label=~\"$instance\"}",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -10360,7 +9609,7 @@
               "disableTextWrap": false,
               "editorMode": "builder",
               "exemplar": false,
-              "expr": "reth_network_acc_duration_poll_imported_transactions{$instance_label=\"$instance\"}",
+              "expr": "reth_network_acc_duration_poll_imported_transactions{$instance_label=~\"$instance\"}",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -10377,7 +9626,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_network_acc_duration_poll_pending_pool_imports{$instance_label=\"$instance\"}",
+              "expr": "reth_network_acc_duration_poll_pending_pool_imports{$instance_label=~\"$instance\"}",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -10394,7 +9643,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_network_acc_duration_poll_fetch_events{$instance_label=\"$instance\"}",
+              "expr": "reth_network_acc_duration_poll_fetch_events{$instance_label=~\"$instance\"}",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -10411,7 +9660,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_network_acc_duration_poll_commands{$instance_label=\"$instance\"}",
+              "expr": "reth_network_acc_duration_poll_commands{$instance_label=~\"$instance\"}",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -10428,7 +9677,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_network_acc_duration_fetch_pending_hashes{$instance_label=\"$instance\"}",
+              "expr": "reth_network_acc_duration_fetch_pending_hashes{$instance_label=~\"$instance\"}",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -10445,7 +9694,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_network_duration_poll_tx_manager{$instance_label=\"$instance\"}",
+              "expr": "reth_network_duration_poll_tx_manager{$instance_label=~\"$instance\"}",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -10524,9 +9773,9 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 372
+            "y": 350
           },
-          "id": 105,
+          "id": 94,
           "options": {
             "legend": {
               "calcs": [],
@@ -10547,7 +9796,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "code",
-              "expr": "reth_network_hashes_pending_fetch{$instance_label=\"$instance\"}",
+              "expr": "reth_network_hashes_pending_fetch{$instance_label=~\"$instance\"}",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "instant": false,
@@ -10563,7 +9812,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "code",
-              "expr": "reth_network_inflight_transaction_requests{$instance_label=\"$instance\"}",
+              "expr": "reth_network_inflight_transaction_requests{$instance_label=~\"$instance\"}",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -10579,7 +9828,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum(reth_network_hashes_inflight_transaction_requests{$instance_label=\"$instance\"}) + sum(reth_network_hashes_pending_fetch{$instance_label=\"$instance\"})",
+              "expr": "sum(reth_network_hashes_inflight_transaction_requests{$instance_label=~\"$instance\"}) + sum(reth_network_hashes_pending_fetch{$instance_label=~\"$instance\"})",
               "hide": false,
               "instant": false,
               "legendFormat": "Total Hashes in Transaction Fetcher",
@@ -10656,9 +9905,9 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 380
+            "y": 358
           },
-          "id": 106,
+          "id": 95,
           "options": {
             "legend": {
               "calcs": [],
@@ -10679,7 +9928,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_network_acc_duration_poll_network_handle{$instance_label=\"$instance\"}",
+              "expr": "reth_network_acc_duration_poll_network_handle{$instance_label=~\"$instance\"}",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -10696,7 +9945,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_network_acc_duration_poll_swarm{$instance_label=\"$instance\"}",
+              "expr": "reth_network_acc_duration_poll_swarm{$instance_label=~\"$instance\"}",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -10713,7 +9962,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_network_duration_poll_network_manager{$instance_label=\"$instance\"}",
+              "expr": "reth_network_duration_poll_network_manager{$instance_label=~\"$instance\"}",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -10793,9 +10042,9 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 380
+            "y": 358
           },
-          "id": 107,
+          "id": 96,
           "options": {
             "legend": {
               "calcs": [],
@@ -10816,7 +10065,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "rate(reth_network_occurrences_hash_already_seen_by_peer{$instance_label=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_network_occurrences_hash_already_seen_by_peer{$instance_label=~\"$instance\"}[$__rate_interval])",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -10833,7 +10082,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "rate(reth_network_occurrences_of_transaction_already_seen_by_peer{$instance_label=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_network_occurrences_of_transaction_already_seen_by_peer{$instance_label=~\"$instance\"}[$__rate_interval])",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -10913,9 +10162,9 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 388
+            "y": 366
           },
-          "id": 108,
+          "id": 97,
           "options": {
             "legend": {
               "calcs": [],
@@ -10936,7 +10185,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "code",
-              "expr": "reth_transaction_pool_total_legacy_transactions{$instance_label=\"$instance\"}",
+              "expr": "reth_transaction_pool_total_legacy_transactions{$instance_label=~\"$instance\"}",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -10953,7 +10202,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "code",
-              "expr": "reth_transaction_pool_total_eip2930_transactions{$instance_label=\"$instance\"}",
+              "expr": "reth_transaction_pool_total_eip2930_transactions{$instance_label=~\"$instance\"}",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -10970,7 +10219,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "code",
-              "expr": "reth_transaction_pool_total_eip1559_transactions{$instance_label=\"$instance\"}",
+              "expr": "reth_transaction_pool_total_eip1559_transactions{$instance_label=~\"$instance\"}",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -10987,7 +10236,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "code",
-              "expr": "reth_transaction_pool_total_eip4844_transactions{$instance_label=\"$instance\"}",
+              "expr": "reth_transaction_pool_total_eip4844_transactions{$instance_label=~\"$instance\"}",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -11004,7 +10253,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "code",
-              "expr": "reth_transaction_pool_total_eip7702_transactions{$instance_label=\"$instance\"}",
+              "expr": "reth_transaction_pool_total_eip7702_transactions{$instance_label=~\"$instance\"}",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -11084,9 +10333,9 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 388
+            "y": 366
           },
-          "id": 109,
+          "id": 98,
           "options": {
             "legend": {
               "calcs": [],
@@ -11107,7 +10356,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_network_duration_find_idle_fallback_peer_for_any_pending_hash{$instance_label=\"$instance\"}",
+              "expr": "reth_network_duration_find_idle_fallback_peer_for_any_pending_hash{$instance_label=~\"$instance\"}",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -11124,7 +10373,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_network_duration_fill_request_from_hashes_pending_fetch{$instance_label=\"$instance\"}",
+              "expr": "reth_network_duration_fill_request_from_hashes_pending_fetch{$instance_label=~\"$instance\"}",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -11204,9 +10453,9 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 396
+            "y": 374
           },
-          "id": 110,
+          "id": 99,
           "options": {
             "legend": {
               "calcs": [],
@@ -11227,7 +10476,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "rate(reth_network_transaction_fetcher_legacy_sum{$instance_label=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_network_transaction_fetcher_legacy_sum{$instance_label=~\"$instance\"}[$__rate_interval])",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -11244,7 +10493,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "rate(reth_network_transaction_fetcher_eip2930_sum{$instance_label=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_network_transaction_fetcher_eip2930_sum{$instance_label=~\"$instance\"}[$__rate_interval])",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -11261,7 +10510,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "rate(reth_network_transaction_fetcher_eip1559_sum{$instance_label=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_network_transaction_fetcher_eip1559_sum{$instance_label=~\"$instance\"}[$__rate_interval])",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -11278,7 +10527,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "rate(reth_network_transaction_fetcher_eip4844_sum{$instance_label=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_network_transaction_fetcher_eip4844_sum{$instance_label=~\"$instance\"}[$__rate_interval])",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -11295,7 +10544,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "rate(reth_network_transaction_fetcher_eip7702_sum{$instance_label=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_network_transaction_fetcher_eip7702_sum{$instance_label=~\"$instance\"}[$__rate_interval])",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -11375,9 +10624,9 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 396
+            "y": 374
           },
-          "id": 111,
+          "id": 100,
           "options": {
             "legend": {
               "calcs": [],
@@ -11394,7 +10643,7 @@
             {
               "disableTextWrap": false,
               "editorMode": "code",
-              "expr": "reth_transaction_pool_pending_transactions_evicted{$instance_label=\"$instance\"}",
+              "expr": "reth_transaction_pool_pending_transactions_evicted{$instance_label=~\"$instance\"}",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "legendFormat": "PendingPool",
@@ -11412,7 +10661,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "reth_transaction_pool_basefee_transactions_evicted{$instance_label=\"$instance\"}",
+              "expr": "reth_transaction_pool_basefee_transactions_evicted{$instance_label=~\"$instance\"}",
               "hide": false,
               "instant": false,
               "legendFormat": "BasefeePool",
@@ -11425,7 +10674,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "reth_transaction_pool_blob_transactions_evicted{$instance_label=\"$instance\"}",
+              "expr": "reth_transaction_pool_blob_transactions_evicted{$instance_label=~\"$instance\"}",
               "hide": false,
               "instant": false,
               "legendFormat": "BlobPool",
@@ -11438,7 +10687,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "reth_transaction_pool_queued_transactions_evicted{$instance_label=\"$instance\"}",
+              "expr": "reth_transaction_pool_queued_transactions_evicted{$instance_label=~\"$instance\"}",
               "hide": false,
               "instant": false,
               "legendFormat": "QueuedPool",
@@ -11514,9 +10763,9 @@
             "h": 8,
             "w": 8,
             "x": 0,
-            "y": 404
+            "y": 382
           },
-          "id": 112,
+          "id": 101,
           "options": {
             "legend": {
               "calcs": [],
@@ -11536,7 +10785,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_network_tracked_peers{$instance_label=\"$instance\"}",
+              "expr": "reth_network_tracked_peers{$instance_label=~\"$instance\"}",
               "legendFormat": "Tracked Peers",
               "range": true,
               "refId": "A"
@@ -11610,9 +10859,9 @@
             "h": 8,
             "w": 8,
             "x": 8,
-            "y": 404
+            "y": 382
           },
-          "id": 113,
+          "id": 102,
           "options": {
             "legend": {
               "calcs": [],
@@ -11632,7 +10881,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_network_pending_outgoing_connections{$instance_label=\"$instance\"}",
+              "expr": "reth_network_pending_outgoing_connections{$instance_label=~\"$instance\"}",
               "legendFormat": "Pending Outgoing Connections",
               "range": true,
               "refId": "A"
@@ -11643,7 +10892,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_network_outgoing_connections{$instance_label=\"$instance\"}",
+              "expr": "reth_network_outgoing_connections{$instance_label=~\"$instance\"}",
               "legendFormat": "Outgoing Connections",
               "range": true,
               "refId": "B"
@@ -11654,7 +10903,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_network_total_pending_connections{$instance_label=\"$instance\"}",
+              "expr": "reth_network_total_pending_connections{$instance_label=~\"$instance\"}",
               "legendFormat": "Total Pending Connections",
               "range": true,
               "refId": "C"
@@ -11665,7 +10914,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_network_incoming_connections{$instance_label=\"$instance\"}",
+              "expr": "reth_network_incoming_connections{$instance_label=~\"$instance\"}",
               "hide": false,
               "legendFormat": "Incoming Connections",
               "range": true,
@@ -11677,7 +10926,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_network_connected_peers{$instance_label=\"$instance\"}",
+              "expr": "reth_network_connected_peers{$instance_label=~\"$instance\"}",
               "hide": false,
               "legendFormat": "Connected Peers",
               "range": true,
@@ -11754,9 +11003,9 @@
             "h": 8,
             "w": 8,
             "x": 16,
-            "y": 404
+            "y": 382
           },
-          "id": 114,
+          "id": 103,
           "options": {
             "legend": {
               "calcs": [],
@@ -11779,7 +11028,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "rate(reth_p2pstream_disconnected_errors{$instance_label=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_p2pstream_disconnected_errors{$instance_label=~\"$instance\"}[$__rate_interval])",
               "legendFormat": "P2P Stream Disconnected",
               "range": true,
               "refId": "A"
@@ -11790,7 +11039,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "rate(reth_network_pending_session_failures{$instance_label=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_network_pending_session_failures{$instance_label=~\"$instance\"}[$__rate_interval])",
               "hide": false,
               "legendFormat": "Failed Pending Sessions",
               "range": true,
@@ -11802,7 +11051,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "rate(reth_network_invalid_messages_received_total{$instance_label=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_network_invalid_messages_received_total{$instance_label=~\"$instance\"}[$__rate_interval])",
               "hide": false,
               "legendFormat": "Invalid Messages",
               "range": true,
@@ -11837,9 +11086,9 @@
             "h": 8,
             "w": 8,
             "x": 0,
-            "y": 412
+            "y": 390
           },
-          "id": 115,
+          "id": 104,
           "options": {
             "legend": {
               "displayMode": "list",
@@ -11866,7 +11115,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_network_useless_peer{$instance_label=\"$instance\"}",
+              "expr": "reth_network_useless_peer{$instance_label=~\"$instance\"}",
               "legendFormat": "UselessPeer",
               "range": true,
               "refId": "A"
@@ -11877,7 +11126,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_network_subprotocol_specific{$instance_label=\"$instance\"}",
+              "expr": "reth_network_subprotocol_specific{$instance_label=~\"$instance\"}",
               "hide": false,
               "legendFormat": "SubprotocolSpecific",
               "range": true,
@@ -11889,7 +11138,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_network_already_connected{$instance_label=\"$instance\"}",
+              "expr": "reth_network_already_connected{$instance_label=~\"$instance\"}",
               "hide": false,
               "legendFormat": "AlreadyConnected",
               "range": true,
@@ -11901,7 +11150,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_network_client_quitting{$instance_label=\"$instance\"}",
+              "expr": "reth_network_client_quitting{$instance_label=~\"$instance\"}",
               "hide": false,
               "legendFormat": "ClientQuitting",
               "range": true,
@@ -11913,7 +11162,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_network_unexpected_identity{$instance_label=\"$instance\"}",
+              "expr": "reth_network_unexpected_identity{$instance_label=~\"$instance\"}",
               "hide": false,
               "legendFormat": "UnexpectedHandshakeIdentity",
               "range": true,
@@ -11925,7 +11174,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_network_disconnect_requested{$instance_label=\"$instance\"}",
+              "expr": "reth_network_disconnect_requested{$instance_label=~\"$instance\"}",
               "hide": false,
               "legendFormat": "DisconnectRequested",
               "range": true,
@@ -11937,7 +11186,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_network_null_node_identity{$instance_label=\"$instance\"}",
+              "expr": "reth_network_null_node_identity{$instance_label=~\"$instance\"}",
               "hide": false,
               "legendFormat": "NullNodeIdentity",
               "range": true,
@@ -11949,7 +11198,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_network_tcp_subsystem_error{$instance_label=\"$instance\"}",
+              "expr": "reth_network_tcp_subsystem_error{$instance_label=~\"$instance\"}",
               "hide": false,
               "legendFormat": "TCPSubsystemError",
               "range": true,
@@ -11961,7 +11210,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_network_incompatible{$instance_label=\"$instance\"}",
+              "expr": "reth_network_incompatible{$instance_label=~\"$instance\"}",
               "hide": false,
               "legendFormat": "IncompatibleP2PVersion",
               "range": true,
@@ -11973,7 +11222,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_network_protocol_breach{$instance_label=\"$instance\"}",
+              "expr": "reth_network_protocol_breach{$instance_label=~\"$instance\"}",
               "hide": false,
               "legendFormat": "ProtocolBreach",
               "range": true,
@@ -11985,7 +11234,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_network_too_many_peers{$instance_label=\"$instance\"}",
+              "expr": "reth_network_too_many_peers{$instance_label=~\"$instance\"}",
               "hide": false,
               "legendFormat": "TooManyPeers",
               "range": true,
@@ -12058,11 +11307,11 @@
           },
           "gridPos": {
             "h": 8,
-            "w": 14,
+            "w": 16,
             "x": 8,
-            "y": 412
+            "y": 390
           },
-          "id": 116,
+          "id": 105,
           "options": {
             "legend": {
               "calcs": [],
@@ -12082,654 +11331,13 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_network_total_dial_successes{$instance_label=\"$instance\"}",
+              "expr": "reth_network_total_dial_successes{$instance_label=~\"$instance\"}",
               "legendFormat": "Total Dial Successes",
               "range": true,
               "refId": "A"
             }
           ],
           "title": "P2P Total Dial Success",
-          "type": "timeseries"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "description": "Peers managed by underlying sigp/discv5 node. \n\nOnly peers in the kbuckets are queried in FINDNODE lookups, and included in NODES responses to other peers.\n\nNot all peers with an established session will make it into the kbuckets, due to e.g. reachability issues (NAT) and capacity of kbuckets furthest log2distance away from local node (XOR metrics).",
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "axisBorderShow": false,
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "drawStyle": "line",
-                "fillOpacity": 0,
-                "gradientMode": "none",
-                "hideFrom": {
-                  "legend": false,
-                  "tooltip": false,
-                  "viz": false
-                },
-                "insertNulls": false,
-                "lineInterpolation": "linear",
-                "lineWidth": 1,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "auto",
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  },
-                  {
-                    "color": "red",
-                    "value": 80
-                  }
-                ]
-              },
-              "unitScale": true
-            },
-            "overrides": [
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "Total peers kbuckets"
-                },
-                "properties": [
-                  {
-                    "id": "color",
-                    "value": {
-                      "fixedColor": "#9b73d6",
-                      "mode": "fixed"
-                    }
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "Total connected sessions"
-                },
-                "properties": [
-                  {
-                    "id": "color",
-                    "value": {
-                      "fixedColor": "super-light-red",
-                      "mode": "fixed"
-                    }
-                  }
-                ]
-              }
-            ]
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 12,
-            "x": 0,
-            "y": 420
-          },
-          "id": 117,
-          "options": {
-            "legend": {
-              "calcs": [],
-              "displayMode": "list",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "mode": "single",
-              "sort": "none"
-            }
-          },
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "disableTextWrap": false,
-              "editorMode": "builder",
-              "expr": "reth_discv5_kbucket_peers_raw_total{$instance_label=\"$instance\"}",
-              "fullMetaSearch": false,
-              "includeNullMetadata": true,
-              "instant": false,
-              "legendFormat": "Total peers kbuckets",
-              "range": true,
-              "refId": "A",
-              "useBackend": false
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "disableTextWrap": false,
-              "editorMode": "builder",
-              "expr": "reth_discv5_sessions_raw_total{$instance_label=\"$instance\"}",
-              "fullMetaSearch": false,
-              "hide": false,
-              "includeNullMetadata": true,
-              "instant": false,
-              "legendFormat": "Total connected sessions",
-              "range": true,
-              "refId": "B",
-              "useBackend": false
-            }
-          ],
-          "title": "Discv5 Peers",
-          "type": "timeseries"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "description": "Frequency of session establishment and kbuckets insertions.\n\nSince discv5 favours long-lived connections, kbuckets insertions are expected to be less frequent the longer the node stays online.\n\nSome incoming connections may be from peers with unreachable ENRs, ENRs that don't advertise a  UDP socket. These peers are not useful for the discv5 node, nor for RLPx.\n\nDiscovered peers are filtered w.r.t. what they advertise in their ENR. By default peers advertising 'eth2' are filtered out. Unreachable ENRs are also filtered out. Only peers that pass the filter are useful. These peers get passed up the node, to attempt an RLPx connection.\n\nSessions will succeed to peers that advertise no UDP socket in their ENR. This allows peers to discover their reachable socket. On the other hand, for DoS protection, peers that advertise a different socket than the socket from which they make the connection, are denied a sigp/discv5 session. These peers have an unverifiable ENR. The peers are passed to RLPx nonetheless (some EL implementations of discv5 are more lax about ENR and source socket matching). ",
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "axisBorderShow": false,
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "drawStyle": "line",
-                "fillOpacity": 0,
-                "gradientMode": "none",
-                "hideFrom": {
-                  "legend": false,
-                  "tooltip": false,
-                  "viz": false
-                },
-                "insertNulls": false,
-                "lineInterpolation": "linear",
-                "lineWidth": 1,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "auto",
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  },
-                  {
-                    "color": "red",
-                    "value": 80
-                  }
-                ]
-              },
-              "unit": "cps",
-              "unitScale": true
-            },
-            "overrides": [
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "Total Session Establishments"
-                },
-                "properties": [
-                  {
-                    "id": "color",
-                    "value": {
-                      "fixedColor": "light-green",
-                      "mode": "fixed"
-                    }
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "Total KBucket Insertions"
-                },
-                "properties": [
-                  {
-                    "id": "color",
-                    "value": {
-                      "fixedColor": "#9958f4",
-                      "mode": "fixed"
-                    }
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "Session Establishments (pass filter)"
-                },
-                "properties": [
-                  {
-                    "id": "color",
-                    "value": {
-                      "fixedColor": "#ff0ada",
-                      "mode": "fixed"
-                    }
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "Session Establishments (unreachable ENR)"
-                },
-                "properties": [
-                  {
-                    "id": "color",
-                    "value": {
-                      "fixedColor": "light-orange",
-                      "mode": "fixed"
-                    }
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "Session Establishment Failed (unverifiable ENR)"
-                },
-                "properties": [
-                  {
-                    "id": "color",
-                    "value": {
-                      "fixedColor": "#8ab8ff",
-                      "mode": "fixed"
-                    }
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "Failed Session Establishments (unverifiable ENR)"
-                },
-                "properties": [
-                  {
-                    "id": "color",
-                    "value": {
-                      "fixedColor": "#8ab8ff",
-                      "mode": "fixed"
-                    }
-                  }
-                ]
-              }
-            ]
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 12,
-            "x": 12,
-            "y": 420
-          },
-          "id": 118,
-          "options": {
-            "legend": {
-              "calcs": [],
-              "displayMode": "list",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "mode": "single",
-              "sort": "none"
-            }
-          },
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "disableTextWrap": false,
-              "editorMode": "builder",
-              "expr": "rate(reth_discv5_inserted_kbucket_peers_raw_total{$instance_label=\"$instance\"}[$__rate_interval])",
-              "fullMetaSearch": false,
-              "includeNullMetadata": false,
-              "instant": false,
-              "legendFormat": "Total KBucket Insertions",
-              "range": true,
-              "refId": "A",
-              "useBackend": false
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "disableTextWrap": false,
-              "editorMode": "builder",
-              "expr": "rate(reth_discv5_established_sessions_raw_total{$instance_label=\"$instance\"}[$__rate_interval])",
-              "fullMetaSearch": false,
-              "hide": false,
-              "includeNullMetadata": false,
-              "instant": false,
-              "legendFormat": "Total Session Establishments",
-              "range": true,
-              "refId": "B",
-              "useBackend": false
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "disableTextWrap": false,
-              "editorMode": "builder",
-              "expr": "rate(reth_discv5_established_sessions_unreachable_enr_total{$instance_label=\"$instance\"}[$__rate_interval])",
-              "fullMetaSearch": false,
-              "hide": false,
-              "includeNullMetadata": false,
-              "instant": false,
-              "legendFormat": "Session Establishments (unreachable ENR)",
-              "range": true,
-              "refId": "C",
-              "useBackend": false
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "disableTextWrap": false,
-              "editorMode": "builder",
-              "expr": "rate(reth_discv5_established_sessions_raw_total{$instance_label=\"$instance\"}[$__rate_interval]) - rate(reth_discv5_established_sessions_custom_filtered_total{$instance_label=\"$instance\"}[$__rate_interval])",
-              "fullMetaSearch": false,
-              "hide": false,
-              "includeNullMetadata": false,
-              "instant": false,
-              "legendFormat": "Session Establishments (pass filter)",
-              "range": true,
-              "refId": "D",
-              "useBackend": false
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "disableTextWrap": false,
-              "editorMode": "builder",
-              "expr": "rate(reth_discv5_unverifiable_enrs_raw_total{$instance_label=\"$instance\"}[$__rate_interval])",
-              "fullMetaSearch": false,
-              "hide": false,
-              "includeNullMetadata": true,
-              "instant": false,
-              "legendFormat": "Failed Session Establishments (unverifiable ENR)",
-              "range": true,
-              "refId": "E",
-              "useBackend": false
-            }
-          ],
-          "title": "Discv5 Peer Churn",
-          "type": "timeseries"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "description": "Frequency of discovering peers from some popular network stacks.\n\nSome nodes miss advertising a fork ID kv-pair in their ENR. They will be counted as 'unknown', but may belong to a popular network.",
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "axisBorderShow": false,
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "drawStyle": "line",
-                "fillOpacity": 0,
-                "gradientMode": "none",
-                "hideFrom": {
-                  "legend": false,
-                  "tooltip": false,
-                  "viz": false
-                },
-                "insertNulls": false,
-                "lineInterpolation": "linear",
-                "lineWidth": 1,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "auto",
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  },
-                  {
-                    "color": "red",
-                    "value": 80
-                  }
-                ]
-              },
-              "unit": "cps",
-              "unitScale": true
-            },
-            "overrides": [
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "Eth"
-                },
-                "properties": [
-                  {
-                    "id": "color",
-                    "value": {
-                      "fixedColor": "#b677d9",
-                      "mode": "fixed"
-                    }
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "Eth2"
-                },
-                "properties": [
-                  {
-                    "id": "color",
-                    "value": {
-                      "fixedColor": "light-green",
-                      "mode": "fixed"
-                    }
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "Unknown"
-                },
-                "properties": [
-                  {
-                    "id": "color",
-                    "value": {
-                      "fixedColor": "#ff0ae5",
-                      "mode": "fixed"
-                    }
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "OP EL"
-                },
-                "properties": [
-                  {
-                    "id": "color",
-                    "value": {
-                      "fixedColor": "#8AB8FF",
-                      "mode": "fixed"
-                    }
-                  }
-                ]
-              }
-            ]
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 12,
-            "x": 0,
-            "y": 428
-          },
-          "id": 119,
-          "options": {
-            "legend": {
-              "calcs": [],
-              "displayMode": "list",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "mode": "single",
-              "sort": "none"
-            }
-          },
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "disableTextWrap": false,
-              "editorMode": "code",
-              "expr": "rate(reth_discv5_eth{$instance_label=\"$instance\"}[$__rate_interval])",
-              "fullMetaSearch": false,
-              "includeNullMetadata": false,
-              "instant": false,
-              "legendFormat": "Eth",
-              "range": true,
-              "refId": "A",
-              "useBackend": false
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "disableTextWrap": false,
-              "editorMode": "code",
-              "expr": "rate(reth_discv5_eth2{$instance_label=\"$instance\"}[$__rate_interval])",
-              "fullMetaSearch": false,
-              "hide": false,
-              "includeNullMetadata": false,
-              "instant": false,
-              "legendFormat": "Eth2",
-              "range": true,
-              "refId": "B",
-              "useBackend": false
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "disableTextWrap": false,
-              "editorMode": "code",
-              "expr": "rate(reth_discv5_opel{$instance_label=\"$instance\"}[$__rate_interval])",
-              "fullMetaSearch": false,
-              "hide": false,
-              "includeNullMetadata": false,
-              "instant": false,
-              "legendFormat": "OP EL",
-              "range": true,
-              "refId": "E",
-              "useBackend": false
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "disableTextWrap": false,
-              "editorMode": "code",
-              "expr": "rate(reth_discv5_opstack{$instance_label=\"$instance\"}[$__rate_interval])",
-              "fullMetaSearch": false,
-              "hide": false,
-              "includeNullMetadata": false,
-              "instant": false,
-              "legendFormat": "OP CL",
-              "range": true,
-              "refId": "C",
-              "useBackend": false
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "disableTextWrap": false,
-              "editorMode": "code",
-              "expr": "(rate(reth_discv5_established_sessions_raw_total{$instance_label=\"$instance\"}[$__rate_interval]) + rate(reth_discv5_unverifiable_enrs_raw_total{$instance_label=\"$instance\"}[$__rate_interval])) - (rate(reth_discv5_eth{$instance_label=\"$instance\"}[$__rate_interval]) + rate(reth_discv5_eth2{$instance_label=\"$instance\"}[$__rate_interval]) + rate(reth_discv5_opstack{$instance_label=\"$instance\"}[$__rate_interval]) + rate(reth_discv5_opel{$instance_label=\"$instance\"}[$__rate_interval]))",
-              "fullMetaSearch": false,
-              "hide": false,
-              "includeNullMetadata": false,
-              "instant": false,
-              "legendFormat": "Unknown",
-              "range": true,
-              "refId": "D",
-              "useBackend": false
-            }
-          ],
-          "title": "Discv5 Advertised Network Stacks",
           "type": "timeseries"
         }
       ],
@@ -12742,9 +11350,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 436
+        "y": 398
       },
-      "id": 120,
+      "id": 106,
       "panels": [
         {
           "datasource": {
@@ -12809,9 +11417,9 @@
             "h": 10,
             "w": 12,
             "x": 0,
-            "y": 437
+            "y": 399
           },
-          "id": 121,
+          "id": 107,
           "options": {
             "legend": {
               "calcs": [
@@ -12949,9 +11557,9 @@
             "h": 10,
             "w": 12,
             "x": 12,
-            "y": 437
+            "y": 399
           },
-          "id": 122,
+          "id": 108,
           "options": {
             "legend": {
               "calcs": [
@@ -13089,9 +11697,9 @@
             "h": 10,
             "w": 12,
             "x": 0,
-            "y": 447
+            "y": 409
           },
-          "id": 123,
+          "id": 109,
           "options": {
             "legend": {
               "calcs": [],
@@ -13185,9 +11793,9 @@
             "h": 10,
             "w": 12,
             "x": 12,
-            "y": 447
+            "y": 409
           },
-          "id": 124,
+          "id": 110,
           "options": {
             "legend": {
               "calcs": [],
@@ -13281,9 +11889,9 @@
             "h": 10,
             "w": 12,
             "x": 0,
-            "y": 457
+            "y": 419
           },
-          "id": 125,
+          "id": 111,
           "options": {
             "legend": {
               "calcs": [],
@@ -13377,9 +11985,9 @@
             "h": 10,
             "w": 12,
             "x": 12,
-            "y": 457
+            "y": 419
           },
-          "id": 126,
+          "id": 112,
           "options": {
             "legend": {
               "calcs": [
@@ -13524,9 +12132,9 @@
             "h": 10,
             "w": 12,
             "x": 0,
-            "y": 467
+            "y": 429
           },
-          "id": 127,
+          "id": 113,
           "options": {
             "legend": {
               "calcs": [
@@ -13666,9 +12274,9 @@
             "h": 10,
             "w": 12,
             "x": 12,
-            "y": 467
+            "y": 429
           },
-          "id": 128,
+          "id": 114,
           "options": {
             "legend": {
               "calcs": [],
@@ -13762,9 +12370,9 @@
             "h": 10,
             "w": 12,
             "x": 0,
-            "y": 477
+            "y": 439
           },
-          "id": 129,
+          "id": 115,
           "options": {
             "legend": {
               "calcs": [],
@@ -13858,9 +12466,9 @@
             "h": 10,
             "w": 12,
             "x": 12,
-            "y": 477
+            "y": 439
           },
-          "id": 130,
+          "id": 116,
           "options": {
             "legend": {
               "calcs": [],
@@ -13901,9 +12509,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 487
+        "y": 449
       },
-      "id": 131,
+      "id": 117,
       "panels": [
         {
           "datasource": {
@@ -13984,9 +12592,9 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 488
+            "y": 450
           },
-          "id": 132,
+          "id": 118,
           "options": {
             "legend": {
               "calcs": [],
@@ -14008,7 +12616,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_jemalloc_active{$instance_label=\"$instance\"}",
+              "expr": "reth_jemalloc_active{$instance_label=~\"$instance\"}",
               "instant": false,
               "legendFormat": "Active",
               "range": true,
@@ -14020,7 +12628,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_jemalloc_allocated{$instance_label=\"$instance\"}",
+              "expr": "reth_jemalloc_allocated{$instance_label=~\"$instance\"}",
               "hide": false,
               "instant": false,
               "legendFormat": "Allocated",
@@ -14033,7 +12641,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_jemalloc_mapped{$instance_label=\"$instance\"}",
+              "expr": "reth_jemalloc_mapped{$instance_label=~\"$instance\"}",
               "hide": false,
               "instant": false,
               "legendFormat": "Mapped",
@@ -14046,7 +12654,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_jemalloc_metadata{$instance_label=\"$instance\"}",
+              "expr": "reth_jemalloc_metadata{$instance_label=~\"$instance\"}",
               "hide": false,
               "instant": false,
               "legendFormat": "Metadata",
@@ -14059,7 +12667,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_jemalloc_resident{$instance_label=\"$instance\"}",
+              "expr": "reth_jemalloc_resident{$instance_label=~\"$instance\"}",
               "hide": false,
               "instant": false,
               "legendFormat": "Resident",
@@ -14072,7 +12680,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_jemalloc_retained{$instance_label=\"$instance\"}",
+              "expr": "reth_jemalloc_retained{$instance_label=~\"$instance\"}",
               "hide": false,
               "instant": false,
               "legendFormat": "Retained",
@@ -14150,9 +12758,9 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 488
+            "y": 450
           },
-          "id": 133,
+          "id": 119,
           "options": {
             "legend": {
               "calcs": [],
@@ -14174,7 +12782,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "reth_process_resident_memory_bytes{$instance_label=\"$instance\"}",
+              "expr": "reth_process_resident_memory_bytes{$instance_label=~\"$instance\"}",
               "instant": false,
               "legendFormat": "Resident",
               "range": true,
@@ -14251,9 +12859,9 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 496
+            "y": 458
           },
-          "id": 134,
+          "id": 120,
           "options": {
             "legend": {
               "calcs": [],
@@ -14275,7 +12883,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "avg(rate(reth_process_cpu_seconds_total{$instance_label=\"$instance\"}[1m]))",
+              "expr": "avg(rate(reth_process_cpu_seconds_total{$instance_label=~\"$instance\"}[1m]))",
               "instant": false,
               "legendFormat": "Process",
               "range": true,
@@ -14352,9 +12960,9 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 496
+            "y": 458
           },
-          "id": 135,
+          "id": 121,
           "options": {
             "legend": {
               "calcs": [],
@@ -14376,7 +12984,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_process_open_fds{$instance_label=\"$instance\"}",
+              "expr": "reth_process_open_fds{$instance_label=~\"$instance\"}",
               "instant": false,
               "legendFormat": "Open",
               "range": true,
@@ -14453,9 +13061,9 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 504
+            "y": 466
           },
-          "id": 136,
+          "id": 122,
           "options": {
             "legend": {
               "calcs": [],
@@ -14477,7 +13085,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "reth_executor_spawn_critical_tasks_total{$instance_label=\"$instance\"}- reth_executor_spawn_finished_critical_tasks_total{$instance_label=\"$instance\"}",
+              "expr": "reth_executor_spawn_critical_tasks_total{$instance_label=~\"$instance\"}- reth_executor_spawn_finished_critical_tasks_total{$instance_label=~\"$instance\"}",
               "hide": false,
               "instant": false,
               "legendFormat": "Tasks running",
@@ -14568,9 +13176,9 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 504
+            "y": 466
           },
-          "id": 137,
+          "id": 123,
           "options": {
             "legend": {
               "calcs": [],
@@ -14594,7 +13202,7 @@
               "disableTextWrap": false,
               "editorMode": "code",
               "exemplar": false,
-              "expr": "rate(reth_executor_spawn_regular_tasks_total{$instance_label=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_executor_spawn_regular_tasks_total{$instance_label=~\"$instance\"}[$__rate_interval])",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -14610,7 +13218,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "reth_executor_spawn_regular_tasks_total{$instance_label=\"$instance\"} - reth_executor_spawn_finished_regular_tasks_total{$instance_label=\"$instance\"}",
+              "expr": "reth_executor_spawn_regular_tasks_total{$instance_label=~\"$instance\"} - reth_executor_spawn_finished_regular_tasks_total{$instance_label=~\"$instance\"}",
               "hide": false,
               "instant": false,
               "legendFormat": "Tasks running",
@@ -14701,9 +13309,9 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 512
+            "y": 474
           },
-          "id": 138,
+          "id": 124,
           "options": {
             "legend": {
               "calcs": [],
@@ -14727,7 +13335,7 @@
               "disableTextWrap": false,
               "editorMode": "code",
               "exemplar": false,
-              "expr": "rate(reth_executor_spawn_regular_blocking_tasks_total{$instance_label=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_executor_spawn_regular_blocking_tasks_total{$instance_label=~\"$instance\"}[$__rate_interval])",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -14743,7 +13351,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "reth_executor_spawn_regular_blocking_tasks_total{$instance_label=\"$instance\"} - reth_executor_spawn_finished_regular_blocking_tasks_total{$instance_label=\"$instance\"}",
+              "expr": "reth_executor_spawn_regular_blocking_tasks_total{$instance_label=~\"$instance\"} - reth_executor_spawn_finished_regular_blocking_tasks_total{$instance_label=~\"$instance\"}",
               "hide": false,
               "instant": false,
               "legendFormat": "Tasks running",
@@ -14821,9 +13429,9 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 512
+            "y": 474
           },
-          "id": 139,
+          "id": 125,
           "options": {
             "legend": {
               "calcs": [],
@@ -14845,7 +13453,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "rate(reth_pruner_duration_seconds_sum{$instance_label=\"$instance\"}[$__rate_interval]) / rate(reth_pruner_duration_seconds_count{$instance_label=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_pruner_duration_seconds_sum{$instance_label=~\"$instance\"}[$__rate_interval]) / rate(reth_pruner_duration_seconds_count{$instance_label=~\"$instance\"}[$__rate_interval])",
               "instant": false,
               "legendFormat": "__auto",
               "range": true,
@@ -14922,9 +13530,9 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 520
+            "y": 482
           },
-          "id": 140,
+          "id": 126,
           "options": {
             "legend": {
               "calcs": [],
@@ -14946,7 +13554,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "rate(reth_pruner_segments_duration_seconds_sum{$instance_label=\"$instance\"}[$__rate_interval]) / rate(reth_pruner_segments_duration_seconds_count{$instance_label=\"$instance\"}[$__rate_interval])",
+              "expr": "rate(reth_pruner_segments_duration_seconds_sum{$instance_label=~\"$instance\"}[$__rate_interval]) / rate(reth_pruner_segments_duration_seconds_count{$instance_label=~\"$instance\"}[$__rate_interval])",
               "instant": false,
               "legendFormat": "{{segment}}",
               "range": true,
@@ -15022,9 +13630,9 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 520
+            "y": 482
           },
-          "id": 141,
+          "id": 127,
           "options": {
             "legend": {
               "calcs": [],
@@ -15047,7 +13655,7 @@
               },
               "description": "Archive and full nodes prune headers, transactions and receipts in MDBX (hot db) after they have been written to static files (cold db). Full nodes additionally prune history indices.",
               "editorMode": "code",
-              "expr": "reth_pruner_segments_highest_pruned_block{$instance_label=\"$instance\"}",
+              "expr": "reth_pruner_segments_highest_pruned_block{$instance_label=~\"$instance\"}",
               "instant": false,
               "legendFormat": "{{segment}}",
               "range": true,
@@ -15182,14 +13790,15 @@
         },
         "definition": "label_values(reth_info{chain=\"$chain\"}, service)",
         "hide": 0,
-        "includeAll": false,
-        "multi": false,
+        "includeAll": true,
+        "multi": true,
         "label": "Instance",
         "name": "instance",
         "query": "label_values(reth_info{chain=\"$chain\"}, service)",
         "refresh": 2,
         "sort": 1,
-        "type": "query"
+        "type": "query",
+        "allValue": ".+"
       },
       {
         "current": {
