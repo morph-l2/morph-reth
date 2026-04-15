@@ -159,21 +159,28 @@
         "defaults": {
           "unit": "short",
           "min": 0,
-          "custom": {
-            "drawStyle": "bars",
-            "lineWidth": 1,
-            "spanNulls": true,
-            "showPoints": "never",
-            "fillOpacity": 60,
-            "barAlignment": 0,
-            "stacking": {
-              "mode": "normal",
-              "group": "A"
-            }
-          },
+          "max": 10,
           "color": {
-            "mode": "palette-classic"
-          }
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "green",
+                "value": 3
+              }
+            ]
+          },
+          "mappings": []
         },
         "overrides": []
       },
@@ -185,19 +192,20 @@
       },
       "id": 3,
       "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "right",
-          "showLegend": true,
+        "displayMode": "gradient",
+        "minVizHeight": 14,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
           "calcs": [
-            "lastNotNull",
-            "max"
-          ]
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
         },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
+        "showUnfilled": true,
+        "valueMode": "color",
+        "namePlacement": "left"
       },
       "pluginVersion": "12.2.1",
       "targets": [
@@ -211,13 +219,12 @@
           "expr": "reth_network_connected_peers{service=~\"$service\"}",
           "instant": true,
           "legendFormat": "{{service}}",
-          "range": false,
           "refId": "A"
         }
       ],
       "title": "Connected peers",
       "transparent": true,
-      "type": "timeseries"
+      "type": "bargauge"
     },
     {
       "datasource": {
