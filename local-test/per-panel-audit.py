@@ -24,7 +24,7 @@ DASHBOARD = ROOT / "etc/grafana/dashboards/morph-reth.json"
 OUT = ROOT / "local-test/per-panel-audit.md"
 
 ROWS_ORDER = [
-    "Overview", "Morph Engine API", "Morph Payload Builder",
+    "Overview", "Engine API", "Payload Builder",
     "Execution & State Root", "Database & Storage", "RPC",
     "Sync & Downloaders", "TxPool & P2P", "State & History",
     "Process & Maintenance",

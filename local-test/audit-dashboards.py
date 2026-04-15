@@ -148,8 +148,8 @@ def main() -> None:
     # but let's re-verify visible order ───────────────────────────────────
     expected_rows = [
         "Overview",
-        "Morph Engine API",
-        "Morph Payload Builder",
+        "Engine API",
+        "Payload Builder",
         "Execution & State Root",
         "Database & Storage",
         "RPC",
