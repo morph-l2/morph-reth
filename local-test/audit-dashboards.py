@@ -30,6 +30,12 @@ OUT_REPORT = ROOT / "local-test/audit-report.txt"
 ENGINE_METRICS_RS = ROOT / "crates/engine-api/src/metrics.rs"
 BUILDER_METRICS_RS = ROOT / "crates/payload/builder/src/metrics.rs"
 
+# Metrics that are intentionally exposed by the binary but NOT plotted on any
+# Grafana panel. Currently empty — all custom metrics in metrics.rs have
+# corresponding panels, and event-style skip counters (L1/pool tx skips)
+# are logged rather than metered.
+INTENTIONALLY_UNCOVERED_METRICS: set[str] = set()
+
 
 def load_json(path: Path) -> dict:
     with path.open() as h:
@@ -191,7 +197,7 @@ def main() -> None:
             errors.append(f"Panel {p['id']} {p['title']!r}: gridPos x={x} w={w} overflows x+w > 24")
 
     # ── 5. Custom metric coverage ────────────────────────────────────────
-    expected_metrics = find_custom_metrics_from_rust()
+    expected_metrics = find_custom_metrics_from_rust() - INTENTIONALLY_UNCOVERED_METRICS
     all_exprs_blob = "\n".join(
         e for p in iter_non_row_panels(dash["panels"]) for e in panel_expressions(p)
     )
@@ -202,6 +208,11 @@ def main() -> None:
     for m in sorted(expected_metrics):
         covered = m in all_exprs_blob
         lines.append(f"  [{'✓' if covered else '✗'}] {m}")
+    if INTENTIONALLY_UNCOVERED_METRICS:
+        lines.append("")
+        lines.append(f"## Exposed but not plotted on dashboard ({len(INTENTIONALLY_UNCOVERED_METRICS)})")
+        for m in sorted(INTENTIONALLY_UNCOVERED_METRICS):
+            lines.append(f"  [~] {m}")
     if missing_coverage:
         errors.append(f"Dashboard has no panel referencing these metrics: {missing_coverage}")
     lines.append("")

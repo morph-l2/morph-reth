@@ -1,12 +1,16 @@
 //! Metrics for the Morph payload builder.
 //!
-//! Tracks per-transaction and per-block timing plus L1 message skip counters,
-//! analogous to geth's `miner/skipped_txs/l1/*`, `miner/commit/*`, and
-//! `processor/block/transactions`.
+//! Tracks per-transaction and per-block timing analogous to geth's
+//! `miner/commit/*` and `processor/block/transactions`.
+//!
+//! L1 message / pool transaction skip events are intentionally NOT exposed
+//! as metrics. They are rare enough (L1) or high-frequency enough (pool)
+//! that logging is a more useful observability tool; see the log sites in
+//! `builder.rs`.
 
 use reth_metrics::{
     Metrics,
-    metrics::{Counter, Gauge, Histogram},
+    metrics::{Gauge, Histogram},
 };
 
 /// Metrics for the Morph payload builder.
@@ -15,8 +19,6 @@ use reth_metrics::{
 ///
 /// | Metric | Type | geth equivalent |
 /// |--------|------|-----------------|
-/// | `l1_tx_gas_limit_exceeded_total` | Counter | `miner/skipped_txs/l1/gas_limit_exceeded` |
-/// | `l1_tx_strange_err_total` | Counter | `miner/skipped_txs/l1/strange_err` |
 /// | `commit_txs_all_duration_seconds` | Histogram | `miner/commit/txs_all` |
 /// | `commit_tx_apply_duration_seconds` | Histogram | `miner/commit/tx_apply` |
 /// | `payload_build_duration_seconds` | Histogram | tempo-inspired |
@@ -24,25 +26,6 @@ use reth_metrics::{
 #[derive(Metrics, Clone)]
 #[metrics(scope = "morph.payload_builder")]
 pub(crate) struct MorphPayloadBuilderMetrics {
-    // -------------------------------------------------------------------------
-    // L1 message skip counters
-    // -------------------------------------------------------------------------
-    /// Number of L1 message transactions skipped because they would exceed the
-    /// block gas limit.
-    ///
-    /// In morph-reth this causes the entire block build to fail rather than
-    /// silently dropping the transaction, so this counter is incremented on the
-    /// error path before the error is propagated.
-    ///
-    /// Analogous to geth's `miner/skipped_txs/l1/gas_limit_exceeded`.
-    pub(crate) l1_tx_gas_limit_exceeded_total: Counter,
-
-    /// Number of L1 message transactions that failed with an unexpected error
-    /// (invalid transaction, EVM error, etc.).
-    ///
-    /// Analogous to geth's `miner/skipped_txs/l1/strange_err`.
-    pub(crate) l1_tx_strange_err_total: Counter,
-
     // -------------------------------------------------------------------------
     // Block-level timing
     // -------------------------------------------------------------------------
@@ -82,21 +65,4 @@ pub(crate) struct MorphPayloadBuilderMetrics {
     /// Cancelled builds do not update this gauge.
     /// Analogous to geth's `processor/block/transactions`.
     pub(crate) block_transactions: Gauge,
-}
-
-impl MorphPayloadBuilderMetrics {
-    /// Increments the pool transaction skip counter with the given reason label.
-    ///
-    /// Uses the `metrics::counter!` macro directly (rather than a struct field) to
-    /// attach a `reason` label. The metric name uses underscores
-    /// (`morph_payload_builder_*`) to match the Prometheus output of the
-    /// auto-generated metrics whose scope `morph.payload_builder` is also converted
-    /// to underscores.
-    ///
-    /// Inspired by tempo's `pool_transactions_skipped_total` with `reason` label.
-    #[inline]
-    pub(crate) fn inc_pool_tx_skipped(&self, reason: &'static str) {
-        metrics::counter!("morph_payload_builder_pool_transactions_skipped_total", "reason" => reason)
-            .increment(1);
-    }
 }
