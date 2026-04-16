@@ -15,6 +15,10 @@ use std::sync::Arc;
 use tracing::info;
 
 fn main() {
+    // Override reth's default version info with morph-reth's own version,
+    // commit SHA, and build timestamp. Must be called before CLI parsing.
+    morph_node::version::init_version_metadata();
+
     // Install signal handler for segmentation faults
     sigsegv_handler::install();
 
