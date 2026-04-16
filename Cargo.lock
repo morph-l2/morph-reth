@@ -4724,7 +4724,7 @@ checksum = "1fafa6961cabd9c63bcd77a45d7e3b7f3b552b70417831fb0f56db717e72407e"
 
 [[package]]
 name = "morph-chainspec"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "alloy-chains",
  "alloy-consensus",
@@ -4747,7 +4747,7 @@ dependencies = [
 
 [[package]]
 name = "morph-consensus"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "alloy-consensus",
  "alloy-evm",
@@ -4765,7 +4765,7 @@ dependencies = [
 
 [[package]]
 name = "morph-engine-api"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -4775,12 +4775,10 @@ dependencies = [
  "async-trait",
  "auto_impl",
  "jsonrpsee",
- "metrics",
  "morph-chainspec",
  "morph-payload-types",
  "morph-primitives",
  "parking_lot",
- "reth-metrics",
  "reth-node-api",
  "reth-payload-builder",
  "reth-payload-primitives",
@@ -4794,7 +4792,7 @@ dependencies = [
 
 [[package]]
 name = "morph-evm"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "alloy-consensus",
  "alloy-evm",
@@ -4820,7 +4818,7 @@ dependencies = [
 
 [[package]]
 name = "morph-node"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -4870,17 +4868,18 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-stream",
+ "vergen",
+ "vergen-git2",
 ]
 
 [[package]]
 name = "morph-payload-builder"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
  "alloy-primitives",
  "alloy-rlp",
- "metrics",
  "morph-chainspec",
  "morph-evm",
  "morph-payload-types",
@@ -4889,7 +4888,6 @@ dependencies = [
  "reth-chainspec",
  "reth-evm",
  "reth-execution-types",
- "reth-metrics",
  "reth-payload-builder",
  "reth-payload-primitives",
  "reth-payload-util",
@@ -4904,7 +4902,7 @@ dependencies = [
 
 [[package]]
 name = "morph-payload-types"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -4925,7 +4923,7 @@ dependencies = [
 
 [[package]]
 name = "morph-primitives"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -4945,7 +4943,7 @@ dependencies = [
 
 [[package]]
 name = "morph-reth"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "clap",
  "eyre",
@@ -4963,7 +4961,7 @@ dependencies = [
 
 [[package]]
 name = "morph-revm"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -4986,7 +4984,7 @@ dependencies = [
 
 [[package]]
 name = "morph-rpc"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -5026,7 +5024,7 @@ dependencies = [
 
 [[package]]
 name = "morph-txpool"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
