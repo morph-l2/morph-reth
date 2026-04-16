@@ -2,7 +2,9 @@
 //!
 //! This module provides the concrete Morph L2 Engine API implementation and supporting helpers.
 
-use crate::{EngineApiResult, MorphEngineApiError, MorphL2EngineApi};
+use crate::{
+    EngineApiResult, MorphEngineApiError, MorphL2EngineApi, metrics::MorphEngineApiMetrics,
+};
 use alloy_consensus::{
     BlockHeader, EMPTY_OMMER_ROOT_HASH, Header, proofs::calculate_transaction_root,
 };
@@ -49,6 +51,9 @@ pub struct RealMorphL2EngineApi<Provider> {
     /// Engine-state tracker updated from consensus engine events (authoritative) and local FCU
     /// success hints (fast path).
     engine_state_tracker: Arc<EngineStateTracker>,
+
+    /// Prometheus metrics for custom Morph L2 Engine API endpoints and chain head health.
+    metrics: MorphEngineApiMetrics,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -151,7 +156,19 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
             chain_spec,
             engine_handle,
             engine_state_tracker,
+            metrics: MorphEngineApiMetrics::default(),
         }
+    }
+
+    /// Updates `head_block_timegap_seconds` gauge after a successful block import.
+    fn record_head_metrics(&self, block_timestamp: u64) {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.metrics
+            .head_block_timegap_seconds
+            .set(now_secs.saturating_sub(block_timestamp) as f64);
     }
 
     /// Returns a reference to the provider.
@@ -186,7 +203,15 @@ where
         &self,
         params: AssembleL2BlockParams,
     ) -> EngineApiResult<ExecutableL2Data> {
-        let built_payload = self.build_l2_payload(params, None, None).await?;
+        let started = Instant::now();
+        let result = self.build_l2_payload(params, None, None).await;
+        self.metrics
+            .assemble_l2_block_duration_seconds
+            .record(started.elapsed());
+
+        let built_payload = result.inspect_err(|_| {
+            self.metrics.assemble_l2_block_failures_total.increment(1);
+        })?;
         let executable_data = built_payload.executable_data;
 
         tracing::debug!(
@@ -220,6 +245,10 @@ where
                 actual = data.number,
                 "cannot validate block with discontinuous block number"
             );
+            self.metrics.validate_l2_block_failures_total.increment(1);
+            self.metrics
+                .validate_l2_block_duration_seconds
+                .record(validate_started.elapsed());
             return Err(MorphEngineApiError::DiscontinuousBlockNumber {
                 expected: current_head.number + 1,
                 actual: data.number,
@@ -233,6 +262,10 @@ where
                 actual = %data.parent_hash,
                 "parent hash mismatch"
             );
+            self.metrics.validate_l2_block_failures_total.increment(1);
+            self.metrics
+                .validate_l2_block_duration_seconds
+                .record(validate_started.elapsed());
             return Err(MorphEngineApiError::WrongParentHash {
                 expected: current_head.hash,
                 actual: data.parent_hash,
@@ -250,6 +283,10 @@ where
                     error = %err,
                     "failed to convert executable data for validation"
                 );
+                self.metrics.validate_l2_block_failures_total.increment(1);
+                self.metrics
+                    .validate_l2_block_duration_seconds
+                    .record(validate_started.elapsed());
                 return Ok(GenericResponse { success: false });
             }
         };
@@ -265,6 +302,10 @@ where
                     error = %err,
                     "engine new_payload failed during validate_l2_block"
                 );
+                self.metrics.validate_l2_block_failures_total.increment(1);
+                self.metrics
+                    .validate_l2_block_duration_seconds
+                    .record(validate_started.elapsed());
                 return Ok(GenericResponse { success: false });
             }
         };
@@ -294,10 +335,18 @@ where
             "validate_l2_block timing"
         );
 
+        self.metrics
+            .validate_l2_block_duration_seconds
+            .record(validate_started.elapsed());
+        if !success {
+            self.metrics.validate_l2_block_failures_total.increment(1);
+        }
+
         Ok(GenericResponse { success })
     }
 
     async fn new_l2_block(&self, data: ExecutableL2Data) -> EngineApiResult<()> {
+        let started = Instant::now();
         tracing::debug!(
             target: "morph::engine",
             block_number = data.number,
@@ -321,6 +370,9 @@ where
                     current_number = current_number,
                     "ignoring past block number"
                 );
+                self.metrics
+                    .new_l2_block_duration_seconds
+                    .record(started.elapsed());
                 return Ok(());
             }
             // Discontinuous block number
@@ -330,6 +382,10 @@ where
                 actual_number = data.number,
                 "cannot new block with discontinuous block number"
             );
+            self.metrics.new_l2_block_failures_total.increment(1);
+            self.metrics
+                .new_l2_block_duration_seconds
+                .record(started.elapsed());
             return Err(MorphEngineApiError::DiscontinuousBlockNumber {
                 expected: expected_number,
                 actual: data.number,
@@ -344,6 +400,10 @@ where
                 actual = %data.parent_hash,
                 "wrong parent hash"
             );
+            self.metrics.new_l2_block_failures_total.increment(1);
+            self.metrics
+                .new_l2_block_duration_seconds
+                .record(started.elapsed());
             return Err(MorphEngineApiError::WrongParentHash {
                 expected: current_head.hash,
                 actual: data.parent_hash,
@@ -352,7 +412,20 @@ where
 
         let block_hash = data.hash;
         let block_number = data.number;
-        self.import_l2_block_via_engine(data).await?;
+        let block_timestamp = data.timestamp;
+        self.import_l2_block_via_engine(data)
+            .await
+            .inspect_err(|_| {
+                self.metrics.new_l2_block_failures_total.increment(1);
+                self.metrics
+                    .new_l2_block_duration_seconds
+                    .record(started.elapsed());
+            })?;
+
+        self.metrics
+            .new_l2_block_duration_seconds
+            .record(started.elapsed());
+        self.record_head_metrics(block_timestamp);
 
         tracing::debug!(
             target: "morph::engine",
@@ -365,6 +438,7 @@ where
     }
 
     async fn new_safe_l2_block(&self, mut data: SafeL2Data) -> EngineApiResult<MorphHeader> {
+        let started = Instant::now();
         tracing::debug!(
             target: "morph::engine",
             block_number = data.number,
@@ -375,11 +449,17 @@ where
         let latest_number = self.current_head()?.number;
 
         if data.number != latest_number + 1 {
+            self.metrics.new_safe_l2_block_failures_total.increment(1);
+            self.metrics
+                .new_safe_l2_block_duration_seconds
+                .record(started.elapsed());
             return Err(MorphEngineApiError::DiscontinuousBlockNumber {
                 expected: latest_number + 1,
                 actual: data.number,
             });
         }
+
+        let block_timestamp = data.timestamp;
 
         // 2. Assemble the block from SafeL2Data inputs.
         let assemble_params = AssembleL2BlockParams {
@@ -391,14 +471,33 @@ where
 
         let built_payload = self
             .build_l2_payload(assemble_params, Some(data.gas_limit), data.base_fee_per_gas)
-            .await?;
+            .await
+            .inspect_err(|_| {
+                self.metrics.new_safe_l2_block_failures_total.increment(1);
+                self.metrics
+                    .new_safe_l2_block_duration_seconds
+                    .record(started.elapsed());
+            })?;
         let executable_data = built_payload.executable_data;
         // Save hash before moving executable_data into the import call.
         let block_hash = executable_data.hash;
 
         // 3. Import the block through reth engine tree and return the in-path header
         // (do not rely on immediate DB visibility after FCU).
-        let header = self.import_l2_block_via_engine(executable_data).await?;
+        let header = self
+            .import_l2_block_via_engine(executable_data)
+            .await
+            .inspect_err(|_| {
+                self.metrics.new_safe_l2_block_failures_total.increment(1);
+                self.metrics
+                    .new_safe_l2_block_duration_seconds
+                    .record(started.elapsed());
+            })?;
+
+        self.metrics
+            .new_safe_l2_block_duration_seconds
+            .record(started.elapsed());
+        self.record_head_metrics(block_timestamp);
 
         // Update safe block tag and seed finalized for memory cleanup.
         //

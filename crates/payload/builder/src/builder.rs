@@ -1,5 +1,6 @@
 //! Morph payload builder implementation.
 
+use crate::metrics::MorphPayloadBuilderMetrics;
 use crate::{MorphBuilderConfig, MorphPayloadBuilderError, config::PayloadBuildingBreaker};
 use alloy_consensus::{BlockHeader, Transaction, Typed2718};
 use alloy_eips::eip2718::Encodable2718;
@@ -31,7 +32,7 @@ use reth_revm::{database::StateProviderDatabase, db::State};
 use reth_storage_api::{StateProvider, StateProviderFactory};
 use reth_transaction_pool::{BestTransactionsAttributes, PoolTransaction, TransactionPool};
 use revm::context_interface::Block as RevmBlock;
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 /// Reads the withdraw trie root from the L2MessageQueue contract storage.
 fn read_withdraw_trie_root<DB: revm::Database>(db: &mut DB) -> Result<B256, DB::Error> {
@@ -177,6 +178,7 @@ where
             cancel,
             best_payload,
             builder_config: self.config.clone(),
+            metrics: MorphPayloadBuilderMetrics::default(),
         };
 
         let state_provider = self.client.state_by_block_hash(ctx.parent().hash())?;
@@ -247,6 +249,8 @@ struct MorphPayloadBuilderCtx {
     best_payload: Option<MorphBuiltPayload>,
     /// Builder configuration with limits.
     builder_config: MorphBuilderConfig,
+    /// Prometheus metrics for this payload build job.
+    metrics: MorphPayloadBuilderMetrics,
 }
 
 impl MorphPayloadBuilderCtx {
@@ -311,6 +315,14 @@ impl MorphPayloadBuilderCtx {
 
             // Check if adding this transaction would exceed block gas limit
             if info.cumulative_gas_used + tx_gas > block_gas_limit {
+                tracing::warn!(
+                    target: "payload_builder",
+                    tx_index = tx_idx,
+                    tx_gas,
+                    cumulative_gas_used = info.cumulative_gas_used,
+                    block_gas_limit,
+                    "L1 message transaction would exceed block gas limit; aborting build"
+                );
                 gas_spent_by_transactions.push(tx_gas);
                 return Err(PayloadBuilderError::other(
                     MorphPayloadBuilderError::BlockGasLimitExceededBySequencerTransactions {
@@ -320,7 +332,8 @@ impl MorphPayloadBuilderCtx {
                 ));
             }
 
-            // Execute the transaction
+            // Execute the transaction and record EVM execution time.
+            let apply_started = Instant::now();
             let gas_used = match builder.execute_transaction(recovered_tx.clone()) {
                 Ok(gas_used) => gas_used,
                 Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
@@ -356,9 +369,19 @@ impl MorphPayloadBuilderCtx {
                 }
                 Err(err) => {
                     // Fatal error - this is a bug or misconfiguration
+                    tracing::error!(
+                        target: "payload_builder",
+                        tx_index = tx_idx,
+                        %err,
+                        ?recovered_tx,
+                        "fatal EVM execution error on L1 message transaction"
+                    );
                     return Err(PayloadBuilderError::EvmExecutionError(Box::new(err)));
                 }
             };
+            self.metrics
+                .commit_tx_apply_duration_seconds
+                .record(apply_started.elapsed());
 
             // For L1 messages, track the next L1 message index.
             // L1 gas is prepaid on L1, so no fees are collected here.
@@ -444,33 +467,60 @@ impl MorphPayloadBuilderCtx {
 
             let tx = tx.into_consensus();
 
-            // Skip blob transactions and L1 messages from pool
+            // Skip blob transactions and L1 messages from pool. These should
+            // never reach the pool under normal operation (pool filters them
+            // out at admission), so their presence here indicates either a
+            // bug in the admission path or a node configuration mismatch —
+            // warn loudly.
             if tx.is_eip4844() || tx.is_l1_msg() {
+                tracing::warn!(
+                    target: "payload_builder",
+                    signer = %tx.signer(),
+                    nonce = tx.nonce(),
+                    is_blob = tx.is_eip4844(),
+                    is_l1_msg = tx.is_l1_msg(),
+                    "unexpected blob or L1-message transaction in the pool; skipping"
+                );
                 best_txs.mark_invalid(tx.signer(), tx.nonce());
                 continue;
             }
 
-            // Check if the transaction exceeds block limits
+            // Check if the transaction exceeds block limits (gas or DA size).
+            // Rare in practice; logged at debug to avoid pool-skip noise.
             if info.is_tx_over_limits(
                 tx.gas_limit(),
                 tx.length() as u64,
                 block_gas_limit,
                 self.builder_config.max_da_block_size,
             ) {
+                tracing::debug!(
+                    target: "payload_builder",
+                    signer = %tx.signer(),
+                    nonce = tx.nonce(),
+                    tx_gas_limit = tx.gas_limit(),
+                    tx_size = tx.length(),
+                    block_gas_limit,
+                    max_da_block_size = self.builder_config.max_da_block_size,
+                    "pool transaction exceeds block limits; skipping"
+                );
                 best_txs.mark_invalid(tx.signer(), tx.nonce());
                 continue;
             }
 
-            // Execute the transaction
+            let apply_started = Instant::now();
             let gas_used = match builder.execute_transaction(tx.clone()) {
                 Ok(gas_used) => gas_used,
                 Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
                     error,
                     ..
                 })) => {
+                    // These three variants fire on the fast path of every
+                    // pool sweep and can be extremely noisy under load. Keep
+                    // them at `trace` so default operation stays quiet; turn
+                    // on `RUST_LOG=morph_payload_builder=trace` to diagnose
+                    // pool-skip rates.
                     if error.is_nonce_too_low() {
-                        // If the nonce is too low, we can skip this transaction
-                        // but don't mark as invalid - the sender may have other valid txs
+                        // Nonce too low: sender may have other valid txs.
                         tracing::trace!(
                             target: "payload_builder",
                             %error,
@@ -478,8 +528,7 @@ impl MorphPayloadBuilderCtx {
                             "skipping nonce too low transaction"
                         );
                     } else {
-                        // If the transaction is invalid for other reasons,
-                        // skip it and all of its descendants from this sender
+                        // Other invalid: skip this tx AND its descendants.
                         tracing::trace!(
                             target: "payload_builder",
                             %error,
@@ -491,7 +540,7 @@ impl MorphPayloadBuilderCtx {
                     continue;
                 }
                 Err(BlockExecutionError::Validation(err)) => {
-                    // Other validation errors - skip transaction and descendants
+                    // Other validation errors - skip transaction and descendants.
                     tracing::trace!(
                         target: "payload_builder",
                         %err,
@@ -502,10 +551,20 @@ impl MorphPayloadBuilderCtx {
                     continue;
                 }
                 Err(err) => {
-                    // Fatal error - should not continue
+                    // Fatal error - should not continue.
+                    tracing::error!(
+                        target: "payload_builder",
+                        signer = %tx.signer(),
+                        nonce = tx.nonce(),
+                        %err,
+                        "fatal EVM execution error on pool transaction; aborting build"
+                    );
                     return Err(PayloadBuilderError::EvmExecutionError(Box::new(err)));
                 }
             };
+            self.metrics
+                .commit_tx_apply_duration_seconds
+                .record(apply_started.elapsed());
 
             // Update execution info
             info.cumulative_gas_used += gas_used;
@@ -583,6 +642,7 @@ where
     DB: Database<Error = reth_evm::execute::ProviderError>,
     BestTxs: PayloadTransactions<Transaction: PoolTransaction<Consensus = MorphTxEnvelope>> + 'a,
 {
+    let build_started = Instant::now();
     let attributes = ctx.attributes();
 
     tracing::debug!(
@@ -633,6 +693,7 @@ where
     let breaker = ctx.builder_config.breaker(block_gas_limit);
 
     // Execute L1 message transactions (must be first, with sequential queue indices)
+    let txs_all_started = Instant::now();
     let mut executed_txs = ctx.execute_l1_messages(&mut builder, &mut info)?;
 
     // Always execute pool transactions (L2 transactions from mempool)
@@ -662,6 +723,11 @@ where
             "breaker stopped pool execution, finalizing payload"
         );
     }
+
+    // Record total transaction execution time.
+    ctx.metrics
+        .commit_txs_all_duration_seconds
+        .record(txs_all_started.elapsed());
 
     // Check if this payload is better than the previous one
     if !ctx.is_better_payload(info.total_fees) {
@@ -747,6 +813,14 @@ where
         executable_data,
         Some(executed),
     );
+
+    // Only record block_transactions for successfully built payloads (not Aborted or Cancelled).
+    ctx.metrics
+        .block_transactions
+        .set(info.transaction_count as f64);
+    ctx.metrics
+        .payload_build_duration_seconds
+        .record(build_started.elapsed());
 
     Ok(BuildOutcomeKind::Better { payload })
 }
@@ -957,6 +1031,7 @@ mod tests {
             cancel: Default::default(),
             best_payload,
             builder_config: MorphBuilderConfig::default(),
+            metrics: MorphPayloadBuilderMetrics::default(),
         }
     }
 

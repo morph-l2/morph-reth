@@ -1,0 +1,73 @@
+name: morph-reth
+
+services:
+  morph-reth:
+    restart: unless-stopped
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    ports:
+      - "9001:9001" # metrics
+      - "30303:30303" # p2p
+      - "8545:8545"   # rpc
+      - "8551:8551"   # engine (authrpc)
+    volumes:
+      # Dockerfile: USER morph-reth, WORKDIR /var/lib/morph-reth
+      - morph_data:/var/lib/morph-reth/data
+      - logs:/var/lib/morph-reth/logs
+      - ./jwttoken:/var/lib/morph-reth/jwt:ro
+    pid: host
+    command: >
+      node
+      --chain morph
+      --datadir /var/lib/morph-reth/data
+      --metrics 0.0.0.0:9001
+      --log.file.directory /var/lib/morph-reth/logs
+      --authrpc.addr 0.0.0.0
+      --authrpc.port 8551
+      --authrpc.jwtsecret /var/lib/morph-reth/jwt/jwt.hex
+      --http --http.addr 0.0.0.0 --http.port 8545
+      --http.api "eth,net,web3"
+
+  prometheus:
+    restart: unless-stopped
+    image: prom/prometheus
+    depends_on:
+      - morph-reth
+    ports:
+      - 9090:9090
+    volumes:
+      - ./prometheus/:/etc/prometheus/
+      - prometheus_data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+
+  grafana:
+    restart: unless-stopped
+    image: grafana/grafana:latest
+    depends_on:
+      - morph-reth
+      - prometheus
+    ports:
+      - 3000:3000
+    environment:
+      PROMETHEUS_URL: ${PROMETHEUS_URL:-http://prometheus:9090}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/datasources:/etc/grafana/provisioning/datasources
+      - ./grafana/dashboards:/etc/grafana/provisioning_temp/dashboards
+    entrypoint: >
+      sh -c "cp -r /etc/grafana/provisioning_temp/dashboards/. /etc/grafana/provisioning/dashboards &&
+             find /etc/grafana/provisioning/dashboards/ -name '*.json' -exec sed -i 's/$${DS_PROMETHEUS}/Prometheus/g' {} \+ &&
+             find /etc/grafana/provisioning/dashboards/ -name '*.json' -exec sed -i 's/$${datasource}/Prometheus/g' {} \+ &&
+             /run.sh"
+
+volumes:
+  morph_data:
+    driver: local
+  logs:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local

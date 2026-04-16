@@ -17,6 +17,7 @@ morph-payload-types.workspace = true
 morph-primitives = { workspace = true, features = ["reth-codec"] }
 
 # reth
+reth-metrics.workspace = true
 reth-node-api.workspace = true
 reth-payload-builder.workspace = true
 reth-payload-primitives.workspace = true
@@ -29,6 +30,9 @@ alloy-consensus.workspace = true
 alloy-eips.workspace = true
 alloy-primitives.workspace = true
 alloy-rpc-types-engine.workspace = true
+
+# metrics
+metrics.workspace = true
 
 # misc
 async-trait.workspace = true

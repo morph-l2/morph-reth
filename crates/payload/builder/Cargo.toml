@@ -40,6 +40,10 @@ alloy-rlp.workspace = true
 # Revm
 revm.workspace = true
 
+# Metrics
+metrics.workspace = true
+reth-metrics.workspace = true
+
 # Utils
 tracing.workspace = true
 thiserror.workspace = true
