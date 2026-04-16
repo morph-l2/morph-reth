@@ -14,6 +14,10 @@ ignore = [
     # https://rustsec.org/advisories/RUSTSEC-2026-0097 rand unsound with custom logger
     # pinned transitively via reth; no fix available upstream yet
     "RUSTSEC-2026-0097",
+    # https://rustsec.org/advisories/RUSTSEC-2026-0098 rustls-webpki URI name constraints
+    "RUSTSEC-2026-0098",
+    # https://rustsec.org/advisories/RUSTSEC-2026-0099 rustls-webpki wildcard name constraints
+    "RUSTSEC-2026-0099",
 ]
 
 # This section is considered when running `cargo deny check bans`.
