@@ -6,7 +6,6 @@ use alloy_primitives::{B256, keccak256};
 use dashmap::DashMap;
 use morph_chainspec::{
     L2_MESSAGE_QUEUE_ADDRESS, L2_MESSAGE_QUEUE_WITHDRAW_TRIE_ROOT_SLOT, MorphChainSpec,
-    MorphHardforks,
 };
 use morph_payload_types::{MorphExecutionData, MorphPayloadTypes};
 use morph_primitives::MorphHeader;
@@ -15,13 +14,13 @@ use reth_chainspec::EthChainSpec;
 use reth_errors::ConsensusError;
 use reth_node_api::{
     AddOnsContext, FullNodeComponents, InvalidPayloadAttributesError, NewPayloadError, NodeTypes,
-    PayloadAttributes, PayloadTypes, PayloadValidator, StateRootValidator,
+    PayloadAttributes, PayloadTypes, PayloadValidator,
 };
 use reth_node_builder::{
     invalid_block_hook::InvalidBlockHookExt,
-    rpc::{BasicEngineValidator, EngineValidatorBuilder, PayloadValidatorBuilder},
+    rpc::{EngineValidatorBuilder, PayloadValidatorBuilder},
 };
-use reth_primitives_traits::{GotExpected, RecoveredBlock, SealedBlock};
+use reth_primitives_traits::{RecoveredBlock, SealedBlock};
 use reth_provider::ChainSpecProvider;
 use std::{collections::VecDeque, sync::Arc};
 
@@ -78,20 +77,21 @@ where
             <<Node::Types as NodeTypes>::Payload as PayloadTypes>::ExecutionData,
         >,
     >,
+    Node::Provider: ChainSpecProvider<ChainSpec = MorphChainSpec>,
     PVB: PayloadValidatorBuilder<Node>,
     PVB::Validator: reth_node_api::PayloadValidator<
             <Node::Types as NodeTypes>::Payload,
             Block = reth_node_api::BlockTy<Node::Types>,
-        > + StateRootValidator<<Node::Types as NodeTypes>::Primitives>
-        + Clone,
+        > + Clone,
 {
     type EngineValidator =
-        BasicEngineValidator<Node::Provider, Node::Evm, PVB::Validator, PVB::Validator>;
+        morph_engine_tree_ext::MorphBasicEngineValidator<Node::Provider, Node::Evm, PVB::Validator>;
 
     async fn build_tree_validator(
         self,
         ctx: &AddOnsContext<'_, Node>,
         tree_config: reth_node_api::TreeConfig,
+        changeset_cache: reth_trie_db::ChangesetCache,
     ) -> eyre::Result<Self::EngineValidator> {
         let validator = self.payload_validator_builder.build(ctx).await?;
         let data_dir = ctx
@@ -100,16 +100,19 @@ where
             .clone()
             .resolve_datadir(ctx.config.chain.chain());
         let invalid_block_hook = ctx.create_invalid_block_hook(&data_dir).await?;
+        let chain_spec = ctx.node.provider().chain_spec();
 
-        Ok(BasicEngineValidator::new(
+        Ok(morph_engine_tree_ext::MorphBasicEngineValidator::new(
             ctx.node.provider().clone(),
             Arc::new(ctx.node.consensus().clone()),
             ctx.node.evm_config().clone(),
-            validator.clone(),
+            validator,
             tree_config,
             invalid_block_hook,
-        )
-        .with_state_root_validator(validator))
+            changeset_cache,
+            ctx.node.task_executor().clone(),
+            chain_spec,
+        ))
     }
 }
 
@@ -120,6 +123,10 @@ where
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct MorphEngineValidator {
+    /// Retained for future `PayloadValidator` extensions that need chainspec access.
+    /// The pre-Jade state-root gate now lives in `MorphBasicEngineValidator` (see
+    /// `morph_engine_tree_ext::payload_validator`) so this field has no direct reader today.
+    #[allow(dead_code)]
     chain_spec: Arc<MorphChainSpec>,
     expected_withdraw_trie_roots: Arc<DashMap<B256, WithdrawTrieRootExpectation>>,
     expected_withdraw_trie_root_order: Arc<Mutex<VecDeque<B256>>>,
@@ -261,34 +268,6 @@ impl PayloadValidator<MorphPayloadTypes> for MorphEngineValidator {
         if attr.timestamp() < header.timestamp() {
             return Err(InvalidPayloadAttributesError::InvalidTimestamp);
         }
-        Ok(())
-    }
-}
-
-impl StateRootValidator<morph_primitives::MorphPrimitives> for MorphEngineValidator {
-    fn validate_state_root(
-        &self,
-        block: &RecoveredBlock<morph_primitives::Block>,
-        computed_state_root: B256,
-    ) -> Result<(), ConsensusError> {
-        let jade_active = self
-            .chain_spec
-            .is_jade_active_at_timestamp(block.header().timestamp());
-
-        // Enforce canonical state-root equality in MPT mode (post-Jade).
-        if jade_active {
-            let expected_state_root = block.header().state_root();
-            if computed_state_root != expected_state_root {
-                return Err(ConsensusError::BodyStateRootDiff(
-                    GotExpected {
-                        got: computed_state_root,
-                        expected: expected_state_root,
-                    }
-                    .into(),
-                ));
-            }
-        }
-
         Ok(())
     }
 }
@@ -550,34 +529,5 @@ mod tests {
                 .validate_payload_attributes_against_header(&attr_future, parent.header())
                 .is_ok()
         );
-    }
-
-    #[test]
-    fn test_validate_state_root_jade_not_active_always_ok() {
-        // On Hoodi, Jade is not activated. validate_state_root should always
-        // return Ok even with mismatched state roots.
-        use morph_primitives::MorphHeader;
-        use reth_primitives_traits::{RecoveredBlock, SealedBlock};
-
-        let validator = MorphEngineValidator::new(test_chain_spec());
-
-        let header = MorphHeader {
-            inner: alloy_consensus::Header {
-                timestamp: 0,
-                state_root: B256::from([0xaa; 32]),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let block = morph_primitives::Block {
-            header,
-            body: Default::default(),
-        };
-        let sealed = SealedBlock::seal_slow(block);
-        let recovered = RecoveredBlock::new_sealed(sealed, vec![]);
-
-        // Different computed root, but Jade is not active
-        let result = validator.validate_state_root(&recovered, B256::from([0xbb; 32]));
-        assert!(result.is_ok());
     }
 }

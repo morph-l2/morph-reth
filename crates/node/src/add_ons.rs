@@ -109,7 +109,7 @@ where
 
         // Keep a local view of canonical head/forkchoice from reth engine events.
         let tracker_for_events = engine_state_tracker.clone();
-        task_executor.spawn_critical("morph engine state tracker", async move {
+        task_executor.spawn_critical_task("morph engine state tracker", async move {
             let mut listener = engine_events.new_listener();
             while let Some(event) = listener.next().await {
                 tracker_for_events.on_consensus_engine_event(&event);

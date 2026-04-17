@@ -9,7 +9,9 @@ use alloy_rlp::Encodable;
 use morph_chainspec::MorphChainSpec;
 use morph_chainspec::{L2_MESSAGE_QUEUE_ADDRESS, L2_MESSAGE_QUEUE_WITHDRAW_TRIE_ROOT_SLOT};
 use morph_evm::{MorphEvmConfig, MorphNextBlockEnvAttributes};
-use morph_payload_types::{ExecutableL2Data, MorphBuiltPayload, MorphPayloadBuilderAttributes};
+use morph_payload_types::{
+    ExecutableL2Data, MorphBuiltPayload, MorphPayloadAttributes, MorphPayloadBuilderAttributes,
+};
 use morph_primitives::{MorphHeader, MorphTxEnvelope};
 use reth_basic_payload_builder::{
     BuildArguments, BuildOutcome, BuildOutcomeKind, MissingPayloadBehaviour, PayloadBuilder,
@@ -21,11 +23,9 @@ use reth_evm::{
     block::{BlockExecutionError, BlockValidationError},
     execute::{BlockBuilder, BlockBuilderOutcome},
 };
-use reth_execution_types::ExecutionOutcome;
+use reth_execution_types::BlockExecutionOutput;
 use reth_payload_builder::PayloadId;
-use reth_payload_primitives::{
-    BuiltPayloadExecutedBlock, PayloadBuilderAttributes, PayloadBuilderError,
-};
+use reth_payload_primitives::{BuiltPayloadExecutedBlock, PayloadBuilderError};
 use reth_payload_util::{BestPayloadTransactions, NoopPayloadTransactions, PayloadTransactions};
 use reth_primitives_traits::{RecoveredBlock, SealedHeader};
 use reth_revm::{database::StateProviderDatabase, db::State};
@@ -158,7 +158,7 @@ where
     /// Constructs a Morph payload from the transactions sent via the payload attributes.
     fn build_payload<'a, BestTxs>(
         &self,
-        args: BuildArguments<MorphPayloadBuilderAttributes, MorphBuiltPayload>,
+        args: BuildArguments<MorphPayloadAttributes, MorphBuiltPayload>,
         best: impl FnOnce(BestTransactionsAttributes) -> BestTxs + Send + Sync + 'a,
     ) -> Result<BuildOutcome<MorphBuiltPayload>, PayloadBuilderError>
     where
@@ -170,11 +170,25 @@ where
             config,
             cancel,
             best_payload,
+            ..
         } = args;
+
+        // Convert RPC-level MorphPayloadAttributes to builder-level MorphPayloadBuilderAttributes
+        let parent_hash = config.parent_header.hash();
+        let payload_id = config.payload_id;
+        let parent_header = config.parent_header.clone();
+        let builder_attrs =
+            MorphPayloadBuilderAttributes::try_new(parent_hash, config.attributes, 1)
+                .map_err(|e| PayloadBuilderError::Other(e.into()))?;
+        let builder_config = PayloadConfig {
+            parent_header,
+            attributes: builder_attrs,
+            payload_id,
+        };
 
         let ctx = MorphPayloadBuilderCtx {
             evm_config: self.evm_config.clone(),
-            config,
+            config: builder_config,
             cancel,
             best_payload,
             builder_config: self.config.clone(),
@@ -197,7 +211,7 @@ where
     Client: StateProviderFactory + ChainSpecProvider<ChainSpec = MorphChainSpec> + Clone,
     Txs: MorphPayloadTransactions<Pool::Transaction>,
 {
-    type Attributes = MorphPayloadBuilderAttributes;
+    type Attributes = MorphPayloadAttributes;
     type BuiltPayload = MorphBuiltPayload;
 
     fn try_build(
@@ -225,6 +239,8 @@ where
         let args = BuildArguments {
             config,
             cached_reads: Default::default(),
+            execution_cache: None,
+            trie_handle: None,
             cancel: Default::default(),
             best_payload: None,
         };
@@ -661,12 +677,12 @@ where
     // Build next block env attributes
     let next_block_attrs = MorphNextBlockEnvAttributes {
         inner: NextBlockEnvAttributes {
-            timestamp: attributes.inner.timestamp,
-            suggested_fee_recipient: attributes.inner.suggested_fee_recipient,
-            prev_randao: attributes.inner.prev_randao,
+            timestamp: attributes.timestamp,
+            suggested_fee_recipient: attributes.suggested_fee_recipient,
+            prev_randao: attributes.prev_randao,
             gas_limit: attributes.gas_limit.unwrap_or(ctx.parent().gas_limit()),
-            withdrawals: Some(attributes.inner.withdrawals.clone()),
-            parent_beacon_block_root: attributes.inner.parent_beacon_block_root,
+            withdrawals: Some(attributes.withdrawals.clone()),
+            parent_beacon_block_root: attributes.parent_beacon_block_root,
             extra_data: Default::default(),
         },
         base_fee_per_gas: attributes.base_fee_per_gas,
@@ -738,8 +754,10 @@ where
 
     // Read withdraw_trie_root from L2MessageQueue contract storage
     // This must be done before finish() consumes the builder
-    let withdraw_trie_root = read_withdraw_trie_root(builder.evm_mut().db_mut())
-        .map_err(|err| PayloadBuilderError::other(MorphPayloadBuilderError::Database(err)))?;
+    let withdraw_trie_root =
+        read_withdraw_trie_root(builder.evm_mut().db_mut()).map_err(|err| {
+            PayloadBuilderError::other(MorphPayloadBuilderError::Storage(err.to_string()))
+        })?;
 
     // 6. Finish building the block
     let BlockBuilderOutcome {
@@ -747,7 +765,7 @@ where
         hashed_state,
         trie_updates,
         mut block,
-    } = builder.finish(state_provider)?;
+    } = builder.finish(state_provider, None)?;
 
     // Update MorphHeader with next_l1_msg_index.
     // Since hash_slow() only hashes the inner header, we can update the
@@ -791,12 +809,10 @@ where
         hash: sealed_block.hash(),
     };
 
-    let execution_output = ExecutionOutcome::new(
-        db.take_bundle(),
-        vec![execution_result.receipts],
-        header.number(),
-        vec![execution_result.requests],
-    );
+    let execution_output = BlockExecutionOutput {
+        result: execution_result,
+        state: db.take_bundle(),
+    };
 
     let executed = BuiltPayloadExecutedBlock {
         recovered_block: Arc::new(block),
@@ -1017,16 +1033,19 @@ mod tests {
     // =========================================================================
 
     fn test_ctx(best_payload: Option<MorphBuiltPayload>) -> MorphPayloadBuilderCtx {
+        let attrs = MorphPayloadBuilderAttributes::try_new(
+            B256::ZERO,
+            morph_payload_types::MorphPayloadAttributes::default(),
+            1,
+        )
+        .unwrap();
+        let payload_id = attrs.payload_id();
         MorphPayloadBuilderCtx {
             evm_config: test_evm_config(),
             config: PayloadConfig::new(
                 Arc::new(SealedHeader::seal_slow(MorphHeader::default())),
-                MorphPayloadBuilderAttributes::try_new(
-                    B256::ZERO,
-                    morph_payload_types::MorphPayloadAttributes::default(),
-                    1,
-                )
-                .unwrap(),
+                attrs,
+                payload_id,
             ),
             cancel: Default::default(),
             best_payload,

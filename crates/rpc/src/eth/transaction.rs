@@ -9,7 +9,7 @@ use alloy_network::TxSigner;
 use alloy_primitives::{Address, Signature, TxKind, U64, U256};
 use alloy_rpc_types_eth::{AccessList, Transaction as RpcTransaction, TransactionInfo};
 use reth_rpc_convert::{
-    SignTxRequestError, SignableTxRequest, TryIntoSimTx, TryIntoTxEnv, transaction::FromConsensusTx,
+    FromConsensusTx, SignTxRequestError, SignableTxRequest, TryIntoSimTx, TryIntoTxEnv,
 };
 use reth_rpc_eth_types::EthApiError;
 use std::convert::Infallible;
@@ -151,10 +151,10 @@ impl SignableTxRequest<MorphTxEnvelope> for MorphTransactionRequest {
 ///
 /// Also encodes the transaction for L1 fee calculation.
 /// All MorphTx transactions are constructed as Version 1.
-impl TryIntoTxEnv<MorphTxEnv, MorphBlockEnv> for MorphTransactionRequest {
+impl<Spec> TryIntoTxEnv<MorphTxEnv, Spec, MorphBlockEnv> for MorphTransactionRequest {
     type Err = EthApiError;
 
-    fn try_into_tx_env<Spec>(
+    fn try_into_tx_env(
         self,
         evm_env: &EvmEnv<Spec, MorphBlockEnv>,
     ) -> Result<MorphTxEnv, Self::Err> {
@@ -338,6 +338,7 @@ mod tests {
                 difficulty: alloy_primitives::U256::ZERO,
                 prevrandao: Some(B256::ZERO),
                 blob_excess_gas_and_price: None,
+                slot_num: 0,
             },
         };
 

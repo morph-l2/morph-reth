@@ -19,20 +19,49 @@ use crate::evm::MorphEvm;
 use alloy_consensus::Transaction;
 use alloy_consensus::transaction::TxHashRef;
 use alloy_evm::{
-    Database, Evm,
+    Database, Evm, RecoveredTx,
     block::{
         BlockExecutionError, BlockExecutionResult, BlockExecutor, ExecutableTx, OnStateHook,
-        StateChangeSource,
+        StateChangeSource, TxResult,
     },
 };
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{Address, Log, U256};
 use curie::apply_curie_hard_fork;
 use morph_chainspec::{MorphChainSpec, MorphHardfork, MorphHardforks};
 use morph_primitives::{MorphReceipt, MorphTxEnvelope};
 use morph_revm::{L1_GAS_PRICE_ORACLE_ADDRESS, MorphHaltReason, TokenFeeInfo, evm::MorphContext};
-use reth_chainspec::EthereumHardforks;
-use reth_revm::{DatabaseCommit, Inspector, State, context::result::ResultAndState};
+use reth_primitives_traits::Recovered;
+use reth_revm::{DatabaseCommit, Inspector, context::result::ResultAndState};
 use revm::context::Block;
+
+/// The result of executing a Morph transaction.
+///
+/// Carries the EVM result together with the recovered transaction and cached fee
+/// information that are needed during [`MorphBlockExecutor::commit_transaction`].
+pub(crate) struct MorphTxResult {
+    /// The raw EVM execution result and state diff.
+    pub result: ResultAndState<MorphHaltReason>,
+    /// Recovered transaction (consensus tx + signer).
+    pub recovered: Recovered<MorphTxEnvelope>,
+    /// L1 data fee read from the handler cache immediately after execution.
+    pub l1_fee: U256,
+    /// Token-fee deduction Transfer logs (survive main-tx revert).
+    pub pre_fee_logs: Vec<Log>,
+    /// Token-fee reimbursement Transfer logs (survive main-tx revert).
+    pub post_fee_logs: Vec<Log>,
+}
+
+impl TxResult for MorphTxResult {
+    type HaltReason = MorphHaltReason;
+
+    fn result(&self) -> &ResultAndState<Self::HaltReason> {
+        &self.result
+    }
+
+    fn into_result(self) -> ResultAndState<Self::HaltReason> {
+        self.result
+    }
+}
 
 /// Block executor for Morph L2 blocks.
 ///
@@ -60,13 +89,13 @@ use revm::context::Block;
 /// 2. `execute_transaction_without_commit`: Execute transaction in EVM
 /// 3. `commit_transaction`: Calculate fees, build receipt, commit state
 /// 4. `finish`: Return final execution result with all receipts
-pub(crate) struct MorphBlockExecutor<'a, DB: Database, I> {
-    /// The EVM used by executor
-    evm: MorphEvm<&'a mut State<DB>, I>,
+pub(crate) struct MorphBlockExecutor<DB: Database, I> {
+    /// The EVM used by executor (owned, not a reference)
+    evm: MorphEvm<DB, I>,
     /// Chain specification
-    spec: &'a MorphChainSpec,
+    spec: std::sync::Arc<MorphChainSpec>,
     /// Receipt builder
-    receipt_builder: &'a DefaultMorphReceiptBuilder,
+    receipt_builder: DefaultMorphReceiptBuilder,
     /// Receipts of executed transactions
     receipts: Vec<MorphReceipt>,
     /// Total gas used by executed transactions
@@ -79,10 +108,10 @@ pub(crate) struct MorphBlockExecutor<'a, DB: Database, I> {
     state_hook: Option<Box<dyn OnStateHook>>,
 }
 
-impl<'a, DB, I> MorphBlockExecutor<'a, DB, I>
+impl<DB, I> MorphBlockExecutor<DB, I>
 where
     DB: Database,
-    I: Inspector<MorphContext<&'a mut State<DB>>>,
+    I: Inspector<MorphContext<DB>>,
 {
     /// Creates a new [`MorphBlockExecutor`].
     ///
@@ -91,9 +120,9 @@ where
     /// * `spec` - Chain specification containing hardfork information
     /// * `receipt_builder` - Builder for constructing transaction receipts
     pub(crate) fn new(
-        evm: MorphEvm<&'a mut State<DB>, I>,
-        spec: &'a MorphChainSpec,
-        receipt_builder: &'a DefaultMorphReceiptBuilder,
+        evm: MorphEvm<DB, I>,
+        spec: std::sync::Arc<MorphChainSpec>,
+        receipt_builder: DefaultMorphReceiptBuilder,
     ) -> Self {
         Self {
             evm,
@@ -106,51 +135,17 @@ where
         }
     }
 
-    /// Returns the L1 data fee for the most recently executed transaction.
-    ///
-    /// Reads from the handler's per-transaction cache (set during
-    /// `validate_and_deduct_eth_fee` / `validate_and_deduct_token_fee`),
-    /// avoiding re-encoding the full transaction RLP.
-    /// For L1 messages (which skip handler fee logic) the cache is ZERO.
-    #[inline]
-    fn cached_l1_fee(&self) -> U256 {
-        self.evm.cached_l1_data_fee()
-    }
-
     /// Extract MorphTx-specific fields for MorphTx (0x7F) transactions.
     ///
     /// MorphTx transactions include:
     /// - Token fee information (when using ERC20 for gas payment)
     /// - Transaction metadata (version, reference, memo)
-    ///
-    /// # How MorphTx Token Fees Work
-    /// 1. User specifies a `fee_token_id` (registered ERC20 token)
-    /// 2. User specifies a `fee_limit` (max tokens willing to pay)
-    /// 3. System fetches token exchange rate from L2TokenRegistry
-    /// 4. System converts ETH fee to token amount using: `token_fee = eth_fee * fee_rate / token_scale`
-    /// 5. System validates user has sufficient token balance
-    ///
-    /// # Arguments
-    /// * `tx` - The transaction to extract fields from
-    /// * `sender` - Transaction sender (used for token registry balance queries)
-    /// * `hardfork` - The current Morph hardfork (affects token registry behavior)
-    ///
-    /// # Returns
-    /// - `Ok(None)` for non-MorphTx transactions
-    /// - `Ok(Some(fields))` for MorphTx with valid fields
-    /// - `Err` if MorphTx is missing required fields or token info cannot be fetched
-    ///
-    /// # Errors
-    /// Returns error if:
-    /// - MorphTx is missing `fee_token_id` or `fee_limit`
-    /// - L2TokenRegistry contract cannot be queried
     fn get_morph_tx_fields(
         &mut self,
         tx: &MorphTxEnvelope,
         sender: Address,
         hardfork: MorphHardfork,
     ) -> Result<Option<MorphReceiptTxFields>, BlockExecutionError> {
-        // Only MorphTx transactions have these fields
         if !tx.is_morph_tx() {
             return Ok(None);
         }
@@ -162,13 +157,10 @@ where
             .fee_limit()
             .ok_or_else(|| BlockExecutionError::msg("MorphTx missing fee_limit"))?;
 
-        // Extract version, reference, and memo from the transaction
         let version = tx.version().unwrap_or(0);
         let reference = tx.reference();
         let memo = tx.memo().cloned();
 
-        // For fee_token_id==0 (ETH fee MorphTx, V1 only), no token registry lookup needed.
-        // Still preserve version/reference/memo in the receipt.
         if fee_token_id == 0 {
             return Ok(Some(MorphReceiptTxFields {
                 version,
@@ -181,8 +173,6 @@ where
             }));
         }
 
-        // Reuse cached token fee info from handler validation to avoid redundant DB reads.
-        // Falls back to DB read if cache is empty (e.g., in test scenarios).
         let token_info = match self.evm.cached_token_fee_info() {
             Some(info) => Some(info),
             None => {
@@ -205,56 +195,32 @@ where
     }
 }
 
-impl<'a, DB, I> BlockExecutor for MorphBlockExecutor<'a, DB, I>
+impl<DB, I> BlockExecutor for MorphBlockExecutor<DB, I>
 where
-    DB: Database,
-    I: Inspector<MorphContext<&'a mut State<DB>>>,
+    DB: Database + DatabaseCommit,
+    I: Inspector<MorphContext<DB>>,
 {
     type Transaction = MorphTxEnvelope;
     type Receipt = MorphReceipt;
-    type Evm = MorphEvm<&'a mut State<DB>, I>;
+    type Evm = MorphEvm<DB, I>;
+    type Result = MorphTxResult;
 
-    /// Applies pre-execution state changes before processing transactions.
-    ///
-    /// This method performs initialization required before executing any transactions:
-    ///
-    /// 1. **State Clear Flag**: Sets the flag that enables EIP-161 state trie clearing
-    ///    if the Spurious Dragon hardfork is active
-    ///
-    /// 2. **L1 Gas Oracle Cache**: Loads the L1 Gas Price Oracle contract into the
-    ///    account cache to optimize L1 fee calculations for all transactions
-    ///
-    /// 3. **Curie Hardfork**: At the exact Curie activation block, applies the
-    ///    hardfork state changes (updates to L1 Gas Price Oracle contract)
-    ///
-    /// # Errors
-    /// Returns error if:
-    /// - L1 Gas Price Oracle account cannot be loaded
-    /// - Curie hardfork application fails at transition block
     fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
-        // 1. Set state clear flag if the block is after the Spurious Dragon hardfork
-        let block_number: u64 = self.evm.block().number.to();
-        let state_clear_flag = self.spec.is_spurious_dragon_active_at_block(block_number);
-        self.evm.db_mut().set_state_clear_flag(state_clear_flag);
-
-        // 2. Load L1 gas oracle contract into cache so that subsequent per-tx
-        // L1BlockInfo reads in the handler are fast (avoid cold DB hits).
-        // NOTE: We do NOT cache L1BlockInfo here because the oracle can be
-        // updated by a regular transaction (from the external gas-oracle service)
-        // within the same block.  The handler reads it per-tx instead.
+        // Pre-warm the L1 gas oracle contract in the underlying DB cache so that
+        // subsequent per-tx L1BlockInfo reads in the handler are fast.
         let _ = self
             .evm
             .db_mut()
-            .load_cache_account(L1_GAS_PRICE_ORACLE_ADDRESS)
+            .basic(L1_GAS_PRICE_ORACLE_ADDRESS)
             .map_err(BlockExecutionError::other)?;
 
+        let block_number: u64 = self.evm.block().number.to();
         let hardfork = self
             .spec
             .morph_hardfork_at(block_number, self.evm.block().timestamp.to::<u64>());
         self.hardfork = hardfork;
 
-        // 3. Apply Curie hardfork at the transition block
-        // Only executes once at the exact block where Curie activates
+        // Apply Curie hardfork at the transition block
         if self
             .spec
             .morph_fork_activation(MorphHardfork::Curie)
@@ -269,97 +235,70 @@ where
         Ok(())
     }
 
-    /// Executes a transaction without committing state changes.
-    ///
-    /// This method validates the transaction can fit in the remaining block gas,
-    /// then executes it in the EVM. The state changes are returned but not yet
-    /// committed to the database.
-    ///
-    /// # Gas Validation
-    /// Before execution, validates that:
-    /// ```text
-    /// tx.gas_limit + cumulative_gas_used <= block.gas_limit
-    /// ```
-    ///
-    /// # Returns
-    /// Returns the execution result and state changes that can be committed later.
-    ///
-    /// # Errors
-    /// Returns error if:
-    /// - Transaction gas limit exceeds available block gas
-    /// - EVM execution fails (reverts, halts, out of gas, etc.)
     fn execute_transaction_without_commit(
         &mut self,
         tx: impl ExecutableTx<Self>,
-    ) -> Result<ResultAndState<MorphHaltReason>, BlockExecutionError> {
-        // The sum of the transaction's gas limit and the gas utilized in this block prior,
-        // must be no greater than the block's gasLimit.
+    ) -> Result<Self::Result, BlockExecutionError> {
+        let (tx_env, recovered) = tx.into_parts();
+
+        // Validate gas limit fits in remaining block gas.
         let block_available_gas = self.evm.block().gas_limit() - self.gas_used;
-        if tx.tx().gas_limit() > block_available_gas {
+        if recovered.tx().gas_limit() > block_available_gas {
             return Err(BlockExecutionError::msg(format!(
                 "transaction gas limit {} exceeds block available gas {}",
-                tx.tx().gas_limit(),
+                recovered.tx().gas_limit(),
                 block_available_gas
             )));
         }
 
+        // Clone the consensus tx and signer BEFORE transact (since we can't move out later).
+        let consensus_tx = recovered.tx().clone();
+        let signer = *recovered.signer();
+
         // Execute the transaction
-        self.evm
-            .transact(&tx)
-            .map_err(|err| BlockExecutionError::evm(err, *tx.tx().tx_hash()))
+        let result = self
+            .evm
+            .transact(tx_env)
+            .map_err(|err| BlockExecutionError::evm(err, *consensus_tx.tx_hash()))?;
+
+        // Read caches from the EVM immediately after execution, before the next tx resets them.
+        let l1_fee = self.evm.cached_l1_data_fee();
+        let pre_fee_logs = self.evm.take_pre_fee_logs();
+        let post_fee_logs = self.evm.take_post_fee_logs();
+
+        Ok(MorphTxResult {
+            result,
+            recovered: Recovered::new_unchecked(consensus_tx, signer),
+            l1_fee,
+            pre_fee_logs,
+            post_fee_logs,
+        })
     }
 
-    /// Commits a transaction's execution result and builds its receipt.
-    ///
-    /// This method performs post-execution processing for a transaction:
-    ///
-    /// 1. **L1 Fee Calculation**: Calculates the L1 data fee for the transaction
-    /// 2. **Token Fee Info**: For MorphTx, extracts token fee information
-    /// 3. **Gas Accounting**: Updates cumulative gas used for the block
-    /// 4. **Receipt Building**: Constructs receipt with all Morph-specific fields
-    /// 5. **State Commit**: Commits the EVM state changes to the database
-    ///
-    /// # Arguments
-    /// * `output` - The execution result from `execute_transaction_without_commit`
-    /// * `tx` - The original transaction
-    ///
-    /// # Returns
-    /// The gas used by this transaction.
-    ///
-    /// # Errors
-    /// Returns error if L1 fee calculation or token fee info extraction fails.
-    #[inline]
-    fn commit_transaction(
-        &mut self,
-        output: ResultAndState<MorphHaltReason>,
-        tx: impl ExecutableTx<Self>,
-    ) -> Result<u64, BlockExecutionError> {
-        let ResultAndState { result, state } = output;
+    fn commit_transaction(&mut self, output: Self::Result) -> Result<u64, BlockExecutionError> {
+        let MorphTxResult {
+            result: ResultAndState { result, state },
+            recovered,
+            l1_fee,
+            pre_fee_logs,
+            post_fee_logs,
+        } = output;
 
-        // Read L1 fee from handler cache (set during validate_and_deduct_*).
-        let l1_fee = self.cached_l1_fee();
-
-        // Get MorphTx-specific fields for MorphTx transactions.
-        // Uses the hardfork cached in apply_pre_execution_changes (constant per block).
-        let morph_tx_fields = self.get_morph_tx_fields(tx.tx(), *tx.signer(), self.hardfork)?;
-
-        // Notify the state hook (e.g. StateRootTask) BEFORE committing,
-        // so the sparse trie can be updated incrementally per transaction.
+        // Notify the state hook (e.g. StateRootTask) BEFORE committing.
         if let Some(hook) = &mut self.state_hook {
             hook.on_state(StateChangeSource::Transaction(self.receipts.len()), &state);
         }
 
-        // Update cumulative gas used
         let gas_used = result.gas_used();
         self.gas_used += gas_used;
 
+        // Get MorphTx-specific fields using the recovered transaction.
+        let (tx, signer) = recovered.into_parts();
+        let morph_tx_fields = self.get_morph_tx_fields(&tx, signer, self.hardfork)?;
+
         // Build receipt.
-        // Fee Transfer logs are cached separately by the handler (pre_fee_logs /
-        // post_fee_logs) so they survive main tx revert.
-        let pre_fee_logs = self.evm.take_pre_fee_logs();
-        let post_fee_logs = self.evm.take_post_fee_logs();
         let ctx: MorphReceiptBuilderCtx<'_, Self::Evm> = MorphReceiptBuilderCtx {
-            tx: tx.tx(),
+            tx: &tx,
             result,
             cumulative_gas_used: self.gas_used,
             l1_fee,
@@ -375,17 +314,6 @@ where
         Ok(gas_used)
     }
 
-    /// Finalizes block execution and returns the results.
-    ///
-    /// Consumes the executor and returns the EVM instance along with the
-    /// complete execution results including all transaction receipts.
-    ///
-    /// # Returns
-    /// A tuple containing:
-    /// - The EVM instance (for potential reuse or state access)
-    /// - Block execution result with receipts, gas used, and empty requests
-    ///
-    /// Note: `blob_gas_used` is always 0 as Morph doesn't support EIP-4844 blobs.
     fn finish(
         self,
     ) -> Result<(Self::Evm, BlockExecutionResult<Self::Receipt>), BlockExecutionError> {
@@ -404,13 +332,15 @@ where
         self.state_hook = hook;
     }
 
-    /// Returns a mutable reference to the EVM instance.
     fn evm_mut(&mut self) -> &mut Self::Evm {
         &mut self.evm
     }
 
-    /// Returns a reference to the EVM instance.
     fn evm(&self) -> &Self::Evm {
         &self.evm
+    }
+
+    fn receipts(&self) -> &[Self::Receipt] {
+        &self.receipts
     }
 }

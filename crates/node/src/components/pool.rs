@@ -1,6 +1,7 @@
 //! Morph transaction pool builder.
 
 use crate::MorphNode;
+use morph_evm::MorphEvmConfig;
 use morph_primitives;
 use morph_txpool::MorphTransactionValidator;
 use reth_node_api::FullNodeTypes;
@@ -18,42 +19,58 @@ use reth_transaction_pool::{TransactionValidationTaskExecutor, blobstore::InMemo
 #[non_exhaustive]
 pub struct MorphPoolBuilder;
 
-impl<Node> PoolBuilder<Node> for MorphPoolBuilder
+impl<Node, Evm> PoolBuilder<Node, Evm> for MorphPoolBuilder
 where
     Node: FullNodeTypes<Types = MorphNode>,
+    Evm: Send,
 {
-    type Pool = morph_txpool::MorphTransactionPool<Node::Provider, InMemoryBlobStore>;
+    type Pool = morph_txpool::MorphTransactionPool<
+        Node::Provider,
+        InMemoryBlobStore,
+        morph_txpool::MorphPooledTransaction,
+        MorphEvmConfig,
+    >;
 
-    async fn build_pool(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::Pool> {
+    async fn build_pool(
+        self,
+        ctx: &BuilderContext<Node>,
+        _evm_config: Evm,
+    ) -> eyre::Result<Self::Pool> {
         let pool_config = ctx.pool_config();
 
         // Use in-memory blob store (Morph doesn't support EIP-4844 blobs)
         let blob_store = InMemoryBlobStore::default();
 
+        // Build the Morph-specific EVM config for the validator
+        let morph_evm_config =
+            MorphEvmConfig::new(ctx.chain_spec(), morph_evm::evm::MorphEvmFactory::default());
+
         // Build the transaction validator with Morph-specific checks
-        let validator = TransactionValidationTaskExecutor::eth_builder(ctx.provider().clone())
-            .with_head_timestamp(ctx.head().timestamp)
-            .with_max_tx_input_bytes(ctx.config().txpool.max_tx_input_bytes)
-            .with_local_transactions_config(pool_config.local_transactions_config.clone())
-            .set_tx_fee_cap(ctx.config().rpc.rpc_tx_fee_cap)
-            .with_max_tx_gas_limit(ctx.config().txpool.max_tx_gas_limit)
-            .set_block_gas_limit(ctx.chain_spec().inner.genesis().gas_limit)
-            .with_minimum_priority_fee(ctx.config().txpool.minimum_priority_fee)
-            .with_additional_tasks(ctx.config().txpool.additional_validation_tasks)
-            // Register MorphTx (0x7F) type for ERC20 gas payment
-            .with_custom_tx_type(morph_primitives::MORPH_TX_TYPE_ID)
-            // Disable the inner EthTransactionValidator's balance check.
-            // MorphTx (fee_token_id > 0) users may have zero ETH but pay gas in ERC20 tokens.
-            // Without this, the inner validator rejects them before reaching MorphTransactionValidator's
-            // token fee validation. The MorphTransactionValidator already performs its own balance
-            // checks for all tx types (including L1 data fee), so this is safe.
-            .disable_balance_check()
-            // Note: L1Message (0x7E) is NOT registered - it will be rejected by
-            // EthTransactionValidator as TxTypeNotSupported, which is correct since
-            // L1 messages should only be included by the sequencer during block building
-            // Disable EIP-4844 blob transactions
-            .no_eip4844()
-            .build_with_tasks(ctx.task_executor().clone(), blob_store.clone());
+        let validator = TransactionValidationTaskExecutor::eth_builder(
+            ctx.provider().clone(),
+            morph_evm_config.clone(),
+        )
+        .with_max_tx_input_bytes(ctx.config().txpool.max_tx_input_bytes)
+        .with_local_transactions_config(pool_config.local_transactions_config.clone())
+        .set_tx_fee_cap(ctx.config().rpc.rpc_tx_fee_cap)
+        .with_max_tx_gas_limit(ctx.config().txpool.max_tx_gas_limit)
+        .set_block_gas_limit(ctx.chain_spec().inner.genesis().gas_limit)
+        .with_minimum_priority_fee(ctx.config().txpool.minimum_priority_fee)
+        .with_additional_tasks(ctx.config().txpool.additional_validation_tasks)
+        // Register MorphTx (0x7F) type for ERC20 gas payment
+        .with_custom_tx_type(morph_primitives::MORPH_TX_TYPE_ID)
+        // Disable the inner EthTransactionValidator's balance check.
+        // MorphTx (fee_token_id > 0) users may have zero ETH but pay gas in ERC20 tokens.
+        // Without this, the inner validator rejects them before reaching MorphTransactionValidator's
+        // token fee validation. The MorphTransactionValidator already performs its own balance
+        // checks for all tx types (including L1 data fee), so this is safe.
+        .disable_balance_check()
+        // Note: L1Message (0x7E) is NOT registered - it will be rejected by
+        // EthTransactionValidator as TxTypeNotSupported, which is correct since
+        // L1 messages should only be included by the sequencer during block building
+        // Disable EIP-4844 blob transactions
+        .no_eip4844()
+        .build_with_tasks(ctx.task_executor().clone(), blob_store.clone());
 
         // Wrap with Morph-specific validator
         let validator = validator.map(MorphTransactionValidator::new);
@@ -69,7 +86,7 @@ where
         // Spawn Morph-specific maintenance task for MorphTx (0x7F) revalidation
         // This handles ERC20 token balance changes that reth's standard maintenance
         // cannot track (reth only tracks ETH balance via SenderInfo)
-        ctx.task_executor().spawn_critical(
+        ctx.task_executor().spawn_critical_task(
             "txpool maintenance - morph pool",
             morph_txpool::maintain_morph_pool(pool.clone(), ctx.provider().clone()),
         );

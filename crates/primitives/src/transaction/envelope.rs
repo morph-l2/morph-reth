@@ -233,10 +233,8 @@ impl alloy_consensus::transaction::SignerRecoverable for MorphTxEnvelope {
     }
 }
 
-impl reth_primitives_traits::SignedTransaction for MorphTxEnvelope {}
-
-#[cfg(feature = "serde-bincode-compat")]
-impl reth_primitives_traits::serde_bincode_compat::RlpBincode for MorphTxEnvelope {}
+// reth_primitives_traits::SignedTransaction has a blanket impl in v0.1.0; no explicit impl needed.
+// RlpBincode trait was removed in reth v2.0.0; no impl needed.
 
 #[cfg(feature = "reth-codec")]
 mod codec {
@@ -430,7 +428,7 @@ mod codec {
     }
 
     impl reth_db_api::table::Decompress for MorphTxEnvelope {
-        fn decompress(value: &[u8]) -> Result<Self, reth_db_api::DatabaseError> {
+        fn decompress(value: &[u8]) -> Result<Self, reth_codecs::DecompressError> {
             let (obj, _) = Compact::from_compact(value, value.len());
             Ok(obj)
         }

@@ -20,8 +20,8 @@
 
 use morph_revm::{CURIE_L1_GAS_PRICE_ORACLE_STORAGE, L1_GAS_PRICE_ORACLE_ADDRESS};
 use revm::{
-    Database,
-    database::{State, states::StorageSlot},
+    Database, DatabaseCommit,
+    state::{Account, EvmStorageSlot},
 };
 
 /// Applies the Morph Curie hard fork to the state.
@@ -33,35 +33,36 @@ use revm::{
 /// - Sets `isCurie` slot to 1 (true)
 ///
 /// This function should only be called once at the Curie transition block.
-pub(crate) fn apply_curie_hard_fork<DB: Database>(state: &mut State<DB>) -> Result<(), DB::Error> {
+pub(crate) fn apply_curie_hard_fork<DB>(db: &mut DB) -> Result<(), DB::Error>
+where
+    DB: Database + DatabaseCommit,
+{
     tracing::info!(target: "morph::evm", "Applying Curie hard fork");
 
-    let oracle = state.load_cache_account(L1_GAS_PRICE_ORACLE_ADDRESS)?;
+    // Load existing account info (may be None if not yet in state)
+    let account_info = db.basic(L1_GAS_PRICE_ORACLE_ADDRESS)?.unwrap_or_default();
 
-    // Create storage updates
-    let new_storage = CURIE_L1_GAS_PRICE_ORACLE_STORAGE
-        .into_iter()
-        .map(|(slot, present_value)| {
-            (
-                slot,
-                StorageSlot {
-                    present_value,
-                    previous_or_original_value: oracle.storage_slot(slot).unwrap_or_default(),
-                },
-            )
-        })
-        .collect();
+    // Build the account state to commit using Account::from(info) to get correct
+    // field defaults (original_info, transaction_id, hasher), then populate storage.
+    let mut account = Account::from(account_info);
+    // Mark as Touched so the commit is persisted.
+    account.mark_touch();
 
-    // Get existing account info or use default
-    let oracle_info = oracle.account_info().unwrap_or_default();
-
-    // Create transition for oracle storage update
-    let transition = oracle.change(oracle_info, new_storage);
-
-    // Add transition to state
-    if let Some(s) = state.transition_state.as_mut() {
-        s.add_transitions(vec![(L1_GAS_PRICE_ORACLE_ADDRESS, transition)]);
+    // Insert Curie initialization storage slots. These are new slots being set for
+    // the first time at the Curie fork, so original_value = 0 is correct.
+    for (slot, new_value) in CURIE_L1_GAS_PRICE_ORACLE_STORAGE {
+        account.storage.insert(
+            slot,
+            EvmStorageSlot::new_changed(Default::default(), new_value, 0),
+        );
     }
+
+    // Commit the storage updates via DatabaseCommit.
+    db.commit(
+        [(L1_GAS_PRICE_ORACLE_ADDRESS, account)]
+            .into_iter()
+            .collect(),
+    );
 
     Ok(())
 }
@@ -91,7 +92,6 @@ mod tests {
         let mut state = State::builder()
             .with_database(db)
             .with_bundle_update()
-            .without_state_clear()
             .build();
 
         // oracle pre fork state

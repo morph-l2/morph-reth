@@ -121,7 +121,7 @@ impl<DB: Database, I> MorphEvm<DB, I> {
         // Get the current hardfork spec from context and create matching precompiles
         let spec = ctx.cfg.spec;
         let precompiles = MorphPrecompiles::new_with_spec(spec);
-        let mut instructions = EthInstructions::new_mainnet();
+        let mut instructions = EthInstructions::new_mainnet_with_spec(spec.into());
 
         // Morph custom BLOCKHASH implementation (matches Morph geth).
         instructions.insert_instruction(0x40, Instruction::new(blockhash_morph::<DB>, BLOCKHASH));

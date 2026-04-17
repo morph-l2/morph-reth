@@ -10,7 +10,7 @@ use alloy_eips::eip2930::AccessList;
 use alloy_eips::eip7702::RecoveredAuthority;
 use alloy_primitives::{Address, B256, Bytes, Signature, TxKind, U256};
 use morph_primitives::{L1_TX_TYPE_ID, MORPH_TX_TYPE_ID, MorphTxEnvelope, TxMorph};
-use reth_evm::{FromRecoveredTx, FromTxWithEncoded, ToTxEnv, TransactionEnv};
+use reth_evm::{FromRecoveredTx, FromTxWithEncoded, ToTxEnv, TransactionEnvMut};
 use revm::context::{Transaction, TxEnv};
 use revm::context_interface::transaction::{
     AccessListItem, RecoveredAuthorization, SignedAuthorization,
@@ -368,14 +368,10 @@ impl FromTxWithEncoded<MorphTxEnvelope> for MorphTxEnv {
     }
 }
 
-// Implement TransactionEnv for MorphTxEnv
-impl TransactionEnv for MorphTxEnv {
+// Implement TransactionEnvMut for MorphTxEnv (renamed from TransactionEnv in v2.0.0)
+impl TransactionEnvMut for MorphTxEnv {
     fn set_gas_limit(&mut self, gas_limit: u64) {
         self.inner.gas_limit = gas_limit;
-    }
-
-    fn nonce(&self) -> u64 {
-        self.inner.nonce
     }
 
     fn set_nonce(&mut self, nonce: u64) {

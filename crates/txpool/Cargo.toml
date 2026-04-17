@@ -14,11 +14,13 @@ workspace = true
 [dependencies]
 # Morph
 morph-chainspec.workspace = true
+morph-evm.workspace = true
 morph-primitives = { workspace = true, features = ["reth-codec"] }
 morph-revm.workspace = true
 
 # Reth
 reth-chainspec.workspace = true
+reth-evm.workspace = true
 reth-primitives-traits.workspace = true
 reth-provider.workspace = true
 reth-revm.workspace = true
@@ -39,4 +41,5 @@ parking_lot.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+reth-evm-ethereum.workspace = true
 reth-provider = { workspace = true, features = ["test-utils"] }

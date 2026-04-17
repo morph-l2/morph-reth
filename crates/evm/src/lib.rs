@@ -77,10 +77,11 @@ use alloy_evm::{
     Database,
     block::{BlockExecutorFactory, BlockExecutorFor},
     eth::EthBlockExecutionCtx,
-    revm::{Inspector, database::State},
+    revm::Inspector,
 };
 pub use evm::MorphEvmFactory;
 use morph_primitives::{MorphReceipt, MorphTxEnvelope};
+use reth_revm::DatabaseCommit;
 
 use crate::{block::MorphBlockExecutorFactory, evm::MorphEvm};
 use morph_chainspec::MorphChainSpec;
@@ -166,12 +167,12 @@ impl BlockExecutorFactory for MorphEvmConfig {
 
     fn create_executor<'a, DB, I>(
         &'a self,
-        evm: MorphEvm<&'a mut State<DB>, I>,
+        evm: MorphEvm<DB, I>,
         ctx: Self::ExecutionCtx<'a>,
     ) -> impl BlockExecutorFor<'a, Self, DB, I>
     where
-        DB: Database + 'a,
-        I: Inspector<MorphContext<&'a mut State<DB>>> + 'a,
+        DB: Database + DatabaseCommit + 'a,
+        I: Inspector<MorphContext<DB>> + 'a,
     {
         self.executor_factory.create_executor(evm, ctx)
     }

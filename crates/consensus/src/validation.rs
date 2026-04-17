@@ -43,7 +43,7 @@ use morph_primitives::{
     Block, BlockBody, MorphHeader, MorphReceipt, MorphTxEnvelope,
     transaction::morph_transaction::MORPH_TX_VERSION_1,
 };
-use reth_consensus::{Consensus, ConsensusError, FullConsensus, HeaderValidator};
+use reth_consensus::{Consensus, ConsensusError, FullConsensus, HeaderValidator, ReceiptRootBloom};
 use reth_consensus_common::validation::{
     validate_against_parent_hash_number, validate_body_against_header,
 };
@@ -346,6 +346,7 @@ impl FullConsensus<morph_primitives::MorphPrimitives> for MorphConsensus {
         &self,
         block: &RecoveredBlock<Block>,
         result: &BlockExecutionResult<MorphReceipt>,
+        receipt_root_bloom: Option<ReceiptRootBloom>,
     ) -> Result<(), ConsensusError> {
         // Verify the block gas used
         let cumulative_gas_used = result
@@ -366,8 +367,19 @@ impl FullConsensus<morph_primitives::MorphPrimitives> for MorphConsensus {
             });
         }
 
-        // Verify the receipts logs bloom and root
-        verify_receipts(block.receipts_root(), block.logs_bloom(), &result.receipts)?;
+        // Verify the receipts logs bloom and root.
+        // Use pre-computed (root, bloom) from the executor when available to avoid
+        // redundant hashing; fall back to computing from receipts otherwise.
+        if let Some((receipts_root, logs_bloom)) = receipt_root_bloom {
+            verify_receipts_precomputed(
+                block.receipts_root(),
+                block.logs_bloom(),
+                receipts_root,
+                logs_bloom,
+            )?;
+        } else {
+            verify_receipts(block.receipts_root(), block.logs_bloom(), &result.receipts)?;
+        }
 
         Ok(())
     }
@@ -624,6 +636,33 @@ fn validate_morph_txs(txs: &[MorphTxEnvelope], is_jade: bool) -> Result<(), Cons
 /// 2. Calculates the logs bloom by combining all receipt blooms
 /// 3. Compares both against the expected values from the block header
 #[inline]
+fn verify_receipts_precomputed(
+    expected_receipts_root: B256,
+    expected_logs_bloom: Bloom,
+    receipts_root: B256,
+    logs_bloom: Bloom,
+) -> Result<(), ConsensusError> {
+    if receipts_root != expected_receipts_root {
+        return Err(ConsensusError::BodyReceiptRootDiff(
+            GotExpected {
+                got: receipts_root,
+                expected: expected_receipts_root,
+            }
+            .into(),
+        ));
+    }
+    if logs_bloom != expected_logs_bloom {
+        return Err(ConsensusError::BodyBloomLogDiff(
+            GotExpected {
+                got: logs_bloom,
+                expected: expected_logs_bloom,
+            }
+            .into(),
+        ));
+    }
+    Ok(())
+}
+
 fn verify_receipts(
     expected_receipts_root: B256,
     expected_logs_bloom: Bloom,
@@ -1891,7 +1930,7 @@ mod tests {
         let recovered =
             reth_primitives_traits::RecoveredBlock::new_unhashed(block, vec![Address::ZERO]);
 
-        let post_result = consensus.validate_block_post_execution(&recovered, &result);
+        let post_result = consensus.validate_block_post_execution(&recovered, &result, None);
         assert!(matches!(
             post_result,
             Err(ConsensusError::BlockGasUsed { .. })

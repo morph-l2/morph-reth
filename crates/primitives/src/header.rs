@@ -152,9 +152,6 @@ impl Sealable for MorphHeader {
     }
 }
 
-#[cfg(feature = "serde-bincode-compat")]
-impl reth_primitives_traits::serde_bincode_compat::RlpBincode for MorphHeader {}
-
 impl reth_primitives_traits::InMemorySize for MorphHeader {
     fn size(&self) -> usize {
         reth_primitives_traits::InMemorySize::size(&self.inner) + core::mem::size_of::<u64>() // next_l1_msg_index
@@ -196,7 +193,7 @@ impl reth_db_api::table::Compress for MorphHeader {
 
 #[cfg(feature = "reth-codec")]
 impl reth_db_api::table::Decompress for MorphHeader {
-    fn decompress(value: &[u8]) -> Result<Self, reth_db_api::DatabaseError> {
+    fn decompress(value: &[u8]) -> Result<Self, reth_codecs::DecompressError> {
         let (obj, _) = reth_codecs::Compact::from_compact(value, value.len());
         Ok(obj)
     }

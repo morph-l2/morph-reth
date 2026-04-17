@@ -27,7 +27,7 @@ use reth_primitives_traits::{NodePrimitives, SealedBlock};
 use std::sync::Arc;
 
 // Feature unification: Ensure reth-ethereum-primitives' serde features are enabled
-// for transitive dependencies (via reth-payload-builder → reth-chain-state).
+// for transitive dependencies (via reth-payload-primitives → reth-chain-state).
 // This is required to satisfy trait bounds on EthereumReceipt in test builds.
 use reth_ethereum_primitives as _;
 
@@ -124,7 +124,6 @@ impl PayloadTypes for MorphPayloadTypes {
     type ExecutionData = MorphExecutionData;
     type BuiltPayload = MorphBuiltPayload;
     type PayloadAttributes = MorphPayloadAttributes;
-    type PayloadBuilderAttributes = MorphPayloadBuilderAttributes;
 
     fn block_to_payload(
         block: SealedBlock<

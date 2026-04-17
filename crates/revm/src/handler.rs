@@ -7,7 +7,7 @@ use revm::{
         Cfg, ContextTr, JournalTr, Transaction,
         result::{EVMError, ExecutionResult, InvalidTransaction},
     },
-    context_interface::Block,
+    context_interface::{Block, journaled_state::account::JournaledAccountTr, result::ResultGas},
     handler::{EvmTr, FrameTr, Handler, MainnetHandler, post_execution, pre_execution, validation},
     inspector::{Inspector, InspectorHandler},
     interpreter::{Gas, InitialAndFloorGas, interpreter::EthInterpreter},
@@ -74,9 +74,10 @@ where
         &mut self,
         evm: &mut Self::Evm,
         result: <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
+        result_gas: ResultGas,
     ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
         MainnetHandler::default()
-            .execution_result(evm, result)
+            .execution_result(evm, result, result_gas)
             .map(|result| result.map_haltreason(Into::into))
     }
 
@@ -169,7 +170,7 @@ where
             exec_result.gas_mut().set_refund(0);
             return;
         }
-        let spec = evm.ctx().cfg().spec().into();
+        let spec = (*evm.ctx().cfg().spec()).into();
         post_execution::refund(spec, exec_result.gas_mut(), eip7702_refund);
     }
 
@@ -248,9 +249,12 @@ where
     }
 
     #[inline]
-    fn validate_initial_tx_gas(&self, evm: &Self::Evm) -> Result<InitialAndFloorGas, Self::Error> {
+    fn validate_initial_tx_gas(
+        &self,
+        evm: &mut Self::Evm,
+    ) -> Result<InitialAndFloorGas, Self::Error> {
         let tx = evm.ctx_ref().tx();
-        let spec = evm.ctx_ref().cfg().spec().into();
+        let spec = (*evm.ctx_ref().cfg().spec()).into();
         let disable_eip7623 = evm.ctx_ref().cfg().is_eip7623_disabled();
 
         // For L1 message transactions, handle intrinsic gas specially
@@ -316,7 +320,7 @@ where
         &self,
         evm: &mut MorphEvm<DB, I>,
     ) -> Result<(), EVMError<DB::Error, MorphInvalidTransaction>> {
-        let hardfork = evm.ctx_ref().cfg().spec();
+        let hardfork = *evm.ctx_ref().cfg().spec();
 
         // Fetch L1 block info from the L1 Gas Price Oracle contract per-tx.
         // Must NOT use a per-block cache because the oracle can be updated by a
@@ -341,7 +345,7 @@ where
         let mut caller = journal.load_account_with_code_mut(tx.caller())?.data;
 
         pre_execution::validate_account_nonce_and_code(
-            &caller.info,
+            &caller.account().info,
             tx.nonce(),
             cfg.is_eip3607_disabled(),
             cfg.is_nonce_check_disabled(),
@@ -467,7 +471,7 @@ where
             // matching the order used in validate_and_deduct_eth_fee.
             let caller = journal.load_account_with_code_mut(caller_addr)?.data;
             pre_execution::validate_account_nonce_and_code(
-                &caller.info,
+                &caller.account().info,
                 nonce,
                 cfg.is_eip3607_disabled(),
                 cfg.is_nonce_check_disabled(),
@@ -495,7 +499,7 @@ where
         }
 
         let beneficiary = evm.ctx_ref().block().beneficiary();
-        let hardfork = evm.ctx_ref().cfg().spec();
+        let hardfork = *evm.ctx_ref().cfg().spec();
         let tx_value = evm.ctx_ref().tx().value();
         let rlp_bytes = evm.ctx_ref().tx().rlp_bytes.clone().unwrap_or_default();
         let gas_limit = evm.ctx_ref().tx().gas_limit();

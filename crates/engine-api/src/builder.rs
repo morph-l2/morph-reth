@@ -18,8 +18,7 @@ use morph_payload_types::{
 };
 use morph_primitives::{Block, BlockBody, MorphHeader, MorphPrimitives, MorphTxEnvelope};
 use parking_lot::RwLock;
-use reth_payload_builder::PayloadBuilderHandle;
-use reth_payload_primitives::{EngineApiMessageVersion, PayloadBuilderAttributes};
+use reth_payload_builder::{BuildNewPayload, PayloadBuilderHandle};
 #[cfg(test)]
 use reth_primitives_traits::RecoveredBlock;
 use reth_primitives_traits::{SealedBlock, SealedHeader};
@@ -662,17 +661,24 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
             base_fee_per_gas: base_fee_override,
         };
 
-        let builder_attrs = MorphPayloadBuilderAttributes::try_new(parent_hash, rpc_attributes, 1)
-            .map_err(|e| {
-                MorphEngineApiError::BlockBuildError(format!(
-                    "failed to create builder attributes: {e}",
-                ))
-            })?;
+        let builder_attrs =
+            MorphPayloadBuilderAttributes::try_new(parent_hash, rpc_attributes.clone(), 1)
+                .map_err(|e| {
+                    MorphEngineApiError::BlockBuildError(format!(
+                        "failed to create builder attributes: {e}",
+                    ))
+                })?;
         let payload_id = builder_attrs.payload_id();
 
+        let build_input = BuildNewPayload {
+            attributes: rpc_attributes,
+            parent_hash,
+            cache: None,
+            trie_handle: None,
+        };
         let _ = self
             .payload_builder
-            .send_new_payload(builder_attrs)
+            .send_new_payload(build_input)
             .await
             .map_err(|_| {
                 MorphEngineApiError::BlockBuildError("failed to send build request".to_string())
@@ -766,7 +772,7 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
         let fcu_started = Instant::now();
         let fcu_result = self
             .engine_handle
-            .fork_choice_updated(forkchoice, None, Self::engine_api_version())
+            .fork_choice_updated(forkchoice, None)
             .await
             .map_err(|e| MorphEngineApiError::ExecutionFailed(e.to_string()))?;
         let fcu_elapsed = fcu_started.elapsed();
@@ -932,10 +938,6 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
                 )))
             }
         }
-    }
-
-    const fn engine_api_version() -> EngineApiMessageVersion {
-        EngineApiMessageVersion::V1
     }
 
     fn current_head(&self) -> EngineApiResult<InMemoryHead>

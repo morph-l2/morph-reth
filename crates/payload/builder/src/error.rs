@@ -42,4 +42,8 @@ pub enum MorphPayloadBuilderError {
     /// Database error when reading contract storage.
     #[error("database error: {0}")]
     Database(#[from] ProviderError),
+
+    /// Generic storage error (e.g. from revm EvmDatabaseError).
+    #[error("storage error: {0}")]
+    Storage(String),
 }

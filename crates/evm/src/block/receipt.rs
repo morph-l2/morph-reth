@@ -245,8 +245,7 @@ mod tests {
     fn make_success_result(gas_used: u64) -> ExecutionResult<morph_revm::MorphHaltReason> {
         ExecutionResult::Success {
             reason: revm::context::result::SuccessReason::Stop,
-            gas_used,
-            gas_refunded: 0,
+            gas: revm::context::result::ResultGas::new(gas_used, gas_used, 0, 0, 0),
             logs: vec![],
             output: revm::context::result::Output::Call(alloy_primitives::Bytes::new()),
         }
@@ -258,8 +257,7 @@ mod tests {
     ) -> ExecutionResult<morph_revm::MorphHaltReason> {
         ExecutionResult::Success {
             reason: revm::context::result::SuccessReason::Stop,
-            gas_used,
-            gas_refunded: 0,
+            gas: revm::context::result::ResultGas::new(gas_used, gas_used, 0, 0, 0),
             logs,
             output: revm::context::result::Output::Call(alloy_primitives::Bytes::new()),
         }
@@ -267,7 +265,8 @@ mod tests {
 
     fn make_revert_result(gas_used: u64) -> ExecutionResult<morph_revm::MorphHaltReason> {
         ExecutionResult::Revert {
-            gas_used,
+            gas: revm::context::result::ResultGas::new(gas_used, gas_used, 0, 0, 0),
+            logs: vec![],
             output: alloy_primitives::Bytes::new(),
         }
     }
