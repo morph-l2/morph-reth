@@ -1,0 +1,18 @@
+[package]
+name = "morph-engine-tree-ext"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# intentionally empty in Task 1 — dependencies are added in Task 3 when
+# the payload_validator copy is introduced.
+
+[features]
+default = ["std"]
+std = []
