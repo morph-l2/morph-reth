@@ -276,10 +276,7 @@ impl TestNodeBuilder {
 /// # Parameters
 /// - `num_nodes`: number of interconnected nodes to create
 /// - `is_dev`: whether to enable dev mode (auto-sealing every 100ms)
-pub async fn setup(
-    num_nodes: usize,
-    is_dev: bool,
-) -> eyre::Result<(Vec<MorphTestNode>, Wallet)> {
+pub async fn setup(num_nodes: usize, is_dev: bool) -> eyre::Result<(Vec<MorphTestNode>, Wallet)> {
     TestNodeBuilder::new()
         .with_num_nodes(num_nodes)
         .with_dev(is_dev)

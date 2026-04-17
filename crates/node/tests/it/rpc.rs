@@ -445,8 +445,7 @@ async fn transaction_by_hash_exposes_morph_fields_over_rpc() -> eyre::Result<()>
 
 /// Produces a simple one-transaction block on the standard Jade profile and returns the
 /// node and identifiers needed by the replay-based debug / trace RPCs.
-async fn build_standard_jade_block_for_debug_trace()
--> eyre::Result<(MorphTestNode, B256, B256)> {
+async fn build_standard_jade_block_for_debug_trace() -> eyre::Result<(MorphTestNode, B256, B256)> {
     let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
