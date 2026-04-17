@@ -48,7 +48,7 @@ where
         // Build the transaction validator with Morph-specific checks
         let validator = TransactionValidationTaskExecutor::eth_builder(
             ctx.provider().clone(),
-            morph_evm_config.clone(),
+            morph_evm_config,
         )
         .with_max_tx_input_bytes(ctx.config().txpool.max_tx_input_bytes)
         .with_local_transactions_config(pool_config.local_transactions_config.clone())
