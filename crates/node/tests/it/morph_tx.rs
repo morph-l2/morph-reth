@@ -31,7 +31,7 @@ use super::helpers::wallet_to_arc;
 async fn morph_tx_v1_eth_fee_included_in_block() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     // Build a MorphTx v1 with ETH fee
@@ -66,7 +66,7 @@ async fn morph_tx_v1_eth_fee_included_in_block() -> eyre::Result<()> {
 async fn morph_tx_v1_multiple_in_sequence() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, mut wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, mut wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     // Inject 3 MorphTx v1 (ETH fee) with sequential nonces
@@ -101,7 +101,7 @@ async fn morph_tx_v1_multiple_in_sequence() -> eyre::Result<()> {
 async fn morph_tx_v0_erc20_fee_included_in_block() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     let raw_tx = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
@@ -135,7 +135,7 @@ async fn morph_tx_v0_erc20_fee_included_in_block() -> eyre::Result<()> {
 async fn morph_tx_v1_erc20_fee_included_in_block() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     let raw_tx = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
@@ -169,7 +169,7 @@ async fn morph_tx_v1_rejected_before_jade() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     // Use PreJade schedule — Jade is NOT active
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new()
+    let (mut nodes, wallet) = TestNodeBuilder::new()
         .with_schedule(HardforkSchedule::PreJade)
         .build()
         .await?;
@@ -196,7 +196,7 @@ async fn morph_tx_v1_rejected_before_jade() -> eyre::Result<()> {
 async fn morph_tx_v0_accepted_before_jade() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new()
+    let (mut nodes, wallet) = TestNodeBuilder::new()
         .with_schedule(HardforkSchedule::PreJade)
         .build()
         .await?;
@@ -226,7 +226,7 @@ async fn morph_tx_v0_accepted_before_jade() -> eyre::Result<()> {
 async fn mixed_tx_types_in_one_block() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
     let wallet_arc = wallet_to_arc(wallet);
 
@@ -287,7 +287,7 @@ async fn mixed_tx_types_in_one_block() -> eyre::Result<()> {
 async fn morph_tx_invalid_token_rejected_by_pool() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let node = nodes.pop().unwrap();
 
     let raw_tx = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
@@ -311,7 +311,7 @@ async fn morph_tx_invalid_token_rejected_by_pool() -> eyre::Result<()> {
 async fn morph_tx_insufficient_token_balance_rejected() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let node = nodes.pop().unwrap();
 
     // Account 2 has ETH only, no tokens in genesis
@@ -334,7 +334,7 @@ async fn morph_tx_insufficient_token_balance_rejected() -> eyre::Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn morph_tx_v0_fee_token_id_zero_rejected() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let node = nodes.pop().unwrap();
 
     let raw_tx = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
@@ -362,7 +362,7 @@ async fn morph_tx_v0_fee_token_id_zero_rejected() -> eyre::Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn morph_tx_memo_exceeds_64_bytes_rejected() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let node = nodes.pop().unwrap();
 
     let raw_tx = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
@@ -382,7 +382,7 @@ async fn morph_tx_memo_exceeds_64_bytes_rejected() -> eyre::Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn morph_tx_fee_limit_zero_accepted() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     let raw_tx = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
@@ -420,7 +420,7 @@ async fn morph_tx_v0_token_balance_decreases() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
     use reth_provider::StateProviderFactory;
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     let sender = alloy_primitives::address!("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
@@ -495,7 +495,7 @@ async fn morph_tx_v0_token_fee_still_charged_on_revert() -> eyre::Result<()> {
     use morph_node::test_utils::{make_deploy_tx, wallet_at_index};
     use reth_provider::{ReceiptProvider, StateProviderFactory};
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     let sender = alloy_primitives::address!("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266");

@@ -17,7 +17,6 @@ use reth_provider::{
     AccountReader, BlockReader, BlockReaderIdExt, HeaderProvider, ReceiptProvider,
     StateProviderFactory, TransactionsProvider,
 };
-use reth_tasks::TaskManager;
 use serde_json::Value;
 
 use super::helpers::wallet_to_arc;
@@ -27,7 +26,7 @@ use super::helpers::wallet_to_arc;
 async fn block_number_advances_correctly() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
     let wallet = wallet_to_arc(wallet);
 
@@ -59,7 +58,7 @@ async fn block_number_advances_correctly() -> eyre::Result<()> {
 async fn block_hash_consistent_with_storage() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
     let wallet = wallet_to_arc(wallet);
 
@@ -91,7 +90,7 @@ async fn block_hash_consistent_with_storage() -> eyre::Result<()> {
 async fn block_transaction_count_correct() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
     let wallet = wallet_to_arc(wallet);
 
@@ -127,7 +126,7 @@ async fn block_transaction_count_correct() -> eyre::Result<()> {
 async fn transaction_retrievable_by_hash() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
     let wallet = wallet_to_arc(wallet);
 
@@ -158,7 +157,7 @@ async fn transaction_retrievable_by_hash() -> eyre::Result<()> {
 async fn block_gas_used_reflects_execution() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
     let wallet = wallet_to_arc(wallet);
 
@@ -184,7 +183,7 @@ async fn block_gas_used_reflects_execution() -> eyre::Result<()> {
 async fn morph_tx_receipt_contains_fee_fields() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     // Build and inject a MorphTx v0 with ERC20 fee payment
@@ -245,7 +244,7 @@ async fn morph_tx_receipt_contains_fee_fields() -> eyre::Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn balance_decreases_after_eth_transfer() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
     let wallet = wallet_to_arc(wallet);
 
@@ -276,7 +275,7 @@ async fn balance_decreases_after_eth_transfer() -> eyre::Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn nonce_increments_after_tx() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
     let wallet = wallet_to_arc(wallet);
 
@@ -304,7 +303,7 @@ async fn nonce_increments_after_tx() -> eyre::Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn l1_message_receipt_l1_fee_is_zero() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
-    let (mut nodes, _tasks, _wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     let l1_msg = L1MessageBuilder::new(0)
@@ -335,7 +334,7 @@ async fn l1_message_receipt_l1_fee_is_zero() -> eyre::Result<()> {
 async fn transaction_receipt_exposes_morph_fields_over_rpc() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     let reference = B256::with_last_byte(0x44);
@@ -402,7 +401,7 @@ async fn transaction_receipt_exposes_morph_fields_over_rpc() -> eyre::Result<()>
 async fn transaction_by_hash_exposes_morph_fields_over_rpc() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     let reference = B256::with_last_byte(0x55);
@@ -445,10 +444,10 @@ async fn transaction_by_hash_exposes_morph_fields_over_rpc() -> eyre::Result<()>
 }
 
 /// Produces a simple one-transaction block on the standard Jade profile and returns the
-/// node, task manager, and identifiers needed by the replay-based debug / trace RPCs.
+/// node and identifiers needed by the replay-based debug / trace RPCs.
 async fn build_standard_jade_block_for_debug_trace()
--> eyre::Result<(MorphTestNode, TaskManager, B256, B256)> {
-    let (mut nodes, tasks, wallet) = TestNodeBuilder::new().build().await?;
+-> eyre::Result<(MorphTestNode, B256, B256)> {
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     let tx = TxLegacy {
@@ -479,7 +478,7 @@ async fn build_standard_jade_block_for_debug_trace()
         .tx_hash();
     let block_hash = payload.block().hash();
 
-    Ok((node, tasks, tx_hash, block_hash))
+    Ok((node, tx_hash, block_hash))
 }
 
 /// Comprehensive test: debug + trace replay APIs on a standard Jade block with Cancun active.
@@ -494,7 +493,7 @@ async fn debug_trace_replay_apis_work_for_standard_jade_block() -> eyre::Result<
 
     reth_tracing::init_test_tracing();
 
-    let (node, _tasks, tx_hash, block_hash) = build_standard_jade_block_for_debug_trace().await?;
+    let (node, tx_hash, block_hash) = build_standard_jade_block_for_debug_trace().await?;
 
     // Verify parent_beacon_block_root is None (Morph L2 does not use beacon chain)
     let block = node

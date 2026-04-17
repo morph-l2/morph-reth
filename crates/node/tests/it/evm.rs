@@ -94,7 +94,7 @@ const ACCOUNT0: Address = alloy_primitives::address!("f39Fd6e51aad88F6F4ce6aB882
 async fn contract_deploy_stores_state() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, _wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     let signer = wallet_at_index(0, TEST_CHAIN_ID);
@@ -130,7 +130,7 @@ async fn contract_deploy_stores_state() -> eyre::Result<()> {
 async fn contract_revert_receipt_status_false() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, _wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     let signer = wallet_at_index(0, TEST_CHAIN_ID);
@@ -171,7 +171,7 @@ async fn contract_state_persists_across_blocks() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
     use morph_node::test_utils::advance_empty_block;
 
-    let (mut nodes, _tasks, _wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     // Block 1: deploy the contract
@@ -207,7 +207,7 @@ async fn contract_state_persists_across_blocks() -> eyre::Result<()> {
 async fn blockhash_opcode_returns_morph_custom_value() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, _wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     // Deploy STORE_BLOCKHASH in block 1.
@@ -247,7 +247,7 @@ async fn blockhash_opcode_returns_morph_custom_value() -> eyre::Result<()> {
 async fn selfdestruct_opcode_disabled() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, _wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     let signer = wallet_at_index(0, TEST_CHAIN_ID);
@@ -301,7 +301,7 @@ async fn selfdestruct_opcode_disabled() -> eyre::Result<()> {
 async fn l1_fee_nonzero_for_calldata_tx() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, _wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     // Transaction with 100 bytes of non-zero calldata
@@ -344,7 +344,7 @@ async fn l1_fee_nonzero_for_calldata_tx() -> eyre::Result<()> {
 async fn empty_calldata_vs_large_calldata_l1_fee_difference() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, _wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     let signer = wallet_at_index(0, TEST_CHAIN_ID);

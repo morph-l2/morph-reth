@@ -25,7 +25,7 @@ use super::helpers::{
 async fn l1_message_after_l2_tx_is_rejected() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     // Inject an L2 transfer into the pool so that the payload builder picks it up.
@@ -63,7 +63,7 @@ async fn l1_message_after_l2_tx_is_rejected() -> eyre::Result<()> {
 async fn l1_message_duplicate_queue_index_rejected() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, _wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     // Both messages claim queue index 0 — this is a protocol violation.
@@ -88,7 +88,7 @@ async fn l1_message_duplicate_queue_index_rejected() -> eyre::Result<()> {
 async fn l1_message_gap_queue_index_rejected() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, _wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     // Index 0 then index 2 — index 1 is skipped.
@@ -113,7 +113,7 @@ async fn l1_message_gap_queue_index_rejected() -> eyre::Result<()> {
 async fn post_jade_state_root_mismatch_is_rejected() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, _wallet) = TestNodeBuilder::new()
+    let (mut nodes, _wallet) = TestNodeBuilder::new()
         .with_schedule(HardforkSchedule::AllActive)
         .build()
         .await?;
@@ -140,7 +140,7 @@ async fn post_jade_state_root_mismatch_is_rejected() -> eyre::Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn block_number_jump_rejected() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
-    let (mut nodes, _tasks, _wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     let base = build_block_no_submit(&mut node, vec![]).await?;
@@ -157,7 +157,7 @@ async fn block_number_jump_rejected() -> eyre::Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn wrong_parent_hash_rejected() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
-    let (mut nodes, _tasks, _wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     let base = build_block_no_submit(&mut node, vec![]).await?;
@@ -178,7 +178,7 @@ async fn wrong_parent_hash_rejected() -> eyre::Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn timestamp_not_greater_than_parent_rejected() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
-    let (mut nodes, _tasks, _wallet) = TestNodeBuilder::new()
+    let (mut nodes, _wallet) = TestNodeBuilder::new()
         .with_schedule(morph_node::test_utils::HardforkSchedule::PreViridian)
         .build()
         .await?;
@@ -201,7 +201,7 @@ async fn timestamp_not_greater_than_parent_rejected() -> eyre::Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn gas_used_exceeds_gas_limit_rejected() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
-    let (mut nodes, _tasks, _wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     let base = build_block_no_submit(&mut node, vec![]).await?;
@@ -217,7 +217,7 @@ async fn gas_used_exceeds_gas_limit_rejected() -> eyre::Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn gas_limit_excessive_increase_rejected() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
-    let (mut nodes, _tasks, _wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     let base = build_block_no_submit(&mut node, vec![]).await?;
@@ -237,7 +237,7 @@ async fn gas_limit_excessive_increase_rejected() -> eyre::Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn next_l1_msg_index_decreases_rejected() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
-    let (mut nodes, _tasks, _wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     // Block 1: include 2 L1 messages -> next_l1_msg_index becomes 2
@@ -261,7 +261,7 @@ async fn next_l1_msg_index_decreases_rejected() -> eyre::Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn next_l1_msg_index_insufficient_for_l1_msgs() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
-    let (mut nodes, _tasks, _wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     // Build block with 2 L1 messages (queue 0,1) but don't submit
@@ -281,7 +281,7 @@ async fn next_l1_msg_index_insufficient_for_l1_msgs() -> eyre::Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn next_l1_msg_index_can_skip_past_included_messages() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
-    let (mut nodes, _tasks, _wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     // Build block with queue indices 0,1 and then advance header.next_l1_msg_index to 4.

@@ -54,6 +54,10 @@ tracing          = { workspace = true }
 default = ["std"]
 std = []
 trie-debug = ["dep:reth-trie-sparse"]
+# Forwards `morph-node`'s `test-utils` feature, which provides `MorphTestNode`,
+# `TestNodeBuilder`, `HardforkSchedule`, etc. used by the Jade-boundary
+# integration test.
+test-utils = ["morph-node/test-utils"]
 
 [dependencies.reth-trie-sparse]
 workspace = true
@@ -63,3 +67,14 @@ optional = true
 [dev-dependencies]
 alloy-genesis = { workspace = true }
 serde_json = { workspace = true }
+# Jade boundary integration test — exercises MorphBasicEngineValidator through
+# the real MorphNode stack via morph-node's test-utils feature.
+morph-node = { workspace = true, features = ["test-utils"] }
+morph-payload-types = { workspace = true }
+reth-node-api = { workspace = true }
+reth-payload-builder = { workspace = true }
+reth-tracing = { workspace = true }
+alloy-rpc-types-engine = { workspace = true }
+alloy-rpc-types-eth = { workspace = true }
+eyre  = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

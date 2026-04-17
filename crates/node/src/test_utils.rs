@@ -24,7 +24,7 @@ use alloy_primitives::{Address, B256, Bytes, TxKind, U256};
 use alloy_rpc_types_engine::PayloadAttributes;
 use alloy_rpc_types_eth::TransactionRequest;
 use alloy_signer_local::PrivateKeySigner;
-use morph_payload_types::{MorphBuiltPayload, MorphPayloadBuilderAttributes};
+use morph_payload_types::MorphBuiltPayload;
 use morph_primitives::{
     MorphTxEnvelope, TxL1Msg, TxMorph, transaction::l1_transaction::L1_TX_TYPE_ID,
 };
@@ -32,9 +32,8 @@ use reth_e2e_test_utils::{
     NodeHelperType, TmpDB, transaction::TransactionTestContext, wallet::Wallet,
 };
 use reth_node_api::NodeTypesWithDBAdapter;
-use reth_payload_builder::EthPayloadBuilderAttributes;
+use reth_payload_builder::BuildNewPayload;
 use reth_provider::providers::BlockchainProvider;
-use reth_tasks::TaskManager;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -245,9 +244,9 @@ impl TestNodeBuilder {
 
     /// Build and launch the configured nodes.
     ///
-    /// Returns the node handles, the task manager, and a wallet derived from
+    /// Returns the node handles and a wallet derived from
     /// the standard test mnemonic (`test test test ... junk`).
-    pub async fn build(mut self) -> eyre::Result<(Vec<MorphTestNode>, TaskManager, Wallet)> {
+    pub async fn build(mut self) -> eyre::Result<(Vec<MorphTestNode>, Wallet)> {
         // Apply the hardfork schedule to the genesis JSON before parsing.
         self.schedule.apply(&mut self.genesis_json);
 
@@ -280,7 +279,7 @@ impl TestNodeBuilder {
 pub async fn setup(
     num_nodes: usize,
     is_dev: bool,
-) -> eyre::Result<(Vec<MorphTestNode>, TaskManager, Wallet)> {
+) -> eyre::Result<(Vec<MorphTestNode>, Wallet)> {
     TestNodeBuilder::new()
         .with_num_nodes(num_nodes)
         .with_dev(is_dev)
@@ -319,7 +318,7 @@ pub async fn advance_chain(
 pub async fn advance_empty_block(node: &mut MorphTestNode) -> eyre::Result<MorphBuiltPayload> {
     use alloy_consensus::BlockHeader;
     use reth_node_api::PayloadKind;
-    use reth_payload_primitives::{BuiltPayload, PayloadBuilderAttributes};
+    use reth_payload_primitives::BuiltPayload;
     use reth_provider::BlockReaderIdExt;
 
     let head = node
@@ -345,13 +344,15 @@ pub async fn advance_empty_block(node: &mut MorphTestNode) -> eyre::Result<Morph
         base_fee_per_gas: None,
     };
 
-    let attrs = MorphPayloadBuilderAttributes::try_new(head_hash, rpc_attrs, 3)
-        .map_err(|e| eyre::eyre!("failed to build payload attributes: {e}"))?;
-
     let payload_id = node
         .inner
         .payload_builder_handle
-        .send_new_payload(attrs)
+        .send_new_payload(BuildNewPayload {
+            attributes: rpc_attrs,
+            parent_hash: head_hash,
+            cache: None,
+            trie_handle: None,
+        })
         .await?
         .map_err(|e| eyre::eyre!("payload build failed: {e}"))?;
 
@@ -545,16 +546,19 @@ async fn transfer_tx_with_nonce(chain_id: u64, signer: PrivateKeySigner, nonce: 
 /// Creates minimal attributes with no L1 messages, suitable for basic tests.
 /// Use [`L1MessageBuilder`] + [`advance_block_with_l1_messages`] (in
 /// `tests/it/helpers.rs`) for tests that need L1 messages.
-pub fn morph_payload_attributes(timestamp: u64) -> MorphPayloadBuilderAttributes {
-    let attributes = PayloadAttributes {
-        timestamp,
-        prev_randao: B256::ZERO,
-        suggested_fee_recipient: Address::ZERO,
-        withdrawals: Some(vec![]),
-        parent_beacon_block_root: Some(B256::ZERO),
-    };
-
-    MorphPayloadBuilderAttributes::from(EthPayloadBuilderAttributes::new(B256::ZERO, attributes))
+pub fn morph_payload_attributes(timestamp: u64) -> morph_payload_types::MorphPayloadAttributes {
+    morph_payload_types::MorphPayloadAttributes {
+        inner: PayloadAttributes {
+            timestamp,
+            prev_randao: B256::ZERO,
+            suggested_fee_recipient: Address::ZERO,
+            withdrawals: Some(vec![]),
+            parent_beacon_block_root: Some(B256::ZERO),
+        },
+        transactions: None,
+        gas_limit: None,
+        base_fee_per_gas: None,
+    }
 }
 
 // =============================================================================

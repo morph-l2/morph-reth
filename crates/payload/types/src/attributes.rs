@@ -68,6 +68,19 @@ impl reth_payload_primitives::PayloadAttributes for MorphPayloadAttributes {
     }
 }
 
+// Enables `MorphNode: NodeBuilderHelper` in reth v2.0.0's e2e-test-utils,
+// which requires `PayloadAttributes: From<alloy_rpc_types_engine::PayloadAttributes>`.
+impl From<PayloadAttributes> for MorphPayloadAttributes {
+    fn from(inner: PayloadAttributes) -> Self {
+        Self {
+            inner,
+            transactions: None,
+            gas_limit: None,
+            base_fee_per_gas: None,
+        }
+    }
+}
+
 /// Internal payload builder attributes.
 ///
 /// This is the internal representation used by the payload builder,

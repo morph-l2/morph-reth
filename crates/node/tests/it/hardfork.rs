@@ -17,7 +17,7 @@ use super::helpers::wallet_to_arc;
 async fn all_active_chain_advances() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new()
+    let (mut nodes, wallet) = TestNodeBuilder::new()
         .with_schedule(HardforkSchedule::AllActive)
         .build()
         .await?;
@@ -45,7 +45,7 @@ async fn all_active_chain_advances() -> eyre::Result<()> {
 async fn pre_jade_chain_advances() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new()
+    let (mut nodes, wallet) = TestNodeBuilder::new()
         .with_schedule(HardforkSchedule::PreJade)
         .build()
         .await?;
@@ -68,7 +68,7 @@ async fn pre_jade_chain_advances() -> eyre::Result<()> {
 async fn pre_jade_empty_block() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, _wallet) = TestNodeBuilder::new()
+    let (mut nodes, _wallet) = TestNodeBuilder::new()
         .with_schedule(HardforkSchedule::PreJade)
         .build()
         .await?;
@@ -88,7 +88,7 @@ async fn pre_jade_empty_block() -> eyre::Result<()> {
 async fn eip7702_accepted_viridian_active() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new()
+    let (mut nodes, wallet) = TestNodeBuilder::new()
         .with_schedule(HardforkSchedule::AllActive) // Viridian active
         .build()
         .await?;
@@ -110,7 +110,7 @@ async fn eip7702_accepted_viridian_active() -> eyre::Result<()> {
 async fn eip7702_rejected_viridian_inactive() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new()
+    let (mut nodes, wallet) = TestNodeBuilder::new()
         .with_schedule(HardforkSchedule::PreViridian) // Viridian NOT active
         .build()
         .await?;
