@@ -10,6 +10,9 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+# morph local crates
+morph-chainspec = { workspace = true }
+
 # reth (direct v2.0.0 pin — workspace root is still on morph-l2/reth fork which lacks
 # reth-execution-cache and v2.0.0's additional pub re-exports; Task 4 flips the whole
 # workspace and this mixed state resolves)
@@ -50,3 +53,7 @@ tracing          = { version = "0.1.0", default-features = false, features = ["a
 default = ["std"]
 std = []
 trie-debug = ["dep:reth-trie-sparse"]
+
+[dev-dependencies]
+alloy-genesis = { workspace = true }
+serde_json = { workspace = true }

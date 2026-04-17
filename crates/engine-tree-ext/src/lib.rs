@@ -8,6 +8,7 @@
 //! `trie_updates` is a verbatim copy of the private sibling module from the same
 //! source tree, required by `payload_validator::compare_trie_updates_with_serial`.
 
+pub mod gate;
 pub mod payload_validator;
 pub(crate) mod trie_updates;
 
