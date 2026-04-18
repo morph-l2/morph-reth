@@ -20,6 +20,7 @@ morph-payload-types.workspace = true
 reth-chainspec.workspace = true
 reth-evm.workspace = true
 reth-ethereum-primitives = { workspace = true, features = ["serde"] }
+reth-payload-primitives.workspace = true
 reth-revm.workspace = true
 reth-primitives-traits.workspace = true
 reth-rpc-eth-api = { workspace = true, optional = true }
