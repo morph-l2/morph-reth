@@ -8,12 +8,15 @@ use morph_chainspec::hardfork::MorphHardfork;
 use revm::{
     Context, Inspector,
     context::{CfgEnv, ContextError, Evm, FrameStack, Journal},
+    context_interface::host::LoadError,
     handler::{
         EthFrame, EvmTr, FrameInitOrResult, FrameTr, ItemOrResult, instructions::EthInstructions,
     },
     inspector::InspectorEvmTr,
     interpreter::{
-        Host, Instruction, InstructionContext, gas::BLOCKHASH, interpreter::EthInterpreter,
+        Host, Instruction, InstructionContext,
+        gas::{BLOCKHASH, WARM_STORAGE_READ_COST},
+        interpreter::EthInterpreter,
         interpreter_types::StackTr,
     },
     primitives::BLOCK_HASH_HISTORY,
@@ -77,6 +80,61 @@ fn blockhash_morph<DB: Database>(
     *number = morph_blockhash_result(chain_id_u64, current_number_u64, requested_number_u64);
 }
 
+/// Morph custom SLOAD opcode.
+///
+/// Fixes `original_value` corruption caused by revm's `mark_warm_with_transaction_id()`.
+///
+/// When token fee deduction marks storage slots cold, the main tx's first SLOAD
+/// triggers `mark_warm_with_transaction_id()` which resets `original_value = present_value`,
+/// losing the true DB-committed original. This makes SSTORE see "clean" slots (2900 gas)
+/// instead of "dirty" (100 gas), causing a 2800 gas mismatch vs go-eth.
+///
+/// Ported from morph-reth-enginevalidator-spike commit 6031236. The DB read hits
+/// the State cache (O(1)) and only triggers on cold SLOADs.
+fn sload_morph<DB: Database>(
+    context: InstructionContext<'_, MorphContext<DB>, EthInterpreter>,
+) {
+    let Some(([], index)) = StackTr::popn_top::<0>(&mut context.interpreter.stack) else {
+        context.interpreter.halt_underflow();
+        return;
+    };
+
+    let target = context.interpreter.input.target_address;
+    let key = *index;
+
+    let additional_cold_cost = context.host.gas_params().cold_storage_additional_cost();
+    let skip_cold = context.interpreter.gas.remaining() < additional_cold_cost;
+    let res = context.host.sload_skip_cold_load(target, key, skip_cold);
+
+    match res {
+        Ok(storage) => {
+            if storage.is_cold {
+                // Read the true committed value from DB (hits State<DB> cache, O(1)).
+                // This matches go-eth's GetCommittedState() returning the un-modified DB value.
+                let db_original =
+                    context.host.journaled_state.database.storage(target, key);
+                if let Ok(db_original) = db_original
+                    && let Some(acc) =
+                        context.host.journaled_state.inner.state.get_mut(&target)
+                    && let Some(slot) = acc.storage.get_mut(&key)
+                    && slot.original_value != db_original
+                {
+                    slot.original_value = db_original;
+                }
+
+                if !context.interpreter.gas.record_cost(additional_cold_cost) {
+                    context.interpreter.halt_oog();
+                    return;
+                }
+            }
+
+            *index = storage.data;
+        }
+        Err(LoadError::ColdLoadSkipped) => context.interpreter.halt_oog(),
+        Err(LoadError::DBError) => context.interpreter.halt_fatal(),
+    }
+}
+
 /// MorphEvm extends the Evm with Morph specific types and logic.
 #[derive(Debug, derive_more::Deref, derive_more::DerefMut)]
 #[expect(clippy::type_complexity)]
@@ -125,6 +183,11 @@ impl<DB: Database, I> MorphEvm<DB, I> {
 
         // Morph custom BLOCKHASH implementation (matches Morph geth).
         instructions.insert_instruction(0x40, Instruction::new(blockhash_morph::<DB>, BLOCKHASH));
+        // Morph custom SLOAD: fixes original_value corruption from token fee deduction.
+        instructions.insert_instruction(
+            0x54,
+            Instruction::new(sload_morph::<DB>, WARM_STORAGE_READ_COST),
+        );
         // SELFDESTRUCT is disabled in Morph
         instructions.insert_instruction(0xff, Instruction::unknown());
         // BLOBHASH is disabled in Morph
