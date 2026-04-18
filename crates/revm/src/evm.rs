@@ -94,9 +94,7 @@ fn blockhash_morph<DB: Database>(
 ///
 /// Ported from morph-reth-enginevalidator-spike commit 6031236. The DB read hits
 /// the State cache (O(1)) and only triggers on cold SLOADs.
-fn sload_morph<DB: Database>(
-    context: InstructionContext<'_, MorphContext<DB>, EthInterpreter>,
-) {
+fn sload_morph<DB: Database>(context: InstructionContext<'_, MorphContext<DB>, EthInterpreter>) {
     let Some(([], index)) = StackTr::popn_top::<0>(&mut context.interpreter.stack) else {
         context.interpreter.halt_underflow();
         return;
@@ -114,11 +112,9 @@ fn sload_morph<DB: Database>(
             if storage.is_cold {
                 // Read the true committed value from DB (hits State<DB> cache, O(1)).
                 // This matches go-eth's GetCommittedState() returning the un-modified DB value.
-                let db_original =
-                    context.host.journaled_state.database.storage(target, key);
+                let db_original = context.host.journaled_state.database.storage(target, key);
                 if let Ok(db_original) = db_original
-                    && let Some(acc) =
-                        context.host.journaled_state.inner.state.get_mut(&target)
+                    && let Some(acc) = context.host.journaled_state.inner.state.get_mut(&target)
                     && let Some(slot) = acc.storage.get_mut(&key)
                     && slot.original_value != db_original
                 {
@@ -152,9 +148,7 @@ fn sload_morph<DB: Database>(
 ///
 /// Ported from morph-reth-enginevalidator-spike commit c61633f, using our
 /// DB-direct lookup style (no per-tx runtime map needed).
-fn sstore_morph<DB: Database>(
-    context: InstructionContext<'_, MorphContext<DB>, EthInterpreter>,
-) {
+fn sstore_morph<DB: Database>(context: InstructionContext<'_, MorphContext<DB>, EthInterpreter>) {
     if context.interpreter.runtime_flag.is_static() {
         context
             .interpreter

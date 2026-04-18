@@ -806,7 +806,10 @@ where
         match handle.state_root() {
             Ok(outcome) => builder.finish(
                 state_provider,
-                Some((outcome.state_root, Arc::unwrap_or_clone(outcome.trie_updates))),
+                Some((
+                    outcome.state_root,
+                    Arc::unwrap_or_clone(outcome.trie_updates),
+                )),
             )?,
             Err(err) => {
                 tracing::warn!(
