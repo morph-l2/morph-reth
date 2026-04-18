@@ -21,7 +21,7 @@ use reth_chainspec::ChainSpecProvider;
 use reth_evm::{
     ConfigureEvm, Database, Evm, NextBlockEnvAttributes,
     block::{BlockExecutionError, BlockValidationError},
-    execute::{BlockBuilder, BlockBuilderOutcome},
+    execute::{BlockBuilder, BlockBuilderOutcome, BlockExecutor},
 };
 use reth_execution_cache::CachedStateProvider;
 use reth_execution_types::BlockExecutionOutput;
@@ -169,10 +169,10 @@ where
         let BuildArguments {
             mut cached_reads,
             execution_cache,
+            trie_handle,
             config,
             cancel,
             best_payload,
-            ..
         } = args;
 
         // Convert RPC-level MorphPayloadAttributes to builder-level MorphPayloadBuilderAttributes
@@ -219,6 +219,7 @@ where
             state_provider.as_ref(),
             ctx,
             best,
+            trie_handle,
         )
         .map(|out| out.with_cached_reads(cached_reads))
     }
@@ -673,6 +674,7 @@ fn build_payload_inner<'a, DB, BestTxs>(
     state_provider: &(impl StateProvider + ?Sized),
     ctx: MorphPayloadBuilderCtx,
     best: impl FnOnce(BestTransactionsAttributes) -> BestTxs + Send + Sync + 'a,
+    trie_handle: Option<reth_trie_parallel::state_root_task::StateRootHandle>,
 ) -> Result<BuildOutcomeKind<MorphBuiltPayload>, PayloadBuilderError>
 where
     DB: Database<Error = reth_evm::execute::ProviderError>,
@@ -713,6 +715,16 @@ where
         .evm_config
         .builder_for_next_block(&mut db, ctx.parent(), next_block_attrs)
         .map_err(PayloadBuilderError::other)?;
+
+    // If the engine tree provided a sparse-trie state root handle, wire the
+    // state hook so per-tx state diffs stream to the background trie task
+    // during execution. The final `state_root()` recv() at finish time will
+    // return quickly since most work is done concurrently.
+    if let Some(ref handle) = trie_handle {
+        builder
+            .executor_mut()
+            .set_state_hook(Some(Box::new(handle.state_hook())));
+    }
 
     // 1. Apply pre-execution changes (system contracts, etc.)
     builder.apply_pre_execution_changes().map_err(|err| {
@@ -779,13 +791,36 @@ where
             PayloadBuilderError::other(MorphPayloadBuilderError::Storage(err.to_string()))
         })?;
 
-    // 6. Finish building the block
+    // 6. Finish building the block.
+    //
+    // When `trie_handle` is provided, drop the state hook to signal FinishedStateUpdates
+    // to the background sparse trie task (via StateHookSender's Drop impl), then wait for
+    // the final root. Fall back to synchronous state root if the task fails.
     let BlockBuilderOutcome {
         execution_result,
         hashed_state,
         trie_updates,
         mut block,
-    } = builder.finish(state_provider, None)?;
+    } = if let Some(mut handle) = trie_handle {
+        builder.executor_mut().set_state_hook(None);
+        match handle.state_root() {
+            Ok(outcome) => builder.finish(
+                state_provider,
+                Some((outcome.state_root, Arc::unwrap_or_clone(outcome.trie_updates))),
+            )?,
+            Err(err) => {
+                tracing::warn!(
+                    target: "payload_builder",
+                    id = %ctx.payload_id(),
+                    %err,
+                    "sparse trie task failed, falling back to sync state root",
+                );
+                builder.finish(state_provider, None)?
+            }
+        }
+    } else {
+        builder.finish(state_provider, None)?
+    };
 
     // Update MorphHeader with next_l1_msg_index.
     // Since hash_slow() only hashes the inner header, we can update the

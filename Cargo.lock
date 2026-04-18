@@ -4939,6 +4939,7 @@ dependencies = [
  "reth-revm",
  "reth-storage-api",
  "reth-transaction-pool",
+ "reth-trie-parallel",
  "revm",
  "thiserror 2.0.18",
  "tracing",
