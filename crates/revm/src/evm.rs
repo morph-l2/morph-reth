@@ -14,12 +14,15 @@ use revm::{
     },
     inspector::InspectorEvmTr,
     interpreter::{
-        Host, Instruction, InstructionContext,
+        Host, Instruction, InstructionContext, InstructionResult,
         gas::{BLOCKHASH, WARM_STORAGE_READ_COST},
         interpreter::EthInterpreter,
-        interpreter_types::StackTr,
+        interpreter_types::{RuntimeFlag, StackTr},
     },
-    primitives::BLOCK_HASH_HISTORY,
+    primitives::{
+        BLOCK_HASH_HISTORY,
+        hardfork::SpecId::{BERLIN, ISTANBUL},
+    },
 };
 
 /// The Morph EVM context type.
@@ -135,6 +138,116 @@ fn sload_morph<DB: Database>(
     }
 }
 
+/// Morph custom SSTORE opcode.
+///
+/// Twin of [`sload_morph`]: revm's standard SSTORE warms a cold slot through
+/// the same `mark_warm_with_transaction_id()` path as SLOAD, so forced-cold
+/// token-fee slots need the same `original_value` restoration before
+/// `sstore_dynamic_gas()` reads it for EIP-2200 accounting.
+///
+/// Without this, a main tx that writes a fee-deducted slot WITHOUT first
+/// SLOADing it sees a "clean" slot (2900 gas SSTORE_RESET, no refund)
+/// instead of a "dirty" slot (100 gas SLOAD_GAS plus refund), causing the
+/// same 2800-gas-per-write divergence vs go-eth that `sload_morph` fixes.
+///
+/// Ported from morph-reth-enginevalidator-spike commit c61633f, using our
+/// DB-direct lookup style (no per-tx runtime map needed).
+fn sstore_morph<DB: Database>(
+    context: InstructionContext<'_, MorphContext<DB>, EthInterpreter>,
+) {
+    if context.interpreter.runtime_flag.is_static() {
+        context
+            .interpreter
+            .halt(InstructionResult::StateChangeDuringStaticCall);
+        return;
+    }
+
+    let Some([index, value]) = StackTr::popn::<2>(&mut context.interpreter.stack) else {
+        context.interpreter.halt_underflow();
+        return;
+    };
+
+    let target = context.interpreter.input.target_address;
+    let spec_id = context.interpreter.runtime_flag.spec_id();
+
+    if spec_id.is_enabled_in(ISTANBUL)
+        && context.interpreter.gas.remaining() <= context.host.gas_params().call_stipend()
+    {
+        context
+            .interpreter
+            .halt(InstructionResult::ReentrancySentryOOG);
+        return;
+    }
+
+    if !context
+        .interpreter
+        .gas
+        .record_cost(context.host.gas_params().sstore_static_gas())
+    {
+        context.interpreter.halt_oog();
+        return;
+    }
+
+    let mut state_load = if spec_id.is_enabled_in(BERLIN) {
+        let additional_cold_cost = context.host.gas_params().cold_storage_additional_cost();
+        let skip_cold = context.interpreter.gas.remaining() < additional_cold_cost;
+        match context
+            .host
+            .sstore_skip_cold_load(target, index, value, skip_cold)
+        {
+            Ok(load) => load,
+            Err(LoadError::ColdLoadSkipped) => {
+                context.interpreter.halt_oog();
+                return;
+            }
+            Err(LoadError::DBError) => {
+                context.interpreter.halt_fatal();
+                return;
+            }
+        }
+    } else {
+        let Some(load) = context.host.sstore(target, index, value) else {
+            context.interpreter.halt_fatal();
+            return;
+        };
+        load
+    };
+
+    // Morph fix: on cold access, restore original_value from the DB-committed value.
+    // Mirrors sload_morph. Only fires on cold path; zero overhead on warm SSTOREs.
+    if state_load.is_cold {
+        let db_original = context.host.journaled_state.database.storage(target, index);
+        if let Ok(db_original) = db_original
+            && state_load.data.original_value != db_original
+        {
+            state_load.data.original_value = db_original;
+            if let Some(acc) = context.host.journaled_state.inner.state.get_mut(&target)
+                && let Some(slot) = acc.storage.get_mut(&index)
+            {
+                slot.original_value = db_original;
+            }
+        }
+    }
+
+    let is_istanbul = spec_id.is_enabled_in(ISTANBUL);
+    let dynamic_gas = context.host.gas_params().sstore_dynamic_gas(
+        is_istanbul,
+        &state_load.data,
+        state_load.is_cold,
+    );
+    if !context.interpreter.gas.record_cost(dynamic_gas) {
+        context.interpreter.halt_oog();
+        return;
+    }
+
+    context.interpreter.gas.record_refund(
+        context
+            .host
+            .gas_params()
+            .sstore_refund(is_istanbul, &state_load.data),
+    );
+}
+
 /// MorphEvm extends the Evm with Morph specific types and logic.
 #[derive(Debug, derive_more::Deref, derive_more::DerefMut)]
 #[expect(clippy::type_complexity)]
@@ -188,6 +301,10 @@ impl<DB: Database, I> MorphEvm<DB, I> {
             0x54,
             Instruction::new(sload_morph::<DB>, WARM_STORAGE_READ_COST),
         );
+        // Morph custom SSTORE: same original_value fix on the SSTORE cold path.
+        // Static gas = 0 because sstore_morph manages all gas accounting itself
+        // (static + dynamic + refund).
+        instructions.insert_instruction(0x55, Instruction::new(sstore_morph::<DB>, 0));
         // SELFDESTRUCT is disabled in Morph
         instructions.insert_instruction(0xff, Instruction::unknown());
         // BLOBHASH is disabled in Morph
