@@ -23,6 +23,7 @@ use reth_evm::{
     block::{BlockExecutionError, BlockValidationError},
     execute::{BlockBuilder, BlockBuilderOutcome},
 };
+use reth_execution_cache::CachedStateProvider;
 use reth_execution_types::BlockExecutionOutput;
 use reth_payload_builder::PayloadId;
 use reth_payload_primitives::{BuiltPayloadExecutedBlock, PayloadBuilderError};
@@ -167,6 +168,7 @@ where
     {
         let BuildArguments {
             mut cached_reads,
+            execution_cache,
             config,
             cancel,
             best_payload,
@@ -195,12 +197,30 @@ where
             metrics: MorphPayloadBuilderMetrics::default(),
         };
 
-        let state_provider = self.client.state_by_block_hash(ctx.parent().hash())?;
-        let state = StateProviderDatabase::new(&state_provider);
+        // When `--engine.share-execution-cache-with-payload-builder` is set,
+        // reth's engine provides a SavedCache snapshot associated with the parent
+        // block. Wrap the state provider so account/storage/code reads consult
+        // the cache before hitting the DB — amortizes cross-block cost when the
+        // payload builder and engine both touch overlapping state.
+        let mut state_provider: Box<dyn StateProvider> =
+            self.client.state_by_block_hash(ctx.parent().hash())?;
+        if let Some(execution_cache) = execution_cache {
+            state_provider = Box::new(CachedStateProvider::new(
+                state_provider,
+                execution_cache.cache().clone(),
+                execution_cache.metrics().clone(),
+            ));
+        }
+        let state = StateProviderDatabase::new(state_provider.as_ref());
 
         // Reuse cached reads from previous runs for incremental payload building
-        build_payload_inner(cached_reads.as_db_mut(state), &state_provider, ctx, best)
-            .map(|out| out.with_cached_reads(cached_reads))
+        build_payload_inner(
+            cached_reads.as_db_mut(state),
+            state_provider.as_ref(),
+            ctx,
+            best,
+        )
+        .map(|out| out.with_cached_reads(cached_reads))
     }
 }
 
@@ -650,7 +670,7 @@ impl ExecutionInfo {
 /// Builds the payload on top of the state.
 fn build_payload_inner<'a, DB, BestTxs>(
     db: DB,
-    state_provider: &impl StateProvider,
+    state_provider: &(impl StateProvider + ?Sized),
     ctx: MorphPayloadBuilderCtx,
     best: impl FnOnce(BestTransactionsAttributes) -> BestTxs + Send + Sync + 'a,
 ) -> Result<BuildOutcomeKind<MorphBuiltPayload>, PayloadBuilderError>
