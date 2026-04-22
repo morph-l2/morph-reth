@@ -4,9 +4,7 @@
 //! - [`MorphBlockExecutor`]: The main block executor
 //! - [`MorphBlockExecutorFactory`]: Factory for creating block executors
 //! - [`MorphReceiptBuilder`]: Receipt construction for transactions
-//! - Hardfork application logic (Curie, etc.)
 
-pub(crate) mod curie;
 mod factory;
 mod receipt;
 
@@ -26,7 +24,6 @@ use alloy_evm::{
     },
 };
 use alloy_primitives::{Address, U256};
-use curie::apply_curie_hard_fork;
 use morph_chainspec::{MorphChainSpec, MorphHardfork, MorphHardforks};
 use morph_primitives::{MorphReceipt, MorphTxEnvelope};
 use morph_revm::{L1_GAS_PRICE_ORACLE_ADDRESS, MorphHaltReason, TokenFeeInfo, evm::MorphContext};
@@ -224,13 +221,9 @@ where
     /// 2. **L1 Gas Oracle Cache**: Loads the L1 Gas Price Oracle contract into the
     ///    account cache to optimize L1 fee calculations for all transactions
     ///
-    /// 3. **Curie Hardfork**: At the exact Curie activation block, applies the
-    ///    hardfork state changes (updates to L1 Gas Price Oracle contract)
-    ///
     /// # Errors
     /// Returns error if:
     /// - L1 Gas Price Oracle account cannot be loaded
-    /// - Curie hardfork application fails at transition block
     fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
         // 1. Set state clear flag if the block is after the Spurious Dragon hardfork
         let block_number: u64 = self.evm.block().number.to();
@@ -252,19 +245,6 @@ where
             .spec
             .morph_hardfork_at(block_number, self.evm.block().timestamp.to::<u64>());
         self.hardfork = hardfork;
-
-        // 3. Apply Curie hardfork at the transition block
-        // Only executes once at the exact block where Curie activates
-        if self
-            .spec
-            .morph_fork_activation(MorphHardfork::Curie)
-            .transitions_at_block(block_number)
-            && let Err(err) = apply_curie_hard_fork(self.evm.db_mut())
-        {
-            return Err(BlockExecutionError::msg(format!(
-                "error occurred at Curie fork: {err:?}"
-            )));
-        }
 
         Ok(())
     }
