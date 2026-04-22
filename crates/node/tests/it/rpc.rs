@@ -584,3 +584,107 @@ async fn debug_trace_replay_apis_work_for_standard_jade_block() -> eyre::Result<
 
     Ok(())
 }
+
+/// `eth_estimateGas` rejects a request whose sender cannot cover the L1 data fee.
+///
+/// Exercises the `MorphEthApi::caller_gas_allowance` override. In reth v2.0.0
+/// the upstream `estimate_gas_with` sets `cfg_env.disable_fee_charge = true`,
+/// so the EVM handler short-circuits and never checks balance — the L1 fee
+/// cap must instead be enforced in the gas-allowance pre-check.
+///
+/// Setup:
+/// - An unfunded random sender (`balance = 0`).
+/// - A zero-value transfer with a non-zero `gasPrice` so the request goes
+///   through the balance-based allowance cap.
+///
+/// Expected:
+/// - The RPC returns an error whose message contains
+///   `"insufficient funds for l1 fee"` (matches go-ethereum's error string
+///   for this case).
+#[tokio::test(flavor = "multi_thread")]
+async fn estimate_gas_reports_insufficient_funds_for_l1_fee() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+
+    // Produce a block so the L1 gas oracle state (genesis alloc) is live
+    // and `caller_gas_allowance` can read the Curie slots.
+    advance_chain(1, &mut node, wallet_to_arc(wallet)).await?;
+
+    let client = node
+        .rpc_client()
+        .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
+
+    // Unfunded random sender.
+    let poor_sender = Address::random();
+    let recipient = Address::random();
+
+    let params = (serde_json::json!({
+        "from": poor_sender,
+        "to": recipient,
+        "value": "0x0",
+        "gasPrice": "0x3b9aca00", // 1 Gwei — ensures the balance-based cap runs
+    }),);
+
+    let result: Result<Value, _> = client.request("eth_estimateGas", params).await;
+
+    let err =
+        result.expect_err("eth_estimateGas must fail for a sender that cannot cover the L1 fee");
+    let err_str = err.to_string();
+    assert!(
+        err_str.contains("insufficient funds for l1 fee"),
+        "expected 'insufficient funds for l1 fee', got: {err_str}"
+    );
+
+    Ok(())
+}
+
+/// `eth_estimateGas` rejects a request whose sender cannot afford `tx.value`.
+///
+/// Exercises the first balance check in `MorphEthApi::caller_gas_allowance`
+/// — the one that fires before the L1 fee is even computed.
+///
+/// Setup:
+/// - An unfunded random sender (`balance = 0`).
+/// - A non-zero `value`, which makes `value > balance` trivially true.
+///
+/// Expected:
+/// - The RPC returns an error whose message contains
+///   `"insufficient funds for transfer"` (matches go-ethereum's error string
+///   for this case).
+#[tokio::test(flavor = "multi_thread")]
+async fn estimate_gas_reports_insufficient_funds_for_transfer() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+
+    advance_chain(1, &mut node, wallet_to_arc(wallet)).await?;
+
+    let client = node
+        .rpc_client()
+        .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
+
+    let poor_sender = Address::random();
+    let recipient = Address::random();
+
+    let params = (serde_json::json!({
+        "from": poor_sender,
+        "to": recipient,
+        "value": "0x64", // 100 wei > 0 balance
+        "gasPrice": "0x3b9aca00",
+    }),);
+
+    let result: Result<Value, _> = client.request("eth_estimateGas", params).await;
+
+    let err =
+        result.expect_err("eth_estimateGas must fail when value exceeds the sender's balance");
+    let err_str = err.to_string();
+    assert!(
+        err_str.contains("insufficient funds for transfer"),
+        "expected 'insufficient funds for transfer', got: {err_str}"
+    );
+
+    Ok(())
+}
