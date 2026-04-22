@@ -126,7 +126,7 @@ mod tests {
             .storage
             .into_iter()
             .collect::<Vec<(U256, StorageSlot)>>();
-        storage.sort_by(|(a, _), (b, _)| a.cmp(b));
+        storage.sort_by_key(|(a, _)| *a);
 
         let expected_storage = [
             (GPO_L1_BLOB_BASE_FEE_SLOT, INITIAL_L1_BLOB_BASE_FEE),
