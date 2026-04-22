@@ -11,18 +11,19 @@
 //!
 //! go-ethereum's `DoEstimateGas` handles this by capping the binary-search
 //! `hi` based on `balance − value − l1DataFee`. We mirror that here by
-//! overriding `caller_gas_allowance` to:
-//! 1. Require `value <= balance`.
-//! 2. Subtract the L1 data fee (computed from `tx_env.rlp_bytes`).
-//! 3. Divide the remainder by `gas_price` to derive the gas allowance.
+//! overriding `caller_gas_allowance`:
 //!
-//! MorphTx transactions paying fees in ERC20 tokens get an additional token
-//! balance check via [`caller_gas_allowance_with_token`], matching
-//! go-ethereum's token-fee branch in `DoEstimateGas`.
+//! * **ETH path** — delegate `(balance − value) / gas_price` to upstream
+//!   [`alloy_evm::call::caller_gas_allowance`], then subtract the L1 fee
+//!   expressed in gas units.
+//! * **MorphTx token-fee path** — read the token balance from the L2 token
+//!   registry and use it (scaled via `price_ratio`/`scale`) as the
+//!   allowance base, matching go-ethereum's token branch in
+//!   `DoEstimateGas`.
 
 use crate::MorphEthApiError;
-use crate::error::ToMorphErr;
 use crate::eth::{MorphEthApi, MorphNodeCore};
+use alloy_evm::call::{CallError, caller_gas_allowance as upstream_caller_gas_allowance};
 use alloy_primitives::U256;
 use morph_chainspec::{MorphChainSpec, MorphHardforks};
 use morph_revm::{L1BlockInfo, MorphTxExt, TokenFeeInfo};
@@ -78,40 +79,26 @@ where
     /// Compute the upper bound on gas that the caller can afford.
     ///
     /// This overrides the upstream default, which only divides
-    /// `balance / gas_price`, by additionally accounting for the
-    /// transaction value and the Morph L1 data fee — matching
-    /// go-ethereum's `DoEstimateGas` behaviour (`available.Sub(available,
-    /// l1DataFee)` before dividing by `feeCap`).
+    /// `(balance − value) / gas_price`, by additionally accounting for the
+    /// Morph L1 data fee — matching go-ethereum's `DoEstimateGas` behaviour
+    /// (`available.Sub(available, l1DataFee)` before dividing by `feeCap`).
     ///
-    /// For MorphTx transactions paying fees in ERC20 tokens
-    /// (`fee_token_id > 0`), the token balance — scaled through the fee
-    /// token's `price_ratio`/`scale` — also caps the allowance.
+    /// MorphTx transactions paying fees in ERC20 tokens (`fee_token_id > 0`)
+    /// take a dedicated path that uses the token balance — scaled through
+    /// the fee token's `price_ratio`/`scale` — as the allowance base.
     fn caller_gas_allowance(
         &self,
         mut db: impl Database<Error: Into<EthApiError>>,
         evm_env: &EvmEnvFor<<Self as RpcNodeCore>::Evm>,
         tx_env: &TxEnvFor<<Self as RpcNodeCore>::Evm>,
     ) -> Result<u64, <Self as EthApiTypes>::Error> {
-        let caller = tx_env.caller();
-        let balance = db
-            .basic(caller)
-            .to_morph_err()?
-            .map(|acc| acc.balance)
-            .unwrap_or_default();
-
-        let value = tx_env.value();
-        if value > balance {
-            return Err(MorphEthApiError::InsufficientFundsForTransfer);
-        }
-
         let l1_fee = self.estimate_l1_fee(&mut db, evm_env, tx_env)?;
 
         if let Some(fee_token_id) = tx_env.fee_token_id.filter(|id| *id > 0) {
             return self.caller_gas_allowance_with_token(
                 &mut db,
-                caller,
-                balance,
-                value,
+                tx_env.caller(),
+                tx_env.value(),
                 l1_fee,
                 fee_token_id,
                 tx_env.fee_limit,
@@ -119,7 +106,24 @@ where
             );
         }
 
-        caller_gas_allowance_with_eth(balance, value, l1_fee, tx_env.gas_price())
+        // ETH path: reuse upstream's `(balance − value) / gas_price` and
+        // then deduct the L1 data fee expressed in gas units.
+        let base = upstream_caller_gas_allowance(&mut db, tx_env).map_err(|e| match e {
+            CallError::Database(db_err) => MorphEthApiError::Eth(db_err.into()),
+            CallError::InsufficientFunds(_) => MorphEthApiError::InsufficientFundsForTransfer,
+        })?;
+
+        let gas_price = tx_env.gas_price();
+        if gas_price == 0 {
+            // Zero gas price → allowance is unbounded by fee; L1 fee cannot cap.
+            return Ok(base);
+        }
+
+        let l1_fee_gas = saturating_div_u128(l1_fee, gas_price);
+        if l1_fee_gas >= base {
+            return Err(MorphEthApiError::InsufficientFundsForL1Fee);
+        }
+        Ok(base - l1_fee_gas)
     }
 }
 
@@ -182,7 +186,6 @@ where
         &self,
         db: &mut DB,
         caller: alloy_primitives::Address,
-        balance: U256,
         value: U256,
         l1_fee: U256,
         fee_token_id: u16,
@@ -205,9 +208,17 @@ where
             return Err(MorphEthApiError::InvalidFeeToken);
         }
 
-        // Calculate base ETH allowance (for tx.value transfer; L1 fee is paid
-        // in tokens on this path, so do not subtract it here).
-        let eth_allowance = caller_gas_allowance_with_eth(balance, value, U256::ZERO, gas_price)?;
+        // Base ETH allowance enforces `value <= balance`; L1 fee is paid in
+        // tokens on this path, so we don't deduct it from the ETH side.
+        let eth_balance = db
+            .basic(caller)
+            .map_err(|e| MorphEthApiError::Eth(e.into()))?
+            .map(|acc| acc.balance)
+            .unwrap_or_default();
+        let eth_available = eth_balance
+            .checked_sub(value)
+            .ok_or(MorphEthApiError::InsufficientFundsForTransfer)?;
+        let eth_allowance = gas_allowance_from_balance(eth_available, gas_price);
 
         // If balance_slot is unknown, we cannot read the token balance via
         // storage alone. Skip the token balance cap and let the EVM handler
@@ -221,7 +232,7 @@ where
             return Ok(eth_allowance);
         }
 
-        // Calculate token-based gas allowance
+        // Calculate token-based gas allowance.
         let limit = match fee_limit {
             Some(limit) if !limit.is_zero() => token_fee_info.balance.min(limit),
             _ => token_fee_info.balance,
@@ -241,38 +252,32 @@ where
     }
 }
 
-/// Calculates the caller's gas allowance when paying with ETH.
+/// Saturating `U256 / u128` → `u64`.
 ///
-/// Subtracts the transaction value and L1 fee from the balance,
-/// then converts the remaining balance to gas units.
-fn caller_gas_allowance_with_eth(
-    balance: U256,
-    value: U256,
-    l1_fee: U256,
-    gas_price: u128,
-) -> Result<u64, MorphEthApiError> {
-    let mut available = balance.saturating_sub(value);
-    if l1_fee >= available {
-        return Err(MorphEthApiError::InsufficientFundsForL1Fee);
+/// Returns `0` when `divisor == 0` (the ETH path checks `gas_price == 0`
+/// before calling this). Saturates to `u64::MAX` if the quotient overflows
+/// a `u64`.
+fn saturating_div_u128(dividend: U256, divisor: u128) -> u64 {
+    if divisor == 0 {
+        return 0;
     }
-    available -= l1_fee;
-    Ok(gas_allowance_from_balance(available, gas_price))
+    let quotient = dividend / U256::from(divisor);
+    if quotient > U256::from(u64::MAX) {
+        u64::MAX
+    } else {
+        quotient.to::<u64>()
+    }
 }
 
 /// Converts a balance to gas units based on the gas price.
 ///
-/// Returns `u64::MAX` if gas price is zero (unlimited gas).
+/// Returns `u64::MAX` if gas price is zero (unlimited gas). Used by the
+/// token-fee path to translate ETH-equivalent balances into a gas cap.
 fn gas_allowance_from_balance(balance: U256, gas_price: u128) -> u64 {
     if gas_price == 0 {
         return u64::MAX;
     }
-    let gas_price = U256::from(gas_price);
-    let allowance = balance / gas_price;
-    if allowance > U256::from(u64::MAX) {
-        u64::MAX
-    } else {
-        allowance.to::<u64>()
-    }
+    saturating_div_u128(balance, gas_price)
 }
 
 /// Converts a token amount to ETH equivalent using the fee token info.
