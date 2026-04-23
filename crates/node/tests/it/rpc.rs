@@ -697,6 +697,69 @@ async fn eth_call_does_not_reject_unfunded_sender_on_l1_fee() -> eyre::Result<()
     Ok(())
 }
 
+/// MorphTx token-fee `eth_call` does NOT reject a zero-ETH sender on
+/// `(ETH_balance − value) / gas_price` grounds.
+///
+/// Guards against a regression where the shared
+/// `Call::caller_gas_allowance` hook short-circuits to upstream's
+/// ETH-based allowance for `eth_call` / `createAccessList`. For a
+/// MorphTx paying fees in a token, the caller can legitimately hold
+/// zero ETH — gas and L1 fee come out of the fee token. Applying the
+/// upstream ETH cap would set the allowance to 0 (or reject outright)
+/// and break token-fee `eth_call` / `createAccessList`.
+///
+/// Setup:
+/// - An unfunded random sender (`balance = 0`).
+/// - `eth_call` with `feeTokenID = 1`, non-zero `gasPrice`, no explicit
+///   `gas` — the path that routes through `caller_gas_allowance`.
+///
+/// Expected:
+/// - The call must not surface our `insufficient funds for transfer`
+///   or `insufficient funds for l1 fee` errors (it may return a
+///   pass-through EVM/handler error such as "invalid fee token" if the
+///   test genesis doesn't have token 1 wired up, which is out of scope).
+#[tokio::test(flavor = "multi_thread")]
+async fn eth_call_token_fee_does_not_reject_zero_eth_sender() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+
+    advance_chain(1, &mut node, wallet_to_arc(wallet)).await?;
+
+    let client = node
+        .rpc_client()
+        .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
+
+    let poor_sender = Address::random();
+    let recipient = Address::random();
+
+    let params = (
+        serde_json::json!({
+            "from": poor_sender,
+            "to": recipient,
+            "value": "0x0",
+            "gasPrice": "0x3b9aca00",
+            "feeTokenID": "0x1",
+            "feeLimit": "0xde0b6b3a7640000",   // 1e18 token units
+        }),
+        "latest",
+    );
+
+    let result: Result<Value, _> = client.request("eth_call", params).await;
+
+    if let Err(err) = &result {
+        let err_str = err.to_string();
+        assert!(
+            !err_str.contains("insufficient funds for transfer")
+                && !err_str.contains("insufficient funds for l1 fee"),
+            "token-fee eth_call must not reject on ETH-balance grounds: {err_str}"
+        );
+    }
+
+    Ok(())
+}
+
 /// `eth_estimateGas` rejects a request whose sender cannot afford `tx.value`.
 ///
 /// Exercises the first balance check in `MorphEthApi::caller_gas_allowance`

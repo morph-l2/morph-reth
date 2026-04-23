@@ -123,6 +123,19 @@ where
         // the flag at its default `false`, which is where Morph's
         // `DoEstimateGas` parity belongs.
         if evm_env.cfg_env.disable_block_gas_limit {
+            // MorphTx token-fee path: the caller pays gas and the L1 fee in
+            // the fee token, and may hold little or zero ETH. Delegating to
+            // `alloy_evm::call::caller_gas_allowance` here would cap the
+            // allowance by `(ETH_balance − value) / gas_price`, i.e. set it
+            // to 0 (or reject on `InsufficientFundsForTransfer`) for any
+            // call with zero ETH — even though morph-geth's `DoCall` runs
+            // the tx through the handler's `validate_and_deduct_token_fee`
+            // without an RPC-layer ETH-based cap. We return `u64::MAX`
+            // here, mirroring that behaviour; the real ETH-value and
+            // token-balance checks happen during execution.
+            if tx_env.fee_token_id.is_some_and(|id| id > 0) {
+                return Ok(u64::MAX);
+            }
             return upstream_caller_gas_allowance(&mut db, tx_env).map_err(|e| match e {
                 CallError::Database(db_err) => MorphEthApiError::Eth(db_err.into()),
                 CallError::InsufficientFunds(_) => MorphEthApiError::InsufficientFundsForTransfer,
