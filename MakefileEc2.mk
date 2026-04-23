@@ -5,7 +5,10 @@ DIST_DIR         = dist
 BINARY           = morph-reth
 TARBALL          = morph-reth.tar.gz
 CARGO_TARGET_DIR ?= target
-PROFILE          ?= release
+# Production deploys go to EC2 via S3. Default to `profiling` so the shipped
+# binaries keep line-table symbols and remain flame-graphable in prod (matches
+# the Dockerfile default). Override with `PROFILE=maxperf` for peak throughput.
+PROFILE          ?= profiling
 
 define cargo_build_and_upload
 	if [ ! -d $(DIST_DIR) ]; then mkdir -p $(DIST_DIR); fi
