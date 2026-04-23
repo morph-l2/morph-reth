@@ -32,3 +32,16 @@ reth-rpc-server-types.workspace = true
 clap.workspace = true
 eyre.workspace = true
 tracing.workspace = true
+
+[features]
+default = ["jemalloc"]
+
+jemalloc = [
+    "reth-cli-util/jemalloc",
+    "reth-ethereum-cli/jemalloc",
+]
+jemalloc-prof = [
+    "jemalloc",
+    "reth-cli-util/jemalloc-prof",
+    "reth-ethereum-cli/jemalloc-prof",
+]

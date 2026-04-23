@@ -3,6 +3,18 @@
 //! This is the main entry point for the Morph L2 execution layer client.
 //! It extends reth with Morph-specific functionality.
 
+#[global_allocator]
+static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
+
+// Required for `override_allocator_on_supported_platforms` — ensures the linker
+// pulls in tikv_jemalloc_sys symbols so jemalloc takes over malloc/free.
+#[cfg(all(feature = "jemalloc", unix))]
+use reth_cli_util::allocator::tikv_jemalloc_sys as _;
+
+#[cfg(all(feature = "jemalloc-prof", unix))]
+#[unsafe(export_name = "malloc_conf")]
+static MALLOC_CONF: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:19\0";
+
 use clap::Parser;
 use morph_chainspec::{MorphChainSpec, MorphChainSpecParser};
 use morph_consensus::MorphConsensus;
