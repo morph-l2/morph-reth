@@ -1,48 +1,10 @@
-//! Morph `eth_call` and `eth_estimateGas` overrides.
+//! Morph `eth_call` / `eth_estimateGas` overrides.
 //!
-//! # Why we override [`Call::caller_gas_allowance`]
-//!
-//! reth v2.0.0's `estimate_gas_with` sets `cfg_env.disable_fee_charge = true`
-//! for both `eth_call` and `eth_estimateGas` (see upstream `reth#18470`).
-//! In revm this causes `calculate_caller_fee` to `return Ok(balance)`
-//! immediately (see `revm-handler/src/pre_execution.rs`), skipping the
-//! caller balance check and L1 fee deduction entirely. Relying on the EVM
-//! handler to enforce balance is therefore a no-op on both RPC paths.
-//!
-//! go-ethereum's `DoEstimateGas` handles this by capping the binary-search
-//! `hi` based on `balance − value − l1DataFee`. We mirror that here by
-//! overriding `caller_gas_allowance`:
-//!
-//! * **ETH path** — delegate `(balance − value) / gas_price` to upstream
-//!   [`alloy_evm::call::caller_gas_allowance`], then subtract the L1 fee
-//!   expressed in gas units.
-//! * **MorphTx token-fee path** — read the token balance from the L2 token
-//!   registry and use it (scaled via `price_ratio`/`scale`) as the
-//!   allowance base, matching go-ethereum's token branch in
-//!   `DoEstimateGas`.
-//!
-//! # Scoping: estimateGas only
-//!
-//! `Call::caller_gas_allowance` is a shared hook — upstream also calls it
-//! from `prepare_call_env` (`eth_call`) and `create_access_list_with`
-//! (`eth_createAccessList`) when no explicit gas limit is provided.
-//! morph-geth's `DoCall`, however, uses `ApplyMessage(..., Big0)` and
-//! does **not** reject `eth_call` on L1-fee grounds. Adding our L1 fee
-//! cap unconditionally would make `eth_call` over-reject.
-//!
-//! We key the Morph extension off `cfg_env.disable_block_gas_limit`,
-//! which upstream sets at each call site:
-//!
-//! | call site                                     | `disable_block_gas_limit` |
-//! |-----------------------------------------------|---------------------------|
-//! | `EstimateCall::estimate_gas_with` (estimate)  | `false` (default)         |
-//! | `Call::prepare_call_env` (`eth_call`)         | `true`                    |
-//! | `EthCall::create_access_list_with`            | `true`                    |
-//!
-//! When the flag is `true` we fall through to upstream's default
-//! `(balance − value) / gas_price` and skip the L1 fee cap, keeping
-//! `eth_call` semantics aligned with `DoCall`. See the followup note
-//! for the (different, symmetric) `eth_createAccessList` gap.
+//! [`Call::caller_gas_allowance`] is overridden so `eth_estimateGas` caps
+//! gas by `balance − value − l1_fee` (ETH path) or the fee token balance
+//! (MorphTx `fee_token_id > 0`). `eth_call` and `eth_createAccessList`
+//! are detected via `cfg_env.disable_block_gas_limit = true` and fall
+//! through to the upstream allowance without the L1-fee extension.
 
 use crate::MorphEthApiError;
 use crate::eth::{MorphEthApi, MorphNodeCore};
@@ -99,40 +61,16 @@ where
         self.eth_api().evm_memory_limit()
     }
 
-    /// Compute the upper bound on gas that the caller can afford.
-    ///
-    /// This overrides the upstream default, which only divides
-    /// `(balance − value) / gas_price`, by additionally accounting for the
-    /// Morph L1 data fee — matching go-ethereum's `DoEstimateGas` behaviour
-    /// (`available.Sub(available, l1DataFee)` before dividing by `feeCap`).
-    ///
-    /// MorphTx transactions paying fees in ERC20 tokens (`fee_token_id > 0`)
-    /// take a dedicated path that uses the token balance — scaled through
-    /// the fee token's `price_ratio`/`scale` — as the allowance base.
     fn caller_gas_allowance(
         &self,
         mut db: impl Database<Error: Into<EthApiError>>,
         evm_env: &EvmEnvFor<<Self as RpcNodeCore>::Evm>,
         tx_env: &TxEnvFor<<Self as RpcNodeCore>::Evm>,
     ) -> Result<u64, <Self as EthApiTypes>::Error> {
-        // When the flag is set, the caller is `prepare_call_env` (eth_call)
-        // or `create_access_list_with` (eth_createAccessList). In both cases
-        // morph-geth's corresponding path does not deduct the L1 fee for the
-        // balance check, so we fall through to upstream's default
-        // `(balance − value) / gas_price`. Only `estimate_gas_with` leaves
-        // the flag at its default `false`, which is where Morph's
-        // `DoEstimateGas` parity belongs.
+        // eth_call / eth_createAccessList: no L1-fee cap. Token-fee callers
+        // can have zero ETH, so defer to the handler instead of the
+        // upstream ETH allowance.
         if evm_env.cfg_env.disable_block_gas_limit {
-            // MorphTx token-fee path: the caller pays gas and the L1 fee in
-            // the fee token, and may hold little or zero ETH. Delegating to
-            // `alloy_evm::call::caller_gas_allowance` here would cap the
-            // allowance by `(ETH_balance − value) / gas_price`, i.e. set it
-            // to 0 (or reject on `InsufficientFundsForTransfer`) for any
-            // call with zero ETH — even though morph-geth's `DoCall` runs
-            // the tx through the handler's `validate_and_deduct_token_fee`
-            // without an RPC-layer ETH-based cap. We return `u64::MAX`
-            // here, mirroring that behaviour; the real ETH-value and
-            // token-balance checks happen during execution.
             if tx_env.fee_token_id.is_some_and(|id| id > 0) {
                 return Ok(u64::MAX);
             }
@@ -142,6 +80,7 @@ where
             });
         }
 
+        // eth_estimateGas path.
         let l1_fee = self.estimate_l1_fee(&mut db, evm_env, tx_env)?;
 
         if let Some(fee_token_id) = tx_env.fee_token_id.filter(|id| *id > 0) {
@@ -156,39 +95,26 @@ where
             );
         }
 
-        // ETH path: mirror go-ethereum's
-        //   allowance = (balance − value − l1_fee) / gas_price
-        // The subtraction and the division must both happen at wei
-        // precision. Delegating `(balance − value) / gas_price` to
-        // `alloy_evm::call::caller_gas_allowance` and then subtracting
-        // `l1_fee / gas_price` in gas units loses the sub-gas_price
-        // remainder and can over-report by 1 gas on either side of the
-        // rounding boundary (e.g. available=15, l1_fee=6, gas_price=10
-        // would yield 1 instead of the correct 0).
-        let caller = tx_env.caller();
+        // allowance = (balance − value − l1_fee) / gas_price, done at wei
+        // precision so the remainder is not lost across the two
+        // subtractions.
         let balance = db
-            .basic(caller)
+            .basic(tx_env.caller())
             .map_err(|e| MorphEthApiError::Eth(e.into()))?
             .map(|acc| acc.balance)
             .unwrap_or_default();
         let available = balance
             .checked_sub(tx_env.value())
             .ok_or(MorphEthApiError::InsufficientFundsForTransfer)?;
-
-        // Reject as soon as the L1 fee consumes everything the caller had
-        // left after paying `tx.value`. Using `checked_sub` here would
-        // pass `l1_fee == available` through as `allowance = 0`, forcing
-        // the binary search to fail later with a less informative
-        // "gas required exceeds allowance 0". Catching the boundary at
-        // the RPC layer surfaces the real reason ("insufficient funds
-        // for l1 fee") the moment we know the tx cannot fund any gas at
-        // all.
+        // Reject at `l1_fee >= available` so the RPC surfaces the real
+        // reason rather than a downstream "gas required exceeds allowance 0".
         if l1_fee >= available {
             return Err(MorphEthApiError::InsufficientFundsForL1Fee);
         }
-        let available = available - l1_fee;
-
-        Ok(gas_allowance_from_balance(available, tx_env.gas_price()))
+        Ok(gas_allowance_from_balance(
+            available - l1_fee,
+            tx_env.gas_price(),
+        ))
     }
 }
 
@@ -199,12 +125,7 @@ where
     Rpc:
         reth_rpc_convert::RpcConvert<Primitives = N::Primitives, Error = EthApiError, Evm = N::Evm>,
 {
-    /// Estimates the L1 data fee for the given transaction.
-    ///
-    /// Returns zero for L1 message transactions since they don't pay L1 fees.
-    /// Uses `tx_env.rlp_bytes` (populated by `MorphTransactionRequest::try_into_tx_env`)
-    /// and the current `L1GasPriceOracle` state to compute the fee via
-    /// `L1BlockInfo::calculate_tx_l1_cost`.
+    /// Estimate the L1 data fee. Zero for L1 messages.
     fn estimate_l1_fee<DB>(
         &self,
         db: &mut DB,
@@ -237,15 +158,8 @@ where
         Ok(l1_info.calculate_tx_l1_cost(rlp_bytes, hardfork))
     }
 
-    /// Calculate caller's gas allowance when paying fees with an ERC20 token.
-    ///
-    /// Uses [`TokenFeeInfo::load_storage_only`] so it works on any
-    /// `revm::Database` (no `Debug` bound), which is what the RPC
-    /// `Call::caller_gas_allowance` trait hands us. When the token is
-    /// registered but its `balance_slot` is unknown, we skip the token
-    /// balance cap — the EVM handler re-validates the balance during
-    /// the binary-search `executable(gas)` call via
-    /// `validate_and_deduct_token_fee`.
+    /// Allowance for MorphTx ERC20 fee-token callers: cap by token
+    /// balance, not by ETH balance.
     #[allow(clippy::too_many_arguments)]
     fn caller_gas_allowance_with_token<DB>(
         &self,
@@ -265,7 +179,6 @@ where
             .map_err(|_| MorphEthApiError::InvalidFeeToken)?
             .ok_or(MorphEthApiError::InvalidFeeToken)?;
 
-        // Validate token is registered and active
         if !token_fee_info.is_active
             || token_fee_info.price_ratio.is_zero()
             || token_fee_info.scale.is_zero()
@@ -273,12 +186,7 @@ where
             return Err(MorphEthApiError::InvalidFeeToken);
         }
 
-        // On the token-fee path, ETH balance only needs to cover `tx.value`
-        // — gas and the L1 data fee are paid in the fee token, matching
-        // the handler (`validate_and_deduct_token_fee`:
-        // "Check that caller has enough ETH to cover the value transfer")
-        // and morph-geth's token branch in `DoEstimateGas`
-        // (`allowance := altByEth / feeCap`, no ETH-balance-based cap).
+        // ETH only needs to cover `value`; gas + L1 fee are paid in tokens.
         let eth_balance = db
             .basic(caller)
             .map_err(|e| MorphEthApiError::Eth(e.into()))?
@@ -288,22 +196,13 @@ where
             return Err(MorphEthApiError::InsufficientFundsForTransfer);
         }
 
-        // If balance_slot is unknown, we cannot read the token balance via
-        // storage alone. Return `u64::MAX` (no RPC-side cap); the EVM
-        // handler's `validate_and_deduct_token_fee` verifies the real
-        // balance during the binary-search `executable(gas)` call.
+        // Unknown balance_slot: defer to the handler's token-balance check.
         if token_fee_info.balance_slot.is_none() {
-            tracing::debug!(
-                target: "morph::rpc",
-                token_id = fee_token_id,
-                "Token balance_slot unknown, skipping token balance cap in caller_gas_allowance"
-            );
             return Ok(u64::MAX);
         }
 
-        // Token-based gas allowance: `altAvailable / feeCap` in go-geth
-        // parlance. Token balance (optionally capped by `fee_limit`), minus
-        // the L1 fee converted into token units, converted back into ETH
+        // Token allowance: limit minus L1 fee in tokens, converted back to ETH
+        // via price_ratio/scale, then divided by gas_price.
         // via `price_ratio`/`scale`, divided by `gas_price`.
         let limit = match fee_limit {
             Some(limit) if !limit.is_zero() => token_fee_info.balance.min(limit),
@@ -323,11 +222,7 @@ where
     }
 }
 
-/// Saturating `U256 / u128` → `u64`.
-///
-/// Returns `0` when `divisor == 0` (the ETH path checks `gas_price == 0`
-/// before calling this). Saturates to `u64::MAX` if the quotient overflows
-/// a `u64`.
+/// `U256 / u128 → u64`, saturating.
 fn saturating_div_u128(dividend: U256, divisor: u128) -> u64 {
     if divisor == 0 {
         return 0;
@@ -340,10 +235,7 @@ fn saturating_div_u128(dividend: U256, divisor: u128) -> u64 {
     }
 }
 
-/// Converts a balance to gas units based on the gas price.
-///
-/// Returns `u64::MAX` if gas price is zero (unlimited gas). Used by the
-/// token-fee path to translate ETH-equivalent balances into a gas cap.
+/// Balance → gas units. `gas_price == 0` → `u64::MAX`.
 fn gas_allowance_from_balance(balance: U256, gas_price: u128) -> u64 {
     if gas_price == 0 {
         return u64::MAX;
@@ -351,10 +243,8 @@ fn gas_allowance_from_balance(balance: U256, gas_price: u128) -> u64 {
     saturating_div_u128(balance, gas_price)
 }
 
-/// Converts a token amount to ETH equivalent using the fee token info.
-///
-/// Uses the formula: `eth = token_amount * price_ratio / scale`.
-/// Returns `None` if price_ratio or scale is zero.
+/// `eth = token_amount * price_ratio / scale`, rounded up. `None` if
+/// `price_ratio` or `scale` is zero.
 fn token_amount_to_eth(token_amount: U256, info: &TokenFeeInfo) -> Option<U256> {
     if info.price_ratio.is_zero() || info.scale.is_zero() {
         return None;
@@ -373,46 +263,22 @@ fn token_amount_to_eth(token_amount: U256, info: &TokenFeeInfo) -> Option<U256> 
 mod tests {
     use super::*;
 
-    /// Regression: the caller-allowance math must subtract the L1 fee at
-    /// wei precision *before* dividing by `gas_price`, matching
-    /// go-ethereum's `DoEstimateGas`
-    /// (`allowance = (balance − value − l1DataFee) / feeCap`).
-    ///
-    /// An earlier refactor composed two floor divisions
-    /// (`floor((balance − value) / gas_price) − floor(l1_fee / gas_price)`),
-    /// which over-reports by 1 gas on either side of a rounding boundary.
-    /// With `balance=15 wei`, `value=0`, `l1_fee=6 wei`, `gas_price=10 wei`
-    /// the correct cap is 0 (the sender cannot afford even 1 gas once the
-    /// L1 fee is paid), but the floor/floor composition returned 1.
+    /// `(balance − value − l1_fee) / gas_price`, wei precision.
+    /// `balance=15, value=0, l1_fee=6, gas_price=10` → 0 (not 1 from
+    /// floor/floor composition).
     #[test]
     fn gas_allowance_subtracts_l1_fee_at_wei_precision() {
-        let balance = U256::from(15u64);
         let value = U256::ZERO;
         let l1_fee = U256::from(6u64);
         let gas_price = 10u128;
 
-        // Morph ETH-path allowance, done end-to-end the way
-        // `caller_gas_allowance` does it.
-        let available = balance
-            .checked_sub(value)
-            .unwrap()
-            .checked_sub(l1_fee)
-            .expect("balance must cover value + l1_fee");
+        let available = U256::from(15u64) - value - l1_fee;
         assert_eq!(gas_allowance_from_balance(available, gas_price), 0);
 
-        // Sanity: at the next wei of balance we get 1 gas.
-        let balance = U256::from(16u64);
-        let available = balance
-            .checked_sub(value)
-            .unwrap()
-            .checked_sub(l1_fee)
-            .unwrap();
+        let available = U256::from(16u64) - value - l1_fee;
         assert_eq!(gas_allowance_from_balance(available, gas_price), 1);
     }
 
-    /// `saturating_div_u128(_, 0) == 0`, preserving the `gas_price == 0`
-    /// short-circuit in `gas_allowance_from_balance` (which returns
-    /// `u64::MAX` instead).
     #[test]
     fn saturating_div_u128_handles_zero_divisor_and_overflow() {
         assert_eq!(saturating_div_u128(U256::from(100u64), 0), 0);
@@ -429,12 +295,6 @@ mod tests {
         );
     }
 
-    /// Inline reproduction of the ETH-path allowance logic in
-    /// `caller_gas_allowance`. Guards against regressing the
-    /// `l1_fee >= available` early return back to a `checked_sub`-based
-    /// `allowance = 0` fall-through (which forces the binary search to
-    /// raise `"gas required exceeds allowance 0"` instead of the real
-    /// `"insufficient funds for l1 fee"`).
     fn eth_path_allowance(
         balance: U256,
         value: U256,
@@ -452,11 +312,6 @@ mod tests {
 
     #[test]
     fn eth_path_l1_fee_equal_to_available_errors_early() {
-        // balance = 10 wei, value = 0, l1_fee = 10 wei, gas_price = 1
-        // → available = 10, l1_fee == available: there is literally zero
-        // wei left for any gas, so this must reject with
-        // `InsufficientFundsForL1Fee` at the RPC layer rather than pass
-        // `allowance = 0` through to the binary search.
         let err = eth_path_allowance(U256::from(10u64), U256::ZERO, U256::from(10u64), 1)
             .expect_err("l1_fee == available must reject");
         assert!(matches!(err, MorphEthApiError::InsufficientFundsForL1Fee));
@@ -464,7 +319,6 @@ mod tests {
 
     #[test]
     fn eth_path_one_wei_above_l1_fee_yields_positive_allowance() {
-        // Sanity companion: one wei of slack yields a positive allowance.
         let allowance = eth_path_allowance(U256::from(11u64), U256::ZERO, U256::from(10u64), 1)
             .expect("l1_fee < available must succeed");
         assert_eq!(allowance, 1);

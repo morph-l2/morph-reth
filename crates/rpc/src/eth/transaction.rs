@@ -189,18 +189,8 @@ impl<Spec> TryIntoTxEnv<MorphTxEnv, Spec, MorphBlockEnv> for MorphTransactionReq
                 Some(morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_1);
         }
 
-        // Encode the transaction RLP so that [`MorphEthApi::caller_gas_allowance`]
-        // (override in `eth/call.rs`) can recover the L1 data fee when computing
-        // the gas-allowance cap for `eth_estimateGas`.
-        //
-        // On reth v2.0.0 both `eth_call` and `eth_estimateGas` set
-        // `cfg_env.disable_fee_charge = true` (upstream `reth#18470`), which
-        // makes revm's `calculate_caller_fee` short-circuit to
-        // `Ok(balance)` — so the handler never reads `rlp_bytes` and never
-        // deducts the L1 fee on either RPC path. That matches go-ethereum's
-        // `DoCall` semantics. The L1 fee is instead enforced in the upper-level
-        // `caller_gas_allowance` override, mirroring go-ethereum's
-        // `DoEstimateGas` (`available.Sub(available, l1DataFee)`).
+        // Required by `MorphEthApi::caller_gas_allowance` (eth/call.rs) to
+        // recover the L1 data fee when capping `eth_estimateGas` allowance.
         tx_env.rlp_bytes = Some(tx_env.encode_for_l1_fee(evm_env.cfg_env.chain_id));
 
         Ok(tx_env)

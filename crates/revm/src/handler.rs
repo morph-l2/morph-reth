@@ -223,12 +223,9 @@ where
         // which skips gas-price checks entirely.
         validation::validate_env::<_, Self::Error>(evm.ctx())?;
 
-        // For MorphTx V1 with ETH fee (fee_token_id == 0), gas price must be validated
-        // against basefee — the same rule that applies to EIP-1559 transactions.
-        // Token-fee MorphTx (fee_token_id > 0) intentionally skips this check because
-        // fees are paid in ERC20 tokens.
-        // Skip for simulation contexts (eth_call / eth_estimateGas) where fee charge
-        // is disabled, matching go-ethereum's NoBaseFee behaviour.
+        // MorphTx V1 ETH-fee: enforce the EIP-1559 priority-fee rule.
+        // Token-fee MorphTx skips it (fees paid in ERC20); simulation
+        // paths also skip it.
         if evm.ctx_ref().tx().is_morph_tx()
             && !evm.ctx_ref().tx().uses_token_fee()
             && !evm.ctx_ref().cfg().is_fee_charge_disabled()
@@ -481,11 +478,8 @@ where
         let caller_addr = evm.ctx_ref().tx().caller();
         let is_call = evm.ctx_ref().tx().kind().is_call();
 
-        // eth_call (disable_fee_charge): skip token fee deduction entirely.
-        // Only nonce/code validation (above) and nonce bump are needed.
-        // This matches the ETH path's disable_fee_charge semantics and ensures
-        // eth_call is a pure simulation without token registry lookups, balance
-        // checks, or ERC20 transfers.
+        // Simulation paths must not touch token balance: skip the token
+        // fee deduction, keep only nonce/code validation and the nonce bump.
         if evm.ctx_ref().cfg().is_fee_charge_disabled() {
             if is_call {
                 let mut caller = evm
@@ -949,15 +943,19 @@ fn calculate_caller_fee_with_l1_cost(
     cfg: impl Cfg,
     l1_data_fee: U256,
 ) -> Result<U256, InvalidTransaction> {
+    // Simulation paths must not consume the caller balance.
+    if cfg.is_fee_charge_disabled() {
+        return Ok(balance);
+    }
+
     let basefee = block.basefee() as u128;
     let blob_price = block.blob_gasprice().unwrap_or_default();
     let is_balance_check_disabled = cfg.is_balance_check_disabled();
-    let is_fee_charge_disabled = cfg.is_fee_charge_disabled();
 
     // Validate balance against max possible spending using max_fee_per_gas (not effective_gas_price).
     // go-eth's buyGas() checks: balance >= gasFeeCap * gas + value + l1DataFee.
     // This ensures the sender can afford the worst-case gas cost before deducting the actual cost.
-    if !is_balance_check_disabled && !is_fee_charge_disabled {
+    if !is_balance_check_disabled {
         let max_gas_spending = U256::from(
             (tx.gas_limit() as u128)
                 .checked_mul(tx.max_fee_per_gas())
@@ -1217,5 +1215,28 @@ mod tests {
             .and_then(|acct| acct.storage.get(&U256::ZERO))
             .unwrap();
         assert_eq!(slot_state.present_value, original_balance);
+    }
+
+    /// `disable_fee_charge` must leave the caller balance untouched.
+    #[test]
+    fn calculate_caller_fee_is_short_circuited_by_disable_fee_charge() {
+        use revm::context::{CfgEnv, TxEnv};
+
+        let balance = U256::from(1_000_000_000_000u128);
+        let mut cfg = CfgEnv::<MorphHardfork>::default();
+        cfg.disable_fee_charge = true;
+
+        let tx = TxEnv {
+            gas_limit: 21_000,
+            gas_price: 1_000_000_000,
+            value: U256::from(42u64),
+            ..Default::default()
+        };
+        let block = BlockEnv::default();
+        let l1_data_fee = U256::from(1_234u64);
+
+        let new_balance =
+            calculate_caller_fee_with_l1_cost(balance, tx, block, cfg, l1_data_fee).unwrap();
+        assert_eq!(new_balance, balance);
     }
 }
