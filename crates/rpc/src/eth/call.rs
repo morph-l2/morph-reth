@@ -143,24 +143,29 @@ where
             );
         }
 
-        // ETH path: reuse upstream's `(balance − value) / gas_price` and
-        // then deduct the L1 data fee expressed in gas units.
-        let base = upstream_caller_gas_allowance(&mut db, tx_env).map_err(|e| match e {
-            CallError::Database(db_err) => MorphEthApiError::Eth(db_err.into()),
-            CallError::InsufficientFunds(_) => MorphEthApiError::InsufficientFundsForTransfer,
-        })?;
+        // ETH path: mirror go-ethereum's
+        //   allowance = (balance − value − l1_fee) / gas_price
+        // The subtraction and the division must both happen at wei
+        // precision. Delegating `(balance − value) / gas_price` to
+        // `alloy_evm::call::caller_gas_allowance` and then subtracting
+        // `l1_fee / gas_price` in gas units loses the sub-gas_price
+        // remainder and can over-report by 1 gas on either side of the
+        // rounding boundary (e.g. available=15, l1_fee=6, gas_price=10
+        // would yield 1 instead of the correct 0).
+        let caller = tx_env.caller();
+        let balance = db
+            .basic(caller)
+            .map_err(|e| MorphEthApiError::Eth(e.into()))?
+            .map(|acc| acc.balance)
+            .unwrap_or_default();
+        let available = balance
+            .checked_sub(tx_env.value())
+            .ok_or(MorphEthApiError::InsufficientFundsForTransfer)?;
+        let available = available
+            .checked_sub(l1_fee)
+            .ok_or(MorphEthApiError::InsufficientFundsForL1Fee)?;
 
-        let gas_price = tx_env.gas_price();
-        if gas_price == 0 {
-            // Zero gas price → allowance is unbounded by fee; L1 fee cannot cap.
-            return Ok(base);
-        }
-
-        let l1_fee_gas = saturating_div_u128(l1_fee, gas_price);
-        if l1_fee_gas >= base {
-            return Err(MorphEthApiError::InsufficientFundsForL1Fee);
-        }
-        Ok(base - l1_fee_gas)
+        Ok(gas_allowance_from_balance(available, tx_env.gas_price()))
     }
 }
 
@@ -338,5 +343,66 @@ fn token_amount_to_eth(token_amount: U256, info: &TokenFeeInfo) -> Option<U256> 
         Some(eth_amount)
     } else {
         Some(eth_amount.saturating_add(U256::from(1)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: the caller-allowance math must subtract the L1 fee at
+    /// wei precision *before* dividing by `gas_price`, matching
+    /// go-ethereum's `DoEstimateGas`
+    /// (`allowance = (balance − value − l1DataFee) / feeCap`).
+    ///
+    /// An earlier refactor composed two floor divisions
+    /// (`floor((balance − value) / gas_price) − floor(l1_fee / gas_price)`),
+    /// which over-reports by 1 gas on either side of a rounding boundary.
+    /// With `balance=15 wei`, `value=0`, `l1_fee=6 wei`, `gas_price=10 wei`
+    /// the correct cap is 0 (the sender cannot afford even 1 gas once the
+    /// L1 fee is paid), but the floor/floor composition returned 1.
+    #[test]
+    fn gas_allowance_subtracts_l1_fee_at_wei_precision() {
+        let balance = U256::from(15u64);
+        let value = U256::ZERO;
+        let l1_fee = U256::from(6u64);
+        let gas_price = 10u128;
+
+        // Morph ETH-path allowance, done end-to-end the way
+        // `caller_gas_allowance` does it.
+        let available = balance
+            .checked_sub(value)
+            .unwrap()
+            .checked_sub(l1_fee)
+            .expect("balance must cover value + l1_fee");
+        assert_eq!(gas_allowance_from_balance(available, gas_price), 0);
+
+        // Sanity: at the next wei of balance we get 1 gas.
+        let balance = U256::from(16u64);
+        let available = balance
+            .checked_sub(value)
+            .unwrap()
+            .checked_sub(l1_fee)
+            .unwrap();
+        assert_eq!(gas_allowance_from_balance(available, gas_price), 1);
+    }
+
+    /// `saturating_div_u128(_, 0) == 0`, preserving the `gas_price == 0`
+    /// short-circuit in `gas_allowance_from_balance` (which returns
+    /// `u64::MAX` instead).
+    #[test]
+    fn saturating_div_u128_handles_zero_divisor_and_overflow() {
+        assert_eq!(saturating_div_u128(U256::from(100u64), 0), 0);
+        assert_eq!(saturating_div_u128(U256::MAX, 1), u64::MAX);
+        assert_eq!(saturating_div_u128(U256::from(9u64), 10), 0);
+        assert_eq!(saturating_div_u128(U256::from(10u64), 10), 1);
+    }
+
+    #[test]
+    fn gas_allowance_with_zero_gas_price_returns_u64_max() {
+        assert_eq!(
+            gas_allowance_from_balance(U256::from(1_000u64), 0),
+            u64::MAX
+        );
     }
 }
