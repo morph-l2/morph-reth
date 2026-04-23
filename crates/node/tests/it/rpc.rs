@@ -640,6 +640,63 @@ async fn estimate_gas_reports_insufficient_funds_for_l1_fee() -> eyre::Result<()
     Ok(())
 }
 
+/// `eth_call` does NOT reject an unfunded sender on L1-fee grounds.
+///
+/// This is the companion to `estimate_gas_reports_insufficient_funds_for_l1_fee`
+/// — same caller/scenario, but invoked via `eth_call` instead of
+/// `eth_estimateGas`. morph-geth's `DoCall` uses
+/// `ApplyMessage(..., Big0)`, so L1 fee is not deducted for this RPC
+/// path; our override must stay out of `eth_call`'s way.
+///
+/// Setup:
+/// - An unfunded random sender (`balance = 0`).
+/// - `eth_call` with non-zero `gasPrice`, without explicit `gas` — the
+///   path that routes through `Call::caller_gas_allowance`.
+///
+/// Expected:
+/// - The call succeeds (empty output is fine; we only check that no
+///   `"insufficient funds"` error is returned).
+#[tokio::test(flavor = "multi_thread")]
+async fn eth_call_does_not_reject_unfunded_sender_on_l1_fee() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+
+    advance_chain(1, &mut node, wallet_to_arc(wallet)).await?;
+
+    let client = node
+        .rpc_client()
+        .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
+
+    let poor_sender = Address::random();
+    let recipient = Address::random();
+
+    let params = (
+        serde_json::json!({
+            "from": poor_sender,
+            "to": recipient,
+            "value": "0x0",
+            "gasPrice": "0x3b9aca00",
+        }),
+        "latest",
+    );
+
+    let result: Result<Value, _> = client.request("eth_call", params).await;
+
+    // eth_call may surface a revert error for other reasons, but it must
+    // never bubble up our L1-fee / transfer affordability errors.
+    if let Err(err) = &result {
+        let err_str = err.to_string();
+        assert!(
+            !err_str.contains("insufficient funds"),
+            "eth_call must not reject on L1-fee grounds: {err_str}"
+        );
+    }
+
+    Ok(())
+}
+
 /// `eth_estimateGas` rejects a request whose sender cannot afford `tx.value`.
 ///
 /// Exercises the first balance check in `MorphEthApi::caller_gas_allowance`

@@ -20,6 +20,29 @@
 //!   registry and use it (scaled via `price_ratio`/`scale`) as the
 //!   allowance base, matching go-ethereum's token branch in
 //!   `DoEstimateGas`.
+//!
+//! # Scoping: estimateGas only
+//!
+//! `Call::caller_gas_allowance` is a shared hook — upstream also calls it
+//! from `prepare_call_env` (`eth_call`) and `create_access_list_with`
+//! (`eth_createAccessList`) when no explicit gas limit is provided.
+//! morph-geth's `DoCall`, however, uses `ApplyMessage(..., Big0)` and
+//! does **not** reject `eth_call` on L1-fee grounds. Adding our L1 fee
+//! cap unconditionally would make `eth_call` over-reject.
+//!
+//! We key the Morph extension off `cfg_env.disable_block_gas_limit`,
+//! which upstream sets at each call site:
+//!
+//! | call site                                     | `disable_block_gas_limit` |
+//! |-----------------------------------------------|---------------------------|
+//! | `EstimateCall::estimate_gas_with` (estimate)  | `false` (default)         |
+//! | `Call::prepare_call_env` (`eth_call`)         | `true`                    |
+//! | `EthCall::create_access_list_with`            | `true`                    |
+//!
+//! When the flag is `true` we fall through to upstream's default
+//! `(balance − value) / gas_price` and skip the L1 fee cap, keeping
+//! `eth_call` semantics aligned with `DoCall`. See the followup note
+//! for the (different, symmetric) `eth_createAccessList` gap.
 
 use crate::MorphEthApiError;
 use crate::eth::{MorphEthApi, MorphNodeCore};
@@ -92,6 +115,20 @@ where
         evm_env: &EvmEnvFor<<Self as RpcNodeCore>::Evm>,
         tx_env: &TxEnvFor<<Self as RpcNodeCore>::Evm>,
     ) -> Result<u64, <Self as EthApiTypes>::Error> {
+        // When the flag is set, the caller is `prepare_call_env` (eth_call)
+        // or `create_access_list_with` (eth_createAccessList). In both cases
+        // morph-geth's corresponding path does not deduct the L1 fee for the
+        // balance check, so we fall through to upstream's default
+        // `(balance − value) / gas_price`. Only `estimate_gas_with` leaves
+        // the flag at its default `false`, which is where Morph's
+        // `DoEstimateGas` parity belongs.
+        if evm_env.cfg_env.disable_block_gas_limit {
+            return upstream_caller_gas_allowance(&mut db, tx_env).map_err(|e| match e {
+                CallError::Database(db_err) => MorphEthApiError::Eth(db_err.into()),
+                CallError::InsufficientFunds(_) => MorphEthApiError::InsufficientFundsForTransfer,
+            });
+        }
+
         let l1_fee = self.estimate_l1_fee(&mut db, evm_env, tx_env)?;
 
         if let Some(fee_token_id) = tx_env.fee_token_id.filter(|id| *id > 0) {
