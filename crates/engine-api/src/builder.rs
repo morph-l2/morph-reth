@@ -21,9 +21,9 @@ use parking_lot::RwLock;
 use reth_payload_builder::{BuildNewPayload, PayloadBuilderHandle};
 #[cfg(test)]
 use reth_primitives_traits::RecoveredBlock;
-use reth_primitives_traits::{SealedBlock, SealedHeader};
+use reth_primitives_traits::{FastInstant as Instant, SealedBlock, SealedHeader};
 use reth_provider::{BlockIdReader, BlockNumReader, CanonChainTracker, HeaderProvider};
-use std::{sync::Arc, time::Instant};
+use std::sync::Arc;
 
 // =============================================================================
 // Real Implementation

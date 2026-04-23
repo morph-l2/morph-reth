@@ -28,12 +28,12 @@ use reth_execution_types::BlockExecutionOutput;
 use reth_payload_builder::PayloadId;
 use reth_payload_primitives::{BuiltPayloadExecutedBlock, PayloadBuilderError};
 use reth_payload_util::{BestPayloadTransactions, NoopPayloadTransactions, PayloadTransactions};
-use reth_primitives_traits::{RecoveredBlock, SealedHeader};
+use reth_primitives_traits::{FastInstant as Instant, RecoveredBlock, SealedHeader};
 use reth_revm::{database::StateProviderDatabase, db::State};
 use reth_storage_api::{StateProvider, StateProviderFactory};
 use reth_transaction_pool::{BestTransactionsAttributes, PoolTransaction, TransactionPool};
 use revm::context_interface::Block as RevmBlock;
-use std::{sync::Arc, time::Instant};
+use std::sync::Arc;
 
 /// Reads the withdraw trie root from the L2MessageQueue contract storage.
 fn read_withdraw_trie_root<DB: revm::Database>(db: &mut DB) -> Result<B256, DB::Error> {
