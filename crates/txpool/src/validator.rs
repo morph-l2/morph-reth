@@ -515,20 +515,13 @@ fn is_morph_tx(tx: &impl Typed2718) -> bool {
 
 #[cfg(test)]
 mod tests {
-    // FIXME(morph-unfork): several tests below are #[cfg(any())]-disabled pending
-    // migration from MockEthProvider to a MorphPrimitives-aware mock provider
-    // (reth v2.0.0 tightened the Provider::BlockHeader == EvmConfig::BlockHeader bound).
-    // The shared imports and helpers remain used by those tests so silence dead-code
-    // lints until the migration lands.
-    #![allow(dead_code, unused_imports)]
-
     use super::*;
-    use alloy_consensus::{Block, Header, Signed, TxEip1559, TxLegacy};
+    use alloy_consensus::{Signed, TxEip1559, TxLegacy};
     use alloy_eips::eip2718::Encodable2718;
     use alloy_primitives::{B256, Signature, TxKind, address};
-    use morph_chainspec::MORPH_MAINNET;
+    use morph_chainspec::{MORPH_MAINNET, MorphChainSpec};
     use morph_evm::MorphEvmConfig;
-    use morph_primitives::{TxL1Msg, TxMorph};
+    use morph_primitives::{MorphPrimitives, TxL1Msg, TxMorph};
     use morph_revm::{
         L2_TOKEN_REGISTRY_ADDRESS, compute_mapping_slot, compute_mapping_slot_for_address,
     };
@@ -537,6 +530,12 @@ mod tests {
     use reth_transaction_pool::{
         blobstore::InMemoryBlobStore, validate::EthTransactionValidatorBuilder,
     };
+
+    fn new_mock_provider() -> MockEthProvider<MorphPrimitives, MorphChainSpec> {
+        MockEthProvider::<MorphPrimitives, _>::new()
+            .with_chain_spec((**MORPH_MAINNET).clone())
+            .with_genesis_block()
+    }
 
     fn storage_key(slot: U256) -> B256 {
         B256::from(slot.to_be_bytes::<32>())
@@ -609,14 +608,10 @@ mod tests {
         assert_eq!(info.base_fee_per_gas(), Some(42));
     }
 
-    // FIXME(morph-unfork): MockEthProvider defaults to Header but morph-evm requires
-    // MorphHeader; reth v2.0.0 tightened the bound. Re-enable after migrating to a
-    // MorphPrimitives-aware mock provider.
-    #[cfg(any())]
     #[test]
     fn validate_l1_message_rejected() {
         // Create validator with mock provider
-        let client = MockEthProvider::default().with_chain_spec(MORPH_MAINNET.clone());
+        let client = new_mock_provider();
         let morph_evm_config = MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone());
         let eth_validator: EthTransactionValidator<
             _,
@@ -658,11 +653,10 @@ mod tests {
         assert_eq!(err.to_string(), "transaction type not supported");
     }
 
-    #[cfg(any())] // FIXME(morph-unfork): see validate_l1_message_rejected note.
     #[test]
     fn validate_valid_eip1559_transaction() {
         // Create validator with mock provider and disable balance check for simplicity
-        let client = MockEthProvider::default().with_chain_spec(MORPH_MAINNET.clone());
+        let client = new_mock_provider();
         let signer = address!("0000000000000000000000000000000000000001");
         client.add_account(signer, ExtendedAccount::new(0, U256::from(10u128.pow(18))));
         let morph_evm_config = MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone());
@@ -714,11 +708,10 @@ mod tests {
         }
     }
 
-    #[cfg(any())] // FIXME(morph-unfork): see validate_l1_message_rejected note.
     #[test]
     fn validate_valid_legacy_transaction() {
         // Create validator with mock provider and disable balance check for simplicity
-        let client = MockEthProvider::default().with_chain_spec(MORPH_MAINNET.clone());
+        let client = new_mock_provider();
         let signer = address!("0000000000000000000000000000000000000001");
         client.add_account(signer, ExtendedAccount::new(0, U256::from(10u128.pow(18))));
         let morph_evm_config = MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone());
@@ -768,27 +761,13 @@ mod tests {
         }
     }
 
-    #[cfg(any())] // FIXME(morph-unfork): see validate_l1_message_rejected note.
     #[test]
     fn validate_morph_tx_uses_effective_gas_price_for_token_fee_path() {
-        let client = MockEthProvider::default().with_chain_spec(MORPH_MAINNET.clone());
+        let client = new_mock_provider();
         let signer = address!("0000000000000000000000000000000000000001");
         let token = address!("5300000000000000000000000000000000000042");
         let balance_slot = U256::from(7);
 
-        client.add_block(
-            B256::from([0x11; 32]),
-            Block::new(
-                Header {
-                    number: 1,
-                    timestamp: 1,
-                    gas_limit: 30_000_000,
-                    base_fee_per_gas: Some(10),
-                    ..Default::default()
-                },
-                Default::default(),
-            ),
-        );
         client.add_account(signer, ExtendedAccount::new(0, U256::ZERO));
         client.add_account(
             L2_TOKEN_REGISTRY_ADDRESS,
@@ -813,6 +792,12 @@ mod tests {
             .disable_balance_check()
             .build::<crate::MorphPooledTransaction, _>(InMemoryBlobStore::default());
         let validator = MorphTransactionValidator::new(eth_validator);
+        // Simulate an active chain head with base_fee_per_gas = 10 so the
+        // effective gas price path is taken (min(max_fee, base_fee + priority)
+        // = min(100, 11) = 11), yielding required_token_amount = 21_000 * 11.
+        validator
+            .block_info
+            .update(L1BlockInfo::default(), 0, 0, Some(10));
 
         let tx = TxMorph {
             chain_id: 2818,
