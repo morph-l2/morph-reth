@@ -174,9 +174,19 @@ where
         let available = balance
             .checked_sub(tx_env.value())
             .ok_or(MorphEthApiError::InsufficientFundsForTransfer)?;
-        let available = available
-            .checked_sub(l1_fee)
-            .ok_or(MorphEthApiError::InsufficientFundsForL1Fee)?;
+
+        // Reject as soon as the L1 fee consumes everything the caller had
+        // left after paying `tx.value`. Using `checked_sub` here would
+        // pass `l1_fee == available` through as `allowance = 0`, forcing
+        // the binary search to fail later with a less informative
+        // "gas required exceeds allowance 0". Catching the boundary at
+        // the RPC layer surfaces the real reason ("insufficient funds
+        // for l1 fee") the moment we know the tx cannot fund any gas at
+        // all.
+        if l1_fee >= available {
+            return Err(MorphEthApiError::InsufficientFundsForL1Fee);
+        }
+        let available = available - l1_fee;
 
         Ok(gas_allowance_from_balance(available, tx_env.gas_price()))
     }
@@ -417,5 +427,56 @@ mod tests {
             gas_allowance_from_balance(U256::from(1_000u64), 0),
             u64::MAX
         );
+    }
+
+    /// Inline reproduction of the ETH-path allowance logic in
+    /// `caller_gas_allowance`. Guards against regressing the
+    /// `l1_fee >= available` early return back to a `checked_sub`-based
+    /// `allowance = 0` fall-through (which forces the binary search to
+    /// raise `"gas required exceeds allowance 0"` instead of the real
+    /// `"insufficient funds for l1 fee"`).
+    fn eth_path_allowance(
+        balance: U256,
+        value: U256,
+        l1_fee: U256,
+        gas_price: u128,
+    ) -> Result<u64, MorphEthApiError> {
+        let available = balance
+            .checked_sub(value)
+            .ok_or(MorphEthApiError::InsufficientFundsForTransfer)?;
+        if l1_fee >= available {
+            return Err(MorphEthApiError::InsufficientFundsForL1Fee);
+        }
+        Ok(gas_allowance_from_balance(available - l1_fee, gas_price))
+    }
+
+    #[test]
+    fn eth_path_l1_fee_equal_to_available_errors_early() {
+        // balance = 10 wei, value = 0, l1_fee = 10 wei, gas_price = 1
+        // → available = 10, l1_fee == available: there is literally zero
+        // wei left for any gas, so this must reject with
+        // `InsufficientFundsForL1Fee` at the RPC layer rather than pass
+        // `allowance = 0` through to the binary search.
+        let err = eth_path_allowance(U256::from(10u64), U256::ZERO, U256::from(10u64), 1)
+            .expect_err("l1_fee == available must reject");
+        assert!(matches!(err, MorphEthApiError::InsufficientFundsForL1Fee));
+    }
+
+    #[test]
+    fn eth_path_one_wei_above_l1_fee_yields_positive_allowance() {
+        // Sanity companion: one wei of slack yields a positive allowance.
+        let allowance = eth_path_allowance(U256::from(11u64), U256::ZERO, U256::from(10u64), 1)
+            .expect("l1_fee < available must succeed");
+        assert_eq!(allowance, 1);
+    }
+
+    #[test]
+    fn eth_path_value_exceeds_balance_errors_before_l1_fee_check() {
+        let err = eth_path_allowance(U256::from(5u64), U256::from(10u64), U256::ZERO, 1)
+            .expect_err("value > balance must reject");
+        assert!(matches!(
+            err,
+            MorphEthApiError::InsufficientFundsForTransfer
+        ));
     }
 }
