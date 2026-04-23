@@ -98,3 +98,12 @@ To wipe chain data and start syncing from scratch:
 ```
 
 This removes `reth-data/db`, `reth-data/static_files`, and `node-data/data/` for the specified network. Config files (genesis, keys) are preserved.
+
+## Storage & engine tuning
+
+- **Storage V2 is reth's default from v2.0.0.** Hot/cold layout: MDBX for state/trie, RocksDB for history indices, static files for changesets. V1 and V2 databases are **not interchangeable** — upgrading from a V1 data directory requires a full re-sync via `reset.sh`.
+
+- `reth-start.sh` passes `--engine.persistence-threshold 256` / `--engine.memory-block-buffer-target 16` / `--engine.persistence-backpressure-threshold 512` (upstream defaults are 8 / 4 / 16). These batch MDBX writes so they do not compete with the morphnode Tendermint LevelDB fsyncs when both run on the same host.
+
+  - **Backpressure semantics**: the engine stops executing new payloads once `canonical_tip - last_persisted_block` exceeds the backpressure threshold. We raised it to 512 to absorb fsync spikes; reth enforces that it must be `>` `--engine.persistence-threshold`.
+  - **When to revert**: if morphnode is moved to a separate host (or its fsyncs no longer contend with reth), these flags can be dropped back to defaults.
