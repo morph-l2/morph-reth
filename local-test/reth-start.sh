@@ -31,7 +31,7 @@ args=(
   --http
   --http.addr "${RETH_HTTP_ADDR}"
   --http.port "${RETH_HTTP_PORT}"
-  --http.api "web3,debug,eth,txpool,net,trace,admin"
+  --http.api "web3,debug,eth,txpool,net,trace,admin,reth"
   --authrpc.addr "${RETH_AUTHRPC_ADDR}"
   --authrpc.port "${RETH_AUTHRPC_PORT}"
   --authrpc.jwtsecret "${JWT_SECRET}"
