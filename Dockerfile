@@ -19,8 +19,10 @@ COPY --from=planner /app/recipe.json recipe.json
 ARG BUILD_PROFILE=release
 ENV BUILD_PROFILE=$BUILD_PROFILE
 
-# Extra Cargo flags
-ARG RUSTFLAGS=""
+# Extra Cargo flags. Default target-cpu=x86-64-v3 matches upstream reth
+# (Haswell / Excavator+) for AVX2 / BMI2 / POPCNT on trie/keccak hot paths.
+# Override with `--build-arg RUSTFLAGS=""` for older CPUs.
+ARG RUSTFLAGS="-C target-cpu=x86-64-v3"
 ENV RUSTFLAGS="$RUSTFLAGS"
 
 # Build dependencies (cached layer)
