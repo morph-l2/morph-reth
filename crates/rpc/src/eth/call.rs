@@ -245,31 +245,38 @@ where
             return Err(MorphEthApiError::InvalidFeeToken);
         }
 
-        // Base ETH allowance enforces `value <= balance`; L1 fee is paid in
-        // tokens on this path, so we don't deduct it from the ETH side.
+        // On the token-fee path, ETH balance only needs to cover `tx.value`
+        // — gas and the L1 data fee are paid in the fee token, matching
+        // the handler (`validate_and_deduct_token_fee`:
+        // "Check that caller has enough ETH to cover the value transfer")
+        // and morph-geth's token branch in `DoEstimateGas`
+        // (`allowance := altByEth / feeCap`, no ETH-balance-based cap).
         let eth_balance = db
             .basic(caller)
             .map_err(|e| MorphEthApiError::Eth(e.into()))?
             .map(|acc| acc.balance)
             .unwrap_or_default();
-        let eth_available = eth_balance
-            .checked_sub(value)
-            .ok_or(MorphEthApiError::InsufficientFundsForTransfer)?;
-        let eth_allowance = gas_allowance_from_balance(eth_available, gas_price);
+        if eth_balance < value {
+            return Err(MorphEthApiError::InsufficientFundsForTransfer);
+        }
 
         // If balance_slot is unknown, we cannot read the token balance via
-        // storage alone. Skip the token balance cap and let the EVM handler
-        // verify the balance during execution (see `validate_and_deduct_token_fee`).
+        // storage alone. Return `u64::MAX` (no RPC-side cap); the EVM
+        // handler's `validate_and_deduct_token_fee` verifies the real
+        // balance during the binary-search `executable(gas)` call.
         if token_fee_info.balance_slot.is_none() {
             tracing::debug!(
                 target: "morph::rpc",
                 token_id = fee_token_id,
                 "Token balance_slot unknown, skipping token balance cap in caller_gas_allowance"
             );
-            return Ok(eth_allowance);
+            return Ok(u64::MAX);
         }
 
-        // Calculate token-based gas allowance.
+        // Token-based gas allowance: `altAvailable / feeCap` in go-geth
+        // parlance. Token balance (optionally capped by `fee_limit`), minus
+        // the L1 fee converted into token units, converted back into ETH
+        // via `price_ratio`/`scale`, divided by `gas_price`.
         let limit = match fee_limit {
             Some(limit) if !limit.is_zero() => token_fee_info.balance.min(limit),
             _ => token_fee_info.balance,
@@ -284,8 +291,7 @@ where
         let available_eth = token_amount_to_eth(available_token, &token_fee_info)
             .ok_or(MorphEthApiError::InvalidFeeToken)?;
 
-        let token_allowance = gas_allowance_from_balance(available_eth, gas_price);
-        Ok(eth_allowance.min(token_allowance))
+        Ok(gas_allowance_from_balance(available_eth, gas_price))
     }
 }
 
