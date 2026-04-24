@@ -5,7 +5,11 @@ DIST_DIR         = dist
 BINARY           = morph-reth
 TARBALL          = morph-reth.tar.gz
 CARGO_TARGET_DIR ?= target
-PROFILE          ?= release
+# Production deploys go to EC2 via S3. Default to `maxperf` (fat LTO +
+# single codegen unit) for peak throughput on prod nodes — matches the
+# Dockerfile default. Override with `PROFILE=profiling` to keep line-table
+# symbols for flame graphs when diagnosing a prod incident.
+PROFILE          ?= maxperf
 
 define cargo_build_and_upload
 	if [ ! -d $(DIST_DIR) ]; then mkdir -p $(DIST_DIR); fi
