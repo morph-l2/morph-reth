@@ -164,3 +164,53 @@ async fn post_jade_block_with_tampered_state_root_is_rejected() -> eyre::Result<
     );
     Ok(())
 }
+
+/// Regression: P2P-downloaded blocks enter the engine tree via the Block input
+/// path (`insert_block`), which never invokes `convert_payload_to_block` and
+/// therefore registers no withdraw-trie-root expectation. Pre-fix, the morph
+/// `PayloadValidator::validate_block_post_execution_with_hashed_state` returned
+/// `Err("missing withdraw trie root expectation cache entry...")` and the
+/// downloaded block was rejected, stalling sync indefinitely.
+///
+/// This test runs two interconnected nodes: node[0] builds and imports a block
+/// via the Engine API (Payload path → expectation registered on node[0] only),
+/// then node[1] points its forkchoice at the new head so reth's downloader
+/// fetches the block from node[0] over P2P. The download lands in node[1]'s
+/// engine tree as a `Block` input. Post-fix, the validator treats the missing
+/// expectation as `SkipValidation` and the import succeeds.
+#[tokio::test(flavor = "multi_thread")]
+async fn p2p_downloaded_block_imports_without_registered_expectation() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, _wallet) = TestNodeBuilder::new()
+        .with_schedule(HardforkSchedule::AllActive)
+        .with_num_nodes(2)
+        .build()
+        .await?;
+    let node1 = nodes.pop().expect("two nodes requested");
+    let mut node0 = nodes.pop().expect("two nodes requested");
+
+    let payload = build_candidate_block(&mut node0).await?;
+    let head_hash = payload.block().hash();
+
+    let exec_data = MorphPayloadTypes::block_to_payload(payload.block().clone());
+    let status = node0
+        .inner
+        .add_ons_handle
+        .beacon_engine_handle
+        .new_payload(exec_data)
+        .await?;
+    assert!(
+        status.is_valid(),
+        "node[0] must accept its own freshly-built block, got {status:?}"
+    );
+    node0.update_forkchoice(head_hash, head_hash).await?;
+
+    // sync_to keeps issuing FCU until node[1]'s head matches `head_hash`.
+    // Since node[1] does not have the block, reth's engine tree will trigger
+    // its block downloader against the connected peer (node[0]) — downloaded
+    // blocks enter via the Block input path, exercising the bug.
+    node1.sync_to(head_hash).await?;
+
+    Ok(())
+}
