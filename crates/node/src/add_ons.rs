@@ -16,7 +16,8 @@ use reth_node_builder::{
     },
 };
 use reth_provider::{
-    BlockWriter, CanonChainTracker, ChainSpecProvider, DBProvider, DatabaseProviderFactory,
+    BlockNumReader, BlockWriter, CanonChainTracker, ChainSpecProvider, DBProvider,
+    DatabaseProviderFactory,
 };
 use reth_rpc_builder::Identity;
 use reth_rpc_eth_api::RpcNodeCore;
@@ -108,11 +109,23 @@ where
             MorphEthConfigHandler::new(ctx.node.provider().clone(), ctx.node.evm_config().clone());
 
         // Keep a local view of canonical head/forkchoice from reth engine events.
+        // Stale events are filtered against the provider's current canonical head;
+        // local FCU successes still write the tracker unconditionally on the
+        // import path. See `record_canonical_event_if_authoritative` for the
+        // race-safety rationale.
         let tracker_for_events = engine_state_tracker.clone();
+        let provider_for_events = provider.clone();
         task_executor.spawn_critical_task("morph engine state tracker", async move {
             let mut listener = engine_events.new_listener();
             while let Some(event) = listener.next().await {
-                tracker_for_events.on_consensus_engine_event(&event);
+                morph_engine_api::record_canonical_event_if_authoritative(
+                    &tracker_for_events,
+                    &event,
+                    || {
+                        let info = provider_for_events.chain_info().ok()?;
+                        Some((info.best_number, info.best_hash))
+                    },
+                );
             }
         });
 

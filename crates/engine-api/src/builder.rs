@@ -10,7 +10,7 @@ use alloy_consensus::{
 };
 use alloy_eips::eip2718::Decodable2718;
 use alloy_primitives::{Address, B64, B256, Sealable};
-use alloy_rpc_types_engine::PayloadAttributes;
+use alloy_rpc_types_engine::{PayloadAttributes, PayloadStatus, PayloadStatusEnum};
 use morph_chainspec::MorphChainSpec;
 use morph_payload_types::{
     AssembleL2BlockParams, ExecutableL2Data, GenericResponse, MORPH_PAYLOAD_BUILDER_VERSION,
@@ -19,6 +19,7 @@ use morph_payload_types::{
 };
 use morph_primitives::{Block, BlockBody, MorphHeader, MorphPrimitives, MorphTxEnvelope};
 use parking_lot::RwLock;
+use reth_node_api::ConsensusEngineEvent;
 use reth_payload_builder::{BuildNewPayload, PayloadBuilderHandle};
 #[cfg(test)]
 use reth_primitives_traits::RecoveredBlock;
@@ -94,25 +95,26 @@ struct BlockTagCache {
 }
 
 impl EngineStateTracker {
-    /// Records a canonical head hint from a locally successful FCU call.
+    /// Unconditionally writes the canonical head hint.
+    ///
+    /// Called from two sources with different trust levels:
+    /// 1. The local FCU sync path, immediately after `fork_choice_updated`
+    ///    returns Ok — the caller knows the new head was just committed and
+    ///    must overwrite the tracker so the next engine-API call sees it
+    ///    before reth's asynchronous event has propagated.
+    /// 2. [`record_canonical_event_if_authoritative`], after the engine
+    ///    event has been validated against the provider's canonical head.
+    ///
+    /// Stale events from reth's unbounded event channel never call into this
+    /// directly — they go through the helper above so the tracker cannot
+    /// silently regress when an old event arrives after a newer optimistic
+    /// write.
     pub fn record_local_head(&self, number: u64, hash: B256, timestamp: u64) {
         *self.head.write() = Some(InMemoryHead {
             number,
             hash,
             timestamp,
         });
-    }
-
-    /// Updates the tracker from a consensus engine event stream item.
-    pub fn on_consensus_engine_event(
-        &self,
-        event: &reth_node_api::ConsensusEngineEvent<MorphPrimitives>,
-    ) {
-        use reth_node_api::ConsensusEngineEvent;
-
-        if let ConsensusEngineEvent::CanonicalChainCommitted(header, _) = event {
-            self.record_local_head(header.number(), header.hash(), header.timestamp());
-        }
     }
 
     fn current_head(&self) -> Option<InMemoryHead> {
@@ -139,6 +141,57 @@ impl EngineStateTracker {
     fn l1_safe_hash(&self) -> Option<B256> {
         self.block_tags.read().safe_hash
     }
+}
+
+/// Apply a [`ConsensusEngineEvent::CanonicalChainCommitted`] event to the
+/// tracker only if it still describes the provider's current canonical head.
+///
+/// reth's engine event stream is FIFO but unbounded
+/// (`UnboundedSender<EngineApiEvent>`). Under high import throughput or
+/// transient backpressure the listener task can lag, and a stale event from a
+/// prior canonical head can arrive after the FCU sync path has already
+/// recorded a newer head via [`EngineStateTracker::record_local_head`].
+/// Treating every event as authoritative would let the tracker silently
+/// regress and cause the next `engine_assembleL2Block` to fail with
+/// `DiscontinuousBlockNumber` until the next event arrives.
+///
+/// We resolve the race by treating the provider's `CanonicalInMemoryState`
+/// as the single authority. reth synchronously updates that state inside
+/// `on_canonical_chain_update` *before* emitting the event, so a fresh event
+/// always matches the provider's current canonical head; a mismatch proves
+/// the event is stale (or reth has reorged elsewhere) and must be ignored.
+/// This stays compatible with future reorg-capable `engine_newL2BlockV2`
+/// flows where head numbers can legitimately decrease — the local FCU path
+/// still writes [`EngineStateTracker::record_local_head`] unconditionally.
+///
+/// `canonical_head` returns `Some((number, hash))` for the provider's current
+/// canonical tip, or `None` if it cannot be resolved (e.g. before the chain
+/// has been initialized) — in which case the event is dropped.
+pub fn record_canonical_event_if_authoritative<F>(
+    tracker: &EngineStateTracker,
+    event: &ConsensusEngineEvent<MorphPrimitives>,
+    canonical_head: F,
+) where
+    F: FnOnce() -> Option<(u64, B256)>,
+{
+    let ConsensusEngineEvent::CanonicalChainCommitted(header, _) = event else {
+        return;
+    };
+    let Some((canonical_num, canonical_hash)) = canonical_head() else {
+        return;
+    };
+    if header.number() != canonical_num || canonical_hash != header.hash() {
+        tracing::trace!(
+            target: "morph::engine",
+            event_number = header.number(),
+            event_hash = %header.hash(),
+            canonical_number = canonical_num,
+            canonical_hash = %canonical_hash,
+            "skipping stale canonical chain event"
+        );
+        return;
+    }
+    tracker.record_local_head(header.number(), header.hash(), header.timestamp());
 }
 
 impl<Provider> RealMorphL2EngineApi<Provider> {
@@ -318,11 +371,7 @@ where
             "validate_l2_block returned engine payload status"
         );
 
-        let success = matches!(
-            status.status,
-            alloy_rpc_types_engine::PayloadStatusEnum::Valid
-                | alloy_rpc_types_engine::PayloadStatusEnum::Accepted
-        );
+        let success = payload_status_is_validated(&status);
         tracing::info!(
             target: "morph::engine",
             block_number = data.number,
@@ -729,7 +778,7 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
             .await
             .map_err(|e| MorphEngineApiError::ExecutionFailed(e.to_string()))?;
         let new_payload_elapsed = new_payload_started.elapsed();
-        self.ensure_payload_status_acceptable(&payload_status, "newPayload")?;
+        ensure_payload_status_valid(&payload_status, "newPayload")?;
 
         // Morph uses Tendermint consensus with instant finality — every committed
         // block is final and no reorgs are possible.
@@ -780,17 +829,31 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
             .await
             .map_err(|e| MorphEngineApiError::ExecutionFailed(e.to_string()))?;
         let fcu_elapsed = fcu_started.elapsed();
-        self.ensure_payload_status_acceptable(&fcu_result.payload_status, "forkchoiceUpdated")?;
+        ensure_payload_status_valid(&fcu_result.payload_status, "forkchoiceUpdated")?;
 
         // Synchronously update the canonical head so that eth_blockNumber immediately
         // reflects the new block. The background write pipeline updates
         // canonical_in_memory_state asynchronously; without this call, morph-node
         // would see eth_blockNumber return the old block number and reject the next
         // block as ErrWrongBlockNumber.
-        self.engine_state_tracker
-            .record_local_head(data.number, data.hash, data.timestamp);
+        //
+        // Order matters for race-safety with the engine-event listener task
+        // (`record_canonical_event_if_authoritative`):
+        //   1. provider.set_canonical_head(N) first — once the listener sees
+        //      provider canonical = N, any in-flight stale CanonicalChainCommitted(N-1)
+        //      it processes after this point will fail the provider check and be
+        //      dropped.
+        //   2. tracker.record_local_head(N) second — if a stale event is already
+        //      mid-processing in the (set_canonical_head, record_local_head)
+        //      window, it can race-write tracker = N-1, but our subsequent local
+        //      write here unconditionally overwrites it back to N.
+        // Reversing the order leaves a window where the listener writes N-1 *after*
+        // record_local_head(N) but *before* set_canonical_head(N), regressing the
+        // tracker until the next event arrives.
         self.provider
             .set_canonical_head(SealedHeader::new(header.clone(), data.hash));
+        self.engine_state_tracker
+            .record_local_head(data.number, data.hash, data.timestamp);
 
         tracing::info!(
             target: "morph::engine",
@@ -923,27 +986,6 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
         ))
     }
 
-    fn ensure_payload_status_acceptable(
-        &self,
-        status: &alloy_rpc_types_engine::PayloadStatus,
-        context: &'static str,
-    ) -> EngineApiResult<()> {
-        match &status.status {
-            alloy_rpc_types_engine::PayloadStatusEnum::Valid
-            | alloy_rpc_types_engine::PayloadStatusEnum::Accepted => Ok(()),
-            alloy_rpc_types_engine::PayloadStatusEnum::Syncing => {
-                Err(MorphEngineApiError::ExecutionFailed(format!(
-                    "{context} returned SYNCING for payload"
-                )))
-            }
-            alloy_rpc_types_engine::PayloadStatusEnum::Invalid { validation_error } => {
-                Err(MorphEngineApiError::ValidationFailed(format!(
-                    "{context} returned INVALID: {validation_error}"
-                )))
-            }
-        }
-    }
-
     fn current_head(&self) -> EngineApiResult<InMemoryHead>
     where
         Provider: HeaderProvider + BlockNumReader,
@@ -970,6 +1012,30 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
         self.engine_state_tracker
             .record_local_head(head.number, head.hash, head.timestamp);
         Ok(head)
+    }
+}
+
+fn payload_status_is_validated(status: &PayloadStatus) -> bool {
+    matches!(status.status, PayloadStatusEnum::Valid)
+}
+
+fn ensure_payload_status_valid(
+    status: &PayloadStatus,
+    context: &'static str,
+) -> EngineApiResult<()> {
+    match &status.status {
+        PayloadStatusEnum::Valid => Ok(()),
+        PayloadStatusEnum::Accepted => Err(MorphEngineApiError::ExecutionFailed(format!(
+            "{context} returned ACCEPTED before payload was validated"
+        ))),
+        PayloadStatusEnum::Syncing => Err(MorphEngineApiError::ExecutionFailed(format!(
+            "{context} returned SYNCING for payload"
+        ))),
+        PayloadStatusEnum::Invalid { validation_error } => {
+            Err(MorphEngineApiError::ValidationFailed(format!(
+                "{context} returned INVALID: {validation_error}"
+            )))
+        }
     }
 }
 
@@ -1037,6 +1103,7 @@ mod tests {
     use super::*;
     use alloy_consensus::Header;
     use alloy_primitives::{Address, Bloom, Bytes};
+    use alloy_rpc_types_engine::{PayloadStatus, PayloadStatusEnum};
     use morph_primitives::BlockBody;
     use reth_node_api::ConsensusEngineEvent;
     use reth_primitives_traits::SealedHeader;
@@ -1047,29 +1114,147 @@ mod tests {
         RecoveredBlock::new_unhashed(block, Vec::new())
     }
 
-    #[test]
-    fn test_engine_state_tracker_updates_head_on_canonical_chain_commit() {
-        let tracker = EngineStateTracker::default();
-        assert!(tracker.current_head().is_none());
+    fn payload_status(status: PayloadStatusEnum) -> PayloadStatus {
+        PayloadStatus::from_status(status)
+    }
 
-        let header = MorphHeader {
+    #[test]
+    fn test_validation_success_requires_valid_payload_status() {
+        assert!(payload_status_is_validated(&payload_status(
+            PayloadStatusEnum::Valid
+        )));
+        assert!(!payload_status_is_validated(&payload_status(
+            PayloadStatusEnum::Accepted
+        )));
+        assert!(!payload_status_is_validated(&payload_status(
+            PayloadStatusEnum::Syncing
+        )));
+        assert!(!payload_status_is_validated(&payload_status(
+            PayloadStatusEnum::Invalid {
+                validation_error: "bad payload".to_string(),
+            }
+        )));
+    }
+
+    #[test]
+    fn test_ensure_payload_status_valid_rejects_accepted() {
+        let err =
+            ensure_payload_status_valid(&payload_status(PayloadStatusEnum::Accepted), "newPayload")
+                .unwrap_err();
+
+        match err {
+            MorphEngineApiError::ExecutionFailed(msg) => {
+                assert!(msg.contains("newPayload returned ACCEPTED"));
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    /// Build a sealed `MorphHeader` for use as a `CanonicalChainCommitted` payload.
+    fn sealed_header_at(number: u64, timestamp: u64) -> SealedHeader<MorphHeader> {
+        SealedHeader::seal_slow(MorphHeader {
             inner: Header {
-                number: 42,
-                timestamp: 1_700_000_042,
+                number,
+                timestamp,
                 ..Default::default()
             },
             ..Default::default()
-        };
-        let sealed_header = SealedHeader::seal_slow(header);
-        tracker.on_consensus_engine_event(&ConsensusEngineEvent::CanonicalChainCommitted(
-            Box::new(sealed_header.clone()),
-            Duration::ZERO,
-        ));
+        })
+    }
 
-        let current_head = tracker.current_head().expect("head should be updated");
-        assert_eq!(current_head.number, sealed_header.number());
-        assert_eq!(current_head.hash, sealed_header.hash());
-        assert_eq!(current_head.timestamp, sealed_header.timestamp());
+    /// Wrap a sealed header into a `CanonicalChainCommitted` event.
+    fn canonical_event(
+        sealed: &SealedHeader<MorphHeader>,
+    ) -> ConsensusEngineEvent<MorphPrimitives> {
+        ConsensusEngineEvent::CanonicalChainCommitted(Box::new(sealed.clone()), Duration::ZERO)
+    }
+
+    #[test]
+    fn test_record_canonical_event_writes_when_provider_matches() {
+        let tracker = EngineStateTracker::default();
+        let sealed = sealed_header_at(42, 1_700_000_042);
+        let event = canonical_event(&sealed);
+
+        record_canonical_event_if_authoritative(&tracker, &event, || {
+            Some((sealed.number(), sealed.hash()))
+        });
+
+        let head = tracker.current_head().expect("head should be set");
+        assert_eq!(head.number, sealed.number());
+        assert_eq!(head.hash, sealed.hash());
+        assert_eq!(head.timestamp, sealed.timestamp());
+    }
+
+    #[test]
+    fn test_record_canonical_event_skips_when_provider_hash_differs() {
+        // Stale event scenario: tracker already advanced (via local FCU) past the
+        // event's number, provider canonical now has a different hash. The event
+        // must not regress the tracked head.
+        let tracker = EngineStateTracker::default();
+        tracker.record_local_head(43, B256::from([0xAA; 32]), 1_700_000_043);
+
+        let stale = sealed_header_at(42, 1_700_000_042);
+        let event = canonical_event(&stale);
+
+        // Provider still reports the newer head (different hash + number).
+        record_canonical_event_if_authoritative(&tracker, &event, || {
+            Some((43, B256::from([0xAA; 32])))
+        });
+
+        let head = tracker.current_head().expect("head must remain");
+        assert_eq!(head.number, 43);
+        assert_eq!(head.hash, B256::from([0xAA; 32]));
+    }
+
+    #[test]
+    fn test_record_canonical_event_skips_when_number_matches_but_hash_differs() {
+        // Reorg-style stale: same number, different hash. Provider has already
+        // moved on to a different canonical block at the same height.
+        let tracker = EngineStateTracker::default();
+        let new_hash = B256::from([0xBB; 32]);
+        tracker.record_local_head(7, new_hash, 1_700_000_007);
+
+        let stale = sealed_header_at(7, 1_700_000_007);
+        // `stale.hash()` is whatever seal_slow computes — guaranteed != 0xBB
+        // because seal_slow hashes the header bytes.
+        assert_ne!(stale.hash(), new_hash, "test setup invariant");
+
+        let event = canonical_event(&stale);
+        record_canonical_event_if_authoritative(&tracker, &event, || Some((7, new_hash)));
+
+        let head = tracker.current_head().expect("head must remain");
+        assert_eq!(head.hash, new_hash);
+    }
+
+    #[test]
+    fn test_record_canonical_event_skips_when_provider_unavailable() {
+        // Provider returns None (e.g. before chain initialization). Event is
+        // dropped without touching tracker.
+        let tracker = EngineStateTracker::default();
+        let sealed = sealed_header_at(1, 100);
+        let event = canonical_event(&sealed);
+
+        record_canonical_event_if_authoritative(&tracker, &event, || None);
+
+        assert!(tracker.current_head().is_none(), "tracker must stay empty");
+    }
+
+    #[test]
+    fn test_record_canonical_event_ignores_non_canonical_variants() {
+        // Only CanonicalChainCommitted updates the tracker; other event variants
+        // (BlockReceived, ForkchoiceUpdated, ...) leave it untouched even when
+        // they would otherwise pass the provider check.
+        let tracker = EngineStateTracker::default();
+        let event = ConsensusEngineEvent::BlockReceived(alloy_eips::BlockNumHash {
+            number: 99,
+            hash: B256::from([0xCC; 32]),
+        });
+
+        record_canonical_event_if_authoritative(&tracker, &event, || {
+            Some((99, B256::from([0xCC; 32])))
+        });
+
+        assert!(tracker.current_head().is_none());
     }
 
     #[test]
@@ -1291,38 +1476,6 @@ mod tests {
         assert_eq!(head.number, 20);
         assert_eq!(head.hash, B256::from([0x02; 32]));
         assert_eq!(head.timestamp, 200);
-    }
-
-    #[test]
-    fn test_engine_state_tracker_ignores_non_canonical_events() {
-        let tracker = EngineStateTracker::default();
-
-        // LiveSyncProgress events should not update the head
-        // (only CanonicalChainCommitted updates it)
-        // We can only test CanonicalChainCommitted since other variants
-        // require complex types. Verify the tracker remains None when no
-        // CanonicalChainCommitted event is sent.
-        assert!(tracker.current_head().is_none());
-
-        // Now send a CanonicalChainCommitted event
-        let header = MorphHeader {
-            inner: Header {
-                number: 5,
-                timestamp: 500,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let sealed_header = SealedHeader::seal_slow(header);
-        tracker.on_consensus_engine_event(&ConsensusEngineEvent::CanonicalChainCommitted(
-            Box::new(sealed_header),
-            Duration::ZERO,
-        ));
-
-        let head = tracker
-            .current_head()
-            .expect("head should be set after event");
-        assert_eq!(head.number, 5);
     }
 
     #[test]
