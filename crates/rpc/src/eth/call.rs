@@ -179,47 +179,96 @@ where
             .map_err(|_| MorphEthApiError::InvalidFeeToken)?
             .ok_or(MorphEthApiError::InvalidFeeToken)?;
 
-        if !token_fee_info.is_active
-            || token_fee_info.price_ratio.is_zero()
-            || token_fee_info.scale.is_zero()
-        {
-            return Err(MorphEthApiError::InvalidFeeToken);
-        }
-
         // ETH only needs to cover `value`; gas + L1 fee are paid in tokens.
         let eth_balance = db
             .basic(caller)
             .map_err(|e| MorphEthApiError::Eth(e.into()))?
             .map(|acc| acc.balance)
             .unwrap_or_default();
-        if eth_balance < value {
-            return Err(MorphEthApiError::InsufficientFundsForTransfer);
-        }
 
-        // Unknown balance_slot: defer to the handler's token-balance check.
-        if token_fee_info.balance_slot.is_none() {
-            return Ok(u64::MAX);
-        }
-
-        // Token allowance: limit minus L1 fee in tokens, converted back to ETH
-        // via price_ratio/scale, then divided by gas_price.
-        // via `price_ratio`/`scale`, divided by `gas_price`.
-        let limit = match fee_limit {
-            Some(limit) if !limit.is_zero() => token_fee_info.balance.min(limit),
-            _ => token_fee_info.balance,
-        };
-
-        let l1_fee_in_token = token_fee_info.eth_to_token_amount(l1_fee);
-        if l1_fee_in_token >= limit {
-            return Err(MorphEthApiError::InsufficientFundsForL1Fee);
-        }
-
-        let available_token = limit - l1_fee_in_token;
-        let available_eth = token_amount_to_eth(available_token, &token_fee_info)
-            .ok_or(MorphEthApiError::InvalidFeeToken)?;
-
-        Ok(gas_allowance_from_balance(available_eth, gas_price))
+        token_gas_allowance(
+            eth_balance,
+            value,
+            &token_fee_info,
+            l1_fee,
+            fee_limit,
+            gas_price,
+            self.eth_api().gas_cap(),
+        )
     }
+}
+
+/// Compute the gas allowance for a MorphTx fee-token caller.
+///
+/// Pure function over the inputs `caller_gas_allowance_with_token` would
+/// load from the database, factored out so the affordability and bounding
+/// logic can be unit-tested without an EVM/DB stack.
+///
+/// The `gas_cap` argument is the per-call RPC ceiling (`EthApiNodeBackend::gas_cap()`),
+/// only consumed by the EVM-call-mode + no-`fee_limit` fallback to avoid
+/// returning `u64::MAX`. See the in-body comment for the security rationale.
+fn token_gas_allowance(
+    eth_balance: U256,
+    value: U256,
+    token_fee_info: &TokenFeeInfo,
+    l1_fee: U256,
+    fee_limit: Option<U256>,
+    gas_price: u128,
+    gas_cap: u64,
+) -> Result<u64, MorphEthApiError> {
+    if !token_fee_info.is_active
+        || token_fee_info.price_ratio.is_zero()
+        || token_fee_info.scale.is_zero()
+    {
+        return Err(MorphEthApiError::InvalidFeeToken);
+    }
+
+    if eth_balance < value {
+        return Err(MorphEthApiError::InsufficientFundsForTransfer);
+    }
+
+    // Determine the token-denominated affordability cap.
+    //
+    // - Slot mode (`balance_slot.is_some()`): RPC reads balance directly
+    //   from token storage; cap by `min(balance, fee_limit)`.
+    // - EVM-call mode (`balance_slot.is_none()`): RPC cannot resolve the
+    //   balance without spinning up an EVM (the handler does that at real
+    //   execution via `load_for_caller`). On the estimateGas path
+    //   `disable_fee_charge=true` short-circuits the handler's check, so
+    //   we MUST bound here — otherwise the binary search amplifies into
+    //   ~25 × block_gas_limit of free EVM work. Use the user-supplied
+    //   `fee_limit` if present; else fall back to the per-call `gas_cap`,
+    //   matching `eth_call`'s effective ceiling.
+    let limit = match (token_fee_info.balance_slot, fee_limit) {
+        (Some(_), Some(limit)) if !limit.is_zero() => token_fee_info.balance.min(limit),
+        (Some(_), _) => token_fee_info.balance,
+        (None, Some(limit)) if !limit.is_zero() => limit,
+        (None, _) => return Ok(gas_cap),
+    };
+
+    gas_allowance_from_token_limit(limit, l1_fee, token_fee_info, gas_price)
+}
+
+/// Convert a token-denominated affordability cap into a gas allowance.
+///
+/// Subtracts the L1 fee (converted to tokens) from `limit_token`, then
+/// converts the remaining token budget back to ETH and divides by
+/// `gas_price`. Returns `InsufficientFundsForL1Fee` if the L1 fee swallows
+/// the entire limit, matching the semantics surfaced for the ETH path.
+fn gas_allowance_from_token_limit(
+    limit_token: U256,
+    l1_fee: U256,
+    token_info: &TokenFeeInfo,
+    gas_price: u128,
+) -> Result<u64, MorphEthApiError> {
+    let l1_fee_in_token = token_info.eth_to_token_amount(l1_fee);
+    if l1_fee_in_token >= limit_token {
+        return Err(MorphEthApiError::InsufficientFundsForL1Fee);
+    }
+    let available_token = limit_token - l1_fee_in_token;
+    let available_eth = token_amount_to_eth(available_token, token_info)
+        .ok_or(MorphEthApiError::InvalidFeeToken)?;
+    Ok(gas_allowance_from_balance(available_eth, gas_price))
 }
 
 /// `U256 / u128 → u64`, saturating.
@@ -332,5 +381,174 @@ mod tests {
             err,
             MorphEthApiError::InsufficientFundsForTransfer
         ));
+    }
+
+    /// Build an active 1:1 token (`scale == price_ratio == 1`) so token math
+    /// is identity and the test focuses on the limit-selection branches.
+    fn token_1to1(balance_slot: Option<U256>, balance: U256) -> TokenFeeInfo {
+        TokenFeeInfo {
+            token_address: alloy_primitives::Address::ZERO,
+            is_active: true,
+            decimals: 18,
+            price_ratio: U256::from(1u64),
+            scale: U256::from(1u64),
+            caller: alloy_primitives::Address::ZERO,
+            balance,
+            balance_slot,
+        }
+    }
+
+    /// EVM-call mode + user-supplied `fee_limit` + L1 fee fits: return the
+    /// remaining-budget gas. Pre-fix this branch returned `u64::MAX`.
+    #[test]
+    fn token_evm_call_mode_with_fee_limit_uses_user_budget() {
+        let token = token_1to1(None, U256::ZERO);
+        let allowance = token_gas_allowance(
+            /* eth_balance */ U256::from(1u64),
+            /* value */ U256::ZERO,
+            &token,
+            /* l1_fee */ U256::from(10u64),
+            /* fee_limit */ Some(U256::from(110u64)),
+            /* gas_price */ 1,
+            /* gas_cap */ 50_000_000,
+        )
+        .expect("fee_limit covers L1 fee with 100 wei to spare");
+        // (110 - 10) / 1 = 100 gas
+        assert_eq!(allowance, 100);
+    }
+
+    /// EVM-call mode + `fee_limit` ≤ L1 fee: surface `InsufficientFundsForL1Fee`
+    /// rather than silently capping at zero.
+    #[test]
+    fn token_evm_call_mode_l1_fee_swallows_limit_returns_clear_error() {
+        let token = token_1to1(None, U256::ZERO);
+        let err = token_gas_allowance(
+            U256::ZERO,
+            U256::ZERO,
+            &token,
+            /* l1_fee */ U256::from(100u64),
+            /* fee_limit */ Some(U256::from(50u64)),
+            1,
+            50_000_000,
+        )
+        .expect_err("fee_limit cannot cover L1 fee");
+        assert!(matches!(err, MorphEthApiError::InsufficientFundsForL1Fee));
+    }
+
+    /// EVM-call mode + no `fee_limit`: cap at the per-call `gas_cap`. Pre-fix
+    /// this returned `u64::MAX`, letting estimateGas binary-search 25 ×
+    /// block_gas_limit of free EVM work.
+    #[test]
+    fn token_evm_call_mode_without_fee_limit_falls_back_to_gas_cap() {
+        let token = token_1to1(None, U256::ZERO);
+        let cap = 5_000_000u64;
+        let allowance = token_gas_allowance(
+            U256::ZERO,
+            U256::ZERO,
+            &token,
+            /* l1_fee */ U256::from(123u64),
+            /* fee_limit */ None,
+            1,
+            cap,
+        )
+        .expect("no fee_limit must fall back to gas_cap, not u64::MAX");
+        assert_eq!(allowance, cap, "must equal gas_cap, not u64::MAX");
+
+        // Same with explicit Some(0), which the production code treats as
+        // "no usable cap" via the `if !limit.is_zero()` guard.
+        let allowance = token_gas_allowance(
+            U256::ZERO,
+            U256::ZERO,
+            &token,
+            U256::from(123u64),
+            Some(U256::ZERO),
+            1,
+            cap,
+        )
+        .expect("Some(0) fee_limit must fall back to gas_cap");
+        assert_eq!(allowance, cap);
+    }
+
+    /// Slot-mode regression: `min(balance, fee_limit)` budget; gas_cap unused.
+    #[test]
+    fn token_slot_mode_caps_by_min_of_balance_and_fee_limit() {
+        let token = token_1to1(
+            Some(U256::from(42u64)),
+            /* balance */ U256::from(1_000u64),
+        );
+
+        // fee_limit < balance → fee_limit binds.
+        let allowance = token_gas_allowance(
+            U256::ZERO,
+            U256::ZERO,
+            &token,
+            /* l1_fee */ U256::from(50u64),
+            /* fee_limit */ Some(U256::from(500u64)),
+            /* gas_price */ 1,
+            /* gas_cap (must NOT leak in) */ 9_999,
+        )
+        .expect("balance covers L1 fee");
+        // (500 - 50) / 1 = 450
+        assert_eq!(allowance, 450);
+
+        // fee_limit > balance → balance binds.
+        let allowance = token_gas_allowance(
+            U256::ZERO,
+            U256::ZERO,
+            &token,
+            U256::from(50u64),
+            Some(U256::from(10_000u64)),
+            1,
+            9_999,
+        )
+        .expect("balance covers L1 fee");
+        // (1000 - 50) / 1 = 950
+        assert_eq!(allowance, 950);
+
+        // No fee_limit → balance binds.
+        let allowance = token_gas_allowance(
+            U256::ZERO,
+            U256::ZERO,
+            &token,
+            U256::from(50u64),
+            None,
+            1,
+            9_999,
+        )
+        .expect("balance covers L1 fee");
+        assert_eq!(allowance, 950);
+    }
+
+    /// Inactive / misconfigured token returns InvalidFeeToken before any
+    /// limit math runs (regardless of mode).
+    #[test]
+    fn token_inactive_or_misconfigured_returns_invalid_fee_token() {
+        let mut token = token_1to1(None, U256::ZERO);
+        token.is_active = false;
+        let err = token_gas_allowance(
+            U256::ZERO,
+            U256::ZERO,
+            &token,
+            U256::ZERO,
+            Some(U256::from(1_000u64)),
+            1,
+            50_000_000,
+        )
+        .expect_err("inactive token must reject");
+        assert!(matches!(err, MorphEthApiError::InvalidFeeToken));
+
+        let mut token = token_1to1(Some(U256::from(1u64)), U256::from(1_000u64));
+        token.price_ratio = U256::ZERO;
+        let err = token_gas_allowance(
+            U256::ZERO,
+            U256::ZERO,
+            &token,
+            U256::ZERO,
+            None,
+            1,
+            50_000_000,
+        )
+        .expect_err("zero price_ratio must reject");
+        assert!(matches!(err, MorphEthApiError::InvalidFeeToken));
     }
 }
