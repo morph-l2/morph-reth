@@ -55,7 +55,7 @@ pub struct MorphPayloadAttributes {
 
 impl reth_payload_primitives::PayloadAttributes for MorphPayloadAttributes {
     fn payload_id(&self, parent_hash: &B256) -> PayloadId {
-        payload_id_morph(parent_hash, self, MORPH_PAYLOAD_BUILDER_VERSION)
+        self.morph_payload_id(parent_hash)
     }
 
     fn timestamp(&self) -> u64 {
@@ -68,6 +68,13 @@ impl reth_payload_primitives::PayloadAttributes for MorphPayloadAttributes {
 
     fn parent_beacon_block_root(&self) -> Option<B256> {
         self.inner.parent_beacon_block_root
+    }
+}
+
+impl MorphPayloadAttributes {
+    /// Computes the Morph payload ID without decoding or recovering transaction bytes.
+    pub fn morph_payload_id(&self, parent_hash: &B256) -> PayloadId {
+        payload_id_morph(parent_hash, self, MORPH_PAYLOAD_BUILDER_VERSION)
     }
 }
 
@@ -537,6 +544,20 @@ mod tests {
         assert_eq!(
             attrs.parent_beacon_block_root(),
             Some(B256::from([0x01; 32]))
+        );
+    }
+
+    #[test]
+    fn test_morph_payload_id_does_not_decode_transactions() {
+        let parent = B256::from([0x01; 32]);
+        let mut attrs = create_test_attributes();
+        attrs.transactions = Some(vec![Bytes::from_static(b"not a valid encoded transaction")]);
+
+        let id = attrs.morph_payload_id(&parent);
+
+        assert_eq!(
+            id,
+            payload_id_morph(&parent, &attrs, MORPH_PAYLOAD_BUILDER_VERSION)
         );
     }
 
