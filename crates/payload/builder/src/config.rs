@@ -2,7 +2,8 @@
 
 use core::time::Duration;
 use reth_chainspec::MIN_TRANSACTION_GAS;
-use std::{fmt::Debug, time::Instant};
+use reth_primitives_traits::FastInstant as Instant;
+use std::fmt::Debug;
 
 /// Minimal data bytes size per transaction.
 /// This is a conservative estimate for the minimum encoded transaction size.
