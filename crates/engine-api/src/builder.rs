@@ -588,15 +588,24 @@ where
         // set_safe on the provider directly, skipping zero hashes. This avoids a full
         // FCU round-trip through the async engine pipeline for what is purely a tag
         // update, and correctly skips the update when the caller passes B256::ZERO.
-        if finalized_block_hash != B256::ZERO {
-            self.update_block_tag(finalized_block_hash, "finalized", |sealed| {
-                self.provider.set_finalized(sealed);
-            })?;
-        }
-
+        //
+        // Order matters: set safe FIRST, then finalized. The Ethereum invariant
+        // `finalized.number <= safe.number` must hold at every observable point
+        // for an RPC reader. Updating finalized first and then safe leaves a
+        // window between the two writes where `eth_getBlockByNumber("finalized")`
+        // returns the new value but `eth_getBlockByNumber("safe")` returns the
+        // stale older value — a transient `finalized > safe` violation. Updating
+        // safe first keeps the invariant satisfied throughout (finalized stays
+        // at its older, smaller value while safe advances).
         if safe_block_hash != B256::ZERO {
             self.update_block_tag(safe_block_hash, "safe", |sealed| {
                 self.provider.set_safe(sealed);
+            })?;
+        }
+
+        if finalized_block_hash != B256::ZERO {
+            self.update_block_tag(finalized_block_hash, "finalized", |sealed| {
+                self.provider.set_finalized(sealed);
             })?;
         }
 

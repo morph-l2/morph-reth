@@ -35,8 +35,12 @@ use reth_provider::BlockReaderIdExt;
 ///
 /// `node.advance_block()` would time out waiting for a non-empty payload since
 /// the pool is empty — instead, drive the builder directly with empty L1
-/// messages and poll `best_payload` until it returns.
+/// messages and resolve the payload synchronously via
+/// `PayloadKind::WaitForPending`. This avoids fixed sleeps + polling, which
+/// were flake-prone on loaded CI runners.
 async fn build_candidate_block(node: &mut MorphTestNode) -> eyre::Result<MorphBuiltPayload> {
+    const BUILD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
     let head = node
         .inner
         .provider
@@ -70,24 +74,16 @@ async fn build_candidate_block(node: &mut MorphTestNode) -> eyre::Result<MorphBu
         .await?
         .map_err(|e| eyre::eyre!("payload build failed: {e}"))?;
 
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        if tokio::time::Instant::now() > deadline {
-            return Err(eyre::eyre!("timeout waiting for payload"));
-        }
-        match node
-            .inner
+    tokio::time::timeout(
+        BUILD_TIMEOUT,
+        node.inner
             .payload_builder_handle
-            .best_payload(payload_id)
-            .await
-        {
-            Some(Ok(p)) => return Ok(p),
-            Some(Err(e)) => return Err(eyre::eyre!("payload build error: {e}")),
-            None => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
-        }
-    }
+            .resolve_kind(payload_id, reth_node_api::PayloadKind::WaitForPending),
+    )
+    .await
+    .map_err(|_| eyre::eyre!("payload build timed out after {:?}", BUILD_TIMEOUT))?
+    .ok_or_else(|| eyre::eyre!("no payload response for id {payload_id:?}"))?
+    .map_err(|e| eyre::eyre!("payload build error: {e}"))
 }
 
 /// Tamper with a payload's header and ask the engine to import the result.
