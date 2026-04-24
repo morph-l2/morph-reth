@@ -228,6 +228,24 @@ impl TestNodeBuilder {
         self
     }
 
+    /// Override an account's runtime bytecode in the test genesis.
+    pub fn with_account_code(mut self, address: Address, code: impl Into<String>) -> Self {
+        let alloc = self
+            .genesis_json
+            .get_mut("alloc")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("test genesis alloc must be an object");
+        let address = address.to_string().to_ascii_lowercase();
+        let entry = alloc
+            .entry(address)
+            .or_insert_with(|| serde_json::json!({ "balance": "0x0" }));
+        let entry = entry
+            .as_object_mut()
+            .expect("test genesis account entry must be an object");
+        entry.insert("code".to_string(), serde_json::json!(code.into()));
+        self
+    }
+
     /// Set the number of nodes to start.
     ///
     /// When `num_nodes > 1`, all nodes are interconnected via a simulated P2P network.
