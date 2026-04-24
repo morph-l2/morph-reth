@@ -1,7 +1,5 @@
 //! Morph payload builder error types.
 
-use reth_evm::execute::ProviderError;
-
 /// Errors that can occur during Morph payload building.
 #[derive(Debug, thiserror::Error)]
 pub enum MorphPayloadBuilderError {
@@ -39,11 +37,7 @@ pub enum MorphPayloadBuilderError {
     #[error("L1 message appears after regular transaction")]
     L1MessageAfterRegularTx,
 
-    /// Database error when reading contract storage.
-    #[error("database error: {0}")]
-    Database(#[from] ProviderError),
-
-    /// Generic storage error (e.g. from revm EvmDatabaseError).
+    /// Generic storage error (e.g. from revm EvmDatabaseError, ProviderError).
     #[error("storage error: {0}")]
     Storage(String),
 }

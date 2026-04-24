@@ -405,8 +405,8 @@ mod tests {
         }
     }
 
-    /// EVM-call mode + user-supplied `fee_limit` + L1 fee fits: return the
-    /// remaining-budget gas. Pre-fix this branch returned `u64::MAX`.
+    /// EVM-call mode with a user-supplied `fee_limit` that covers the L1 fee
+    /// must return the remaining-budget gas, never `u64::MAX`.
     #[test]
     fn token_evm_call_mode_with_fee_limit_uses_user_budget() {
         let token = token_1to1(None, U256::ZERO);
@@ -442,9 +442,9 @@ mod tests {
         assert!(matches!(err, MorphEthApiError::InsufficientFundsForL1Fee));
     }
 
-    /// EVM-call mode + no `fee_limit`: cap at the per-call `gas_cap`. Pre-fix
-    /// this returned `u64::MAX`, letting estimateGas binary-search 25 ×
-    /// block_gas_limit of free EVM work.
+    /// EVM-call mode without a `fee_limit` must cap at the per-call `gas_cap`,
+    /// never `u64::MAX` (which lets estimateGas binary-search 25× the
+    /// block_gas_limit of free EVM work).
     #[test]
     fn token_evm_call_mode_without_fee_limit_falls_back_to_gas_cap() {
         let token = token_1to1(None, U256::ZERO);
@@ -559,11 +559,9 @@ mod tests {
         assert!(matches!(err, MorphEthApiError::InvalidFeeToken));
     }
 
-    /// EVM-call mode + absurd user-supplied `fee_limit` must NOT bypass
-    /// `gas_cap`. Pre-fix the `(None, Some(fee_limit))` arm accepted the
-    /// user value verbatim, letting `fee_limit = U256::MAX` return
-    /// `u64::MAX` — silently bypassing any operator-configured
-    /// `--rpc.gascap < block_gas_limit`.
+    /// EVM-call mode with an absurd user-supplied `fee_limit` (e.g.
+    /// `U256::MAX`) must clamp to `gas_cap`, never bypass the
+    /// operator-configured `--rpc.gascap < block_gas_limit`.
     #[test]
     fn token_evm_call_mode_huge_fee_limit_clamps_to_gas_cap() {
         let token = token_1to1(None, U256::ZERO);

@@ -43,7 +43,7 @@ where
 
         // Build the Morph-specific EVM config for the validator
         let morph_evm_config =
-            MorphEvmConfig::new(ctx.chain_spec(), morph_evm::evm::MorphEvmFactory::default());
+            MorphEvmConfig::new(ctx.chain_spec(), morph_evm::MorphEvmFactory::default());
 
         // Build the transaction validator with Morph-specific checks
         let validator = TransactionValidationTaskExecutor::eth_builder(

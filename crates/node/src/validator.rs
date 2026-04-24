@@ -461,11 +461,11 @@ mod tests {
     }
 
     /// Block-input path (P2P sync, pipeline backfill) reaches
-    /// `validate_block_post_execution_with_hashed_state` without ever calling
-    /// `convert_payload_to_block`, so no expectation is registered. Pre-fix
-    /// this returned `Err`, stalling sync. Post-fix it must skip the
-    /// CL-supplied cross-check and return `Ok` so the upstream strict
-    /// state-root check (post-Jade) remains the source of truth.
+    /// `validate_block_post_execution_with_hashed_state` without calling
+    /// `convert_payload_to_block`, so no expectation is registered. The
+    /// validator must treat the missing entry as `SkipValidation` and
+    /// return `Ok` — otherwise sync stalls. The upstream strict state-root
+    /// check (post-Jade) remains the source of truth.
     #[test]
     fn validate_block_post_execution_skips_when_no_expectation_registered() {
         let validator = MorphEngineValidator::new();

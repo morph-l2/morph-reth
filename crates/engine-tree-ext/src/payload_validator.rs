@@ -839,13 +839,6 @@ where
         state: &EngineApiTreeState<N>,
     ) -> ProviderResult<Option<SealedHeader<N::BlockHeader>>> {
         // check memory first
-        // NOTE(morph): Upstream reth reads `state.tree_state` and `state.invalid_headers`
-        // as private fields on EngineApiTreeState. External crates can only access them
-        // via the public accessors `tree_state()` and `has_invalid_header()` (defined at
-        // reth/crates/engine/tree/src/tree/mod.rs:165,170 at v2.0.0). All 5 call sites
-        // in this file are converted to accessor form. Pure substitution, no behavior
-        // change. Task 4 flips the workspace to v2.0.0 but the accessor calls remain
-        // correct; only the rationale becomes irrelevant.
         let header = state.tree_state().sealed_header_by_hash(&hash);
 
         if header.is_some() {
@@ -1278,11 +1271,6 @@ where
                 // Get a database provider to use as trie cursor factory
                 match overlay_factory.database_provider_ro() {
                     Ok(provider) => {
-                        // NOTE(morph): Upstream uses `super::trie_updates::compare_trie_updates(...)`
-                        // (private sibling module in reth_engine_tree). We copied the full
-                        // `trie_updates.rs` (312 LOC, byte-identical to v2.0.0) into this crate at
-                        // `src/trie_updates.rs`, and call it via `crate::trie_updates::...`. This
-                        // preserves the debug utility semantics exactly — no stub, no feature loss.
                         match crate::trie_updates::compare_trie_updates(
                             &provider,
                             task_trie_updates,

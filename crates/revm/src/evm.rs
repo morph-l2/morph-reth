@@ -92,8 +92,7 @@ fn blockhash_morph<DB: Database>(
 /// losing the true DB-committed original. This makes SSTORE see "clean" slots (2900 gas)
 /// instead of "dirty" (100 gas), causing a 2800 gas mismatch vs go-eth.
 ///
-/// Ported from morph-reth-enginevalidator-spike commit 6031236. The DB read hits
-/// the State cache (O(1)) and only triggers on cold SLOADs.
+/// The DB read hits the State cache (O(1)) and only triggers on cold SLOADs.
 fn sload_morph<DB: Database>(context: InstructionContext<'_, MorphContext<DB>, EthInterpreter>) {
     let Some(([], index)) = StackTr::popn_top::<0>(&mut context.interpreter.stack) else {
         context.interpreter.halt_underflow();
@@ -146,8 +145,7 @@ fn sload_morph<DB: Database>(context: InstructionContext<'_, MorphContext<DB>, E
 /// instead of a "dirty" slot (100 gas SLOAD_GAS plus refund), causing the
 /// same 2800-gas-per-write divergence vs go-eth that `sload_morph` fixes.
 ///
-/// Ported from morph-reth-enginevalidator-spike commit c61633f, using our
-/// DB-direct lookup style (no per-tx runtime map needed).
+/// Uses DB-direct lookup (no per-tx runtime map needed).
 fn sstore_morph<DB: Database>(context: InstructionContext<'_, MorphContext<DB>, EthInterpreter>) {
     if context.interpreter.runtime_flag.is_static() {
         context

@@ -165,19 +165,19 @@ async fn post_jade_block_with_tampered_state_root_is_rejected() -> eyre::Result<
     Ok(())
 }
 
-/// Regression: P2P-downloaded blocks enter the engine tree via the Block input
-/// path (`insert_block`), which never invokes `convert_payload_to_block` and
-/// therefore registers no withdraw-trie-root expectation. Pre-fix, the morph
-/// `PayloadValidator::validate_block_post_execution_with_hashed_state` returned
-/// `Err("missing withdraw trie root expectation cache entry...")` and the
-/// downloaded block was rejected, stalling sync indefinitely.
+/// Regression test: P2P-downloaded blocks enter the engine tree via the
+/// Block-input path (`insert_block`), which never invokes
+/// `convert_payload_to_block` and therefore registers no withdraw-trie-root
+/// expectation. The validator must treat the missing entry as
+/// `SkipValidation` so the downloaded block is accepted; otherwise sync
+/// stalls indefinitely with `"missing withdraw trie root expectation
+/// cache entry"`.
 ///
-/// This test runs two interconnected nodes: node[0] builds and imports a block
-/// via the Engine API (Payload path → expectation registered on node[0] only),
-/// then node[1] points its forkchoice at the new head so reth's downloader
-/// fetches the block from node[0] over P2P. The download lands in node[1]'s
-/// engine tree as a `Block` input. Post-fix, the validator treats the missing
-/// expectation as `SkipValidation` and the import succeeds.
+/// The test runs two interconnected nodes: node[0] builds and imports a
+/// block via the Engine API (Payload path → expectation registered on
+/// node[0] only), then node[1] points its forkchoice at the new head so
+/// reth's downloader fetches the block from node[0] over P2P. The download
+/// lands in node[1]'s engine tree as a `Block` input.
 #[tokio::test(flavor = "multi_thread")]
 async fn p2p_downloaded_block_imports_without_registered_expectation() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
