@@ -553,7 +553,7 @@ async fn morph_tx_v0_token_fee_transfer_to_fee_token_contract_gas_regression() -
         .storage(token_addr, fee_vault_slot)?
         .unwrap_or_default();
 
-    let raw_tx = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
+    let raw_tx = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), wallet.inner_nonce)
         .with_v0_token_fee(TEST_TOKEN_ID)
         .with_to(token_addr)
         .with_data(erc20_transfer_calldata(recipient, amount))
