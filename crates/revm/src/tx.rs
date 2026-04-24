@@ -368,7 +368,6 @@ impl FromTxWithEncoded<MorphTxEnvelope> for MorphTxEnv {
     }
 }
 
-// Implement TransactionEnvMut for MorphTxEnv (renamed from TransactionEnv in v2.0.0)
 impl TransactionEnvMut for MorphTxEnv {
     fn set_gas_limit(&mut self, gas_limit: u64) {
         self.inner.gas_limit = gas_limit;

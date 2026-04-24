@@ -233,9 +233,6 @@ impl alloy_consensus::transaction::SignerRecoverable for MorphTxEnvelope {
     }
 }
 
-// reth_primitives_traits::SignedTransaction has a blanket impl in v0.1.0; no explicit impl needed.
-// RlpBincode trait was removed in reth v2.0.0; no impl needed.
-
 #[cfg(feature = "reth-codec")]
 mod codec {
     use crate::L1_TX_TYPE_ID;

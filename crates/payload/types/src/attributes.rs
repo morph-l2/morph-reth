@@ -8,6 +8,10 @@ use morph_primitives::MorphTxEnvelope;
 use reth_primitives_traits::{Recovered, SignerRecoverable, WithEncoded};
 use sha2::{Digest, Sha256};
 
+/// Version byte mixed into Morph payload IDs. Bumped only when the payload-attribute
+/// hashing scheme materially changes; serves as a domain separator across versions.
+pub const MORPH_PAYLOAD_BUILDER_VERSION: u8 = 1;
+
 /// Morph-specific payload attributes for Engine API.
 ///
 /// This extends the standard Ethereum [`PayloadAttributes`] with L2-specific fields
@@ -51,8 +55,7 @@ pub struct MorphPayloadAttributes {
 
 impl reth_payload_primitives::PayloadAttributes for MorphPayloadAttributes {
     fn payload_id(&self, parent_hash: &B256) -> PayloadId {
-        // Use version 1 as the default version for attributes-based payload IDs.
-        payload_id_morph(parent_hash, self, 1)
+        payload_id_morph(parent_hash, self, MORPH_PAYLOAD_BUILDER_VERSION)
     }
 
     fn timestamp(&self) -> u64 {
@@ -68,8 +71,6 @@ impl reth_payload_primitives::PayloadAttributes for MorphPayloadAttributes {
     }
 }
 
-// Enables `MorphNode: NodeBuilderHelper` in reth v2.0.0's e2e-test-utils,
-// which requires `PayloadAttributes: From<alloy_rpc_types_engine::PayloadAttributes>`.
 impl From<PayloadAttributes> for MorphPayloadAttributes {
     fn from(inner: PayloadAttributes) -> Self {
         Self {
@@ -135,8 +136,6 @@ pub struct MorphPayloadBuilderAttributes {
 
 impl MorphPayloadBuilderAttributes {
     /// Build from parent hash + RPC attributes + version byte, decoding L1 messages.
-    ///
-    /// This replaces the old `PayloadBuilderAttributes::try_new` trait method.
     pub fn try_new(
         parent: B256,
         attributes: MorphPayloadAttributes,
@@ -217,12 +216,8 @@ impl MorphPayloadBuilderAttributes {
     }
 }
 
-/// Implement `PayloadAttributes` so that `MorphPayloadBuilderAttributes` can be used as
-/// `PayloadBuilder::Attributes` in reth v2.0.0, which requires the bound
-/// `Attributes: PayloadAttributes`.
-///
-/// Note: `payload_id()` ignores the `parent_hash` arg and returns the pre-computed
-/// `self.id` (already derived from parent + rpc-attrs during `try_new`).
+/// `payload_id()` ignores the `parent_hash` arg and returns the pre-computed `self.id`
+/// (already derived from parent + rpc-attrs during `try_new`).
 impl reth_payload_primitives::PayloadAttributes for MorphPayloadBuilderAttributes {
     fn payload_id(&self, _parent_hash: &B256) -> PayloadId {
         self.id
@@ -547,8 +542,12 @@ mod tests {
 
     #[test]
     fn test_builder_attributes_has_l1_messages_empty() {
-        let attrs = MorphPayloadBuilderAttributes::try_new(B256::ZERO, create_test_attributes(), 1)
-            .unwrap();
+        let attrs = MorphPayloadBuilderAttributes::try_new(
+            B256::ZERO,
+            create_test_attributes(),
+            MORPH_PAYLOAD_BUILDER_VERSION,
+        )
+        .unwrap();
         assert!(!attrs.has_l1_messages());
     }
 
@@ -562,7 +561,12 @@ mod tests {
         rpc_attrs.gas_limit = Some(30_000_000);
         rpc_attrs.base_fee_per_gas = Some(1_000_000_000);
 
-        let attrs = MorphPayloadBuilderAttributes::try_new(parent, rpc_attrs, 1).unwrap();
+        let attrs = MorphPayloadBuilderAttributes::try_new(
+            parent,
+            rpc_attrs,
+            MORPH_PAYLOAD_BUILDER_VERSION,
+        )
+        .unwrap();
 
         assert_eq!(attrs.parent(), parent);
         assert_eq!(attrs.timestamp(), 999);

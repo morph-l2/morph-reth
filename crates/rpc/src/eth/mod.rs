@@ -22,8 +22,9 @@ use reth_rpc_eth_api::{
         bal::GetBlockAccessList, pending_block::PendingEnvBuilder,
     },
 };
-use reth_rpc_eth_types::StateCacheDb;
-use reth_rpc_eth_types::{EthApiError, EthStateCache, FeeHistoryCache, GasPriceOracle};
+use reth_rpc_eth_types::{
+    EthApiError, EthStateCache, FeeHistoryCache, GasPriceOracle, StateCacheDb,
+};
 use reth_tasks::{
     Runtime,
     pool::{BlockingTaskGuard, BlockingTaskPool},

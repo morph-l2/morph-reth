@@ -32,7 +32,9 @@ use std::sync::Arc;
 use reth_ethereum_primitives as _;
 
 // Re-export main types
-pub use attributes::{MorphPayloadAttributes, MorphPayloadBuilderAttributes};
+pub use attributes::{
+    MORPH_PAYLOAD_BUILDER_VERSION, MorphPayloadAttributes, MorphPayloadBuilderAttributes,
+};
 pub use built::MorphBuiltPayload;
 pub use executable_l2_data::ExecutableL2Data;
 pub use params::{AssembleL2BlockParams, BatchSignature, GenericResponse};

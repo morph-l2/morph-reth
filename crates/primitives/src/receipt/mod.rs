@@ -414,8 +414,6 @@ impl InMemorySize for MorphReceipt {
     }
 }
 
-// RlpBincode trait was removed in reth v2.0.0; no impl needed.
-
 /// Calculates the receipt root for a header.
 ///
 /// This function computes the Merkle root of receipts using the standard encoding

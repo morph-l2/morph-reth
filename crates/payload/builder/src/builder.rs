@@ -179,9 +179,12 @@ where
         let parent_hash = config.parent_header.hash();
         let payload_id = config.payload_id;
         let parent_header = config.parent_header.clone();
-        let builder_attrs =
-            MorphPayloadBuilderAttributes::try_new(parent_hash, config.attributes, 1)
-                .map_err(|e| PayloadBuilderError::Other(e.into()))?;
+        let builder_attrs = MorphPayloadBuilderAttributes::try_new(
+            parent_hash,
+            config.attributes,
+            morph_payload_types::MORPH_PAYLOAD_BUILDER_VERSION,
+        )
+        .map_err(|e| PayloadBuilderError::Other(e.into()))?;
         let builder_config = PayloadConfig {
             parent_header,
             attributes: builder_attrs,
@@ -1094,7 +1097,7 @@ mod tests {
         let attrs = MorphPayloadBuilderAttributes::try_new(
             B256::ZERO,
             morph_payload_types::MorphPayloadAttributes::default(),
-            1,
+            morph_payload_types::MORPH_PAYLOAD_BUILDER_VERSION,
         )
         .unwrap();
         let payload_id = attrs.payload_id();

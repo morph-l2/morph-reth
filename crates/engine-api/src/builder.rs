@@ -13,8 +13,9 @@ use alloy_primitives::{Address, B64, B256, Sealable};
 use alloy_rpc_types_engine::PayloadAttributes;
 use morph_chainspec::MorphChainSpec;
 use morph_payload_types::{
-    AssembleL2BlockParams, ExecutableL2Data, GenericResponse, MorphBuiltPayload,
-    MorphExecutionData, MorphPayloadBuilderAttributes, MorphPayloadTypes, SafeL2Data,
+    AssembleL2BlockParams, ExecutableL2Data, GenericResponse, MORPH_PAYLOAD_BUILDER_VERSION,
+    MorphBuiltPayload, MorphExecutionData, MorphPayloadBuilderAttributes, MorphPayloadTypes,
+    SafeL2Data,
 };
 use morph_primitives::{Block, BlockBody, MorphHeader, MorphPrimitives, MorphTxEnvelope};
 use parking_lot::RwLock;
@@ -661,13 +662,16 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
             base_fee_per_gas: base_fee_override,
         };
 
-        let builder_attrs =
-            MorphPayloadBuilderAttributes::try_new(parent_hash, rpc_attributes.clone(), 1)
-                .map_err(|e| {
-                    MorphEngineApiError::BlockBuildError(format!(
-                        "failed to create builder attributes: {e}",
-                    ))
-                })?;
+        let builder_attrs = MorphPayloadBuilderAttributes::try_new(
+            parent_hash,
+            rpc_attributes.clone(),
+            MORPH_PAYLOAD_BUILDER_VERSION,
+        )
+        .map_err(|e| {
+            MorphEngineApiError::BlockBuildError(format!(
+                "failed to create builder attributes: {e}",
+            ))
+        })?;
         let payload_id = builder_attrs.payload_id();
 
         let build_input = BuildNewPayload {
