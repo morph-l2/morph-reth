@@ -23,16 +23,28 @@ COPY --from=planner /app/recipe.json recipe.json
 ARG BUILD_PROFILE=maxperf
 ENV BUILD_PROFILE=$BUILD_PROFILE
 
-# Extra Cargo flags
-ARG RUSTFLAGS=""
-ENV RUSTFLAGS="$RUSTFLAGS"
+# Architecture-conditional RUSTFLAGS:
+# - linux/amd64 (default): enable x86-64-v3 baseline (Haswell+ / Excavator+)
+#   plus pclmulqdq (carry-less multiply, used by keccak/GHASH but not auto-
+#   enabled by v3). Matches upstream reth release defaults. Pre-2013 Intel
+#   and pre-2015 AMD CPUs will SIGILL on these binaries — pass an explicit
+#   `--build-arg RUSTFLAGS=""` for those hosts.
+# - other platforms (linux/arm64, etc.): no architecture flag.
+ARG TARGETPLATFORM
+ARG RUSTFLAGS=
 
 # Build dependencies (cached layer)
-RUN cargo chef cook --profile $BUILD_PROFILE --recipe-path recipe.json
+RUN if [ -z "$RUSTFLAGS" ] && [ "$TARGETPLATFORM" = "linux/amd64" ]; then \
+        export RUSTFLAGS="-C target-cpu=x86-64-v3 -C target-feature=+pclmulqdq"; \
+    fi && \
+    cargo chef cook --profile $BUILD_PROFILE --recipe-path recipe.json
 
 # Build the application
 COPY . .
-RUN cargo build --profile $BUILD_PROFILE --locked --bin morph-reth
+RUN if [ -z "$RUSTFLAGS" ] && [ "$TARGETPLATFORM" = "linux/amd64" ]; then \
+        export RUSTFLAGS="-C target-cpu=x86-64-v3 -C target-feature=+pclmulqdq"; \
+    fi && \
+    cargo build --profile $BUILD_PROFILE --locked --bin morph-reth
 
 # Copy binary to a fixed location (ARG not resolved in COPY)
 RUN cp /app/target/$BUILD_PROFILE/morph-reth /app/morph-reth

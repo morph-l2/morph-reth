@@ -40,14 +40,20 @@ install: ## Build and install the morph-reth binary under `$(CARGO_HOME)/bin`.
 
 ##@ Cross Build (requires Docker + cross: cargo install cross --git https://github.com/cross-rs/cross)
 
-# Pattern rule: cross-build for any target, e.g. `make build-x86_64-unknown-linux-gnu`
-# See: https://github.com/cross-rs/cross/wiki/FAQ#undefined-reference-with-build-std
-build-%: ## Cross-build morph-reth for a specific target (e.g. build-x86_64-unknown-linux-gnu).
-	RUSTFLAGS="-C link-arg=-lgcc -Clink-arg=-static-libgcc" \
-		cross build --locked --bin morph-reth --target $* --profile "$(PROFILE)"
+# x86_64 release artifacts target the x86-64-v3 baseline (Haswell+ /
+# Excavator+), matching upstream reth. `+pclmulqdq` enables carry-less
+# multiply (used by keccak/GHASH) which v3 does not auto-imply. Pre-2013
+# Intel and pre-2015 AMD CPUs will SIGILL on these binaries.
+build-x86_64-unknown-linux-gnu: RUSTFLAGS_ARCH = -C target-cpu=x86-64-v3 -C target-feature=+pclmulqdq
 
 # aarch64 needs larger jemalloc page size (64KB pages on some ARM systems)
 build-aarch64-unknown-linux-gnu: export JEMALLOC_SYS_WITH_LG_PAGE=16
+
+# Pattern rule: cross-build for any target, e.g. `make build-x86_64-unknown-linux-gnu`
+# See: https://github.com/cross-rs/cross/wiki/FAQ#undefined-reference-with-build-std
+build-%: ## Cross-build morph-reth for a specific target (e.g. build-x86_64-unknown-linux-gnu).
+	RUSTFLAGS="-C link-arg=-lgcc -Clink-arg=-static-libgcc $(RUSTFLAGS_ARCH)" \
+		cross build --locked --bin morph-reth --target $* --profile "$(PROFILE)"
 
 # Create a `.tar.gz` containing the morph-reth binary for a specific target.
 define tarball_release_binary
