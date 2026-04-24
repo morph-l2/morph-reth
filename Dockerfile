@@ -15,11 +15,12 @@ RUN cargo chef prepare --recipe-path recipe.json
 FROM chef AS builder
 COPY --from=planner /app/recipe.json recipe.json
 
-# Build profile. Defaults to `profiling` (release + line-table symbols) so
-# production binaries remain flame-graphable. Override with
-# `--build-arg BUILD_PROFILE=maxperf` for peak throughput (fat LTO, slower
-# to link) or `release` for the slimmer/stripped variant.
-ARG BUILD_PROFILE=profiling
+# Build profile. Defaults to `maxperf` (fat LTO + single codegen unit) for
+# peak throughput in production containers. Link time is noticeably longer
+# but amortized across every block executed. Override with
+# `--build-arg BUILD_PROFILE=profiling` to keep line-table symbols for
+# flame graphs, or `release` for the slimmer/stripped variant.
+ARG BUILD_PROFILE=maxperf
 ENV BUILD_PROFILE=$BUILD_PROFILE
 
 # Extra Cargo flags
