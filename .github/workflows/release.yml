@@ -113,12 +113,14 @@ jobs:
       - name: Resolve build profile
         id: profile
         run: |
-          # Tag push -> maxperf (peak throughput for public releases).
-          # workflow_dispatch -> user-selected profile (defaults to profiling).
+          # Tag push -> profiling (matches Dockerfile + EC2 deploy defaults;
+          # see PR rationale: maxperf regresses ERC20 long tail).
+          # workflow_dispatch -> user-selected profile (defaults to profiling,
+          # `maxperf` available for eth-heavy reference builds).
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             PROFILE="${{ inputs.profile }}"
           else
-            PROFILE="maxperf"
+            PROFILE="profiling"
           fi
           # Cargo's target dir is "debug" for dev, otherwise the profile name.
           if [[ "$PROFILE" == "dev" ]]; then

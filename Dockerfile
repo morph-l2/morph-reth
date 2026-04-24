@@ -15,12 +15,16 @@ RUN cargo chef prepare --recipe-path recipe.json
 FROM chef AS builder
 COPY --from=planner /app/recipe.json recipe.json
 
-# Build profile. Defaults to `maxperf` (fat LTO + single codegen unit) for
-# peak throughput in production containers. Link time is noticeably longer
-# but amortized across every block executed. Override with
-# `--build-arg BUILD_PROFILE=profiling` to keep line-table symbols for
-# flame graphs, or `release` for the slimmer/stripped variant.
-ARG BUILD_PROFILE=maxperf
+# Build profile. Defaults to `profiling` (thin LTO + line-table debug info).
+# Bench data on M4 Pro showed `maxperf` (fat LTO + cgu=1) hitting a hard
+# trade-off on ERC20 workloads: peak `eth_transfer` throughput +13% but
+# median ERC20 TPS -10% and import_ms long tail catastrophic (p99.9 90ms,
+# max 456ms, 0.36% blocks > 50ms vs profiling's 0%). `profiling` keeps
+# ~80% of maxperf's hot-path gain, no ERC20 regression, AND gives prod
+# binaries line-table symbols so incidents produce clean stack traces.
+# Override with `--build-arg BUILD_PROFILE=maxperf` for eth-heavy nodes
+# that don't care about long tail, or `release` for slim/stripped.
+ARG BUILD_PROFILE=profiling
 ENV BUILD_PROFILE=$BUILD_PROFILE
 
 # Architecture-conditional RUSTFLAGS:

@@ -5,11 +5,13 @@ DIST_DIR         = dist
 BINARY           = morph-reth
 TARBALL          = morph-reth.tar.gz
 CARGO_TARGET_DIR ?= target
-# Production deploys go to EC2 via S3. Default to `maxperf` (fat LTO +
-# single codegen unit) for peak throughput on prod nodes — matches the
-# Dockerfile default. Override with `PROFILE=profiling` to keep line-table
-# symbols for flame graphs when diagnosing a prod incident.
-PROFILE          ?= maxperf
+# Production deploys go to EC2 via S3. Default to `profiling` (thin LTO +
+# line-table debug) — matches the Dockerfile default. Bench data showed
+# `maxperf` (fat LTO + cgu=1) regresses ERC20 median TPS -10% and explodes
+# the import_ms long tail (p99.9 90ms, max 456ms) while only winning eth-
+# transfer by 7%. `profiling` keeps most of the throughput gain, no ERC20
+# regression, and ships line-table symbols for incident diagnosis.
+PROFILE          ?= profiling
 
 # Architecture-conditional RUSTFLAGS based on the build host's CPU. EC2
 # build hosts native-compile and upload to S3 → prod hosts pull. As long
