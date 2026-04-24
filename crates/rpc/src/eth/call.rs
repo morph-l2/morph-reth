@@ -230,23 +230,29 @@ fn token_gas_allowance(
     // Determine the token-denominated affordability cap.
     //
     // - Slot mode (`balance_slot.is_some()`): RPC reads balance directly
-    //   from token storage; cap by `min(balance, fee_limit)`.
+    //   from token storage; cap by `min(balance, fee_limit)`. The
+    //   trusted balance is the natural ceiling.
     // - EVM-call mode (`balance_slot.is_none()`): RPC cannot resolve the
     //   balance without spinning up an EVM (the handler does that at real
     //   execution via `load_for_caller`). On the estimateGas path
     //   `disable_fee_charge=true` short-circuits the handler's check, so
-    //   we MUST bound here — otherwise the binary search amplifies into
-    //   ~25 × block_gas_limit of free EVM work. Use the user-supplied
-    //   `fee_limit` if present; else fall back to the per-call `gas_cap`,
-    //   matching `eth_call`'s effective ceiling.
-    let limit = match (token_fee_info.balance_slot, fee_limit) {
-        (Some(_), Some(limit)) if !limit.is_zero() => token_fee_info.balance.min(limit),
-        (Some(_), _) => token_fee_info.balance,
-        (None, Some(limit)) if !limit.is_zero() => limit,
+    //   there is no natural balance ceiling — we MUST enforce `gas_cap`
+    //   here, matching `eth_call`'s effective ceiling. Trusting a
+    //   user-supplied `fee_limit` alone would let `fee_limit = U256::MAX`
+    //   bypass the operator-configured `--rpc.gascap`.
+    let (limit, clamp_to_gas_cap) = match (token_fee_info.balance_slot, fee_limit) {
+        (Some(_), Some(limit)) if !limit.is_zero() => (token_fee_info.balance.min(limit), false),
+        (Some(_), _) => (token_fee_info.balance, false),
+        (None, Some(limit)) if !limit.is_zero() => (limit, true),
         (None, _) => return Ok(gas_cap),
     };
 
-    gas_allowance_from_token_limit(limit, l1_fee, token_fee_info, gas_price)
+    let allowance = gas_allowance_from_token_limit(limit, l1_fee, token_fee_info, gas_price)?;
+    Ok(if clamp_to_gas_cap {
+        allowance.min(gas_cap)
+    } else {
+        allowance
+    })
 }
 
 /// Convert a token-denominated affordability cap into a gas allowance.
@@ -292,20 +298,21 @@ fn gas_allowance_from_balance(balance: U256, gas_price: u128) -> u64 {
     saturating_div_u128(balance, gas_price)
 }
 
-/// `eth = token_amount * price_ratio / scale`, rounded up. `None` if
+/// `eth = floor(token_amount * price_ratio / scale)`. `None` if
 /// `price_ratio` or `scale` is zero.
+///
+/// Floor (not ceil) is deliberate: this is the inverse of the
+/// protocol's `eth_to_token_amount`, which ceils to protect the
+/// protocol (undercharging loses revenue). An affordability budget
+/// must round in the opposite direction — the largest `eth` such
+/// that the corresponding token charge still fits the user's
+/// balance. With non-1:1 ratios, ceiling here would over-promise a
+/// gas budget the user cannot actually settle at execution time.
 fn token_amount_to_eth(token_amount: U256, info: &TokenFeeInfo) -> Option<U256> {
     if info.price_ratio.is_zero() || info.scale.is_zero() {
         return None;
     }
-    let (eth_amount, remainder) = token_amount
-        .saturating_mul(info.price_ratio)
-        .div_rem(info.scale);
-    if remainder.is_zero() {
-        Some(eth_amount)
-    } else {
-        Some(eth_amount.saturating_add(U256::from(1)))
-    }
+    Some(token_amount.saturating_mul(info.price_ratio) / info.scale)
 }
 
 #[cfg(test)]
@@ -550,5 +557,62 @@ mod tests {
         )
         .expect_err("zero price_ratio must reject");
         assert!(matches!(err, MorphEthApiError::InvalidFeeToken));
+    }
+
+    /// EVM-call mode + absurd user-supplied `fee_limit` must NOT bypass
+    /// `gas_cap`. Pre-fix the `(None, Some(fee_limit))` arm accepted the
+    /// user value verbatim, letting `fee_limit = U256::MAX` return
+    /// `u64::MAX` — silently bypassing any operator-configured
+    /// `--rpc.gascap < block_gas_limit`.
+    #[test]
+    fn token_evm_call_mode_huge_fee_limit_clamps_to_gas_cap() {
+        let token = token_1to1(None, U256::ZERO);
+        let cap = 5_000_000u64;
+        let allowance = token_gas_allowance(
+            U256::ZERO,
+            U256::ZERO,
+            &token,
+            /* l1_fee */ U256::ZERO,
+            /* fee_limit */ Some(U256::MAX),
+            /* gas_price */ 1,
+            /* gas_cap */ cap,
+        )
+        .expect("huge fee_limit must clamp, not error");
+        assert_eq!(allowance, cap, "must clamp to gas_cap, not u64::MAX");
+    }
+
+    /// `token_amount_to_eth` must floor, not ceil. Inverse of
+    /// `eth_to_token_amount` (which ceils for protocol safety): an
+    /// affordability budget must round toward the user so the returned
+    /// wei budget is settleable at execution time.
+    #[test]
+    fn token_amount_to_eth_floors_non_unit_ratio() {
+        // scale=10, price_ratio=3. eth_to_token_amount(1 wei) = ceil(10/3) = 4
+        // tokens. So 1 token cannot afford even 1 wei of gas — budget = 0.
+        let info = TokenFeeInfo {
+            price_ratio: U256::from(3u64),
+            scale: U256::from(10u64),
+            ..token_1to1(None, U256::ZERO)
+        };
+        assert_eq!(
+            token_amount_to_eth(U256::from(1u64), &info),
+            Some(U256::ZERO)
+        );
+        assert_eq!(
+            token_amount_to_eth(U256::from(3u64), &info),
+            Some(U256::ZERO)
+        );
+        // 4 tokens → floor(12/10) = 1 wei. Roundtrip check:
+        // eth_to_token_amount(1) = ceil(10/3) = 4, so 4 tokens → 1 wei is
+        // exactly settleable.
+        assert_eq!(
+            token_amount_to_eth(U256::from(4u64), &info),
+            Some(U256::from(1u64))
+        );
+        // Exact multiple: 10 tokens → 3 wei (floor and ceil agree).
+        assert_eq!(
+            token_amount_to_eth(U256::from(10u64), &info),
+            Some(U256::from(3u64))
+        );
     }
 }
