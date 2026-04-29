@@ -1,6 +1,6 @@
 //! Request/response types for L2 Engine API methods.
 
-use alloy_primitives::{Address, Bytes};
+use alloy_primitives::Bytes;
 
 /// Parameters for engine_assembleL2Block.
 ///
@@ -68,22 +68,6 @@ impl GenericResponse {
     pub fn failure() -> Self {
         Self { success: false }
     }
-}
-
-/// BLS batch signature from a sequencer validator.
-///
-/// This is sent by the consensus layer via `engine_appendBatchSignature`
-/// when collecting validator signatures for L1 batch submission.
-/// For non-sequencer nodes this is accepted but not persisted.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BatchSignature {
-    /// Validator address that produced the signature.
-    pub signer: Address,
-    /// BLS public key of the signer.
-    pub signer_pub_key: Bytes,
-    /// BLS signature over the batch hash.
-    pub signature: Bytes,
 }
 
 impl From<bool> for GenericResponse {
