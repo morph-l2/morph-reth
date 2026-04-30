@@ -7,9 +7,15 @@ use clap::Parser;
 use morph_chainspec::{MorphChainSpec, MorphChainSpecParser};
 use morph_consensus::MorphConsensus;
 use morph_evm::{MorphEvmConfig, evm::MorphEvmFactory};
-use morph_node::{MorphArgs, MorphNode};
+use morph_node::{
+    MorphAddOns, MorphArgs, MorphNode,
+    exex::{ReferenceIndexControl, reference_index_exex},
+};
+use morph_reference_index::ReferenceIndexDb;
+use reth_chainspec::EthChainSpec;
 use reth_cli_util::sigsegv_handler;
 use reth_ethereum_cli::Cli;
+use reth_node_builder::Node;
 use reth_rpc_server_types::DefaultRpcModuleValidator;
 use std::sync::Arc;
 use tracing::info;
@@ -43,8 +49,37 @@ fn main() {
             .run_with_components::<MorphNode>(components, async move |builder, morph_args| {
                 info!(target: "morph::cli", "Starting Morph-Reth node");
 
+                // Open the reference index DB before launching the node so we
+                // can wire it into both the ExEx and the add-ons.
+                let chain_spec = builder.config().chain.clone();
+                let datadir = builder.config().datadir();
+                let reference_index_path =
+                    datadir.data_dir().join("morph").join("reference_index");
+                let chain_id = chain_spec.chain().id();
+                let genesis_hash = chain_spec.genesis_hash(); // from EthChainSpec trait
+
+                info!(
+                    target: "morph::reference_index",
+                    path = %reference_index_path.display(),
+                    chain_id,
+                    "opening Morph reference index database"
+                );
+                let db = ReferenceIndexDb::open(&reference_index_path, chain_id, genesis_hash)?;
+                let (control, startup_rx) = ReferenceIndexControl::new(db);
+
+                let exex_control = control.clone();
+                let node = MorphNode::new(morph_args);
+
                 let handle = builder
-                    .node(MorphNode::new(morph_args))
+                    .with_types::<MorphNode>()
+                    .with_components(node.components_builder())
+                    .with_add_ons(MorphAddOns::new().with_reference_index(control))
+                    .install_exex(
+                        "morph-reference-index",
+                        async move |ctx| {
+                            Ok(reference_index_exex(ctx, exex_control, startup_rx))
+                        },
+                    )
                     .launch_with_debug_capabilities()
                     .await?;
 

@@ -5,9 +5,11 @@
 pub mod error;
 pub mod eth;
 pub mod eth_config;
+pub mod morph;
 pub mod types;
 
 pub use error::MorphEthApiError;
 pub use eth::{MorphEthApi, MorphEthApiBuilder, MorphRpcConverter, MorphRpcTypes};
 pub use eth_config::{MorphEthConfigApiServer, MorphEthConfigHandler};
+pub use morph::{MorphRpc, MorphRpcHandler, MorphRpcServer, ReferenceQueryArgs};
 pub use types::*;

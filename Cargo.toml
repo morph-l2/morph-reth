@@ -74,6 +74,9 @@ reth-engine-primitives = { git = "https://github.com/morph-l2/reth", rev = "1b07
 reth-engine-tree = { git = "https://github.com/morph-l2/reth", rev = "1b0702546633c259306017717b2938f14adfe329" }
 reth-errors = { git = "https://github.com/morph-l2/reth", rev = "1b0702546633c259306017717b2938f14adfe329" }
 reth-eth-wire-types = { git = "https://github.com/morph-l2/reth", rev = "1b0702546633c259306017717b2938f14adfe329" }
+reth-exex = { git = "https://github.com/morph-l2/reth", rev = "1b0702546633c259306017717b2938f14adfe329" }
+reth-exex-test-utils = { git = "https://github.com/morph-l2/reth", rev = "1b0702546633c259306017717b2938f14adfe329" }
+reth-exex-types = { git = "https://github.com/morph-l2/reth", rev = "1b0702546633c259306017717b2938f14adfe329" }
 reth-ethereum = { git = "https://github.com/morph-l2/reth", rev = "1b0702546633c259306017717b2938f14adfe329" }
 reth-ethereum-cli = { git = "https://github.com/morph-l2/reth", rev = "1b0702546633c259306017717b2938f14adfe329" }
 reth-ethereum-consensus = { git = "https://github.com/morph-l2/reth", rev = "1b0702546633c259306017717b2938f14adfe329" }
