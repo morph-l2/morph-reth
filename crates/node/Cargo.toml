@@ -90,9 +90,11 @@ alloy-primitives.workspace = true
 alloy-rpc-types-engine.workspace = true
 alloy-rpc-types-eth.workspace = true
 jsonrpsee.workspace = true
+morph-chainspec.workspace = true
 morph-payload-types.workspace = true
 morph-primitives.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 
 [[test]]
 name = "it"
