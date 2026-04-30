@@ -84,6 +84,11 @@ where
         + BlockHashReader,
 {
     let mut first_ready = true;
+    // Track last sent FinishedHeight to keep progress monotonic.  Without this,
+    // the `tokio::select!` arms can race: a live commit may send `FinishedHeight(H+k)`
+    // before the startup watch channel is observed, which would otherwise
+    // regress reth's pruning marker back to `H`.
+    let mut last_finished: Option<BlockNumHash> = None;
 
     loop {
         tokio::select! {
@@ -93,9 +98,9 @@ where
                     debug!(
                         target: "morph::reference_index",
                         block_number = block.number,
-                        "startup complete; sending initial FinishedHeight"
+                        "startup complete; forwarding initial FinishedHeight"
                     );
-                    ctx.events.send(ExExEvent::FinishedHeight(block))?;
+                    send_finished_height_monotonic(&ctx.events, block, &mut last_finished)?;
                 }
             }
 
@@ -162,11 +167,12 @@ where
                     }
                 }
 
-                if let Err(e) =
-                    handle_notification(&ctx.events, &control.db, notification)
-                {
-                    error!(target: "morph::reference_index", ?e, "error processing notification");
-                    return Err(e);
+                match handle_notification(&ctx.events, &control.db, notification, &mut last_finished) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        error!(target: "morph::reference_index", ?e, "error processing notification");
+                        return Err(e);
+                    }
                 }
             }
         }
@@ -218,10 +224,14 @@ where
 }
 
 /// Process one ExEx notification: commit or revert three tables atomically.
+///
+/// Updates `last_finished` when a FinishedHeight is sent so the caller can
+/// keep progress monotonic across the startup-watch and notification arms.
 fn handle_notification(
     events: &tokio::sync::mpsc::UnboundedSender<ExExEvent>,
     db: &ReferenceIndexDb,
     notification: ExExNotification<MorphPrimitives>,
+    last_finished: &mut Option<BlockNumHash>,
 ) -> eyre::Result<()> {
     match notification {
         ExExNotification::ChainCommitted { new } => {
@@ -237,7 +247,7 @@ fn handle_notification(
             }
             update_indexed_to(&tx, new.tip().number())?;
             tx.commit()?;
-            events.send(ExExEvent::FinishedHeight(new.tip().num_hash()))?;
+            send_finished_height_monotonic(events, new.tip().num_hash(), last_finished)?;
         }
         ExExNotification::ChainReverted { old } => {
             let parent = old.first().number().saturating_sub(1);
@@ -265,8 +275,28 @@ fn handle_notification(
             }
             update_indexed_to(&tx, new.tip().number())?;
             tx.commit()?;
+            // On reorg to a shorter chain the tip may go down; that is the one
+            // case we ALLOW FinishedHeight to regress (reth's ExExEvent doc
+            // explicitly permits "on reorgs, height may go down").
             events.send(ExExEvent::FinishedHeight(new.tip().num_hash()))?;
+            *last_finished = Some(new.tip().num_hash());
         }
+    }
+    Ok(())
+}
+
+/// Send a FinishedHeight only if it strictly advances `last_finished`.
+///
+/// Used for ChainCommitted and the startup watch channel, where progress
+/// must only go forward.  ChainReorged has its own allow-regress path.
+fn send_finished_height_monotonic(
+    events: &tokio::sync::mpsc::UnboundedSender<ExExEvent>,
+    block: BlockNumHash,
+    last_finished: &mut Option<BlockNumHash>,
+) -> eyre::Result<()> {
+    if last_finished.is_none_or(|last| block.number > last.number) {
+        events.send(ExExEvent::FinishedHeight(block))?;
+        *last_finished = Some(block);
     }
     Ok(())
 }

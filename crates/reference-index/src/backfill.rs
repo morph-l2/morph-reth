@@ -164,8 +164,6 @@ where
         "starting reference index backfill"
     );
 
-    let total = head_at_startup.saturating_sub(start).saturating_add(1) as f64;
-    let mut done = 0f64;
     let mut current = start;
 
     while current <= head_at_startup {
@@ -205,9 +203,6 @@ where
             set_backfill_state(&tx, BackfillState::InProgress)?;
         }
         tx.commit()?;
-
-        done += (batch_end - current + 1) as f64;
-        crate::metrics::set_backfill_progress(done / total);
 
         debug!(
             target: "morph::reference_index",

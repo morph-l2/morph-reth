@@ -61,9 +61,6 @@ pub fn write_block<Tx: DbTxMut>(
         written += 1;
     }
 
-    if written > 0 {
-        crate::metrics::increment_entries(written);
-    }
     Ok(written)
 }
 
@@ -148,7 +145,6 @@ pub fn set_backfill_state<Tx: DbTxMut>(
         IndexMetaKey::BackfillState.into(),
         MetaValue(vec![state as u8]),
     )?;
-    crate::metrics::set_backfill_state(state as u8);
     Ok(())
 }
 

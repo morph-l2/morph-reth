@@ -14,7 +14,6 @@ alloy-consensus.workspace = true
 alloy-primitives.workspace = true
 alloy-rlp.workspace = true
 eyre.workspace = true
-metrics.workspace = true
 morph-chainspec.workspace = true
 morph-primitives = { workspace = true, features = ["reth-codec"] }
 reth-chainspec.workspace = true

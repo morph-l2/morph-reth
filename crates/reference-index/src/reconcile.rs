@@ -49,13 +49,21 @@ where
 
     for number in check_start..=indexed_to {
         let indexed_hash = db.indexed_block_hash(number)?;
-        let canonical_hash = provider.block_hash(number)?;
 
-        if indexed_hash != canonical_hash {
+        // `None` means the block was never written to IndexedBlocks (e.g. the
+        // sentinel path where backfill marks indexed_to = head but writes no
+        // IndexedBlocks entries for pre-Jade blocks).  Treat as "not indexed,
+        // skip" rather than a hash mismatch to avoid spurious reorg detection.
+        let Some(indexed) = indexed_hash else {
+            continue;
+        };
+
+        let canonical_hash = provider.block_hash(number)?;
+        if Some(indexed) != canonical_hash {
             debug!(
                 target: "morph::reference_index",
                 number,
-                ?indexed_hash,
+                ?indexed,
                 ?canonical_hash,
                 "canonical hash mismatch during reconcile"
             );

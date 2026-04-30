@@ -191,7 +191,6 @@ impl ReferenceIndexDb {
 
     pub fn set_ready(&self, ready: bool) {
         self.ready.store(ready, Ordering::Release);
-        crate::metrics::set_ready(ready);
     }
 
     // ── transaction factory ───────────────────────────────────────────────────

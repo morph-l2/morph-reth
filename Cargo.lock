@@ -4959,7 +4959,6 @@ dependencies = [
  "alloy-primitives",
  "alloy-rlp",
  "eyre",
- "metrics",
  "morph-chainspec",
  "morph-primitives",
  "reth-chainspec",

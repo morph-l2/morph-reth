@@ -41,7 +41,6 @@ impl ReferenceIndexReader {
 
         let indexed_to = self.db.indexed_to()?;
         if canonical_tip.saturating_sub(indexed_to) > self.lag_threshold {
-            crate::metrics::set_lag_blocks(canonical_tip.saturating_sub(indexed_to));
             return Err(ReferenceIndexError::IndexBehind);
         }
 
@@ -79,7 +78,6 @@ impl ReferenceIndexReader {
             next = cursor.next()?;
         }
 
-        crate::metrics::set_lag_blocks(canonical_tip.saturating_sub(indexed_to));
         Ok(results)
     }
 }

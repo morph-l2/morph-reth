@@ -15,7 +15,6 @@ use tracing as _;
 
 pub mod backfill;
 pub mod db;
-pub mod metrics;
 pub mod reader;
 pub mod reconcile;
 pub mod tables;
