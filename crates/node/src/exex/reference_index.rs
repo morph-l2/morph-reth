@@ -275,6 +275,17 @@ where
     let chain_spec = provider.chain_spec();
     let head = provider.best_block_number()?;
 
+    // Paired-snapshot validation: if snapshot_block_hash metadata is present,
+    // verify it against the main DB before doing any indexing work.  Fails
+    // startup on mismatch per design spec.
+    control.db.validate_paired_snapshot(|number| {
+        provider.block_hash(number).map_err(|e| {
+            morph_reference_index::ReferenceIndexError::Other(eyre::eyre!(
+                "failed to read main DB block hash at {number}: {e}"
+            ))
+        })
+    })?;
+
     // Re-resolve jade sentinel if Jade has since activated.
     maybe_reset_jade_sentinel(&control.db, &provider, chain_spec.as_ref(), head)?;
 

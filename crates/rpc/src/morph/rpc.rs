@@ -7,18 +7,18 @@ use serde::{Deserialize, Serialize};
 
 /// Parameters for `morph_getTransactionHashesByReference`.
 ///
-/// Hex-encoded quantities are accepted (`"0x0"`, `"0x64"`) for `offset`/`limit`
-/// for geth compatibility; plain integers are also accepted.
+/// `offset`/`limit` use the geth `hexutil.Uint64` wire format (hex-encoded
+/// quantity strings like `"0x0"`, `"0x64"`).  Plain integers are also accepted.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReferenceQueryArgs {
     /// 32-byte Morph transaction reference key.
     pub reference: B256,
     /// Starting offset (default 0, max 10 000).
-    #[serde(default)]
+    #[serde(default, with = "alloy_serde::quantity::opt")]
     pub offset: Option<u64>,
     /// Maximum number of results (default 100, max 100).
-    #[serde(default)]
+    #[serde(default, with = "alloy_serde::quantity::opt")]
     pub limit: Option<u64>,
 }
 

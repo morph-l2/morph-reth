@@ -250,6 +250,41 @@ impl ReferenceIndexDb {
             .transpose()
     }
 
+    /// Validate a paired-snapshot against the main chain provider.
+    ///
+    /// Must be called after `FullNode.provider()` is available.  Fails startup
+    /// if `snapshot_block_number`/`snapshot_block_hash` are set but disagree
+    /// with the main chain (either the snapshot is ahead of the main DB, or
+    /// the hash at that height diverges).
+    ///
+    /// When snapshot metadata is not present (fresh DB, no paired snapshot),
+    /// this is a no-op.
+    pub fn validate_paired_snapshot<F>(&self, main_block_hash: F) -> Result<(), ReferenceIndexError>
+    where
+        F: FnOnce(u64) -> Result<Option<B256>, ReferenceIndexError>,
+    {
+        let Some(expected) = self.snapshot_block_hash()? else {
+            return Ok(());
+        };
+        let Some(number) = self.snapshot_block_number()? else {
+            // Hash without number is malformed state; treat as mismatch.
+            return Err(ReferenceIndexError::ChainIdentityMismatch(
+                "snapshot_block_hash present but snapshot_block_number missing",
+            ));
+        };
+
+        match main_block_hash(number)? {
+            None => Err(ReferenceIndexError::Other(eyre::eyre!(
+                "reference index snapshot ahead of main DB (snapshot_block_number={number})"
+            ))),
+            Some(actual) if actual != expected => Err(ReferenceIndexError::Other(eyre::eyre!(
+                "reference index snapshot chain mismatch at block {number}: \
+                 expected {expected:?}, main DB has {actual:?}"
+            ))),
+            Some(_) => Ok(()),
+        }
+    }
+
     /// Returns the canonical block hash stored in `IndexedBlocks` for `block_number`.
     pub fn indexed_block_hash(
         &self,

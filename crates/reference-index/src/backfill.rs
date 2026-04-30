@@ -103,11 +103,28 @@ where
 {
     let state = db.backfill_state()?;
 
+    // `jade_first_block_number` is our canonical lower bound; it's written as the
+    // very first step on the NotStarted path.  InProgress/Complete resumes read
+    // it back from IndexMeta.
     let start = match state {
         BackfillState::Complete => return Ok(()),
         BackfillState::InProgress => {
-            // Resume from last checkpoint + 1 (checkpoint is the last fully written block).
-            db.indexed_to()?.saturating_add(1)
+            // Resume from `max(indexed_to + 1, jade_first_block_number)`: if the
+            // crash happened between InProgress write and the first batch commit,
+            // `indexed_to` is still 0 and must not be used as-is.
+            let jade_first = db
+                .jade_first_block_number()?
+                .unwrap_or(JADE_NOT_ACTIVE_SENTINEL);
+            if jade_first == JADE_NOT_ACTIVE_SENTINEL {
+                // Sentinel case: no range to backfill; mark complete.
+                let tx = db.tx_mut()?;
+                update_indexed_from(&tx, head_at_startup)?;
+                update_indexed_to(&tx, head_at_startup)?;
+                set_backfill_state(&tx, BackfillState::Complete)?;
+                tx.commit()?;
+                return Ok(());
+            }
+            db.indexed_to()?.saturating_add(1).max(jade_first)
         }
         BackfillState::NotStarted => {
             let jade_first = resolve_jade_first_block(provider, chain_spec, head_at_startup)?;
