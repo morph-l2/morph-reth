@@ -137,18 +137,21 @@ where
         let reference_rpc_handler = if let Some(control) = self.reference_index {
             let startup_control = control.clone();
             let startup_node = ctx.node.clone();
+            // spawn_critical causes node shutdown on panic/error, matching the spec
+            // requirement that reference index startup failures are fatal.
             task_executor.spawn_critical("morph reference index startup", async move {
-                if let Err(err) = tokio::task::spawn_blocking(move || {
+                let result = tokio::task::spawn_blocking(move || {
                     crate::exex::run_startup_indexing(&startup_node, &startup_control)
                 })
                 .await
-                .unwrap_or_else(|e| Err(eyre::eyre!("panic: {e}")))
-                {
-                    tracing::error!(
-                        target: "morph::reference_index",
-                        ?err,
-                        "reference index startup indexing failed"
-                    );
+                .unwrap_or_else(|e| Err(eyre::eyre!("reference index startup panicked: {e}")));
+
+                match result {
+                    Ok(()) => {}
+                    Err(err) => {
+                        // Propagate to spawn_critical which will shut down the node.
+                        panic!("reference index startup failed: {err:?}");
+                    }
                 }
             });
 

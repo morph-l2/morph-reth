@@ -34,7 +34,9 @@ pub trait MorphRpc {
     ///
     /// Returns `-32000 "reference index is behind"` when the index lags the
     /// current chain tip by more than the configured threshold (default 16).
-    #[method(name = "getTransactionHashesByReference")]
+    ///
+    /// Marked `blocking` because the handler runs synchronous MDBX reads.
+    #[method(name = "getTransactionHashesByReference", blocking)]
     fn get_transaction_hashes_by_reference(
         &self,
         args: ReferenceQueryArgs,

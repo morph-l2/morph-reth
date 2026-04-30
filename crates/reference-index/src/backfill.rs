@@ -157,8 +157,11 @@ where
 
         let tx = db.tx_mut()?;
         for number in current..=batch_end {
+            // `WithHash` is required because write_block stores transaction hashes in the
+            // reference index keys.  `NoHash` would leave tx hashes uninitialised per
+            // reth's BlockReader contract (see blockchain_provider.rs:309).
             let block = provider
-                .sealed_block_with_senders(number.into(), TransactionVariant::NoHash)?
+                .sealed_block_with_senders(number.into(), TransactionVariant::WithHash)?
                 .ok_or_else(|| {
                     ReferenceIndexError::Other(eyre::eyre!(
                         "missing block {number} during backfill"

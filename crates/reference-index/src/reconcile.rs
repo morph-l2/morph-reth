@@ -39,7 +39,12 @@ where
     let indexed_to = db.indexed_to()?;
 
     // ── Step A: canonical hash check ────────────────────────────────────────
-    let check_start = indexed_to.saturating_sub(max_reorg_depth.saturating_sub(1));
+    // Use indexed_from as lower bound to avoid scanning blocks that were never
+    // indexed (e.g. pre-Jade blocks on the sentinel path where backfill sets
+    // indexed_to but writes no IndexedBlocks entries).
+    let indexed_from = db.indexed_from()?.unwrap_or(indexed_to);
+    let depth_start = indexed_to.saturating_sub(max_reorg_depth.saturating_sub(1));
+    let check_start = indexed_from.max(depth_start);
     let mut fork_height: Option<u64> = None;
 
     for number in check_start..=indexed_to {
@@ -92,8 +97,9 @@ where
 
         let tx = db.tx_mut()?;
         for number in rebuild_start..=current_head {
+            // `WithHash` is required: we persist tx hashes as part of the index keys.
             let block = provider
-                .sealed_block_with_senders(number.into(), TransactionVariant::NoHash)?
+                .sealed_block_with_senders(number.into(), TransactionVariant::WithHash)?
                 .ok_or_else(|| {
                     ReferenceIndexError::Other(eyre::eyre!(
                         "missing block {number} during reconcile"

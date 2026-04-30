@@ -20,9 +20,12 @@ use reth_db_api::{cursor::DbCursorRO, transaction::DbTxMut};
 
 /// Index one canonical block into all three data tables.
 ///
-/// Returns the number of reference entries written.  This function is
-/// idempotent: re-writing the same block overwrites previously stored rows
-/// with the same canonical values.
+/// Returns the number of reference entries written.
+///
+/// **Not idempotent on its own**: the caller must call [`delete_block`] for
+/// the same block number before re-writing to avoid leaving stale entries
+/// (keys contain `tx_hash`, so a re-write with a different tx set would leave
+/// old-tx ghost rows).  Reconcile and reorg paths follow this contract.
 pub fn write_block<Tx: DbTxMut>(
     tx: &Tx,
     block_number: u64,

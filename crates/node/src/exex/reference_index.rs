@@ -114,18 +114,32 @@ where
                     continue;
                 }
 
-                // Gap check on first is_ready notification.
+                // On the first is_ready notification: fill any gap that opened
+                // between when Task A finished reconcile and when this notification
+                // arrived.  We delete-then-write to avoid stale entries in case a
+                // mini-reorg happened during that window.
                 if first_ready {
                     first_ready = false;
+                    let indexed_to = control.db.indexed_to()?;
                     if let Some(chain) = notification.committed_chain() {
-                        let indexed_to = control.db.indexed_to()?;
                         let notif_start = chain.first().number();
                         if notif_start > indexed_to + 1 {
-                            fill_gap(
+                            fill_gap_idempotent(
                                 &control.db,
                                 &ctx.components.provider().clone(),
                                 indexed_to + 1,
                                 notif_start - 1,
+                            )?;
+                        }
+                    } else if let Some(old) = notification.reverted_chain() {
+                        // Reorg during drain window: roll back below the revert start.
+                        let revert_start = old.first().number();
+                        if revert_start <= indexed_to {
+                            fill_gap_idempotent(
+                                &control.db,
+                                &ctx.components.provider().clone(),
+                                revert_start,
+                                indexed_to,
                             )?;
                         }
                     }
@@ -144,8 +158,11 @@ where
     Ok(())
 }
 
-/// Fill index entries from main DB for the gap `[from, to]`.
-fn fill_gap<Provider>(
+/// Fill (or repair) index entries for blocks `[from, to]` using canonical main DB data.
+///
+/// Uses delete-then-write per block to stay idempotent even if some entries
+/// already exist (e.g. partial prior write or mini-reorg during drain window).
+fn fill_gap_idempotent<Provider>(
     db: &ReferenceIndexDb,
     provider: &Provider,
     from: u64,
@@ -160,12 +177,15 @@ where
     info!(
         target: "morph::reference_index",
         from, to,
-        "filling gap between startup reconcile and first ExEx notification"
+        "idempotent gap fill between startup reconcile and first ExEx notification"
     );
     let tx = db.tx_mut()?;
     for number in from..=to {
+        // Delete any stale entries before writing canonical ones.
+        delete_block(&tx, number)?;
+        // `WithHash` is required: write_block stores tx hashes in the index keys.
         let block = provider
-            .sealed_block_with_senders(number.into(), TransactionVariant::NoHash)?
+            .sealed_block_with_senders(number.into(), TransactionVariant::WithHash)?
             .ok_or_else(|| eyre::eyre!("missing block {number} during gap fill"))?;
         write_block(
             &tx,
