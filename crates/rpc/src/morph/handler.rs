@@ -9,6 +9,7 @@ use morph_reference_index::{
     ReferenceIndexError, ReferenceIndexReader, ReferenceQuery, ReferenceTransactionResult,
 };
 use reth_storage_api::BlockNumReader;
+use tracing;
 
 // ── Context ──────────────────────────────────────────────────────────────────
 
@@ -85,6 +86,19 @@ fn to_rpc_error(error: ReferenceIndexError) -> ErrorObjectOwned {
                 None::<()>,
             )
         }
-        other => ErrorObjectOwned::owned(-32000, other.to_string(), None::<()>),
+        // Log internal details for operators but return a generic message on
+        // the wire so Database/Provider/Other error strings don't leak.
+        other => {
+            tracing::error!(
+                target: "morph::reference_index_rpc",
+                error = %other,
+                "reference index internal error"
+            );
+            ErrorObjectOwned::owned(
+                ErrorCode::InternalError.code(),
+                "internal reference index error",
+                None::<()>,
+            )
+        }
     }
 }

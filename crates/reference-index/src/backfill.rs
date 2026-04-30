@@ -112,19 +112,31 @@ where
             // Resume from `max(indexed_to + 1, jade_first_block_number)`: if the
             // crash happened between InProgress write and the first batch commit,
             // `indexed_to` is still 0 and must not be used as-is.
-            let jade_first = db
+            let jade_first_stored = db
                 .jade_first_block_number()?
                 .unwrap_or(JADE_NOT_ACTIVE_SENTINEL);
-            if jade_first == JADE_NOT_ACTIVE_SENTINEL {
-                // Sentinel case: no range to backfill; mark complete.
+            if jade_first_stored == JADE_NOT_ACTIVE_SENTINEL {
+                // Previously sentinel; crash may have happened before the follow-up
+                // txn that would have marked Complete.  Re-resolve against the current
+                // head: Jade might have activated in the meantime.
+                let new_jade = resolve_jade_first_block(provider, chain_spec, head_at_startup)?;
+                if new_jade == JADE_NOT_ACTIVE_SENTINEL {
+                    // Still not active; safe to mark complete immediately.
+                    let tx = db.tx_mut()?;
+                    update_indexed_from(&tx, head_at_startup)?;
+                    update_indexed_to(&tx, head_at_startup)?;
+                    set_backfill_state(&tx, BackfillState::Complete)?;
+                    tx.commit()?;
+                    return Ok(());
+                }
+                // Jade now active; persist the real first block and continue backfill.
                 let tx = db.tx_mut()?;
-                update_indexed_from(&tx, head_at_startup)?;
-                update_indexed_to(&tx, head_at_startup)?;
-                set_backfill_state(&tx, BackfillState::Complete)?;
+                set_jade_first_block_number(&tx, new_jade)?;
                 tx.commit()?;
-                return Ok(());
+                db.indexed_to()?.saturating_add(1).max(new_jade)
+            } else {
+                db.indexed_to()?.saturating_add(1).max(jade_first_stored)
             }
-            db.indexed_to()?.saturating_add(1).max(jade_first)
         }
         BackfillState::NotStarted => {
             let jade_first = resolve_jade_first_block(provider, chain_spec, head_at_startup)?;
