@@ -79,7 +79,11 @@ fn to_rpc_error(error: ReferenceIndexError) -> ErrorObjectOwned {
             ErrorObjectOwned::owned(-32000, "reference index is behind", None::<()>)
         }
         ReferenceIndexError::LimitTooLarge { .. } | ReferenceIndexError::OffsetTooLarge { .. } => {
-            ErrorObjectOwned::owned(ErrorCode::InvalidParams.code(), error.to_string(), None::<()>)
+            ErrorObjectOwned::owned(
+                ErrorCode::InvalidParams.code(),
+                error.to_string(),
+                None::<()>,
+            )
         }
         other => ErrorObjectOwned::owned(-32000, other.to_string(), None::<()>),
     }

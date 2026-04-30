@@ -71,11 +71,9 @@ where
     // `lo` is now the first block whose timestamp >= jade_ts.
     // Verify that the previous block (if any) has timestamp < jade_ts.
     if lo > 0 {
-        let prev = provider
-            .header_by_number(lo - 1)?
-            .ok_or_else(|| {
-                ReferenceIndexError::Other(eyre::eyre!("missing header at {}", lo - 1))
-            })?;
+        let prev = provider.header_by_number(lo - 1)?.ok_or_else(|| {
+            ReferenceIndexError::Other(eyre::eyre!("missing header at {}", lo - 1))
+        })?;
         if prev.timestamp() >= jade_ts {
             // Shouldn't happen on a well-formed chain, but fall back to sentinel.
             return Ok(JADE_NOT_ACTIVE_SENTINEL);
@@ -98,7 +96,9 @@ pub fn run_backfill<P, CS>(
     batch_size: u64,
 ) -> Result<(), ReferenceIndexError>
 where
-    P: BlockReader<Block = morph_primitives::Block> + BlockNumReader + HeaderProvider<Header = MorphHeader>,
+    P: BlockReader<Block = morph_primitives::Block>
+        + BlockNumReader
+        + HeaderProvider<Header = MorphHeader>,
     CS: MorphHardforks,
 {
     let state = db.backfill_state()?;
@@ -139,9 +139,7 @@ where
         return Ok(());
     }
 
-    let jade_first = db
-        .jade_first_block_number()?
-        .unwrap_or(start);
+    let jade_first = db.jade_first_block_number()?.unwrap_or(start);
 
     info!(
         target: "morph::reference_index",

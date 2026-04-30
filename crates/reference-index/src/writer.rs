@@ -7,8 +7,8 @@
 use crate::{
     db::{IndexMetaKey, encode_b256, encode_u64},
     tables::{
-        BlockHashValue, BlockReferenceIndex, BlockReferenceKey, BlockTimestampValue,
-        IndexMeta, IndexedBlockKey, IndexedBlocks, MetaValue, ReferenceIndex, ReferenceIndexKey,
+        BlockHashValue, BlockReferenceIndex, BlockReferenceKey, BlockTimestampValue, IndexMeta,
+        IndexedBlockKey, IndexedBlocks, MetaValue, ReferenceIndex, ReferenceIndexKey,
         ReferenceValue,
     },
     types::{BackfillState, ReferenceIndexError},
@@ -69,10 +69,7 @@ pub fn write_block<Tx: DbTxMut>(
 /// Implements the reverse of [`write_block`]: reads every
 /// `BlockReferenceIndex` row for `block_number`, reconstructs each
 /// `ReferenceIndex` key, and removes entries from all three tables.
-pub fn delete_block<Tx: DbTxMut>(
-    tx: &Tx,
-    block_number: u64,
-) -> Result<(), ReferenceIndexError> {
+pub fn delete_block<Tx: DbTxMut>(tx: &Tx, block_number: u64) -> Result<(), ReferenceIndexError> {
     // 1. Collect all BlockReferenceIndex rows for this block.
     let mut entries = Vec::new();
     {
@@ -245,7 +242,10 @@ mod tests {
         write_block(&tx, 7, B256::repeat_byte(0x11), 100, &[]).unwrap();
         update_indexed_to(&tx, 7).unwrap();
         tx.commit().unwrap();
-        assert_eq!(db.indexed_block_hash(7).unwrap(), Some(B256::repeat_byte(0x11)));
+        assert_eq!(
+            db.indexed_block_hash(7).unwrap(),
+            Some(B256::repeat_byte(0x11))
+        );
 
         let tx = db.tx_mut().unwrap();
         delete_block(&tx, 7).unwrap();

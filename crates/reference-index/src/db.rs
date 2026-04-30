@@ -50,9 +50,11 @@ pub fn encode_u64(value: u64) -> MetaValue {
 }
 
 pub fn decode_u64(value: MetaValue) -> Result<u64, ReferenceIndexError> {
-    let bytes: [u8; 8] = value.0.as_slice().try_into().map_err(|_| {
-        ReferenceIndexError::Other(eyre::eyre!("invalid u64 metadata length"))
-    })?;
+    let bytes: [u8; 8] = value
+        .0
+        .as_slice()
+        .try_into()
+        .map_err(|_| ReferenceIndexError::Other(eyre::eyre!("invalid u64 metadata length")))?;
     Ok(u64::from_be_bytes(bytes))
 }
 
@@ -61,9 +63,11 @@ pub fn encode_u32(value: u32) -> MetaValue {
 }
 
 pub fn decode_u32(value: MetaValue) -> Result<u32, ReferenceIndexError> {
-    let bytes: [u8; 4] = value.0.as_slice().try_into().map_err(|_| {
-        ReferenceIndexError::Other(eyre::eyre!("invalid u32 metadata length"))
-    })?;
+    let bytes: [u8; 4] = value
+        .0
+        .as_slice()
+        .try_into()
+        .map_err(|_| ReferenceIndexError::Other(eyre::eyre!("invalid u32 metadata length")))?;
     Ok(u32::from_be_bytes(bytes))
 }
 
@@ -72,9 +76,11 @@ pub fn encode_b256(value: B256) -> MetaValue {
 }
 
 pub fn decode_b256(value: MetaValue) -> Result<B256, ReferenceIndexError> {
-    let bytes: [u8; 32] = value.0.as_slice().try_into().map_err(|_| {
-        ReferenceIndexError::Other(eyre::eyre!("invalid B256 metadata length"))
-    })?;
+    let bytes: [u8; 32] = value
+        .0
+        .as_slice()
+        .try_into()
+        .map_err(|_| ReferenceIndexError::Other(eyre::eyre!("invalid B256 metadata length")))?;
     Ok(B256::new(bytes))
 }
 
@@ -105,7 +111,9 @@ impl ReferenceIndexDb {
             path,
             DatabaseArguments::new(reth_db::models::ClientVersion::default()),
         )
-        .map_err(|e| ReferenceIndexError::Other(eyre::eyre!("failed to open reference index DB: {e}")))?;
+        .map_err(|e| {
+            ReferenceIndexError::Other(eyre::eyre!("failed to open reference index DB: {e}"))
+        })?;
 
         let this = Self {
             db: Arc::new(db),
@@ -264,11 +272,8 @@ impl ReferenceIndexDb {
     /// Used for gap detection after startup.
     pub fn highest_block_reference_index(&self) -> Result<Option<u64>, ReferenceIndexError> {
         let tx = self.tx()?;
-        let mut cursor =
-            tx.cursor_read::<crate::tables::BlockReferenceIndex>()?;
-        Ok(cursor
-            .last()?
-            .map(|(k, _)| k.block_number))
+        let mut cursor = tx.cursor_read::<crate::tables::BlockReferenceIndex>()?;
+        Ok(cursor.last()?.map(|(k, _)| k.block_number))
     }
 }
 
@@ -297,16 +302,21 @@ mod tests {
         ReferenceIndexDb::open(dir.path(), 2818, B256::ZERO).unwrap();
         // Re-open with wrong chain_id.
         let err = ReferenceIndexDb::open(dir.path(), 9999, B256::ZERO).unwrap_err();
-        assert!(matches!(err, ReferenceIndexError::ChainIdentityMismatch("chain_id")));
+        assert!(matches!(
+            err,
+            ReferenceIndexError::ChainIdentityMismatch("chain_id")
+        ));
     }
 
     #[test]
     fn open_rejects_mismatched_genesis_hash() {
         let dir = TempDir::new().unwrap();
         ReferenceIndexDb::open(dir.path(), 2818, B256::ZERO).unwrap();
-        let err =
-            ReferenceIndexDb::open(dir.path(), 2818, B256::repeat_byte(0xff)).unwrap_err();
-        assert!(matches!(err, ReferenceIndexError::ChainIdentityMismatch("genesis_hash")));
+        let err = ReferenceIndexDb::open(dir.path(), 2818, B256::repeat_byte(0xff)).unwrap_err();
+        assert!(matches!(
+            err,
+            ReferenceIndexError::ChainIdentityMismatch("genesis_hash")
+        ));
     }
 
     #[test]

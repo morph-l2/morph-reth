@@ -53,8 +53,7 @@ fn main() {
                 // can wire it into both the ExEx and the add-ons.
                 let chain_spec = builder.config().chain.clone();
                 let datadir = builder.config().datadir();
-                let reference_index_path =
-                    datadir.data_dir().join("morph").join("reference_index");
+                let reference_index_path = datadir.data_dir().join("morph").join("reference_index");
                 let chain_id = chain_spec.chain().id();
                 let genesis_hash = chain_spec.genesis_hash(); // from EthChainSpec trait
 
@@ -74,12 +73,9 @@ fn main() {
                     .with_types::<MorphNode>()
                     .with_components(node.components_builder())
                     .with_add_ons(MorphAddOns::new().with_reference_index(control))
-                    .install_exex(
-                        "morph-reference-index",
-                        async move |ctx| {
-                            Ok(reference_index_exex(ctx, exex_control, startup_rx))
-                        },
-                    )
+                    .install_exex("morph-reference-index", async move |ctx| {
+                        Ok(reference_index_exex(ctx, exex_control, startup_rx))
+                    })
                     .launch_with_debug_capabilities()
                     .await?;
 

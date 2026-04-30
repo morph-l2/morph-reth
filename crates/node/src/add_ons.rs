@@ -92,7 +92,6 @@ where
     }
 }
 
-
 impl<N, EthB, PVB, EVB> NodeAddOns<N> for MorphAddOns<N, EthB, PVB, EVB>
 where
     N: FullNodeComponents<Types = MorphNode, Evm = MorphEvmConfig>,

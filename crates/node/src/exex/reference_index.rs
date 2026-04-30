@@ -24,7 +24,9 @@ use morph_reference_index::{
 use reth_db_api::transaction::DbTx;
 use reth_exex::{ExExContext, ExExEvent, ExExNotification};
 use reth_node_api::{FullNodeComponents, NodeTypes};
-use reth_provider::{BlockHashReader, BlockReader, BlockNumReader, ChainSpecProvider, HeaderProvider};
+use reth_provider::{
+    BlockHashReader, BlockNumReader, BlockReader, ChainSpecProvider, HeaderProvider,
+};
 use reth_storage_api::TransactionVariant;
 use tokio::sync::watch;
 use tokio_stream::StreamExt;
@@ -74,10 +76,7 @@ pub async fn reference_index_exex<Node>(
 ) -> eyre::Result<()>
 where
     Node: FullNodeComponents<
-        Types: NodeTypes<
-            Primitives = MorphPrimitives,
-            ChainSpec = MorphChainSpec,
-        >,
+        Types: NodeTypes<Primitives = MorphPrimitives, ChainSpec = MorphChainSpec>,
     >,
     Node::Provider: BlockReader<Block = morph_primitives::Block>
         + BlockNumReader
@@ -168,7 +167,13 @@ where
         let block = provider
             .sealed_block_with_senders(number.into(), TransactionVariant::NoHash)?
             .ok_or_else(|| eyre::eyre!("missing block {number} during gap fill"))?;
-        write_block(&tx, block.number(), block.hash(), block.timestamp(), &block.body().transactions)?;
+        write_block(
+            &tx,
+            block.number(),
+            block.hash(),
+            block.timestamp(),
+            &block.body().transactions,
+        )?;
     }
     update_indexed_to(&tx, to)?;
     tx.commit()?;
@@ -235,16 +240,10 @@ fn handle_notification(
 /// `FinishedHeight` through `control`.
 ///
 /// Call once from a spawned task after the node's provider is available.
-pub fn run_startup_indexing<Node>(
-    node: &Node,
-    control: &ReferenceIndexControl,
-) -> eyre::Result<()>
+pub fn run_startup_indexing<Node>(node: &Node, control: &ReferenceIndexControl) -> eyre::Result<()>
 where
     Node: FullNodeComponents<
-        Types: NodeTypes<
-            Primitives = MorphPrimitives,
-            ChainSpec = MorphChainSpec,
-        >,
+        Types: NodeTypes<Primitives = MorphPrimitives, ChainSpec = MorphChainSpec>,
     >,
     Node::Provider: BlockReader<Block = morph_primitives::Block>
         + BlockNumReader
