@@ -116,12 +116,20 @@ where
 
                 // On the first is_ready notification: fill any gap that opened
                 // between when Task A finished reconcile and when this notification
-                // arrived.  We delete-then-write to avoid stale entries in case a
-                // mini-reorg happened during that window.
+                // arrived.  The goal is that after this branch runs, the index
+                // covers exactly the canonical range that is not going to be
+                // touched by the upcoming handle_notification call.
+                //
+                // fill_gap_idempotent delete-then-writes so stale entries from
+                // possible mini-reorgs during the drain window are cleaned up.
                 if first_ready {
                     first_ready = false;
                     let indexed_to = control.db.indexed_to()?;
                     if let Some(chain) = notification.committed_chain() {
+                        // ChainCommitted / ChainReorged: blocks to index start at
+                        // chain.first().  Anything in (indexed_to, notif_start-1]
+                        // must be backfilled from main DB so handle_notification
+                        // can pick up from notif_start.
                         let notif_start = chain.first().number();
                         if notif_start > indexed_to + 1 {
                             fill_gap_idempotent(
@@ -132,16 +140,25 @@ where
                             )?;
                         }
                     } else if let Some(old) = notification.reverted_chain() {
-                        // Reorg during drain window: roll back below the revert start.
+                        // ChainReverted: handle_notification will delete old.blocks
+                        // and set indexed_to = parent (= revert_start - 1).
+                        // If parent > indexed_to, the drain window committed and
+                        // never wrote canonical blocks (indexed_to+1..=parent) that
+                        // will SURVIVE this revert.  We must fill them now so the
+                        // post-revert indexed_to = parent is consistent.
                         let revert_start = old.first().number();
-                        if revert_start <= indexed_to {
+                        let parent = revert_start.saturating_sub(1);
+                        if parent > indexed_to {
                             fill_gap_idempotent(
                                 &control.db,
                                 &ctx.components.provider().clone(),
-                                revert_start,
-                                indexed_to,
+                                indexed_to + 1,
+                                parent,
                             )?;
                         }
+                        // parent <= indexed_to: revert overlaps already-indexed
+                        // range; handle_notification's delete_block + rollback of
+                        // indexed_to takes care of it, no backfill needed.
                     }
                 }
 
