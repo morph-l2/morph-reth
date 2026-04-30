@@ -154,7 +154,7 @@ where
             });
 
             let morph_rpc_ctx = MorphRpc::new(
-                ReferenceIndexReader::new(control.db.clone(), DEFAULT_LAG_THRESHOLD),
+                ReferenceIndexReader::new(control.db, DEFAULT_LAG_THRESHOLD),
                 provider.clone(),
             );
             Some(MorphRpcHandler::new(morph_rpc_ctx))

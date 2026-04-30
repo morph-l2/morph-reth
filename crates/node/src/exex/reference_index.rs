@@ -90,15 +90,13 @@ where
         tokio::select! {
             // Forward the startup FinishedHeight when Task A finishes.
             changed = startup_rx.changed() => {
-                if changed.is_ok() {
-                    if let Some(block) = *startup_rx.borrow_and_update() {
-                        debug!(
-                            target: "morph::reference_index",
-                            block_number = block.number,
-                            "startup complete; sending initial FinishedHeight"
-                        );
-                        ctx.events.send(ExExEvent::FinishedHeight(block))?;
-                    }
+                if changed.is_ok() && let Some(block) = *startup_rx.borrow_and_update() {
+                    debug!(
+                        target: "morph::reference_index",
+                        block_number = block.number,
+                        "startup complete; sending initial FinishedHeight"
+                    );
+                    ctx.events.send(ExExEvent::FinishedHeight(block))?;
                 }
             }
 
