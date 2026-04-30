@@ -18,6 +18,7 @@ members = [
     "crates/payload/builder",
     "crates/payload/types",
     "crates/primitives",
+    "crates/reference-index",
     "crates/revm",
     "crates/txpool",
 ]
@@ -50,6 +51,7 @@ morph-node = { path = "crates/node"}
 morph-payload-builder = { path = "crates/payload/builder", default-features = false }
 morph-payload-types = { path = "crates/payload/types", default-features = false }
 morph-primitives = { path = "crates/primitives", default-features = false }
+morph-reference-index = { path = "crates/reference-index", default-features = false }
 morph-rpc = { path = "crates/rpc" }
 morph-revm = { path = "crates/revm", default-features = false }
 morph-txpool = { path = "crates/txpool", default-features = false }
