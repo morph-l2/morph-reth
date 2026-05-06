@@ -33,8 +33,6 @@ pub enum IndexMetaKey {
     GenesisHash = 6,
     SchemaVersion = 7,
     JadeFirstBlockNumber = 8,
-    SnapshotBlockNumber = 9,
-    SnapshotBlockHash = 10,
 }
 
 impl From<IndexMetaKey> for MetaKey {
@@ -233,55 +231,6 @@ impl ReferenceIndexDb {
         tx.get::<crate::tables::IndexMeta>(IndexMetaKey::JadeFirstBlockNumber.into())?
             .map(decode_u64)
             .transpose()
-    }
-
-    pub fn snapshot_block_number(&self) -> Result<Option<u64>, ReferenceIndexError> {
-        let tx = self.tx()?;
-        tx.get::<crate::tables::IndexMeta>(IndexMetaKey::SnapshotBlockNumber.into())?
-            .map(decode_u64)
-            .transpose()
-    }
-
-    pub fn snapshot_block_hash(&self) -> Result<Option<B256>, ReferenceIndexError> {
-        let tx = self.tx()?;
-        tx.get::<crate::tables::IndexMeta>(IndexMetaKey::SnapshotBlockHash.into())?
-            .map(decode_b256)
-            .transpose()
-    }
-
-    /// Validate a paired-snapshot against the main chain provider.
-    ///
-    /// Must be called after `FullNode.provider()` is available.  Fails startup
-    /// if `snapshot_block_number`/`snapshot_block_hash` are set but disagree
-    /// with the main chain (either the snapshot is ahead of the main DB, or
-    /// the hash at that height diverges).
-    ///
-    /// When snapshot metadata is not present (fresh DB, no paired snapshot),
-    /// this is a no-op.
-    pub fn validate_paired_snapshot<F>(&self, main_block_hash: F) -> Result<(), ReferenceIndexError>
-    where
-        F: FnOnce(u64) -> Result<Option<B256>, ReferenceIndexError>,
-    {
-        let Some(expected) = self.snapshot_block_hash()? else {
-            return Ok(());
-        };
-        let Some(number) = self.snapshot_block_number()? else {
-            // Hash without number is malformed state; treat as mismatch.
-            return Err(ReferenceIndexError::ChainIdentityMismatch(
-                "snapshot_block_hash present but snapshot_block_number missing",
-            ));
-        };
-
-        match main_block_hash(number)? {
-            None => Err(ReferenceIndexError::Other(eyre::eyre!(
-                "reference index snapshot ahead of main DB (snapshot_block_number={number})"
-            ))),
-            Some(actual) if actual != expected => Err(ReferenceIndexError::Other(eyre::eyre!(
-                "reference index snapshot chain mismatch at block {number}: \
-                 expected {expected:?}, main DB has {actual:?}"
-            ))),
-            Some(_) => Ok(()),
-        }
     }
 
     /// Returns the canonical block hash stored in `IndexedBlocks` for `block_number`.

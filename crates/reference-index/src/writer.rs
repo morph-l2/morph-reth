@@ -5,7 +5,7 @@
 //! single atomic commit.
 
 use crate::{
-    db::{IndexMetaKey, encode_b256, encode_u64},
+    db::{IndexMetaKey, encode_u64},
     tables::{
         BlockHashValue, BlockReferenceIndex, BlockReferenceKey, BlockTimestampValue, IndexMeta,
         IndexedBlockKey, IndexedBlocks, MetaValue, ReferenceIndex, ReferenceIndexKey,
@@ -159,21 +159,6 @@ pub fn set_jade_first_block_number<Tx: DbTxMut>(
     Ok(())
 }
 
-pub fn set_snapshot_block<Tx: DbTxMut>(
-    tx: &Tx,
-    block_number: u64,
-    block_hash: B256,
-) -> Result<(), ReferenceIndexError> {
-    tx.put::<IndexMeta>(
-        IndexMetaKey::SnapshotBlockNumber.into(),
-        encode_u64(block_number),
-    )?;
-    tx.put::<IndexMeta>(
-        IndexMetaKey::SnapshotBlockHash.into(),
-        encode_b256(block_hash),
-    )?;
-    Ok(())
-}
 
 #[cfg(test)]
 mod tests {
