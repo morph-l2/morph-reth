@@ -8,7 +8,6 @@ use alloy_primitives::B256;
 use reth_db::{DatabaseEnv, mdbx::DatabaseArguments};
 use reth_db_api::{
     Database,
-    cursor::DbCursorRO,
     transaction::{DbTx, DbTxMut},
 };
 use std::{
@@ -244,20 +243,6 @@ impl ReferenceIndexDb {
             .map(|v| v.0))
     }
 
-    /// Returns the highest block number recorded in `IndexedBlocks`.
-    pub fn highest_indexed_block(&self) -> Result<Option<u64>, ReferenceIndexError> {
-        let tx = self.tx()?;
-        let mut cursor = tx.cursor_read::<IndexedBlocks>()?;
-        Ok(cursor.last()?.map(|(k, _)| k.block_number))
-    }
-
-    /// Returns the highest block number recorded in `BlockReferenceIndex`.
-    /// Used for gap detection after startup.
-    pub fn highest_block_reference_index(&self) -> Result<Option<u64>, ReferenceIndexError> {
-        let tx = self.tx()?;
-        let mut cursor = tx.cursor_read::<crate::tables::BlockReferenceIndex>()?;
-        Ok(cursor.last()?.map(|(k, _)| k.block_number))
-    }
 }
 
 #[cfg(test)]

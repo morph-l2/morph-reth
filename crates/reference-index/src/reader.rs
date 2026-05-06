@@ -23,10 +23,6 @@ impl ReferenceIndexReader {
         Self { db, lag_threshold }
     }
 
-    pub fn db(&self) -> &ReferenceIndexDb {
-        &self.db
-    }
-
     /// Execute a paginated reference query.
     ///
     /// `canonical_tip` is the current best block number, used to compute lag.
