@@ -38,8 +38,8 @@ args=(
   --log.file.directory "$(dirname "${RETH_LOG_FILE}")"
   --log.file.filter info
   --rpc.eth-proof-window 1209600
-  # Local testing: skip NAT discovery (UPnP/STUN) — not needed on a single host
-  --disable-nat
+  # Local testing: explicitly avoid external IP probes such as icanhazip.com.
+  --nat none
   # Batch MDBX writes so they don't compete with Tendermint's LevelDB fsyncs
   # (v2.0.0 added persistence-backpressure-threshold, which must be > persistence-threshold)
   --engine.persistence-threshold 256
