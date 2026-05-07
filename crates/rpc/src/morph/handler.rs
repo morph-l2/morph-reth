@@ -11,6 +11,8 @@ use morph_reference_index::{
 use reth_storage_api::BlockNumReader;
 use tracing;
 
+const TARGET: &str = "morph::reference_index_rpc";
+
 // ── Context ──────────────────────────────────────────────────────────────────
 
 /// `morph_` namespace context.  All dependencies are required; no `Option<>`.
@@ -60,7 +62,8 @@ impl<Provider: BlockNumReader + Clone + Send + Sync + 'static> MorphRpcServer
             .ctx
             .provider
             .best_block_number()
-            .map_err(|e| to_rpc_error(ReferenceIndexError::Other(eyre::eyre!(e))))?;
+            .map_err(ReferenceIndexError::from)
+            .map_err(to_rpc_error)?;
 
         self.ctx
             .reference_index
@@ -90,7 +93,7 @@ fn to_rpc_error(error: ReferenceIndexError) -> ErrorObjectOwned {
         // the wire so Database/Provider/Other error strings don't leak.
         other => {
             tracing::error!(
-                target: "morph::reference_index_rpc",
+                target: TARGET,
                 error = %other,
                 "reference index internal error"
             );

@@ -17,6 +17,8 @@ use reth_provider::{BlockHashReader, BlockReader, HeaderProvider};
 use reth_storage_api::TransactionVariant;
 use tracing::{debug, info};
 
+const TARGET: &str = "morph::reference_index";
+
 /// Run the startup reconciliation pass.
 ///
 /// Steps:
@@ -61,7 +63,7 @@ where
         let canonical_hash = provider.block_hash(number)?;
         if Some(indexed) != canonical_hash {
             debug!(
-                target: "morph::reference_index",
+                target: TARGET,
                 number,
                 ?indexed,
                 ?canonical_hash,
@@ -75,7 +77,7 @@ where
     // ── Step B: apply reorg if detected ──────────────────────────────────────
     let rebuild_start = if let Some(fh) = fork_height {
         info!(
-            target: "morph::reference_index",
+            target: TARGET,
             fork_height = fh,
             old_indexed_to = indexed_to,
             "offline reorg detected; rolling back index"
@@ -97,7 +99,7 @@ where
     // ── Step C: suffix gap fill ───────────────────────────────────────────────
     if rebuild_start <= current_head {
         info!(
-            target: "morph::reference_index",
+            target: TARGET,
             rebuild_start,
             current_head,
             "filling reference index suffix gap"

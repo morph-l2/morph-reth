@@ -32,6 +32,8 @@ use tokio::sync::watch;
 use tokio_stream::StreamExt;
 use tracing::{debug, error, info};
 
+const TARGET: &str = "morph::reference_index";
+
 // ── shared control ────────────────────────────────────────────────────────────
 
 /// Shared handle that connects Task A (startup indexing) with Task B (ExEx).
@@ -96,7 +98,7 @@ where
             changed = startup_rx.changed() => {
                 if changed.is_ok() && let Some(block) = *startup_rx.borrow_and_update() {
                     debug!(
-                        target: "morph::reference_index",
+                        target: TARGET,
                         block_number = block.number,
                         "startup complete; forwarding initial FinishedHeight"
                     );
@@ -111,7 +113,7 @@ where
                     // Drain without writing to avoid backpressure.
                     if let Some(chain) = notification.committed_chain() {
                         debug!(
-                            target: "morph::reference_index",
+                            target: TARGET,
                             tip = chain.tip().number(),
                             "drained notification while index initializing"
                         );
@@ -170,7 +172,7 @@ where
                 match handle_notification(&ctx.events, &control.db, notification, &mut last_finished) {
                     Ok(()) => {}
                     Err(e) => {
-                        error!(target: "morph::reference_index", ?e, "error processing notification");
+                        error!(target: TARGET, ?e, "error processing notification");
                         return Err(e);
                     }
                 }
@@ -198,7 +200,7 @@ where
         return Ok(());
     }
     info!(
-        target: "morph::reference_index",
+        target: TARGET,
         from, to,
         "idempotent gap fill between startup reconcile and first ExEx notification"
     );
@@ -359,7 +361,7 @@ where
     })?;
 
     info!(
-        target: "morph::reference_index",
+        target: TARGET,
         indexed_to,
         "reference index ready"
     );

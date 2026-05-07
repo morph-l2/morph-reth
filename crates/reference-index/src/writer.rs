@@ -159,7 +159,6 @@ pub fn set_jade_first_block_number<Tx: DbTxMut>(
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

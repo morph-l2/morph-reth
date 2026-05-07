@@ -242,7 +242,6 @@ impl ReferenceIndexDb {
             .get::<IndexedBlocks>(IndexedBlockKey { block_number })?
             .map(|v| v.0))
     }
-
 }
 
 #[cfg(test)]

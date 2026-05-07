@@ -20,6 +20,8 @@ use reth_provider::{BlockReader, HeaderProvider};
 use reth_storage_api::{BlockNumReader, TransactionVariant};
 use tracing::{debug, info};
 
+const TARGET: &str = "morph::reference_index";
+
 /// Determine the first block number at which the Jade hardfork is active.
 ///
 /// Returns `JADE_NOT_ACTIVE_SENTINEL` (`u64::MAX`) when:
@@ -171,7 +173,7 @@ where
     let jade_first = db.jade_first_block_number()?.unwrap_or(start);
 
     info!(
-        target: "morph::reference_index",
+        target: TARGET,
         start, head_at_startup,
         "starting reference index backfill"
     );
@@ -217,7 +219,7 @@ where
         tx.commit()?;
 
         debug!(
-            target: "morph::reference_index",
+            target: TARGET,
             batch_start = current,
             batch_end,
             is_last_batch,
@@ -225,13 +227,9 @@ where
         );
 
         current = batch_end + 1;
-
-        if !is_last_batch {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
     }
 
-    info!(target: "morph::reference_index", "reference index backfill complete");
+    info!(target: TARGET, "reference index backfill complete");
     Ok(())
 }
 
@@ -265,7 +263,7 @@ where
                 set_backfill_state(&tx, BackfillState::NotStarted)?;
                 tx.commit()?;
                 info!(
-                    target: "morph::reference_index",
+                    target: TARGET,
                     jade_first_block = new,
                     "Jade has activated; resetting backfill to index from first Jade block"
                 );
