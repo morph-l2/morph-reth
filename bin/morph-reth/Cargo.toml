@@ -20,8 +20,10 @@ morph-chainspec = { workspace = true, features = ["cli"] }
 morph-consensus.workspace = true
 morph-evm.workspace = true
 morph-node.workspace = true
+morph-reference-index.workspace = true
 
 # Reth CLI
+reth-chainspec.workspace = true
 reth-cli.workspace = true
 reth-cli-util.workspace = true
 reth-ethereum-cli.workspace = true

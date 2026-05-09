@@ -2086,15 +2086,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
-name = "core2"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b49ba7ef1ad6107f8824dbe97de947cbaac53c44e7f9756a1fba0d37c1eec505"
-dependencies = [
- "memchr",
-]
-
-[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4843,15 +4834,18 @@ dependencies = [
  "morph-payload-builder",
  "morph-payload-types",
  "morph-primitives",
+ "morph-reference-index",
  "morph-rpc",
  "morph-txpool",
  "parking_lot",
  "reth-chainspec",
  "reth-db",
+ "reth-db-api",
  "reth-e2e-test-utils",
  "reth-engine-local",
  "reth-engine-tree",
  "reth-errors",
+ "reth-exex",
  "reth-node-api",
  "reth-node-builder",
  "reth-node-core",
@@ -4862,14 +4856,17 @@ dependencies = [
  "reth-provider",
  "reth-rpc-builder",
  "reth-rpc-eth-api",
+ "reth-storage-api",
  "reth-tasks",
  "reth-tracing",
  "reth-transaction-pool",
  "reth-trie",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-stream",
+ "tracing",
  "vergen",
  "vergen-git2",
 ]
@@ -4946,6 +4943,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "morph-reference-index"
+version = "0.2.2"
+dependencies = [
+ "alloy-consensus",
+ "alloy-primitives",
+ "alloy-rlp",
+ "eyre",
+ "morph-chainspec",
+ "morph-primitives",
+ "reth-chainspec",
+ "reth-codecs",
+ "reth-db",
+ "reth-db-api",
+ "reth-errors",
+ "reth-primitives-traits",
+ "reth-provider",
+ "reth-storage-api",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "morph-reth"
 version = "0.2.2"
 dependencies = [
@@ -4955,6 +4977,8 @@ dependencies = [
  "morph-consensus",
  "morph-evm",
  "morph-node",
+ "morph-reference-index",
+ "reth-chainspec",
  "reth-cli",
  "reth-cli-util",
  "reth-ethereum-cli",
@@ -5002,6 +5026,7 @@ dependencies = [
  "morph-chainspec",
  "morph-evm",
  "morph-primitives",
+ "morph-reference-index",
  "morph-revm",
  "reth-chainspec",
  "reth-errors",
@@ -5083,11 +5108,10 @@ dependencies = [
 
 [[package]]
 name = "multihash"
-version = "0.19.3"
+version = "0.19.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b430e7953c29dd6a09afc29ff0bb69c6e306329ee6794700aee27b76a1aea8d"
+checksum = "577c63b00ad74d57e8c9aa870b5fccebf2fd64a308a5aee9f1bb88e4aea19447"
 dependencies = [
- "core2",
  "unsigned-varint",
 ]
 
