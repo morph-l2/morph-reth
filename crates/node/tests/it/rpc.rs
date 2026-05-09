@@ -396,6 +396,78 @@ async fn transaction_receipt_exposes_morph_fields_over_rpc() -> eyre::Result<()>
     Ok(())
 }
 
+/// `eth_getBlockReceipts` uses the same Morph receipt converter as per-tx receipt RPCs.
+#[tokio::test(flavor = "multi_thread")]
+async fn block_receipts_expose_morph_fields_over_rpc() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+
+    let reference = B256::with_last_byte(0x66);
+    let memo = alloy_primitives::Bytes::from_static(b"block-receipts");
+    let expected_reference = reference.to_string();
+    let expected_memo = memo.to_string();
+
+    let raw_tx = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
+        .with_v1_token_fee(TEST_TOKEN_ID)
+        .with_reference(reference)
+        .with_memo(memo)
+        .with_data(vec![0xbb; 16])
+        .build_signed()?;
+    node.rpc.inject_tx(raw_tx).await?;
+
+    let payload = node.advance_block().await?;
+    let block_number = payload.block().number();
+    let block_number_param = format!("0x{block_number:x}");
+    let tx_hash = *payload
+        .block()
+        .body()
+        .transactions
+        .first()
+        .unwrap()
+        .tx_hash();
+    let client = node
+        .rpc_client()
+        .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
+
+    let tx_receipt: Value = client
+        .request("eth_getTransactionReceipt", (tx_hash,))
+        .await?;
+    let block_receipts: Value = client
+        .request("eth_getBlockReceipts", (block_number_param,))
+        .await?;
+    let block_receipt = block_receipts
+        .as_array()
+        .and_then(|receipts| receipts.first())
+        .ok_or_else(|| eyre::eyre!("expected a block receipt"))?;
+
+    for field in [
+        "type",
+        "version",
+        "feeTokenID",
+        "feeRate",
+        "tokenScale",
+        "feeLimit",
+        "reference",
+        "memo",
+        "l1Fee",
+    ] {
+        assert_eq!(
+            block_receipt[field], tx_receipt[field],
+            "block receipt field {field} must match eth_getTransactionReceipt"
+        );
+    }
+    assert_eq!(block_receipt["type"].as_str(), Some("0x7f"));
+    assert_eq!(
+        block_receipt["reference"].as_str(),
+        Some(expected_reference.as_str())
+    );
+    assert_eq!(block_receipt["memo"].as_str(), Some(expected_memo.as_str()));
+
+    Ok(())
+}
+
 /// `eth_getTransactionByHash` exposes MorphTx reference and memo over JSON-RPC.
 #[tokio::test(flavor = "multi_thread")]
 async fn transaction_by_hash_exposes_morph_fields_over_rpc() -> eyre::Result<()> {
