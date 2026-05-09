@@ -6,9 +6,7 @@
 use crate::{EngineApiResult, api::MorphL2EngineApi};
 use alloy_primitives::B256;
 use jsonrpsee::{RpcModule, core::RpcResult, proc_macros::rpc};
-use morph_payload_types::{
-    AssembleL2BlockParams, BatchSignature, ExecutableL2Data, GenericResponse, SafeL2Data,
-};
+use morph_payload_types::{AssembleL2BlockParams, ExecutableL2Data, GenericResponse, SafeL2Data};
 use morph_primitives::MorphHeader;
 use reth_rpc_api::IntoEngineApiRpcModule;
 use std::sync::Arc;
@@ -62,22 +60,6 @@ pub trait MorphL2EngineRpc {
         &self,
         safe_block_hash: B256,
         finalized_block_hash: B256,
-    ) -> RpcResult<()>;
-
-    /// Append a BLS batch signature for a given batch hash.
-    ///
-    /// Called by the consensus layer when collecting validator signatures for
-    /// L1 batch submission. Non-sequencer sync nodes accept this call but do
-    /// not persist the signature.
-    ///
-    /// # JSON-RPC Method
-    ///
-    /// `engine_appendBatchSignature`
-    #[method(name = "appendBatchSignature")]
-    async fn append_batch_signature(
-        &self,
-        batch_hash: B256,
-        signature: BatchSignature,
     ) -> RpcResult<()>;
 }
 
@@ -179,25 +161,6 @@ where
             .await
             .map_err(|e| {
                 tracing::error!(target: "morph::engine", error = %e, "failed to set block tags");
-                e.into()
-            })
-    }
-
-    async fn append_batch_signature(
-        &self,
-        batch_hash: B256,
-        _signature: BatchSignature,
-    ) -> RpcResult<()> {
-        tracing::debug!(
-            target: "morph::engine",
-            %batch_hash,
-            "RPC appendBatchSignature called (no-op for sync node)"
-        );
-        self.inner
-            .append_batch_signature(batch_hash, _signature)
-            .await
-            .map_err(|e| {
-                tracing::error!(target: "morph::engine", error = %e, "failed to append batch signature");
                 e.into()
             })
     }

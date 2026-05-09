@@ -6,9 +6,7 @@
 
 use crate::EngineApiResult;
 use alloy_primitives::B256;
-use morph_payload_types::{
-    AssembleL2BlockParams, BatchSignature, ExecutableL2Data, GenericResponse, SafeL2Data,
-};
+use morph_payload_types::{AssembleL2BlockParams, ExecutableL2Data, GenericResponse, SafeL2Data};
 use morph_primitives::MorphHeader;
 
 /// Morph L2 Engine API trait.
@@ -109,16 +107,4 @@ pub trait MorphL2EngineApi: Send + Sync {
         safe_block_hash: B256,
         finalized_block_hash: B256,
     ) -> EngineApiResult<()>;
-
-    /// Append a BLS batch signature for a given batch hash.
-    ///
-    /// Called by the consensus layer when collecting validator signatures for
-    /// L1 batch submission. For non-sequencer sync nodes, this is a no-op.
-    async fn append_batch_signature(
-        &self,
-        _batch_hash: B256,
-        _signature: BatchSignature,
-    ) -> EngineApiResult<()> {
-        Ok(())
-    }
 }
