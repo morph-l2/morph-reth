@@ -4,19 +4,17 @@
 //! that can execute Morph L2 blocks with proper L1 fee calculation and receipt building.
 
 use crate::{
-    block::{DefaultMorphReceiptBuilder, MorphBlockExecutor},
+    block::{DefaultMorphReceiptBuilder, MorphBlockExecutor, MorphTxResult},
     evm::MorphEvm,
 };
 use alloy_evm::{
-    Database,
-    block::{BlockExecutorFactory, BlockExecutorFor},
+    block::{BlockExecutorFactory, StateDB},
     eth::EthBlockExecutionCtx,
     revm::Inspector,
 };
 use morph_chainspec::MorphChainSpec;
 use morph_primitives::{MorphReceipt, MorphTxEnvelope};
 use morph_revm::evm::MorphContext;
-use reth_revm::DatabaseCommit;
 use std::sync::Arc;
 
 use crate::evm::MorphEvmFactory;
@@ -58,6 +56,10 @@ impl BlockExecutorFactory for MorphBlockExecutorFactory {
     type ExecutionCtx<'a> = EthBlockExecutionCtx<'a>;
     type Transaction = MorphTxEnvelope;
     type Receipt = MorphReceipt;
+    type TxExecutionResult = MorphTxResult;
+    // The Morph executor owns its EVM and receipt builder by value rather than
+    // borrowing them from the factory, so the lifetime parameter is unused.
+    type Executor<'a, DB: StateDB, I: Inspector<MorphContext<DB>>> = MorphBlockExecutor<DB, I>;
 
     fn evm_factory(&self) -> &Self::EvmFactory {
         &self.evm_factory
@@ -67,10 +69,10 @@ impl BlockExecutorFactory for MorphBlockExecutorFactory {
         &'a self,
         evm: MorphEvm<DB, I>,
         _ctx: Self::ExecutionCtx<'a>,
-    ) -> impl BlockExecutorFor<'a, Self, DB, I>
+    ) -> Self::Executor<'a, DB, I>
     where
-        DB: Database + DatabaseCommit + 'a,
-        I: Inspector<MorphContext<DB>> + 'a,
+        DB: StateDB,
+        I: Inspector<MorphContext<DB>>,
     {
         MorphBlockExecutor::new(evm, self.spec.clone(), self.receipt_builder)
     }

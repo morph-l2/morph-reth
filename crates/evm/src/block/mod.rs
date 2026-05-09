@@ -21,8 +21,8 @@ use alloy_consensus::transaction::TxHashRef;
 use alloy_evm::{
     Database, Evm, RecoveredTx,
     block::{
-        BlockExecutionError, BlockExecutionResult, BlockExecutor, ExecutableTx, OnStateHook,
-        StateChangeSource, TxResult,
+        BlockExecutionError, BlockExecutionResult, BlockExecutor, ExecutableTx, GasOutput,
+        OnStateHook, StateChangeSource, TxResult,
     },
 };
 use alloy_primitives::{Address, Log, U256};
@@ -38,7 +38,7 @@ use revm::context::Block;
 ///
 /// Carries the EVM result together with the recovered transaction and cached fee
 /// information that are needed during [`MorphBlockExecutor::commit_transaction`].
-pub(crate) struct MorphTxResult {
+pub struct MorphTxResult {
     /// The raw EVM execution result and state diff.
     pub result: ResultAndState<MorphHaltReason>,
     /// Recovered transaction (consensus tx + signer).
@@ -89,7 +89,7 @@ impl TxResult for MorphTxResult {
 /// 2. `execute_transaction_without_commit`: Execute transaction in EVM
 /// 3. `commit_transaction`: Calculate fees, build receipt, commit state
 /// 4. `finish`: Return final execution result with all receipts
-pub(crate) struct MorphBlockExecutor<DB: Database, I> {
+pub struct MorphBlockExecutor<DB: Database, I> {
     /// The EVM used by executor (owned, not a reference)
     evm: MorphEvm<DB, I>,
     /// Chain specification
@@ -275,7 +275,7 @@ where
         })
     }
 
-    fn commit_transaction(&mut self, output: Self::Result) -> Result<u64, BlockExecutionError> {
+    fn commit_transaction(&mut self, output: Self::Result) -> GasOutput {
         let MorphTxResult {
             result: ResultAndState { result, state },
             recovered,
@@ -289,12 +289,26 @@ where
             hook.on_state(StateChangeSource::Transaction(self.receipts.len()), &state);
         }
 
-        let gas_used = result.gas_used();
+        // EIP-8037 separates regular and state gas; pre-Amsterdam morph treats
+        // them as a single number, so use the unified `tx_gas_used` getter.
+        let gas_used = result.gas().tx_gas_used();
         self.gas_used += gas_used;
 
-        // Get MorphTx-specific fields using the recovered transaction.
+        // Get MorphTx-specific fields using the recovered transaction. Errors here
+        // are tracing-only — the trait API no longer permits us to surface errors
+        // from `commit_transaction`.
         let (tx, signer) = recovered.into_parts();
-        let morph_tx_fields = self.get_morph_tx_fields(&tx, signer, self.hardfork)?;
+        let morph_tx_fields = match self.get_morph_tx_fields(&tx, signer, self.hardfork) {
+            Ok(fields) => fields,
+            Err(err) => {
+                tracing::error!(
+                    target: "morph::evm",
+                    %err,
+                    "failed to load MorphTx receipt fields; emitting receipt without them"
+                );
+                None
+            }
+        };
 
         // Build receipt.
         let ctx: MorphReceiptBuilderCtx<'_, Self::Evm> = MorphReceiptBuilderCtx {
@@ -311,7 +325,8 @@ where
         // Commit state changes
         self.evm.db_mut().commit(state);
 
-        Ok(gas_used)
+        // Morph is pre-EIP-8037, so all gas is regular gas (no state-gas tracking).
+        GasOutput::new(gas_used)
     }
 
     fn finish(

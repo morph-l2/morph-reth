@@ -69,6 +69,11 @@ impl reth_payload_primitives::PayloadAttributes for MorphPayloadAttributes {
     fn parent_beacon_block_root(&self) -> Option<B256> {
         self.inner.parent_beacon_block_root
     }
+
+    fn slot_number(&self) -> Option<u64> {
+        // Morph L2 has no PoS slot semantics.
+        None
+    }
 }
 
 impl MorphPayloadAttributes {
@@ -241,6 +246,11 @@ impl reth_payload_primitives::PayloadAttributes for MorphPayloadBuilderAttribute
     fn parent_beacon_block_root(&self) -> Option<B256> {
         self.parent_beacon_block_root
     }
+
+    fn slot_number(&self) -> Option<u64> {
+        // Morph L2 has no PoS slot semantics.
+        None
+    }
 }
 
 /// Compute payload ID from parent hash and attributes.
@@ -322,6 +332,8 @@ mod tests {
                 suggested_fee_recipient: Address::random(),
                 withdrawals: None,
                 parent_beacon_block_root: None,
+                // Morph L2 has no PoS slot semantics; field added in alloy 2.0.
+                slot_number: None,
             },
             transactions: None,
             gas_limit: None,

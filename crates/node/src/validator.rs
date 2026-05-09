@@ -252,7 +252,7 @@ impl PayloadValidator<MorphPayloadTypes> for MorphEngineValidator {
         };
 
         if actual_withdraw_trie_root != expected_withdraw_trie_root {
-            return Err(ConsensusError::Other(format!(
+            return Err(ConsensusError::msg(format!(
                 "withdraw trie root mismatch: expected {expected_withdraw_trie_root}, got {actual_withdraw_trie_root}"
             )));
         }
@@ -579,6 +579,7 @@ mod tests {
                 suggested_fee_recipient: alloy_primitives::Address::ZERO,
                 withdrawals: None,
                 parent_beacon_block_root: None,
+                slot_number: None,
             },
             transactions: None,
             gas_limit: None,
@@ -598,6 +599,7 @@ mod tests {
                 suggested_fee_recipient: alloy_primitives::Address::ZERO,
                 withdrawals: None,
                 parent_beacon_block_root: None,
+                slot_number: None,
             },
             transactions: None,
             gas_limit: None,
@@ -617,6 +619,7 @@ mod tests {
                 suggested_fee_recipient: alloy_primitives::Address::ZERO,
                 withdrawals: None,
                 parent_beacon_block_root: None,
+                slot_number: None,
             },
             transactions: None,
             gas_limit: None,

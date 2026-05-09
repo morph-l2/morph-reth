@@ -141,6 +141,7 @@ async fn payload_builder_hash_matches_block_hash_with_nonzero_prev_randao() -> e
             suggested_fee_recipient: Address::ZERO,
             withdrawals: Some(vec![]),
             parent_beacon_block_root: Some(B256::ZERO),
+            slot_number: None,
         },
         transactions: Some(vec![]),
         gas_limit: None,

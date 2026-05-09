@@ -82,14 +82,19 @@ where
     }
 
     #[inline]
-    fn apply_eip7702_auth_list(&self, evm: &mut Self::Evm) -> Result<u64, Self::Error> {
-        pre_execution::apply_eip7702_auth_list(evm.ctx())
+    fn apply_eip7702_auth_list(
+        &self,
+        evm: &mut Self::Evm,
+        init_and_floor_gas: &mut InitialAndFloorGas,
+    ) -> Result<u64, Self::Error> {
+        pre_execution::apply_eip7702_auth_list(evm.ctx(), init_and_floor_gas)
     }
 
     #[inline]
     fn validate_against_state_and_deduct_caller(
         &self,
         evm: &mut Self::Evm,
+        _init_and_floor_gas: &mut InitialAndFloorGas,
     ) -> Result<(), Self::Error> {
         // Reset per-transaction caches from the previous iteration.
         evm.cached_l1_data_fee = U256::ZERO;
@@ -251,28 +256,38 @@ where
         evm: &mut Self::Evm,
     ) -> Result<InitialAndFloorGas, Self::Error> {
         let tx = evm.ctx_ref().tx();
-        let spec = (*evm.ctx_ref().cfg().spec()).into();
-        let disable_eip7623 = evm.ctx_ref().cfg().is_eip7623_disabled();
+        let cfg = evm.ctx_ref().cfg();
+        let spec = (*cfg.spec()).into();
+        let disable_eip7623 = cfg.is_eip7623_disabled();
+        let is_amsterdam_eip8037 = cfg.is_amsterdam_eip8037_enabled();
+        let tx_gas_limit_cap = cfg.tx_gas_limit_cap();
 
         // For L1 message transactions, handle intrinsic gas specially
         if tx.is_l1_msg() {
-            // Calculate intrinsic gas (same as normal transactions)
-            let initial_and_floor = validation::validate_initial_tx_gas(tx, spec, disable_eip7623)
-                .unwrap_or_else(|_| {
-                    // If intrinsic gas > gas_limit, use gas_limit as intrinsic gas
-                    // This matches go-ethereum's behavior for L1 messages
-                    InitialAndFloorGas {
-                        initial_gas: tx.gas_limit(),
-                        floor_gas: 0,
-                    }
-                });
+            // Calculate intrinsic gas (same as normal transactions). If intrinsic gas
+            // > gas_limit, fall back to gas_limit (matching go-ethereum's behavior for
+            // L1 messages, which prepay gas on L1 and must always execute).
+            let initial_and_floor = validation::validate_initial_tx_gas(
+                tx,
+                spec,
+                disable_eip7623,
+                is_amsterdam_eip8037,
+                tx_gas_limit_cap,
+            )
+            .unwrap_or_else(|_| InitialAndFloorGas::new(tx.gas_limit(), 0));
 
             return Ok(initial_and_floor);
         }
 
         // Normal transaction validation
-        let initial_and_floor = validation::validate_initial_tx_gas(tx, spec, disable_eip7623)
-            .map_err(MorphInvalidTransaction::EthInvalidTransaction)?;
+        let initial_and_floor = validation::validate_initial_tx_gas(
+            tx,
+            spec,
+            disable_eip7623,
+            is_amsterdam_eip8037,
+            tx_gas_limit_cap,
+        )
+        .map_err(MorphInvalidTransaction::EthInvalidTransaction)?;
 
         Ok(initial_and_floor)
     }

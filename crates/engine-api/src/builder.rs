@@ -713,6 +713,8 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
                 suggested_fee_recipient: Address::ZERO,
                 withdrawals: Some(Vec::new()),
                 parent_beacon_block_root: None,
+                // Morph L2 has no PoS slot semantics; introduced in alloy 2.0.
+                slot_number: None,
             },
             transactions: Some(params.transactions),
             gas_limit: gas_limit_override,
@@ -944,6 +946,10 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
                 blob_gas_used: None,
                 excess_blob_gas: None,
                 requests_hash: None,
+                // Pre-Amsterdam Morph blocks do not carry a block-access-list hash,
+                // and there is no PoS slot number.
+                block_access_list_hash: None,
+                slot_number: None,
             },
         };
         let body = BlockBody {

@@ -37,9 +37,10 @@ pub struct MorphAddOns<
     PVB = MorphEngineValidatorBuilder,
     EVB = MorphTreeEngineValidatorBuilder<PVB>,
     RpcMiddleware = Identity,
+    AuthHttpMiddleware = Identity,
 > {
     /// Inner RPC add-ons from reth.
-    inner: RpcAddOns<N, EthB, PVB, NoopEngineApiBuilder, EVB, RpcMiddleware>,
+    inner: RpcAddOns<N, EthB, PVB, NoopEngineApiBuilder, EVB, RpcMiddleware, AuthHttpMiddleware>,
 }
 
 impl<N> MorphAddOns<NodeAdapter<N>, MorphEthApiBuilder>
@@ -58,6 +59,7 @@ where
                 pvb.clone(),
                 NoopEngineApiBuilder::default(),
                 MorphTreeEngineValidatorBuilder::new(pvb),
+                Identity::default(),
                 Identity::default(),
             ),
         }

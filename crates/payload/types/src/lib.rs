@@ -120,6 +120,15 @@ impl ExecutionPayload for MorphExecutionData {
     fn transaction_count(&self) -> usize {
         self.block.body().transactions().count()
     }
+
+    fn gas_limit(&self) -> u64 {
+        self.block.gas_limit()
+    }
+
+    fn slot_number(&self) -> Option<u64> {
+        // Morph L2 has no PoS slot semantics.
+        None
+    }
 }
 
 impl PayloadTypes for MorphPayloadTypes {

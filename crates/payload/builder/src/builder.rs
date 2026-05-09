@@ -23,7 +23,7 @@ use reth_evm::{
     block::{BlockExecutionError, BlockValidationError},
     execute::{BlockBuilder, BlockBuilderOutcome, BlockExecutor},
 };
-use reth_execution_cache::CachedStateProvider;
+use reth_execution_cache::{CachedStateMetrics, CachedStateMetricsSource, CachedStateProvider};
 use reth_execution_types::BlockExecutionOutput;
 use reth_payload_builder::PayloadId;
 use reth_payload_primitives::{BuiltPayloadExecutedBlock, PayloadBuilderError};
@@ -208,10 +208,14 @@ where
         let mut state_provider: Box<dyn StateProvider> =
             self.client.state_by_block_hash(ctx.parent().hash())?;
         if let Some(execution_cache) = execution_cache {
+            // reth v2.2.0 dropped `SavedCache::metrics`; the canonical pattern
+            // (see `reth-ethereum-payload`) is to materialize a fresh zeroed
+            // metrics handle on every payload build — cheap because morph-reth
+            // builds payloads on demand rather than every 12s like upstream.
             state_provider = Box::new(CachedStateProvider::new(
                 state_provider,
                 execution_cache.cache().clone(),
-                execution_cache.metrics().clone(),
+                CachedStateMetrics::zeroed(CachedStateMetricsSource::Builder),
             ));
         }
         let state = StateProviderDatabase::new(state_provider.as_ref());
@@ -374,8 +378,11 @@ impl MorphPayloadBuilderCtx {
 
             // Execute the transaction and record EVM execution time.
             let apply_started = Instant::now();
+            // `BlockBuilder::execute_transaction` returns `GasOutput` from
+            // alloy-evm 0.34; pre-Amsterdam morph treats regular and state gas
+            // as a single number, so collapse to `tx_gas_used()` immediately.
             let gas_used = match builder.execute_transaction(recovered_tx.clone()) {
-                Ok(gas_used) => gas_used,
+                Ok(gas_output) => gas_output.tx_gas_used(),
                 Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
                     error,
                     ..
@@ -548,8 +555,10 @@ impl MorphPayloadBuilderCtx {
             }
 
             let apply_started = Instant::now();
+            // Same reasoning as the L1-message branch above: collapse `GasOutput`
+            // into a single u64 since we are still pre-Amsterdam.
             let gas_used = match builder.execute_transaction(tx.clone()) {
-                Ok(gas_used) => gas_used,
+                Ok(gas_output) => gas_output.tx_gas_used(),
                 Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
                     error,
                     ..
@@ -709,6 +718,8 @@ where
             withdrawals: Some(attributes.withdrawals.clone()),
             parent_beacon_block_root: attributes.parent_beacon_block_root,
             extra_data: Default::default(),
+            // Morph L2 has no PoS slot semantics; field added in alloy 2.0.
+            slot_number: None,
         },
         base_fee_per_gas: attributes.base_fee_per_gas,
     };

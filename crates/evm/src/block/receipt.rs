@@ -242,10 +242,20 @@ mod tests {
     // Since build_receipt only uses E::HaltReason, we can use any concrete Evm type.
     type TestEvm = crate::evm::MorphEvm<revm::database::EmptyDB>;
 
+    // revm v38 reshaped `ResultGas`: the previous 5-arg constructor is gone,
+    // and the new 3-arg `new(total_gas_spent, refunded, floor_gas)` is itself
+    // deprecated in favor of `with_*` builders. Our receipt-builder tests only
+    // observe `gas_used()` (`= total_gas_spent`), so set just that field via
+    // the non-deprecated builder. State gas (EIP-8037) and refunds aren't
+    // exercised pre-Amsterdam.
+    fn result_gas(gas_used: u64) -> revm::context::result::ResultGas {
+        revm::context::result::ResultGas::default().with_total_gas_spent(gas_used)
+    }
+
     fn make_success_result(gas_used: u64) -> ExecutionResult<morph_revm::MorphHaltReason> {
         ExecutionResult::Success {
             reason: revm::context::result::SuccessReason::Stop,
-            gas: revm::context::result::ResultGas::new(gas_used, gas_used, 0, 0, 0),
+            gas: result_gas(gas_used),
             logs: vec![],
             output: revm::context::result::Output::Call(alloy_primitives::Bytes::new()),
         }
@@ -257,7 +267,7 @@ mod tests {
     ) -> ExecutionResult<morph_revm::MorphHaltReason> {
         ExecutionResult::Success {
             reason: revm::context::result::SuccessReason::Stop,
-            gas: revm::context::result::ResultGas::new(gas_used, gas_used, 0, 0, 0),
+            gas: result_gas(gas_used),
             logs,
             output: revm::context::result::Output::Call(alloy_primitives::Bytes::new()),
         }
@@ -265,7 +275,7 @@ mod tests {
 
     fn make_revert_result(gas_used: u64) -> ExecutionResult<morph_revm::MorphHaltReason> {
         ExecutionResult::Revert {
-            gas: revm::context::result::ResultGas::new(gas_used, gas_used, 0, 0, 0),
+            gas: result_gas(gas_used),
             logs: vec![],
             output: alloy_primitives::Bytes::new(),
         }

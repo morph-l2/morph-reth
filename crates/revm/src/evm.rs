@@ -120,7 +120,11 @@ fn sload_morph<DB: Database>(context: InstructionContext<'_, MorphContext<DB>, E
                     slot.original_value = db_original;
                 }
 
-                if !context.interpreter.gas.record_cost(additional_cold_cost) {
+                if !context
+                    .interpreter
+                    .gas
+                    .record_regular_cost(additional_cold_cost)
+                {
                     context.interpreter.halt_oog();
                     return;
                 }
@@ -174,7 +178,7 @@ fn sstore_morph<DB: Database>(context: InstructionContext<'_, MorphContext<DB>, 
     if !context
         .interpreter
         .gas
-        .record_cost(context.host.gas_params().sstore_static_gas())
+        .record_regular_cost(context.host.gas_params().sstore_static_gas())
     {
         context.interpreter.halt_oog();
         return;
@@ -227,7 +231,7 @@ fn sstore_morph<DB: Database>(context: InstructionContext<'_, MorphContext<DB>, 
         &state_load.data,
         state_load.is_cold,
     );
-    if !context.interpreter.gas.record_cost(dynamic_gas) {
+    if !context.interpreter.gas.record_regular_cost(dynamic_gas) {
         context.interpreter.halt_oog();
         return;
     }

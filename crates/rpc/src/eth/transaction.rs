@@ -50,6 +50,11 @@ impl FromConsensusTx<MorphTxEnvelope> for MorphRpcTransaction {
             inner: Recovered::new_unchecked(tx, signer),
             block_hash: tx_info.block_hash,
             block_number: tx_info.block_number,
+            // alloy 2.0 added an explicit `block_timestamp` to RPC transactions
+            // so receipts/transactions returned by `eth_*` align with engine API
+            // semantics. `TransactionInfo` already plumbs this through from the
+            // block header, so we just forward it.
+            block_timestamp: tx_info.block_timestamp,
             transaction_index: tx_info.index,
             effective_gas_price,
         };
@@ -743,6 +748,7 @@ mod tests {
             hash: Some(B256::ZERO),
             block_hash: Some(B256::random()),
             block_number: Some(10),
+            block_timestamp: None,
             index: Some(0),
             base_fee: Some(1000),
         };
@@ -785,6 +791,7 @@ mod tests {
             hash: Some(B256::ZERO),
             block_hash: Some(B256::random()),
             block_number: Some(100),
+            block_timestamp: None,
             index: Some(5),
             base_fee: Some(1_000_000_000),
         };
@@ -825,6 +832,7 @@ mod tests {
             hash: Some(B256::ZERO),
             block_hash: None,
             block_number: None,
+            block_timestamp: None,
             index: None,
             base_fee: Some(1_000_000_000),
         };
@@ -860,6 +868,7 @@ mod tests {
             hash: Some(B256::ZERO),
             block_hash: Some(B256::random()),
             block_number: Some(1),
+            block_timestamp: None,
             index: Some(0),
             base_fee: Some(base_fee),
         };

@@ -140,6 +140,8 @@ impl ConfigureEvm for MorphEvmConfig {
                 .map(|w| Cow::Borrowed(w.0.as_slice())),
             extra_data: block.extra_data().clone(),
             tx_count_hint: Some(block.body().transactions.len()),
+            // Morph L2 has no PoS slot semantics; introduced upstream in alloy 2.0.
+            slot_number: None,
         })
     }
 
@@ -155,6 +157,8 @@ impl ConfigureEvm for MorphEvmConfig {
             withdrawals: attributes.inner.withdrawals.map(|w| Cow::Owned(w.0)),
             extra_data: attributes.inner.extra_data,
             tx_count_hint: None,
+            // Morph L2 has no PoS slot semantics; introduced upstream in alloy 2.0.
+            slot_number: None,
         })
     }
 }
@@ -277,6 +281,7 @@ mod tests {
                 parent_beacon_block_root: None,
                 withdrawals: None,
                 extra_data: Bytes::new(),
+                slot_number: None,
             },
             base_fee_per_gas: Some(500_000),
         };
@@ -326,6 +331,7 @@ mod tests {
                 parent_beacon_block_root: None,
                 withdrawals: None,
                 extra_data: Bytes::new(),
+                slot_number: None,
             },
             base_fee_per_gas: None,
         };
