@@ -85,41 +85,9 @@ pub const GPO_BLOB_SCALAR_SLOT: U256 = U256::from_limbs([8, 0, 0, 0]);
 /// Added in the Curie hardfork. Set to 1 (true) after Curie activation.
 pub const GPO_IS_CURIE_SLOT: U256 = U256::from_limbs([9, 0, 0, 0]);
 
-// =============================================================================
-// L1 Gas Price Oracle Initial Values (for Curie hardfork)
-// =============================================================================
-
-/// The initial blob base fee used by the oracle contract at Curie activation.
-pub const INITIAL_L1_BLOB_BASE_FEE: U256 = U256::from_limbs([1, 0, 0, 0]);
-
-/// The initial commit scalar used by the oracle contract at Curie activation.
-/// Reference: `rcfg.InitialCommitScalar` in go-ethereum (230759955285)
-pub const INITIAL_COMMIT_SCALAR: U256 = U256::from_limbs([230759955285, 0, 0, 0]);
-
-/// The initial blob scalar used by the oracle contract at Curie activation.
-/// Reference: `rcfg.InitialBlobScalar` in go-ethereum (417565260)
-pub const INITIAL_BLOB_SCALAR: U256 = U256::from_limbs([417565260, 0, 0, 0]);
-
-/// Curie hardfork flag value (1 = true).
-pub const IS_CURIE: U256 = U256::from_limbs([1, 0, 0, 0]);
-
 /// Maximum L1 data fee cap for circuit compatibility.
 /// Matches go-ethereum's `CalculateL1DataFee` cap in `rollup/fees/rollup_fee.go`.
 const L1_FEE_CAP: U256 = U256::from_limbs([u64::MAX, 0, 0, 0]);
-
-/// Storage updates for L1 gas price oracle Curie hardfork initialization.
-///
-/// These storage slots are initialized when the Curie hardfork activates:
-/// - l1BlobBaseFee = 1
-/// - commitScalar = InitialCommitScalar
-/// - blobScalar = InitialBlobScalar
-/// - isCurie = 1 (true)
-pub const CURIE_L1_GAS_PRICE_ORACLE_STORAGE: [(U256, U256); 4] = [
-    (GPO_L1_BLOB_BASE_FEE_SLOT, INITIAL_L1_BLOB_BASE_FEE),
-    (GPO_COMMIT_SCALAR_SLOT, INITIAL_COMMIT_SCALAR),
-    (GPO_BLOB_SCALAR_SLOT, INITIAL_BLOB_SCALAR),
-    (GPO_IS_CURIE_SLOT, IS_CURIE),
-];
 
 // =============================================================================
 // L1 Block Info
@@ -421,22 +389,6 @@ mod tests {
         // All parameters are zero, so cost is zero (tx_l1_gas * 0 * 0 / precision = 0)
         let cost = info.calculate_tx_l1_cost(&input, MorphHardfork::Bernoulli);
         assert_eq!(cost, U256::ZERO);
-    }
-
-    #[test]
-    fn test_curie_oracle_storage_constants() {
-        assert_eq!(CURIE_L1_GAS_PRICE_ORACLE_STORAGE.len(), 4);
-        // Verify the 4 slots are the expected ones
-        assert_eq!(
-            CURIE_L1_GAS_PRICE_ORACLE_STORAGE[0].0,
-            GPO_L1_BLOB_BASE_FEE_SLOT
-        );
-        assert_eq!(
-            CURIE_L1_GAS_PRICE_ORACLE_STORAGE[1].0,
-            GPO_COMMIT_SCALAR_SLOT
-        );
-        assert_eq!(CURIE_L1_GAS_PRICE_ORACLE_STORAGE[2].0, GPO_BLOB_SCALAR_SLOT);
-        assert_eq!(CURIE_L1_GAS_PRICE_ORACLE_STORAGE[3].0, GPO_IS_CURIE_SLOT);
     }
 
     #[test]
