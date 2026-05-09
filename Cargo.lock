@@ -2419,7 +2419,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccc2776f0c61eca1ca32528f85548abd1a4be8fb53d1b21c013e4f18da1e7090"
 dependencies = [
  "data-encoding",
- "syn 2.0.117",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -5037,15 +5037,18 @@ dependencies = [
  "morph-payload-builder",
  "morph-payload-types",
  "morph-primitives",
+ "morph-reference-index",
  "morph-rpc",
  "morph-txpool",
  "parking_lot",
  "reth-chainspec",
  "reth-db",
+ "reth-db-api",
  "reth-e2e-test-utils",
  "reth-engine-local",
  "reth-engine-tree",
  "reth-errors",
+ "reth-exex",
  "reth-node-api",
  "reth-node-builder",
  "reth-node-core",
@@ -5056,6 +5059,7 @@ dependencies = [
  "reth-provider",
  "reth-rpc-builder",
  "reth-rpc-eth-api",
+ "reth-storage-api",
  "reth-tasks",
  "reth-tracing",
  "reth-transaction-pool",
@@ -5063,8 +5067,10 @@ dependencies = [
  "reth-trie-db",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-stream",
+ "tracing",
  "vergen",
  "vergen-git2",
 ]
@@ -5142,6 +5148,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "morph-reference-index"
+version = "0.2.2"
+dependencies = [
+ "alloy-consensus",
+ "alloy-primitives",
+ "alloy-rlp",
+ "eyre",
+ "morph-chainspec",
+ "morph-primitives",
+ "reth-chainspec",
+ "reth-codecs",
+ "reth-db",
+ "reth-db-api",
+ "reth-errors",
+ "reth-primitives-traits",
+ "reth-provider",
+ "reth-storage-api",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "morph-reth"
 version = "0.2.2"
 dependencies = [
@@ -5151,6 +5182,8 @@ dependencies = [
  "morph-consensus",
  "morph-evm",
  "morph-node",
+ "morph-reference-index",
+ "reth-chainspec",
  "reth-cli",
  "reth-cli-util",
  "reth-ethereum-cli",
@@ -5199,6 +5232,7 @@ dependencies = [
  "morph-chainspec",
  "morph-evm",
  "morph-primitives",
+ "morph-reference-index",
  "morph-revm",
  "reth-chainspec",
  "reth-errors",

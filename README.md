@@ -200,7 +200,6 @@ Morph provides a custom L2 Engine API (different from the standard Ethereum Engi
 | `engine_newL2Block` | Import a new L2 block via `newPayload` + `forkchoiceUpdated` and advance the canonical head |
 | `engine_newSafeL2Block` | Rebuild and import a safe L2 block from derivation inputs |
 | `engine_setBlockTags` | Update safe/finalized block tags without importing a block |
-| `engine_appendBatchSignature` | Accept a BLS batch signature from the consensus layer (no-op for sync nodes) |
 
 ## Contributing
 

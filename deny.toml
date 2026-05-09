@@ -12,6 +12,16 @@ ignore = [
     # pinned transitively via reth; we don't install a custom logger so this is
     # a false positive in our usage, but cargo-deny can't see usage
     "RUSTSEC-2026-0097",
+    # https://rustsec.org/advisories/RUSTSEC-2026-0098 rustls-webpki URI name constraints
+    "RUSTSEC-2026-0098",
+    # https://rustsec.org/advisories/RUSTSEC-2026-0099 rustls-webpki wildcard name constraints
+    "RUSTSEC-2026-0099",
+    # https://rustsec.org/advisories/RUSTSEC-2026-0118 hickory-proto NSEC3 validation loop
+    # pinned transitively via reth-dns-discovery -> hickory-resolver ^0.25; no 0.25 fix is available
+    "RUSTSEC-2026-0118",
+    # https://rustsec.org/advisories/RUSTSEC-2026-0119 hickory-proto O(n^2) name compression
+    # fixed in hickory-proto 0.26.1, but hickory-resolver ^0.25 cannot select it
+    "RUSTSEC-2026-0119",
 ]
 
 # This section is considered when running `cargo deny check bans`.

@@ -4,9 +4,7 @@
 //! - [`MorphBlockExecutor`]: The main block executor
 //! - [`MorphBlockExecutorFactory`]: Factory for creating block executors
 //! - [`MorphReceiptBuilder`]: Receipt construction for transactions
-//! - Hardfork application logic (Curie, etc.)
 
-pub(crate) mod curie;
 mod factory;
 mod receipt;
 
@@ -26,7 +24,6 @@ use alloy_evm::{
     },
 };
 use alloy_primitives::{Address, Log, U256};
-use curie::apply_curie_hard_fork;
 use morph_chainspec::{MorphChainSpec, MorphHardfork, MorphHardforks};
 use morph_primitives::{MorphReceipt, MorphTxEnvelope};
 use morph_revm::{L1_GAS_PRICE_ORACLE_ADDRESS, MorphHaltReason, TokenFeeInfo, evm::MorphContext};
@@ -80,12 +77,8 @@ impl TxResult for MorphTxResult {
 /// The executor extracts token fee information from the L2TokenRegistry contract,
 /// including exchange rate and scale factor.
 ///
-/// ## Hardfork Application
-/// The executor applies hardfork-specific state changes at transition blocks,
-/// such as the Curie hardfork which updates the L1 Gas Price Oracle contract.
-///
 /// ## Execution Flow
-/// 1. `apply_pre_execution_changes`: Set up state, load contracts, apply hardforks
+/// 1. `apply_pre_execution_changes`: Set up state and load contracts
 /// 2. `execute_transaction_without_commit`: Execute transaction in EVM
 /// 3. `commit_transaction`: Calculate fees, build receipt, commit state
 /// 4. `finish`: Return final execution result with all receipts
@@ -205,6 +198,16 @@ where
     type Evm = MorphEvm<DB, I>;
     type Result = MorphTxResult;
 
+    /// Applies pre-execution state changes before processing transactions.
+    ///
+    /// This method performs initialization required before executing any transactions:
+    ///
+    /// 1. **L1 Gas Oracle Cache**: Loads the L1 Gas Price Oracle contract into the
+    ///    account cache to optimize L1 fee calculations for all transactions
+    ///
+    /// # Errors
+    /// Returns error if:
+    /// - L1 Gas Price Oracle account cannot be loaded
     fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
         // Pre-warm the L1 gas oracle contract in the underlying DB cache so that
         // subsequent per-tx L1BlockInfo reads in the handler are fast.
@@ -219,18 +222,6 @@ where
             .spec
             .morph_hardfork_at(block_number, self.evm.block().timestamp.to::<u64>());
         self.hardfork = hardfork;
-
-        // Apply Curie hardfork at the transition block
-        if self
-            .spec
-            .morph_fork_activation(MorphHardfork::Curie)
-            .transitions_at_block(block_number)
-            && let Err(err) = apply_curie_hard_fork(self.evm.db_mut())
-        {
-            return Err(BlockExecutionError::msg(format!(
-                "error occurred at Curie fork: {err:?}"
-            )));
-        }
 
         Ok(())
     }
