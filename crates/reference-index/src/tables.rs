@@ -6,6 +6,7 @@ use reth_db_api::{
     table::{Compress, Decode, Decompress, Encode, TableInfo},
     tables,
 };
+use reth_codecs::DecompressError;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -184,9 +185,11 @@ impl Compress for BlockTimestampValue {
 }
 
 impl Decompress for BlockTimestampValue {
-    fn decompress(value: &[u8]) -> Result<Self, DatabaseError> {
+    fn decompress(value: &[u8]) -> Result<Self, DecompressError> {
         Ok(Self(u64::from_be_bytes(
-            value.try_into().map_err(|_| DatabaseError::Decode)?,
+            value
+                .try_into()
+                .map_err(|_| DecompressError::new(DatabaseError::Decode))?,
         )))
     }
 }
@@ -209,9 +212,11 @@ macro_rules! impl_b256_value_codec {
         }
 
         impl Decompress for $name {
-            fn decompress(value: &[u8]) -> Result<Self, DatabaseError> {
+            fn decompress(value: &[u8]) -> Result<Self, DecompressError> {
                 Ok(Self(B256::new(
-                    value.try_into().map_err(|_| DatabaseError::Decode)?,
+                    value
+                        .try_into()
+                        .map_err(|_| DecompressError::new(DatabaseError::Decode))?,
                 )))
             }
         }
@@ -234,11 +239,11 @@ impl Compress for MetaValue {
 }
 
 impl Decompress for MetaValue {
-    fn decompress(value: &[u8]) -> Result<Self, DatabaseError> {
+    fn decompress(value: &[u8]) -> Result<Self, DecompressError> {
         Ok(Self(value.to_vec()))
     }
 
-    fn decompress_owned(value: Vec<u8>) -> Result<Self, DatabaseError> {
+    fn decompress_owned(value: Vec<u8>) -> Result<Self, DecompressError> {
         Ok(Self(value))
     }
 }
