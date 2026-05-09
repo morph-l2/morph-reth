@@ -73,7 +73,7 @@ async fn reference_index_finds_single_morph_tx() -> eyre::Result<()> {
     let dir = TempDir::new()?;
     let db = open_and_backfill_index(&node.inner.provider, &dir).await;
 
-    let reader = ReferenceIndexReader::new(db.clone(), DEFAULT_LAG_THRESHOLD);
+    let reader = ReferenceIndexReader::new(db, DEFAULT_LAG_THRESHOLD);
     let canonical_tip = node.inner.provider.best_block_number()?;
     let query = ReferenceQuery::new(reference, None, None).unwrap();
     let results = reader.query(query, canonical_tip)?;
