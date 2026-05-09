@@ -4941,7 +4941,7 @@ dependencies = [
 
 [[package]]
 name = "morph-engine-tree-ext"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "alloy-consensus",
  "alloy-eip7928",
