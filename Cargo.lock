@@ -4715,7 +4715,7 @@ checksum = "1fafa6961cabd9c63bcd77a45d7e3b7f3b552b70417831fb0f56db717e72407e"
 
 [[package]]
 name = "morph-chainspec"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "alloy-chains",
  "alloy-consensus",
@@ -4738,7 +4738,7 @@ dependencies = [
 
 [[package]]
 name = "morph-consensus"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "alloy-consensus",
  "alloy-evm",
@@ -4756,7 +4756,7 @@ dependencies = [
 
 [[package]]
 name = "morph-engine-api"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -4785,7 +4785,7 @@ dependencies = [
 
 [[package]]
 name = "morph-evm"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "alloy-consensus",
  "alloy-evm",
@@ -4811,7 +4811,7 @@ dependencies = [
 
 [[package]]
 name = "morph-node"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -4873,7 +4873,7 @@ dependencies = [
 
 [[package]]
 name = "morph-payload-builder"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -4903,7 +4903,7 @@ dependencies = [
 
 [[package]]
 name = "morph-payload-types"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -4924,7 +4924,7 @@ dependencies = [
 
 [[package]]
 name = "morph-primitives"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -4944,7 +4944,7 @@ dependencies = [
 
 [[package]]
 name = "morph-reference-index"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "alloy-consensus",
  "alloy-primitives",
@@ -4969,7 +4969,7 @@ dependencies = [
 
 [[package]]
 name = "morph-reth"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "clap",
  "eyre",
@@ -4989,7 +4989,7 @@ dependencies = [
 
 [[package]]
 name = "morph-revm"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -5012,7 +5012,7 @@ dependencies = [
 
 [[package]]
 name = "morph-rpc"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -5053,7 +5053,7 @@ dependencies = [
 
 [[package]]
 name = "morph-txpool"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
