@@ -52,7 +52,7 @@ where
 async fn reference_index_finds_single_morph_tx() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     let reference = B256::with_last_byte(0x99);
@@ -90,7 +90,7 @@ async fn reference_index_finds_single_morph_tx() -> eyre::Result<()> {
 async fn reference_index_pagination() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
     let reference = B256::with_last_byte(0xaa);
     let mut tx_hashes = Vec::new();
@@ -148,7 +148,7 @@ async fn reference_index_pagination() -> eyre::Result<()> {
 async fn reference_index_no_results_for_unrelated_reference() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
     let reference = B256::with_last_byte(0xbb);
     let other_reference = B256::with_last_byte(0xcc);
