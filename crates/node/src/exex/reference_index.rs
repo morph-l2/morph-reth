@@ -13,6 +13,7 @@
 
 use alloy_consensus::BlockHeader;
 use alloy_eips::BlockNumHash;
+use futures::FutureExt;
 use morph_chainspec::spec::MorphChainSpec;
 use morph_primitives::MorphPrimitives;
 use morph_reference_index::{
@@ -21,7 +22,7 @@ use morph_reference_index::{
     reconcile::run_startup_reconcile,
     writer::{delete_block, update_indexed_to, write_block},
 };
-use reth_db_api::transaction::DbTx;
+use reth_db_api::transaction::{DbTx, DbTxMut};
 use reth_exex::{ExExContext, ExExEvent, ExExNotification};
 use reth_node_api::{FullNodeComponents, NodeTypes};
 use reth_provider::{
@@ -29,10 +30,11 @@ use reth_provider::{
 };
 use reth_storage_api::TransactionVariant;
 use tokio::sync::watch;
-use tokio_stream::StreamExt;
+use tokio_stream::{Stream, StreamExt};
 use tracing::{debug, error, info};
 
 const TARGET: &str = "morph::reference_index";
+const MAX_LIVE_NOTIFICATION_BATCH: usize = 1024;
 
 // ── shared control ────────────────────────────────────────────────────────────
 
@@ -169,7 +171,8 @@ where
                     }
                 }
 
-                match handle_notification(&ctx.events, &control.db, notification, &mut last_finished) {
+                let notifications = drain_ready_notifications(&mut ctx.notifications, notification)?;
+                match handle_notifications_batch(&ctx.events, &control.db, notifications, &mut last_finished) {
                     Ok(()) => {}
                     Err(e) => {
                         error!(target: TARGET, ?e, "error processing notification");
@@ -225,66 +228,123 @@ where
     Ok(())
 }
 
-/// Process one ExEx notification: commit or revert three tables atomically.
-///
-/// Updates `last_finished` when a FinishedHeight is sent so the caller can
-/// keep progress monotonic across the startup-watch and notification arms.
-fn handle_notification(
+/// Drain already-ready notifications so fast catch-up can be indexed in one DB transaction.
+fn drain_ready_notifications<S>(
+    notifications: &mut S,
+    first: ExExNotification<MorphPrimitives>,
+) -> eyre::Result<Vec<ExExNotification<MorphPrimitives>>>
+where
+    S: Stream<Item = eyre::Result<ExExNotification<MorphPrimitives>>> + Unpin,
+{
+    let mut batch = Vec::with_capacity(32);
+    batch.push(first);
+
+    while batch.len() < MAX_LIVE_NOTIFICATION_BATCH {
+        match notifications.try_next().now_or_never() {
+            Some(Ok(Some(notification))) => batch.push(notification),
+            Some(Ok(None)) | None => break,
+            Some(Err(err)) => return Err(err),
+        }
+    }
+
+    Ok(batch)
+}
+
+/// Process ready ExEx notifications in one atomic commit.
+fn handle_notifications_batch(
     events: &tokio::sync::mpsc::UnboundedSender<ExExEvent>,
     db: &ReferenceIndexDb,
-    notification: ExExNotification<MorphPrimitives>,
+    notifications: Vec<ExExNotification<MorphPrimitives>>,
     last_finished: &mut Option<BlockNumHash>,
 ) -> eyre::Result<()> {
+    if notifications.is_empty() {
+        return Ok(());
+    }
+
+    let tx = db.tx_mut()?;
+    let mut finished_height = None;
+    let mut allow_regression = false;
+    for notification in notifications {
+        let effect = apply_notification_to_tx(&tx, notification)?;
+        allow_regression |= effect.allow_regression;
+        finished_height = effect.finished_height;
+    }
+    tx.commit()?;
+
+    if let Some(block) = finished_height {
+        if allow_regression {
+            events.send(ExExEvent::FinishedHeight(block))?;
+            *last_finished = Some(block);
+        } else {
+            send_finished_height_monotonic(events, block, last_finished)?;
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct NotificationEffect {
+    finished_height: Option<BlockNumHash>,
+    allow_regression: bool,
+}
+
+fn apply_notification_to_tx<Tx: DbTxMut>(
+    tx: &Tx,
+    notification: ExExNotification<MorphPrimitives>,
+) -> eyre::Result<NotificationEffect> {
     match notification {
         ExExNotification::ChainCommitted { new } => {
-            let tx = db.tx_mut()?;
             for block in new.blocks_iter() {
                 write_block(
-                    &tx,
+                    tx,
                     block.number(),
                     block.hash(),
                     block.timestamp(),
                     &block.body().transactions,
                 )?;
             }
-            update_indexed_to(&tx, new.tip().number())?;
-            tx.commit()?;
-            send_finished_height_monotonic(events, new.tip().num_hash(), last_finished)?;
+            update_indexed_to(tx, new.tip().number())?;
+            Ok(NotificationEffect {
+                finished_height: Some(new.tip().num_hash()),
+                allow_regression: false,
+            })
         }
         ExExNotification::ChainReverted { old } => {
             let parent = old.first().number().saturating_sub(1);
-            let tx = db.tx_mut()?;
             for block in old.blocks_iter() {
-                delete_block(&tx, block.number())?;
+                delete_block(tx, block.number())?;
             }
-            update_indexed_to(&tx, parent)?;
-            tx.commit()?;
+            update_indexed_to(tx, parent)?;
             // FinishedHeight not sent on revert per spec.
+            Ok(NotificationEffect {
+                finished_height: None,
+                allow_regression: true,
+            })
         }
         ExExNotification::ChainReorged { old, new } => {
-            let tx = db.tx_mut()?;
             for block in old.blocks_iter() {
-                delete_block(&tx, block.number())?;
+                delete_block(tx, block.number())?;
             }
             for block in new.blocks_iter() {
                 write_block(
-                    &tx,
+                    tx,
                     block.number(),
                     block.hash(),
                     block.timestamp(),
                     &block.body().transactions,
                 )?;
             }
-            update_indexed_to(&tx, new.tip().number())?;
-            tx.commit()?;
+            update_indexed_to(tx, new.tip().number())?;
             // On reorg to a shorter chain the tip may go down; that is the one
             // case we ALLOW FinishedHeight to regress (reth's ExExEvent doc
             // explicitly permits "on reorgs, height may go down").
-            events.send(ExExEvent::FinishedHeight(new.tip().num_hash()))?;
-            *last_finished = Some(new.tip().num_hash());
+            Ok(NotificationEffect {
+                finished_height: Some(new.tip().num_hash()),
+                allow_regression: true,
+            })
         }
     }
-    Ok(())
 }
 
 /// Send a FinishedHeight only if it strictly advances `last_finished`.
@@ -367,4 +427,143 @@ where
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_consensus::Header;
+    use alloy_primitives::B256;
+    use morph_primitives::{Block, BlockBody, MorphHeader, MorphPrimitives};
+    use reth_primitives_traits::SealedBlock;
+    use reth_provider::{Chain, ExecutionOutcome};
+    use std::{collections::BTreeMap, sync::Arc};
+
+    #[test]
+    fn batched_commits_emit_finished_height_once_at_tip() -> eyre::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let db = ReferenceIndexDb::open(dir.path(), 2910, B256::ZERO)?;
+        let (events, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut last_finished = None;
+
+        let block1 = recovered_block(1, B256::ZERO);
+        let block1_hash = block1.hash();
+        let block2 = recovered_block(2, block1_hash);
+        let block2_num_hash = block2.num_hash();
+
+        handle_notifications_batch(
+            &events,
+            &db,
+            vec![
+                committed_notification(vec![block1]),
+                committed_notification(vec![block2]),
+            ],
+            &mut last_finished,
+        )?;
+
+        assert_eq!(db.indexed_to()?, 2);
+        assert!(db.indexed_block_hash(1)?.is_some());
+        assert!(db.indexed_block_hash(2)?.is_some());
+        assert_eq!(last_finished, Some(block2_num_hash));
+        assert_eq!(
+            events_rx.try_recv()?,
+            ExExEvent::FinishedHeight(block2_num_hash)
+        );
+        assert!(events_rx.try_recv().is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn batch_with_reorg_allows_final_finished_height_to_regress() -> eyre::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let db = ReferenceIndexDb::open(dir.path(), 2910, B256::ZERO)?;
+        let (events, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut last_finished = Some(BlockNumHash {
+            number: 12,
+            hash: B256::repeat_byte(0x12),
+        });
+
+        let old10 = recovered_block(10, B256::ZERO);
+        let old11 = recovered_block(11, old10.hash());
+        let old12 = recovered_block(12, old11.hash());
+        let new10 = recovered_block(10, B256::repeat_byte(0x99));
+        let new11 = recovered_block(11, new10.hash());
+        let new11_num_hash = new11.num_hash();
+
+        handle_notifications_batch(
+            &events,
+            &db,
+            vec![
+                reorg_notification(vec![old10, old11, old12], vec![new10]),
+                committed_notification(vec![new11]),
+            ],
+            &mut last_finished,
+        )?;
+
+        assert_eq!(db.indexed_to()?, 11);
+        assert_eq!(last_finished, Some(new11_num_hash));
+        assert_eq!(
+            events_rx.try_recv()?,
+            ExExEvent::FinishedHeight(new11_num_hash)
+        );
+        assert!(events_rx.try_recv().is_err());
+
+        Ok(())
+    }
+
+    fn committed_notification(
+        blocks: Vec<reth_primitives_traits::RecoveredBlock<Block>>,
+    ) -> ExExNotification<MorphPrimitives> {
+        ExExNotification::ChainCommitted {
+            new: Arc::new(Chain::new(
+                blocks,
+                ExecutionOutcome::default(),
+                BTreeMap::new(),
+            )),
+        }
+    }
+
+    fn reorg_notification(
+        old: Vec<reth_primitives_traits::RecoveredBlock<Block>>,
+        new: Vec<reth_primitives_traits::RecoveredBlock<Block>>,
+    ) -> ExExNotification<MorphPrimitives> {
+        ExExNotification::ChainReorged {
+            old: Arc::new(Chain::new(
+                old,
+                ExecutionOutcome::default(),
+                BTreeMap::new(),
+            )),
+            new: Arc::new(Chain::new(
+                new,
+                ExecutionOutcome::default(),
+                BTreeMap::new(),
+            )),
+        }
+    }
+
+    fn recovered_block(
+        number: u64,
+        parent_hash: B256,
+    ) -> reth_primitives_traits::RecoveredBlock<Block> {
+        let header = MorphHeader {
+            inner: Header {
+                number,
+                parent_hash,
+                timestamp: 1_000 + number,
+                gas_limit: 30_000_000,
+                parent_beacon_block_root: Some(B256::ZERO),
+                ..Default::default()
+            },
+            next_l1_msg_index: 0,
+        };
+        let body = BlockBody {
+            transactions: vec![],
+            ommers: vec![],
+            withdrawals: None,
+        };
+        SealedBlock::seal_slow(Block { header, body })
+            .try_recover()
+            .expect("empty test block should recover")
+    }
 }

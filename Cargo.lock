@@ -5028,6 +5028,7 @@ dependencies = [
  "clap",
  "dashmap",
  "eyre",
+ "futures",
  "jsonrpsee",
  "morph-chainspec",
  "morph-consensus",

@@ -61,6 +61,7 @@ alloy-rpc-types-eth.workspace = true
 eyre.workspace = true
 clap.workspace = true
 dashmap.workspace = true
+futures.workspace = true
 parking_lot.workspace = true
 tokio = { workspace = true, features = ["sync", "rt"] }
 tokio-stream.workspace = true
