@@ -97,7 +97,7 @@ To wipe chain data and start syncing from scratch:
 ./local-test/reset.sh hoodi --yes    # Reset hoodi (no confirmation)
 ```
 
-This removes `reth-data/db`, `reth-data/static_files`, and `node-data/data/` for the specified network. Config files (genesis, keys) are preserved.
+This removes reth's canonical DB, RocksDB history indices, static files, ExEx state, Morph reference index state, and `node-data/data/` for the specified network. Config files (genesis, keys), `reth.toml`, discovery secrets, and logs are preserved.
 
 ## Storage & engine tuning
 

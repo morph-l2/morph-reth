@@ -17,11 +17,15 @@ echo "=========================================="
 echo
 echo "This will remove:"
 echo "  - ${RETH_DATA_DIR}/db"
+echo "  - ${RETH_DATA_DIR}/rocksdb"
 echo "  - ${RETH_DATA_DIR}/static_files"
+echo "  - ${RETH_DATA_DIR}/exex"
+echo "  - ${RETH_DATA_DIR}/morph"
 echo "  - ${NODE_HOME}/data"
 echo
 echo "This keeps:"
 echo "  - ${NODE_HOME}/config (genesis/keys)"
+echo "  - ${RETH_DATA_DIR}/discovery-secret and ${RETH_DATA_DIR}/reth.toml"
 echo "  - log files"
 echo
 
@@ -35,7 +39,13 @@ fi
 
 "${SCRIPT_DIR}/stop-all.sh" || true
 
-rm -rf "${RETH_DATA_DIR}/db" "${RETH_DATA_DIR}/static_files" "${NODE_HOME}/data"
+rm -rf \
+  "${RETH_DATA_DIR}/db" \
+  "${RETH_DATA_DIR}/rocksdb" \
+  "${RETH_DATA_DIR}/static_files" \
+  "${RETH_DATA_DIR}/exex" \
+  "${RETH_DATA_DIR}/morph" \
+  "${NODE_HOME}/data"
 mkdir -p "${RETH_DATA_DIR}" "${NODE_HOME}/data"
 
 cat > "${NODE_HOME}/data/priv_validator_state.json" <<'EOF'
