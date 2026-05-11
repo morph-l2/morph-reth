@@ -54,9 +54,9 @@ async fn state_root_validation_skipped_pre_jade() -> eyre::Result<()> {
     Ok(())
 }
 
-/// `engine_newL2Block` can import a block assembled over the authenticated RPC.
+/// `engine_newL2Block` can import consecutive blocks assembled over the authenticated RPC.
 #[tokio::test(flavor = "multi_thread")]
-async fn new_l2_block_imports_assembled_block_over_rpc() -> eyre::Result<()> {
+async fn new_l2_block_imports_consecutive_assembled_blocks_over_rpc() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
@@ -87,6 +87,31 @@ async fn new_l2_block_imports_assembled_block_over_rpc() -> eyre::Result<()> {
         latest.hash(),
         expected_hash,
         "imported canonical head should match the assembled block hash"
+    );
+
+    let mut params = AssembleL2BlockParams::empty(2);
+    params.timestamp = Some(latest.timestamp() + 1);
+
+    let data: ExecutableL2Data = client.request("engine_assembleL2Block", (params,)).await?;
+    let expected_hash = data.hash;
+
+    let _: () = client.request("engine_newL2Block", (data,)).await?;
+
+    let latest = node
+        .inner
+        .provider
+        .sealed_header_by_number_or_tag(alloy_rpc_types_eth::BlockNumberOrTag::Latest)?
+        .expect("latest header must exist after importing the second block");
+
+    assert_eq!(
+        latest.number(),
+        2,
+        "engine_newL2Block should expose the first imported block as the parent immediately"
+    );
+    assert_eq!(
+        latest.hash(),
+        expected_hash,
+        "second imported canonical head should match the assembled block hash"
     );
 
     Ok(())

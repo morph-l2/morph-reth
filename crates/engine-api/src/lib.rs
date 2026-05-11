@@ -26,8 +26,6 @@ mod metrics;
 mod rpc;
 
 pub use api::MorphL2EngineApi;
-pub use builder::{
-    EngineStateTracker, RealMorphL2EngineApi, record_canonical_event_if_authoritative,
-};
+pub use builder::{BlockTagTracker, RealMorphL2EngineApi};
 pub use error::{EngineApiResult, MorphEngineApiError};
 pub use rpc::{MorphL2EngineRpcHandler, MorphL2EngineRpcServer, into_rpc_result};

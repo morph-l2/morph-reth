@@ -21,13 +21,11 @@ use reth_node_builder::{
     },
 };
 use reth_provider::{
-    BlockNumReader, BlockWriter, CanonChainTracker, ChainSpecProvider, DBProvider,
-    DatabaseProviderFactory,
+    BlockWriter, CanonChainTracker, ChainSpecProvider, DBProvider, DatabaseProviderFactory,
 };
 use reth_rpc_builder::Identity;
 use reth_rpc_eth_api::RpcNodeCore;
 use reth_tracing::tracing;
-use tokio_stream::StreamExt;
 
 /// Morph node add-ons for RPC and Engine API.
 ///
@@ -118,35 +116,12 @@ where
         let payload_builder = ctx.node.payload_builder_handle().clone();
         let chain_spec = ctx.node.provider().chain_spec();
         let beacon_engine_handle = ctx.beacon_engine_handle.clone();
-        let engine_events = ctx.engine_events.clone();
         let task_executor = ctx.node.task_executor().clone();
-        let engine_state_tracker =
-            std::sync::Arc::new(morph_engine_api::EngineStateTracker::default());
+        let block_tag_tracker = std::sync::Arc::new(morph_engine_api::BlockTagTracker::default());
 
         // Create Morph eth_config handler (EIP-7910 + morph extension)
         let eth_config_handler =
             MorphEthConfigHandler::new(ctx.node.provider().clone(), ctx.node.evm_config().clone());
-
-        // Keep a local view of canonical head/forkchoice from reth engine events.
-        // Stale events are filtered against the provider's current canonical head;
-        // local FCU successes still write the tracker unconditionally on the
-        // import path. See `record_canonical_event_if_authoritative` for the
-        // race-safety rationale.
-        let tracker_for_events = engine_state_tracker.clone();
-        let provider_for_events = provider.clone();
-        task_executor.spawn_critical_task("morph engine state tracker", async move {
-            let mut listener = engine_events.new_listener();
-            while let Some(event) = listener.next().await {
-                morph_engine_api::record_canonical_event_if_authoritative(
-                    &tracker_for_events,
-                    &event,
-                    || {
-                        let info = provider_for_events.chain_info().ok()?;
-                        Some((info.best_number, info.best_hash))
-                    },
-                );
-            }
-        });
 
         // Spawn reference index startup indexing (Task A) if configured.
         let reference_rpc_handler = if let Some(control) = self.reference_index {
@@ -215,7 +190,7 @@ where
                         payload_builder,
                         chain_spec,
                         beacon_engine_handle,
-                        engine_state_tracker,
+                        block_tag_tracker,
                     );
 
                 // Create the RPC handler
