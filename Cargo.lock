@@ -5259,6 +5259,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "morph-statetest"
+version = "0.3.0"
+dependencies = [
+ "alloy-evm",
+ "alloy-primitives",
+ "alloy-rlp",
+ "alloy-trie",
+ "clap",
+ "eyre",
+ "morph-chainspec",
+ "morph-evm",
+ "morph-revm",
+ "revm",
+ "revm-statetest-types",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "morph-txpool"
 version = "0.3.0"
 dependencies = [
@@ -9419,6 +9439,24 @@ dependencies = [
  "revm-bytecode",
  "revm-primitives",
  "serde",
+]
+
+[[package]]
+name = "revm-statetest-types"
+version = "17.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94743de1e54a812077b79dd3a87b4059175a804650b21582fb6feae96ef2be9c"
+dependencies = [
+ "alloy-eip7928",
+ "k256",
+ "revm-context",
+ "revm-context-interface",
+ "revm-database",
+ "revm-primitives",
+ "revm-state",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
