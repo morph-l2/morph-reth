@@ -145,7 +145,7 @@ jobs:
           sha256sum ${{ matrix.archive }}.tar.gz > ${{ matrix.archive }}.tar.gz.sha256
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.archive }}
           path: |
