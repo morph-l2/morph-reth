@@ -31,6 +31,11 @@ pub const MORPH_TX_VERSION_1: u8 = 1;
 /// Maximum length of the memo field in bytes.
 pub const MAX_MEMO_LENGTH: usize = 64;
 
+#[cfg(feature = "serde")]
+fn is_morph_tx_version_0(version: &u8) -> bool {
+    *version == MORPH_TX_VERSION_0
+}
+
 /// Canonical MorphTx-specific fields shared across modules.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -119,7 +124,14 @@ pub struct TxMorph {
 
     /// Version of the Morph transaction format.
     /// Used for future extensibility.
-    #[cfg_attr(feature = "serde", serde(default, with = "alloy_serde::quantity"))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(
+            default,
+            with = "alloy_serde::quantity",
+            skip_serializing_if = "is_morph_tx_version_0"
+        )
+    )]
     pub version: u8,
 
     /// Token ID for alternative fee payment.

@@ -771,6 +771,45 @@ mod tests {
     }
 
     #[test]
+    fn from_consensus_tx_morph_tx_v0_omits_v1_fields() {
+        use alloy_consensus::Signed;
+
+        let morph_tx = TxMorph {
+            chain_id: 2818,
+            nonce: 756,
+            gas_limit: 100_000,
+            max_fee_per_gas: 85_000_000,
+            max_priority_fee_per_gas: 83_000_000,
+            fee_token_id: 2,
+            fee_limit: U256::from(10_000_000),
+            ..Default::default()
+        };
+        let tx = MorphTxEnvelope::Morph(Signed::new_unchecked(
+            morph_tx,
+            Signature::new(U256::ZERO, U256::ZERO, false),
+            Default::default(),
+        ));
+        let tx_info = TransactionInfo {
+            hash: Some(B256::ZERO),
+            block_hash: Some(B256::random()),
+            block_number: Some(19720219),
+            block_timestamp: None,
+            index: Some(0),
+            base_fee: Some(1_000_000),
+        };
+
+        let rpc_tx = MorphRpcTransaction::from_consensus_tx(tx, Address::ZERO, tx_info).unwrap();
+        let json = serde_json::to_string(&rpc_tx).unwrap();
+
+        assert_eq!(json.matches("\"gas\"").count(), 1);
+        assert_eq!(json.matches("\"feeTokenID\"").count(), 1);
+        assert_eq!(json.matches("\"feeLimit\"").count(), 1);
+        assert!(!json.contains("\"version\""));
+        assert!(!json.contains("\"reference\""));
+        assert!(!json.contains("\"memo\""));
+    }
+
+    #[test]
     fn from_consensus_tx_standard_eip1559() {
         use alloy_consensus::{Signed, TxEip1559};
 
