@@ -133,7 +133,9 @@ struct MorphTxReceiptFields {
 
 /// Extracts Morph-specific fee fields from a receipt.
 ///
-/// L1 message receipts return zero/None for all fee fields.
+/// morph-geth's `eth_` RPC keeps Morph receipt extension keys present for
+/// every receipt. Numeric metadata that is absent in storage is exposed as
+/// zero, while `reference` / `memo` remain null unless populated by MorphTx v1.
 fn morph_tx_receipt_fields(receipt: &MorphReceipt) -> MorphTxReceiptFields {
     match receipt {
         MorphReceipt::Legacy(r)
@@ -142,15 +144,22 @@ fn morph_tx_receipt_fields(receipt: &MorphReceipt) -> MorphTxReceiptFields {
         | MorphReceipt::Eip7702(r)
         | MorphReceipt::Morph(r) => MorphTxReceiptFields {
             l1_fee: r.l1_fee,
-            version: r.version,
-            fee_token_id: r.fee_token_id,
-            fee_rate: r.fee_rate,
-            token_scale: r.token_scale,
-            fee_limit: r.fee_limit,
+            version: Some(r.version.unwrap_or_default()),
+            fee_token_id: Some(r.fee_token_id.unwrap_or_default()),
+            fee_rate: Some(r.fee_rate.unwrap_or_default()),
+            token_scale: Some(r.token_scale.unwrap_or_default()),
+            fee_limit: Some(r.fee_limit.unwrap_or_default()),
             reference: r.reference,
             memo: r.memo.clone(),
         },
-        MorphReceipt::L1Msg(_) => MorphTxReceiptFields::default(),
+        MorphReceipt::L1Msg(_) => MorphTxReceiptFields {
+            version: Some(0),
+            fee_token_id: Some(0),
+            fee_rate: Some(U256::ZERO),
+            token_scale: Some(U256::ZERO),
+            fee_limit: Some(U256::ZERO),
+            ..Default::default()
+        },
     }
 }
 
@@ -226,11 +235,11 @@ mod tests {
         let fields = morph_tx_receipt_fields(&receipt);
 
         assert_eq!(fields.l1_fee, U256::ZERO);
-        assert!(fields.version.is_none());
-        assert!(fields.fee_token_id.is_none());
-        assert!(fields.fee_rate.is_none());
-        assert!(fields.token_scale.is_none());
-        assert!(fields.fee_limit.is_none());
+        assert_eq!(fields.version, Some(0));
+        assert_eq!(fields.fee_token_id, Some(0));
+        assert_eq!(fields.fee_rate, Some(U256::ZERO));
+        assert_eq!(fields.token_scale, Some(U256::ZERO));
+        assert_eq!(fields.fee_limit, Some(U256::ZERO));
         assert!(fields.reference.is_none());
         assert!(fields.memo.is_none());
     }
@@ -251,6 +260,36 @@ mod tests {
         let fields = morph_tx_receipt_fields(&receipt);
         assert_eq!(fields.l1_fee, r.l1_fee);
         assert_eq!(fields.reference, r.reference);
+    }
+
+    #[test]
+    fn morph_tx_receipt_fields_defaults_absent_numeric_metadata_to_zero() {
+        let receipt = MorphReceipt::Eip1559(MorphTransactionReceipt {
+            inner: Receipt {
+                status: alloy_consensus::Eip658Value::Eip658(true),
+                cumulative_gas_used: 21_000,
+                logs: vec![],
+            },
+            l1_fee: U256::from(123),
+            version: None,
+            fee_token_id: None,
+            fee_rate: None,
+            token_scale: None,
+            fee_limit: None,
+            reference: None,
+            memo: None,
+        });
+
+        let fields = morph_tx_receipt_fields(&receipt);
+
+        assert_eq!(fields.l1_fee, U256::from(123));
+        assert_eq!(fields.version, Some(0));
+        assert_eq!(fields.fee_token_id, Some(0));
+        assert_eq!(fields.fee_rate, Some(U256::ZERO));
+        assert_eq!(fields.token_scale, Some(U256::ZERO));
+        assert_eq!(fields.fee_limit, Some(U256::ZERO));
+        assert!(fields.reference.is_none());
+        assert!(fields.memo.is_none());
     }
 
     /// Regression test for the `transactionReceipts` subscription wiring.
@@ -391,13 +430,14 @@ mod tests {
             .pop()
             .expect("converter must produce one receipt per input");
 
-        // L1 messages explicitly carry no Morph metadata.
+        // L1 messages have no MorphTx metadata, but RPC compatibility with
+        // morph-geth still exposes absent numeric extension fields as zero.
         assert_eq!(rpc.l1_fee, U256::ZERO);
-        assert!(rpc.version.is_none());
-        assert!(rpc.fee_token_id.is_none());
-        assert!(rpc.fee_rate.is_none());
-        assert!(rpc.token_scale.is_none());
-        assert!(rpc.fee_limit.is_none());
+        assert_eq!(rpc.version, Some(0));
+        assert_eq!(rpc.fee_token_id, Some(U64::ZERO));
+        assert_eq!(rpc.fee_rate, Some(U256::ZERO));
+        assert_eq!(rpc.token_scale, Some(U256::ZERO));
+        assert_eq!(rpc.fee_limit, Some(U256::ZERO));
         assert!(rpc.reference.is_none());
         assert!(rpc.memo.is_none());
     }

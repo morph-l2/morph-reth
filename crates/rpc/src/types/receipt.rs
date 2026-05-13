@@ -25,33 +25,27 @@ pub struct MorphRpcReceipt {
 
     /// MorphTx version (only for MorphTx type 0x7F).
     /// 0 = legacy format, 1 = with reference/memo support.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<u8>,
 
     /// Token ID used for fee payment.
-    #[serde(rename = "feeTokenID", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "feeTokenID")]
     pub fee_token_id: Option<U64>,
 
     /// Fee rate used for token fee calculation.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub fee_rate: Option<U256>,
 
     /// Token scale factor.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub token_scale: Option<U256>,
 
     /// Fee limit specified in the transaction.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub fee_limit: Option<U256>,
 
     /// Reference key for transaction indexing (only for MorphTx type 0x7F).
     /// 32-byte key used for looking up transactions by external systems.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub reference: Option<B256>,
 
     /// Memo field for arbitrary data (only for MorphTx type 0x7F).
     /// Up to 64 bytes for notes, invoice numbers, or other metadata.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub memo: Option<Bytes>,
 }
 
@@ -217,18 +211,23 @@ mod tests {
     }
 
     #[test]
-    fn receipt_serde_skips_none_fields() {
+    fn receipt_serde_keeps_morph_extension_keys_for_geth_compatibility() {
         let receipt = make_rpc_receipt(U256::from(100), None, None);
-        let json = serde_json::to_string(&receipt).unwrap();
+        let json = serde_json::to_value(&receipt).unwrap();
 
-        // Optional fields should not appear in JSON when None
-        assert!(!json.contains("version"));
-        assert!(!json.contains("feeTokenID"));
-        assert!(!json.contains("feeRate"));
-        assert!(!json.contains("tokenScale"));
-        assert!(!json.contains("feeLimit"));
-        assert!(!json.contains("reference"));
-        assert!(!json.contains("memo"));
+        // morph-geth exposes these extension keys for every receipt. When a
+        // field is not populated, raw JSON still carries an explicit null.
+        for field in [
+            "version",
+            "feeTokenID",
+            "feeRate",
+            "tokenScale",
+            "feeLimit",
+            "reference",
+            "memo",
+        ] {
+            assert_eq!(json.get(field), Some(&serde_json::Value::Null));
+        }
     }
 
     #[test]
