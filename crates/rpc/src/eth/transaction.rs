@@ -760,6 +760,8 @@ mod tests {
         }
 
         let json = serde_json::to_string(&rpc_tx).unwrap();
+        assert_eq!(json.matches("\"gas\"").count(), 1);
+        assert_eq!(json.matches("\"gasLimit\"").count(), 0);
         assert_eq!(json.matches("\"version\"").count(), 1);
         assert_eq!(json.matches("\"feeTokenID\"").count(), 1);
         assert_eq!(json.matches("\"feeTokenId\"").count(), 0);
