@@ -38,7 +38,10 @@ pub const MAX_MEMO_LENGTH: usize = 64;
 pub struct MorphTxFields {
     #[cfg_attr(feature = "serde", serde(default, with = "alloy_serde::quantity"))]
     pub version: u8,
-    #[cfg_attr(feature = "serde", serde(default, with = "alloy_serde::quantity"))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, with = "alloy_serde::quantity", rename = "feeTokenID")
+    )]
     pub fee_token_id: u16,
     #[cfg_attr(feature = "serde", serde(default))]
     pub fee_limit: U256,
@@ -2146,6 +2149,22 @@ mod tests {
         assert_eq!(fields.fee_limit, U256::ZERO);
         assert_eq!(fields.reference, None);
         assert_eq!(fields.memo, None);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_morph_tx_fields_serde_uses_canonical_fee_token_id_key() {
+        let fields = MorphTxFields {
+            version: 1,
+            fee_token_id: 7,
+            fee_limit: U256::from(999u64),
+            reference: None,
+            memo: None,
+        };
+
+        let json = serde_json::to_value(fields).unwrap();
+        assert_eq!(json.get("feeTokenID"), Some(&serde_json::json!("0x7")));
+        assert!(json.get("feeTokenId").is_none());
     }
 
     #[cfg(feature = "reth-codec")]
