@@ -25,7 +25,7 @@ pub struct MorphRpcReceipt {
 
     /// MorphTx version (only for MorphTx type 0x7F).
     /// 0 = legacy format, 1 = with reference/memo support.
-    pub version: Option<u8>,
+    pub version: Option<U64>,
 
     /// Token ID used for fee payment.
     #[serde(rename = "feeTokenID")]
@@ -153,7 +153,7 @@ mod tests {
         MorphRpcReceipt {
             inner: tx_receipt,
             l1_fee,
-            version,
+            version: version.map(U64::from),
             fee_token_id,
             fee_rate: None,
             token_scale: None,
@@ -242,5 +242,13 @@ mod tests {
         let receipt = make_rpc_receipt(U256::ZERO, Some(U64::from(42)), Some(1));
         let json = serde_json::to_string(&receipt).unwrap();
         assert!(json.contains("\"feeTokenID\""));
+    }
+
+    #[test]
+    fn receipt_serde_version_is_json_rpc_quantity() {
+        let receipt = make_rpc_receipt(U256::ZERO, None, Some(0));
+        let json = serde_json::to_value(&receipt).unwrap();
+
+        assert_eq!(json.get("version"), Some(&serde_json::json!("0x0")));
     }
 }
