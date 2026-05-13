@@ -13,7 +13,7 @@
 //! - Test ERC20 at `0x5300000000000000000000000000000000000022`
 //!   with 1000 tokens pre-funded for test account 0 and 1
 
-use alloy_primitives::Address;
+use alloy_primitives::{Address, B256, Bytes, U256};
 use morph_node::test_utils::{HardforkSchedule, MorphTxBuilder, TEST_TOKEN_ID, TestNodeBuilder};
 use reth_payload_primitives::BuiltPayload;
 
@@ -31,7 +31,7 @@ use super::helpers::wallet_to_arc;
 async fn morph_tx_v1_eth_fee_included_in_block() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     // Build a MorphTx v1 with ETH fee
@@ -66,7 +66,7 @@ async fn morph_tx_v1_eth_fee_included_in_block() -> eyre::Result<()> {
 async fn morph_tx_v1_multiple_in_sequence() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, mut wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, mut wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     // Inject 3 MorphTx v1 (ETH fee) with sequential nonces
@@ -101,7 +101,7 @@ async fn morph_tx_v1_multiple_in_sequence() -> eyre::Result<()> {
 async fn morph_tx_v0_erc20_fee_included_in_block() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     let raw_tx = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
@@ -135,7 +135,7 @@ async fn morph_tx_v0_erc20_fee_included_in_block() -> eyre::Result<()> {
 async fn morph_tx_v1_erc20_fee_included_in_block() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     let raw_tx = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
@@ -169,7 +169,7 @@ async fn morph_tx_v1_rejected_before_jade() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     // Use PreJade schedule — Jade is NOT active
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new()
+    let (mut nodes, wallet) = TestNodeBuilder::new()
         .with_schedule(HardforkSchedule::PreJade)
         .build()
         .await?;
@@ -196,7 +196,7 @@ async fn morph_tx_v1_rejected_before_jade() -> eyre::Result<()> {
 async fn morph_tx_v0_accepted_before_jade() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new()
+    let (mut nodes, wallet) = TestNodeBuilder::new()
         .with_schedule(HardforkSchedule::PreJade)
         .build()
         .await?;
@@ -226,7 +226,7 @@ async fn morph_tx_v0_accepted_before_jade() -> eyre::Result<()> {
 async fn mixed_tx_types_in_one_block() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
     let wallet_arc = wallet_to_arc(wallet);
 
@@ -287,7 +287,7 @@ async fn mixed_tx_types_in_one_block() -> eyre::Result<()> {
 async fn morph_tx_invalid_token_rejected_by_pool() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let node = nodes.pop().unwrap();
 
     let raw_tx = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
@@ -311,7 +311,7 @@ async fn morph_tx_invalid_token_rejected_by_pool() -> eyre::Result<()> {
 async fn morph_tx_insufficient_token_balance_rejected() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let node = nodes.pop().unwrap();
 
     // Account 2 has ETH only, no tokens in genesis
@@ -334,7 +334,7 @@ async fn morph_tx_insufficient_token_balance_rejected() -> eyre::Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn morph_tx_v0_fee_token_id_zero_rejected() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let node = nodes.pop().unwrap();
 
     let raw_tx = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
@@ -362,7 +362,7 @@ async fn morph_tx_v0_fee_token_id_zero_rejected() -> eyre::Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn morph_tx_memo_exceeds_64_bytes_rejected() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let node = nodes.pop().unwrap();
 
     let raw_tx = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
@@ -382,7 +382,7 @@ async fn morph_tx_memo_exceeds_64_bytes_rejected() -> eyre::Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn morph_tx_fee_limit_zero_accepted() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     let raw_tx = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
@@ -413,6 +413,44 @@ fn token_balance_slot(account: Address) -> alloy_primitives::B256 {
     alloy_primitives::keccak256(preimage)
 }
 
+/// Build calldata for ERC20 `transfer(address,uint256)`.
+fn erc20_transfer_calldata(to: Address, amount: U256) -> Bytes {
+    let mut calldata = Vec::with_capacity(68);
+    calldata.extend_from_slice(&[0xa9, 0x05, 0x9c, 0xbb]);
+
+    let mut address_word = [0u8; 32];
+    address_word[12..].copy_from_slice(to.as_slice());
+    calldata.extend_from_slice(&address_word);
+
+    calldata.extend_from_slice(&amount.to_be_bytes::<32>());
+    Bytes::from(calldata)
+}
+
+fn erc20_transfer_topic() -> B256 {
+    alloy_primitives::keccak256("Transfer(address,address,uint256)")
+}
+
+fn address_topic(address: Address) -> B256 {
+    let mut topic = [0u8; 32];
+    topic[12..].copy_from_slice(address.as_slice());
+    B256::from(topic)
+}
+
+/// Optimized runtime for:
+///
+/// ```solidity
+/// contract Slot1Token {
+///     uint256 private dummy;
+///     mapping(address => uint256) public balanceOf; // slot 1
+///     event Transfer(address indexed from, address indexed to, uint256 value);
+///     function transfer(address to, uint256 amount) external returns (bool) { ... }
+/// }
+/// ```
+///
+/// Keeping `balanceOf` at slot 1 lets the test token use the same storage layout
+/// as `tests/assets/test-genesis.json` and the token registry's direct-slot path.
+const SLOT1_ERC20_RUNTIME_CODE: &str = "0x608060405234801561000f575f5ffd5b5060043610610034575f3560e01c806370a0823114610038578063a9059cbb1461006a575b5f5ffd5b61005761004636600461015e565b60016020525f908152604090205481565b6040519081526020015b60405180910390f35b61007d61007836600461017e565b61008d565b6040519015158152602001610061565b335f90815260016020526040812054828110156100da5760405162461bcd60e51b815260206004820152600760248201526662616c616e636560c81b604482015260640160405180910390fd5b335f81815260016020908152604080832087860390556001600160a01b03881680845292819020805488019055518681529192917fddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef910160405180910390a35060019392505050565b80356001600160a01b0381168114610159575f5ffd5b919050565b5f6020828403121561016e575f5ffd5b61017782610143565b9392505050565b5f5f6040838503121561018f575f5ffd5b61019883610143565b94602093909301359350505056";
+
 /// After a successful MorphTx v0 with ERC20 fee, the sender's token balance
 /// must decrease (fee was charged from tokens, not ETH).
 #[tokio::test(flavor = "multi_thread")]
@@ -420,7 +458,7 @@ async fn morph_tx_v0_token_balance_decreases() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
     use reth_provider::StateProviderFactory;
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     let sender = alloy_primitives::address!("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
@@ -455,6 +493,131 @@ async fn morph_tx_v0_token_balance_decreases() -> eyre::Result<()> {
         bal_after < bal_before,
         "token balance must decrease after MorphTx v0 (fee deducted in tokens)"
     );
+
+    Ok(())
+}
+
+/// Regression for the mainnet block 19720219 shape:
+///
+/// - tx `0xc267450129e51457a280fa82c74364d312e47885c09d15c78f6a0895844913c9`
+/// - block `0xfbd17c5a73553cbd71f4654c189759a6262e6e52e76a19d760da4ab2b4e98a52`
+/// - mainnet gas used: 59_335
+///
+/// The important shape is not the exact mainnet state, but that the MorphTx pays
+/// fees in the same ERC20 contract it calls. Fee deduction touches the sender's
+/// balance slot before the main ERC20 `transfer` SLOAD/SSTORE pair, so this
+/// catches regressions in the `sload_morph`, `sstore_morph`, and reimburse
+/// cold/warm-state handling.
+///
+/// `EXPECTED_GAS_USED = 48_128` is the sandbox golden, NOT the mainnet
+/// 59_335. The sandbox uses a minimal hand-written ERC20 with one
+/// storage slot per `transfer`, while the mainnet token's compiled
+/// bytecode does extra checks; initial balances and call data sizes also
+/// differ. What's locked is the bug-vs-fix delta: a regression in
+/// `sload_morph`/`sstore_morph` causes the main tx's SSTORE on
+/// `sender.balanceOf` to be charged 2900 (SSTORE_RESET) instead of 100
+/// (dirty), pushing `cumulative_gas_used` ~2800 above the golden and
+/// tripping this assertion before the change reaches mainnet.
+#[tokio::test(flavor = "multi_thread")]
+async fn morph_tx_v0_token_fee_transfer_to_fee_token_contract_gas_regression() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+    use alloy_consensus::TxReceipt;
+    use alloy_consensus::transaction::TxHashRef;
+    use reth_provider::{ReceiptProvider, StateProviderFactory};
+
+    const EXPECTED_GAS_USED: u64 = 48_128;
+    let token_addr = morph_node::test_utils::TEST_TOKEN_ADDRESS;
+    let (mut nodes, wallet) = TestNodeBuilder::new()
+        .with_account_code(token_addr, SLOT1_ERC20_RUNTIME_CODE)
+        .build()
+        .await?;
+    let mut node = nodes.pop().unwrap();
+
+    let sender = alloy_primitives::address!("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+    let recipient = Address::with_last_byte(0x99);
+    let fee_vault = alloy_primitives::address!("530000000000000000000000000000000000000a");
+    let amount = U256::from(100);
+
+    let sender_slot = token_balance_slot(sender);
+    let recipient_slot = token_balance_slot(recipient);
+    let fee_vault_slot = token_balance_slot(fee_vault);
+
+    let state_before = node.inner.provider.latest()?;
+    let sender_before = state_before
+        .storage(token_addr, sender_slot)?
+        .unwrap_or_default();
+    let recipient_before = state_before
+        .storage(token_addr, recipient_slot)?
+        .unwrap_or_default();
+    let fee_vault_before = state_before
+        .storage(token_addr, fee_vault_slot)?
+        .unwrap_or_default();
+
+    let raw_tx = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), wallet.inner_nonce)
+        .with_v0_token_fee(TEST_TOKEN_ID)
+        .with_to(token_addr)
+        .with_data(erc20_transfer_calldata(recipient, amount))
+        .with_gas_limit(100_000)
+        .build_signed()?;
+    node.rpc.inject_tx(raw_tx).await?;
+    let payload = node.advance_block().await?;
+
+    let tx_hash = *payload
+        .block()
+        .body()
+        .transactions
+        .first()
+        .expect("block should contain regression tx")
+        .tx_hash();
+    let receipt = node
+        .inner
+        .provider
+        .receipt_by_hash(tx_hash)?
+        .expect("receipt must exist");
+
+    assert!(receipt.status(), "ERC20 transfer must succeed");
+
+    let transfer_topic = erc20_transfer_topic();
+    let transfer_logs: Vec<_> = receipt
+        .logs()
+        .iter()
+        .filter(|log| log.address == token_addr && log.topics().first() == Some(&transfer_topic))
+        .collect();
+    assert_eq!(
+        transfer_logs.len(),
+        1,
+        "the main ERC20 transfer should execute against the fee token contract"
+    );
+    assert_eq!(transfer_logs[0].topics()[1], address_topic(sender));
+    assert_eq!(transfer_logs[0].topics()[2], address_topic(recipient));
+
+    let state_after = node.inner.provider.latest()?;
+    let sender_after = state_after
+        .storage(token_addr, sender_slot)?
+        .unwrap_or_default();
+    let recipient_after = state_after
+        .storage(token_addr, recipient_slot)?
+        .unwrap_or_default();
+    let fee_vault_after = state_after
+        .storage(token_addr, fee_vault_slot)?
+        .unwrap_or_default();
+
+    let sender_delta = sender_before - sender_after;
+    let recipient_delta = recipient_after - recipient_before;
+    let fee_vault_delta = fee_vault_after - fee_vault_before;
+
+    assert_eq!(recipient_delta, amount);
+    assert!(
+        fee_vault_delta > U256::ZERO,
+        "fee vault should keep the net charged token fee"
+    );
+    assert_eq!(
+        sender_delta,
+        amount + fee_vault_delta,
+        "sender should only lose the main transfer amount plus net token fee"
+    );
+
+    assert_eq!(receipt.cumulative_gas_used(), EXPECTED_GAS_USED);
 
     Ok(())
 }
@@ -495,7 +658,7 @@ async fn morph_tx_v0_token_fee_still_charged_on_revert() -> eyre::Result<()> {
     use morph_node::test_utils::{make_deploy_tx, wallet_at_index};
     use reth_provider::{ReceiptProvider, StateProviderFactory};
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     let sender = alloy_primitives::address!("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266");

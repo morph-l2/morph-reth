@@ -114,6 +114,10 @@ impl BlockAssembler<MorphEvmConfig> for MorphBlockAssembler {
             blob_gas_used: None,
             excess_blob_gas: None,
             requests_hash: None,
+            // Pre-Amsterdam Morph blocks do not carry a block-access-list hash,
+            // and have no PoS slot number.
+            block_access_list_hash: None,
+            slot_number: None,
         };
 
         // Wrap in MorphHeader with L2-specific fields

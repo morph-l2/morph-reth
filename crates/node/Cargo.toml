@@ -14,6 +14,7 @@ workspace = true
 morph-chainspec.workspace = true
 morph-consensus.workspace = true
 morph-engine-api.workspace = true
+morph-engine-tree-ext.workspace = true
 morph-evm.workspace = true
 morph-payload-builder.workspace = true
 morph-payload-types.workspace = true
@@ -45,6 +46,7 @@ reth-tasks.workspace = true
 reth-transaction-pool.workspace = true
 reth-tracing.workspace = true
 reth-trie.workspace = true
+reth-trie-db.workspace = true
 
 # Alloy
 alloy-consensus.workspace = true
@@ -59,6 +61,7 @@ alloy-rpc-types-eth.workspace = true
 eyre.workspace = true
 clap.workspace = true
 dashmap.workspace = true
+futures.workspace = true
 parking_lot.workspace = true
 tokio = { workspace = true, features = ["sync", "rt"] }
 tokio-stream.workspace = true

@@ -252,4 +252,153 @@ mod tests {
         assert_eq!(fields.l1_fee, r.l1_fee);
         assert_eq!(fields.reference, r.reference);
     }
+
+    /// Regression test for the `transactionReceipts` subscription wiring.
+    ///
+    /// reth v2.2.0 exposes a `transactionReceipts` pubsub topic that, in the
+    /// `SubscriptionKind::TransactionReceipts` arm of
+    /// `reth_rpc::eth::pubsub`, calls `converter.convert_receipts(inputs)`
+    /// against the same converter the RPC `eth_getBlockReceipts` /
+    /// `eth_getTransactionReceipt` endpoints use. For Morph that converter
+    /// is [`MorphReceiptConverter`].
+    ///
+    /// This test exercises the converter end-to-end on a Morph-tagged
+    /// receipt and asserts every Morph-specific field survives the
+    /// conversion. If any of these assertions break in a future bump,
+    /// pubsub `transactionReceipts` subscribers would silently lose Morph
+    /// metadata.
+    #[test]
+    fn transaction_receipts_subscription_preserves_morph_fields() {
+        use alloy_consensus::{Signed, TxEip1559, transaction::Recovered};
+        use alloy_primitives::{B256, Signature, U256, address};
+        use morph_primitives::{MorphPrimitives, MorphTxEnvelope};
+        use reth_primitives_traits::TransactionMeta;
+        use reth_rpc_convert::transaction::{ConvertReceiptInput, ReceiptConverter};
+
+        let signer = address!("0000000000000000000000000000000000000099");
+
+        let envelope = MorphTxEnvelope::Eip1559(Signed::new_unchecked(
+            TxEip1559 {
+                chain_id: 2818,
+                nonce: 0,
+                gas_limit: 21_000,
+                max_fee_per_gas: 2_000_000_000,
+                max_priority_fee_per_gas: 1_000_000,
+                ..Default::default()
+            },
+            Signature::new(U256::ZERO, U256::ZERO, false),
+            B256::ZERO,
+        ));
+        let recovered: Recovered<&MorphTxEnvelope> = Recovered::new_unchecked(&envelope, signer);
+
+        let receipt = MorphReceipt::Morph(make_morph_receipt_with_fields());
+
+        let meta = TransactionMeta {
+            tx_hash: B256::ZERO,
+            index: 0,
+            block_hash: b256!("1111111111111111111111111111111111111111111111111111111111111111"),
+            block_number: 42,
+            base_fee: Some(1_000_000_000),
+            excess_blob_gas: None,
+            timestamp: 1_700_000_000,
+        };
+
+        let input = ConvertReceiptInput::<'_, MorphPrimitives> {
+            receipt,
+            tx: recovered,
+            gas_used: 21_000,
+            next_log_index: 0,
+            meta,
+        };
+
+        let rpc_receipts = MorphReceiptConverter
+            .convert_receipts(vec![input])
+            .expect("morph converter should not fail on a well-formed input");
+        assert_eq!(rpc_receipts.len(), 1);
+        let rpc = &rpc_receipts[0];
+
+        // Morph-specific top-level RPC fields must round-trip from the
+        // primitive `MorphTransactionReceipt` into `MorphRpcReceipt`.
+        assert_eq!(rpc.l1_fee, U256::from(5000));
+        assert_eq!(rpc.version, Some(1));
+        assert_eq!(rpc.fee_token_id, Some(U64::from(3)));
+        assert_eq!(rpc.fee_rate, Some(U256::from(2_000_000)));
+        assert_eq!(rpc.token_scale, Some(U256::from(1_000_000)));
+        assert_eq!(rpc.fee_limit, Some(U256::from(999_999)));
+        assert_eq!(
+            rpc.reference,
+            Some(b256!(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ))
+        );
+        assert_eq!(rpc.memo, Some(PrimitiveBytes::from("test memo")));
+
+        // Standard inner fields (from `build_receipt`) must also be plumbed.
+        assert_eq!(rpc.inner.from, signer);
+        assert_eq!(rpc.inner.block_number, Some(42));
+        assert_eq!(rpc.inner.transaction_index, Some(0));
+    }
+
+    /// Companion test: L1 message receipts must come back from the
+    /// pubsub-style converter path with default Morph fields and the
+    /// L1Msg envelope variant, just like `eth_getBlockReceipts`.
+    #[test]
+    fn transaction_receipts_subscription_l1_msg_carries_default_morph_fields() {
+        use alloy_consensus::transaction::Recovered;
+        use alloy_primitives::{Address, B256, Sealed, U256, address};
+        use morph_primitives::transaction::TxL1Msg;
+        use morph_primitives::{MorphPrimitives, MorphTxEnvelope};
+        use reth_primitives_traits::TransactionMeta;
+        use reth_rpc_convert::transaction::{ConvertReceiptInput, ReceiptConverter};
+
+        let l1_msg = TxL1Msg {
+            queue_index: 7,
+            gas_limit: 100_000,
+            sender: address!("000000000000000000000000000000000000dead"),
+            ..Default::default()
+        };
+        let envelope = MorphTxEnvelope::L1Msg(Sealed::new_unchecked(l1_msg, B256::ZERO));
+        let recovered: Recovered<&MorphTxEnvelope> =
+            Recovered::new_unchecked(&envelope, Address::ZERO);
+
+        let receipt = MorphReceipt::L1Msg(Receipt {
+            status: alloy_consensus::Eip658Value::Eip658(true),
+            cumulative_gas_used: 50_000,
+            logs: vec![],
+        });
+
+        let meta = TransactionMeta {
+            tx_hash: B256::ZERO,
+            index: 0,
+            block_hash: B256::ZERO,
+            block_number: 1,
+            base_fee: None,
+            excess_blob_gas: None,
+            timestamp: 0,
+        };
+
+        let input = ConvertReceiptInput::<'_, MorphPrimitives> {
+            receipt,
+            tx: recovered,
+            gas_used: 50_000,
+            next_log_index: 0,
+            meta,
+        };
+
+        let rpc = MorphReceiptConverter
+            .convert_receipts(vec![input])
+            .expect("morph converter should not fail on a well-formed L1 message input")
+            .pop()
+            .expect("converter must produce one receipt per input");
+
+        // L1 messages explicitly carry no Morph metadata.
+        assert_eq!(rpc.l1_fee, U256::ZERO);
+        assert!(rpc.version.is_none());
+        assert!(rpc.fee_token_id.is_none());
+        assert!(rpc.fee_rate.is_none());
+        assert!(rpc.token_scale.is_none());
+        assert!(rpc.fee_limit.is_none());
+        assert!(rpc.reference.is_none());
+        assert!(rpc.memo.is_none());
+    }
 }

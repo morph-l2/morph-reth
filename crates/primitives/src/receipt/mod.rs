@@ -414,9 +414,6 @@ impl InMemorySize for MorphReceipt {
     }
 }
 
-#[cfg(feature = "serde-bincode-compat")]
-impl reth_primitives_traits::serde_bincode_compat::RlpBincode for MorphReceipt {}
-
 /// Calculates the receipt root for a header.
 ///
 /// This function computes the Merkle root of receipts using the standard encoding
@@ -456,8 +453,8 @@ mod compact {
     /// they don't implement `Compact` in reth_codecs. The conversion is lossless.
     #[derive(reth_codecs::CompactZstd)]
     #[reth_zstd(
-        compressor = reth_zstd_compressors::RECEIPT_COMPRESSOR,
-        decompressor = reth_zstd_compressors::RECEIPT_DECOMPRESSOR
+        compressor = reth_zstd_compressors::with_receipt_compressor,
+        decompressor = reth_zstd_compressors::with_receipt_decompressor
     )]
     struct CompactMorphReceipt<'a> {
         success: bool,
@@ -590,11 +587,8 @@ mod compact {
 #[cfg(feature = "reth-codec")]
 mod db_impl {
     use super::MorphReceipt;
-    use reth_codecs::Compact;
-    use reth_db_api::{
-        DatabaseError,
-        table::{Compress, Decompress},
-    };
+    use reth_codecs::{Compact, DecompressError};
+    use reth_db_api::table::{Compress, Decompress};
 
     impl Compress for MorphReceipt {
         type Compressed = Vec<u8>;
@@ -605,7 +599,7 @@ mod db_impl {
     }
 
     impl Decompress for MorphReceipt {
-        fn decompress(value: &[u8]) -> Result<Self, DatabaseError> {
+        fn decompress(value: &[u8]) -> Result<Self, DecompressError> {
             let (obj, _) = Compact::from_compact(value, value.len());
             Ok(obj)
         }

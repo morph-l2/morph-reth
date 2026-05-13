@@ -23,7 +23,7 @@ Thanks for your interest in contributing to Morph Reth! This document provides g
 
 ### Prerequisites
 
-- Rust 1.88 or later
+- Rust 1.95 or later
 - Cargo
 
 ### Build

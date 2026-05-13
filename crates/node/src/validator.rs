@@ -6,7 +6,6 @@ use alloy_primitives::{B256, keccak256};
 use dashmap::DashMap;
 use morph_chainspec::{
     L2_MESSAGE_QUEUE_ADDRESS, L2_MESSAGE_QUEUE_WITHDRAW_TRIE_ROOT_SLOT, MorphChainSpec,
-    MorphHardforks,
 };
 use morph_payload_types::{MorphExecutionData, MorphPayloadTypes};
 use morph_primitives::MorphHeader;
@@ -15,14 +14,15 @@ use reth_chainspec::EthChainSpec;
 use reth_errors::ConsensusError;
 use reth_node_api::{
     AddOnsContext, FullNodeComponents, InvalidPayloadAttributesError, NewPayloadError, NodeTypes,
-    PayloadAttributes, PayloadTypes, PayloadValidator, StateRootValidator,
+    PayloadAttributes, PayloadTypes, PayloadValidator,
 };
 use reth_node_builder::{
     invalid_block_hook::InvalidBlockHookExt,
-    rpc::{BasicEngineValidator, EngineValidatorBuilder, PayloadValidatorBuilder},
+    rpc::{EngineValidatorBuilder, PayloadValidatorBuilder},
 };
-use reth_primitives_traits::{GotExpected, RecoveredBlock, SealedBlock};
+use reth_primitives_traits::{RecoveredBlock, SealedBlock};
 use reth_provider::ChainSpecProvider;
+use reth_tracing::tracing;
 use std::{collections::VecDeque, sync::Arc};
 
 /// Builder for Morph engine validator (payload validation).
@@ -39,8 +39,8 @@ where
 {
     type Validator = MorphEngineValidator;
 
-    async fn build(self, ctx: &AddOnsContext<'_, Node>) -> eyre::Result<Self::Validator> {
-        Ok(MorphEngineValidator::new(ctx.node.provider().chain_spec()))
+    async fn build(self, _ctx: &AddOnsContext<'_, Node>) -> eyre::Result<Self::Validator> {
+        Ok(MorphEngineValidator::new())
     }
 }
 
@@ -78,20 +78,21 @@ where
             <<Node::Types as NodeTypes>::Payload as PayloadTypes>::ExecutionData,
         >,
     >,
+    Node::Provider: ChainSpecProvider<ChainSpec = MorphChainSpec>,
     PVB: PayloadValidatorBuilder<Node>,
     PVB::Validator: reth_node_api::PayloadValidator<
             <Node::Types as NodeTypes>::Payload,
             Block = reth_node_api::BlockTy<Node::Types>,
-        > + StateRootValidator<<Node::Types as NodeTypes>::Primitives>
-        + Clone,
+        > + Clone,
 {
     type EngineValidator =
-        BasicEngineValidator<Node::Provider, Node::Evm, PVB::Validator, PVB::Validator>;
+        morph_engine_tree_ext::MorphBasicEngineValidator<Node::Provider, Node::Evm, PVB::Validator>;
 
     async fn build_tree_validator(
         self,
         ctx: &AddOnsContext<'_, Node>,
         tree_config: reth_node_api::TreeConfig,
+        changeset_cache: reth_trie_db::ChangesetCache,
     ) -> eyre::Result<Self::EngineValidator> {
         let validator = self.payload_validator_builder.build(ctx).await?;
         let data_dir = ctx
@@ -100,16 +101,19 @@ where
             .clone()
             .resolve_datadir(ctx.config.chain.chain());
         let invalid_block_hook = ctx.create_invalid_block_hook(&data_dir).await?;
+        let chain_spec = ctx.node.provider().chain_spec();
 
-        Ok(BasicEngineValidator::new(
+        Ok(morph_engine_tree_ext::MorphBasicEngineValidator::new(
             ctx.node.provider().clone(),
             Arc::new(ctx.node.consensus().clone()),
             ctx.node.evm_config().clone(),
-            validator.clone(),
+            validator,
             tree_config,
             invalid_block_hook,
-        )
-        .with_state_root_validator(validator))
+            changeset_cache,
+            ctx.node.task_executor().clone(),
+            chain_spec,
+        ))
     }
 }
 
@@ -117,10 +121,9 @@ where
 ///
 /// This validator is used by the engine API to validate incoming payloads.
 /// For Morph, most validation is deferred to the consensus layer.
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone)]
 #[non_exhaustive]
 pub struct MorphEngineValidator {
-    chain_spec: Arc<MorphChainSpec>,
     expected_withdraw_trie_roots: Arc<DashMap<B256, WithdrawTrieRootExpectation>>,
     expected_withdraw_trie_root_order: Arc<Mutex<VecDeque<B256>>>,
 }
@@ -135,12 +138,8 @@ impl MorphEngineValidator {
     const MAX_EXPECTED_WITHDRAW_TRIE_ROOTS: usize = 4096;
 
     /// Creates a new [`MorphEngineValidator`].
-    pub fn new(chain_spec: Arc<MorphChainSpec>) -> Self {
-        Self {
-            chain_spec,
-            expected_withdraw_trie_roots: Arc::new(DashMap::new()),
-            expected_withdraw_trie_root_order: Arc::new(Mutex::new(VecDeque::new())),
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
     fn record_withdraw_trie_root_expectation(
@@ -222,10 +221,19 @@ impl PayloadValidator<MorphPayloadTypes> for MorphEngineValidator {
         block: &RecoveredBlock<Self::Block>,
     ) -> Result<(), ConsensusError> {
         let Some(expectation) = self.take_withdraw_trie_root_expectation(block.hash()) else {
-            return Err(ConsensusError::Other(format!(
-                "missing withdraw trie root expectation cache entry for block {}",
-                block.hash()
-            )));
+            // No CL-supplied expectation. Reachable on the Block-input path
+            // (P2P-downloaded blocks, pipeline backfill, and buffered blocks
+            // whose expectation was evicted from the bounded LRU before
+            // reattach) — `convert_payload_to_block` was never invoked to
+            // register one. Treat as SkipValidation so sync isn't stalled;
+            // the strict post-Jade state-root check upstream still covers
+            // withdraw-trie consistency through state-root equality.
+            tracing::debug!(
+                target: "morph::engine_validator",
+                block_hash = %block.hash(),
+                "no withdraw trie root expectation registered; skipping CL cross-check"
+            );
+            return Ok(());
         };
         let WithdrawTrieRootExpectation::Verify(expected_withdraw_trie_root) = expectation else {
             return Ok(());
@@ -244,7 +252,7 @@ impl PayloadValidator<MorphPayloadTypes> for MorphEngineValidator {
         };
 
         if actual_withdraw_trie_root != expected_withdraw_trie_root {
-            return Err(ConsensusError::Other(format!(
+            return Err(ConsensusError::msg(format!(
                 "withdraw trie root mismatch: expected {expected_withdraw_trie_root}, got {actual_withdraw_trie_root}"
             )));
         }
@@ -265,45 +273,11 @@ impl PayloadValidator<MorphPayloadTypes> for MorphEngineValidator {
     }
 }
 
-impl StateRootValidator<morph_primitives::MorphPrimitives> for MorphEngineValidator {
-    fn validate_state_root(
-        &self,
-        block: &RecoveredBlock<morph_primitives::Block>,
-        computed_state_root: B256,
-    ) -> Result<(), ConsensusError> {
-        let jade_active = self
-            .chain_spec
-            .is_jade_active_at_timestamp(block.header().timestamp());
-
-        // Enforce canonical state-root equality in MPT mode (post-Jade).
-        if jade_active {
-            let expected_state_root = block.header().state_root();
-            if computed_state_root != expected_state_root {
-                return Err(ConsensusError::BodyStateRootDiff(
-                    GotExpected {
-                        got: computed_state_root,
-                        expected: expected_state_root,
-                    }
-                    .into(),
-                ));
-            }
-        }
-
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloy_primitives::U256;
-    use morph_chainspec::MORPH_HOODI;
     use reth_trie::{HashedPostState, HashedStorage};
-    use std::sync::Arc;
-
-    fn test_chain_spec() -> Arc<MorphChainSpec> {
-        MORPH_HOODI.clone()
-    }
 
     #[test]
     fn test_extract_updated_withdraw_trie_root_from_hashed_state() {
@@ -333,7 +307,7 @@ mod tests {
 
     #[test]
     fn test_withdraw_trie_root_expectation_cache_evicts_incrementally_not_clear_all() {
-        let validator = MorphEngineValidator::new(test_chain_spec());
+        let validator = MorphEngineValidator::new();
         let key = |n: usize| {
             let mut bytes = [0u8; 32];
             bytes[..8].copy_from_slice(&(n as u64).to_be_bytes());
@@ -379,7 +353,7 @@ mod tests {
 
     #[test]
     fn test_record_and_take_expectation_roundtrip() {
-        let validator = MorphEngineValidator::new(test_chain_spec());
+        let validator = MorphEngineValidator::new();
         let hash = B256::from([0x42; 32]);
         let expected_root = B256::from([0xee; 32]);
 
@@ -405,7 +379,7 @@ mod tests {
 
     #[test]
     fn test_record_skip_validation_expectation() {
-        let validator = MorphEngineValidator::new(test_chain_spec());
+        let validator = MorphEngineValidator::new();
         let hash = B256::from([0x99; 32]);
 
         validator.record_withdraw_trie_root_expectation(
@@ -419,7 +393,7 @@ mod tests {
 
     #[test]
     fn test_duplicate_record_overwrites_value() {
-        let validator = MorphEngineValidator::new(test_chain_spec());
+        let validator = MorphEngineValidator::new();
         let hash = B256::from([0x11; 32]);
         let root1 = B256::from([0xaa; 32]);
         let root2 = B256::from([0xbb; 32]);
@@ -439,7 +413,7 @@ mod tests {
 
     #[test]
     fn test_take_nonexistent_returns_none() {
-        let validator = MorphEngineValidator::new(test_chain_spec());
+        let validator = MorphEngineValidator::new();
         let hash = B256::from([0xff; 32]);
         assert!(
             validator
@@ -476,13 +450,116 @@ mod tests {
         );
     }
 
+    fn empty_recovered_block_with_hash(
+        hash: B256,
+    ) -> reth_primitives_traits::RecoveredBlock<morph_primitives::Block> {
+        let header = MorphHeader::default();
+        let body = morph_primitives::BlockBody::default();
+        let block = morph_primitives::Block::new(header, body);
+        let sealed = reth_primitives_traits::SealedBlock::new_unchecked(block, hash);
+        reth_primitives_traits::RecoveredBlock::new_sealed(sealed, Vec::new())
+    }
+
+    /// Block-input path (P2P sync, pipeline backfill) reaches
+    /// `validate_block_post_execution_with_hashed_state` without calling
+    /// `convert_payload_to_block`, so no expectation is registered. The
+    /// validator must treat the missing entry as `SkipValidation` and
+    /// return `Ok` — otherwise sync stalls. The upstream strict state-root
+    /// check (post-Jade) remains the source of truth.
+    #[test]
+    fn validate_block_post_execution_skips_when_no_expectation_registered() {
+        let validator = MorphEngineValidator::new();
+        let block = empty_recovered_block_with_hash(B256::from([0xab; 32]));
+
+        let result = validator
+            .validate_block_post_execution_with_hashed_state(&HashedPostState::default(), &block);
+
+        assert!(
+            result.is_ok(),
+            "missing expectation must be treated as SkipValidation, got {:?}",
+            result.err()
+        );
+    }
+
+    /// SkipValidation expectation (CL didn't supply a value) must be honored.
+    #[test]
+    fn validate_block_post_execution_honors_skip_validation_expectation() {
+        let validator = MorphEngineValidator::new();
+        let hash = B256::from([0xcd; 32]);
+        validator.record_withdraw_trie_root_expectation(
+            hash,
+            WithdrawTrieRootExpectation::SkipValidation,
+        );
+        let block = empty_recovered_block_with_hash(hash);
+
+        let result = validator
+            .validate_block_post_execution_with_hashed_state(&HashedPostState::default(), &block);
+
+        assert!(result.is_ok());
+        // expectation must be consumed.
+        assert!(
+            validator
+                .take_withdraw_trie_root_expectation(hash)
+                .is_none()
+        );
+    }
+
+    /// Verify expectation: when the slot wasn't touched we trust CL (no DB read)
+    /// and pass through.
+    #[test]
+    fn validate_block_post_execution_passes_when_slot_unchanged() {
+        let validator = MorphEngineValidator::new();
+        let hash = B256::from([0x33; 32]);
+        validator.record_withdraw_trie_root_expectation(
+            hash,
+            WithdrawTrieRootExpectation::Verify(B256::from([0xee; 32])),
+        );
+        let block = empty_recovered_block_with_hash(hash);
+
+        // empty hashed state → no withdraw-slot diff → skip per the doc-comment
+        // explanation in the validator.
+        let result = validator
+            .validate_block_post_execution_with_hashed_state(&HashedPostState::default(), &block);
+
+        assert!(result.is_ok());
+    }
+
+    /// Verify expectation that mismatches an actually-updated slot must fail.
+    #[test]
+    fn validate_block_post_execution_rejects_mismatched_root() {
+        let validator = MorphEngineValidator::new();
+        let hash = B256::from([0x55; 32]);
+        let expected = B256::from([0xee; 32]);
+        let actual = B256::from([0xff; 32]);
+        validator.record_withdraw_trie_root_expectation(
+            hash,
+            WithdrawTrieRootExpectation::Verify(expected),
+        );
+
+        let hashed_address = keccak256(L2_MESSAGE_QUEUE_ADDRESS);
+        let hashed_slot = keccak256(B256::from(L2_MESSAGE_QUEUE_WITHDRAW_TRIE_ROOT_SLOT));
+        let state = HashedPostState::from_hashed_storage(
+            hashed_address,
+            HashedStorage::from_iter(false, [(hashed_slot, U256::from_be_bytes(actual.0))]),
+        );
+
+        let block = empty_recovered_block_with_hash(hash);
+        let err = validator
+            .validate_block_post_execution_with_hashed_state(&state, &block)
+            .expect_err("mismatched root must fail");
+        assert!(
+            err.to_string().contains("withdraw trie root mismatch"),
+            "unexpected error: {err}"
+        );
+    }
+
     #[test]
     fn test_validate_payload_attributes_timestamp_not_in_past() {
         use alloy_rpc_types_engine::PayloadAttributes;
         use morph_payload_types::MorphPayloadAttributes;
         use reth_node_api::PayloadValidator;
 
-        let validator = MorphEngineValidator::new(test_chain_spec());
+        let validator = MorphEngineValidator::new();
 
         // Create a header with timestamp 100
         let parent_header = MorphHeader {
@@ -502,6 +579,7 @@ mod tests {
                 suggested_fee_recipient: alloy_primitives::Address::ZERO,
                 withdrawals: None,
                 parent_beacon_block_root: None,
+                slot_number: None,
             },
             transactions: None,
             gas_limit: None,
@@ -521,6 +599,7 @@ mod tests {
                 suggested_fee_recipient: alloy_primitives::Address::ZERO,
                 withdrawals: None,
                 parent_beacon_block_root: None,
+                slot_number: None,
             },
             transactions: None,
             gas_limit: None,
@@ -540,6 +619,7 @@ mod tests {
                 suggested_fee_recipient: alloy_primitives::Address::ZERO,
                 withdrawals: None,
                 parent_beacon_block_root: None,
+                slot_number: None,
             },
             transactions: None,
             gas_limit: None,
@@ -550,34 +630,5 @@ mod tests {
                 .validate_payload_attributes_against_header(&attr_future, parent.header())
                 .is_ok()
         );
-    }
-
-    #[test]
-    fn test_validate_state_root_jade_not_active_always_ok() {
-        // On Hoodi, Jade is not activated. validate_state_root should always
-        // return Ok even with mismatched state roots.
-        use morph_primitives::MorphHeader;
-        use reth_primitives_traits::{RecoveredBlock, SealedBlock};
-
-        let validator = MorphEngineValidator::new(test_chain_spec());
-
-        let header = MorphHeader {
-            inner: alloy_consensus::Header {
-                timestamp: 0,
-                state_root: B256::from([0xaa; 32]),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let block = morph_primitives::Block {
-            header,
-            body: Default::default(),
-        };
-        let sealed = SealedBlock::seal_slow(block);
-        let recovered = RecoveredBlock::new_sealed(sealed, vec![]);
-
-        // Different computed root, but Jade is not active
-        let result = validator.validate_state_root(&recovered, B256::from([0xbb; 32]));
-        assert!(result.is_ok());
     }
 }

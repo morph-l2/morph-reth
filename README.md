@@ -68,7 +68,7 @@ morph-reth/
 
 ### Prerequisites
 
-- Rust 1.88 or later
+- Rust 1.95 or later
 - Cargo
 
 ### Building from Source

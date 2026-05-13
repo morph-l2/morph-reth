@@ -4,14 +4,13 @@
 //! that can execute Morph L2 blocks with proper L1 fee calculation and receipt building.
 
 use crate::{
-    block::{DefaultMorphReceiptBuilder, MorphBlockExecutor},
+    block::{DefaultMorphReceiptBuilder, MorphBlockExecutor, MorphTxResult},
     evm::MorphEvm,
 };
 use alloy_evm::{
-    Database,
-    block::{BlockExecutorFactory, BlockExecutorFor},
+    block::{BlockExecutorFactory, StateDB},
     eth::EthBlockExecutionCtx,
-    revm::{Inspector, database::State},
+    revm::Inspector,
 };
 use morph_chainspec::MorphChainSpec;
 use morph_primitives::{MorphReceipt, MorphTxEnvelope};
@@ -21,16 +20,6 @@ use std::sync::Arc;
 use crate::evm::MorphEvmFactory;
 
 /// Block executor factory for Morph.
-///
-/// This factory creates [`MorphBlockExecutor`] instances that handle Morph-specific
-/// block execution logic including:
-/// - L1 fee calculation for transactions
-/// - Token fee information extraction for MorphTx (0x7F) transactions
-/// - Curie hardfork application
-///
-/// Unlike using `EthBlockExecutorFactory`, this factory uses the custom
-/// `MorphReceiptBuilder` trait which includes `l1_fee` in its context,
-/// ensuring receipts are built with complete information.
 #[derive(Debug, Clone)]
 pub(crate) struct MorphBlockExecutorFactory {
     /// Receipt builder
@@ -67,6 +56,10 @@ impl BlockExecutorFactory for MorphBlockExecutorFactory {
     type ExecutionCtx<'a> = EthBlockExecutionCtx<'a>;
     type Transaction = MorphTxEnvelope;
     type Receipt = MorphReceipt;
+    type TxExecutionResult = MorphTxResult;
+    // The Morph executor owns its EVM and receipt builder by value rather than
+    // borrowing them from the factory, so the lifetime parameter is unused.
+    type Executor<'a, DB: StateDB, I: Inspector<MorphContext<DB>>> = MorphBlockExecutor<DB, I>;
 
     fn evm_factory(&self) -> &Self::EvmFactory {
         &self.evm_factory
@@ -74,13 +67,13 @@ impl BlockExecutorFactory for MorphBlockExecutorFactory {
 
     fn create_executor<'a, DB, I>(
         &'a self,
-        evm: MorphEvm<&'a mut State<DB>, I>,
+        evm: MorphEvm<DB, I>,
         _ctx: Self::ExecutionCtx<'a>,
-    ) -> impl BlockExecutorFor<'a, Self, DB, I>
+    ) -> Self::Executor<'a, DB, I>
     where
-        DB: Database + 'a,
-        I: Inspector<MorphContext<&'a mut State<DB>>> + 'a,
+        DB: StateDB,
+        I: Inspector<MorphContext<DB>>,
     {
-        MorphBlockExecutor::new(evm, &self.spec, &self.receipt_builder)
+        MorphBlockExecutor::new(evm, self.spec.clone(), self.receipt_builder)
     }
 }

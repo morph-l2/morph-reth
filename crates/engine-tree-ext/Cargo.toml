@@ -1,0 +1,80 @@
+[package]
+name = "morph-engine-tree-ext"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# morph local crates
+morph-chainspec = { workspace = true }
+# morph-primitives brought in transitively via morph-chainspec; direct dep here
+# enables the reth-codec feature so cargo test -p morph-engine-tree-ext satisfies
+# NodePrimitives::Receipt: FullReceipt (requires Compact impl).
+morph-primitives = { workspace = true, features = ["reth-codec"] }
+
+# reth (workspace = true after Task 4 flips root Cargo.toml to paradigmxyz/reth v2.0.0)
+reth-chain-state        = { workspace = true }
+reth-consensus          = { workspace = true }
+reth-db                 = { workspace = true }
+reth-engine-primitives  = { workspace = true }
+reth-engine-tree        = { workspace = true }
+reth-errors             = { workspace = true }
+reth-evm                = { workspace = true }
+reth-execution-cache    = { workspace = true }
+reth-payload-primitives = { workspace = true }
+reth-primitives-traits  = { workspace = true }
+reth-provider           = { workspace = true }
+reth-revm               = { workspace = true }
+reth-tasks              = { workspace = true }
+reth-trie               = { workspace = true }
+reth-trie-db            = { workspace = true }
+reth-trie-parallel      = { workspace = true }
+
+# alloy / revm — workspace versions from reth v2.0.0
+alloy-consensus  = { workspace = true }
+alloy-eip7928    = { workspace = true }
+alloy-eips       = { workspace = true }
+alloy-evm        = { workspace = true }
+alloy-primitives = { workspace = true }
+alloy-rlp        = { workspace = true }
+revm-primitives  = { workspace = true }
+
+# utilities
+crossbeam-channel = { workspace = true }
+derive_more      = { workspace = true }
+tokio            = { workspace = true }
+tracing          = { workspace = true }
+
+[features]
+default = ["std"]
+std = []
+trie-debug = ["dep:reth-trie-sparse"]
+# Forwards `morph-node`'s `test-utils` feature, which provides `MorphTestNode`,
+# `TestNodeBuilder`, `HardforkSchedule`, etc. used by the Jade-boundary
+# integration test.
+test-utils = ["morph-node/test-utils"]
+
+[dependencies.reth-trie-sparse]
+workspace = true
+default-features = false
+optional = true
+
+[dev-dependencies]
+alloy-genesis = { workspace = true }
+serde_json = { workspace = true }
+# Jade boundary integration test — exercises MorphBasicEngineValidator through
+# the real MorphNode stack via morph-node's test-utils feature.
+morph-node = { workspace = true, features = ["test-utils"] }
+morph-payload-types = { workspace = true }
+reth-node-api = { workspace = true }
+reth-payload-builder = { workspace = true }
+reth-tracing = { workspace = true }
+alloy-rpc-types-engine = { workspace = true }
+alloy-rpc-types-eth = { workspace = true }
+eyre  = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

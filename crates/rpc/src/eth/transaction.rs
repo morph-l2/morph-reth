@@ -9,7 +9,7 @@ use alloy_network::TxSigner;
 use alloy_primitives::{Address, Signature, TxKind, U64, U256};
 use alloy_rpc_types_eth::{AccessList, Transaction as RpcTransaction, TransactionInfo};
 use reth_rpc_convert::{
-    SignTxRequestError, SignableTxRequest, TryIntoSimTx, TryIntoTxEnv, transaction::FromConsensusTx,
+    FromConsensusTx, SignTxRequestError, SignableTxRequest, TryIntoSimTx, TryIntoTxEnv,
 };
 use reth_rpc_eth_types::EthApiError;
 use std::convert::Infallible;
@@ -50,6 +50,11 @@ impl FromConsensusTx<MorphTxEnvelope> for MorphRpcTransaction {
             inner: Recovered::new_unchecked(tx, signer),
             block_hash: tx_info.block_hash,
             block_number: tx_info.block_number,
+            // alloy 2.0 added an explicit `block_timestamp` to RPC transactions
+            // so receipts/transactions returned by `eth_*` align with engine API
+            // semantics. `TransactionInfo` already plumbs this through from the
+            // block header, so we just forward it.
+            block_timestamp: tx_info.block_timestamp,
             transaction_index: tx_info.index,
             effective_gas_price,
         };
@@ -151,10 +156,10 @@ impl SignableTxRequest<MorphTxEnvelope> for MorphTransactionRequest {
 ///
 /// Also encodes the transaction for L1 fee calculation.
 /// All MorphTx transactions are constructed as Version 1.
-impl TryIntoTxEnv<MorphTxEnv, MorphBlockEnv> for MorphTransactionRequest {
+impl<Spec> TryIntoTxEnv<MorphTxEnv, Spec, MorphBlockEnv> for MorphTransactionRequest {
     type Err = EthApiError;
 
-    fn try_into_tx_env<Spec>(
+    fn try_into_tx_env(
         self,
         evm_env: &EvmEnv<Spec, MorphBlockEnv>,
     ) -> Result<MorphTxEnv, Self::Err> {
@@ -189,28 +194,9 @@ impl TryIntoTxEnv<MorphTxEnv, MorphBlockEnv> for MorphTransactionRequest {
                 Some(morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_1);
         }
 
-        // L1 fee handling for different RPC methods:
-        //
-        // 1. eth_estimateGas (disable_fee_charge = false):
-        //    - Must calculate L1 data fee to check if sender has sufficient balance
-        //    - Matches go-ethereum behavior: available.Sub(available, l1DataFee)
-        //    - Generate RLP bytes for L1 fee calculation
-        //
-        // 2. eth_call (disable_fee_charge = true):
-        //    - Pure EVM simulation, no fee deduction or balance check
-        //    - Matches go-ethereum behavior: ApplyMessage(..., l1Fee = 0)
-        //    - Skip RLP encoding to avoid L1 fee calculation
-        //
-        // The handler layer (validate_and_deduct_eth_fee) will:
-        // - Calculate L1 fee based on rlp_bytes (None → empty slice → fee = 0)
-        // - Skip balance check when disable_fee_charge = true
-        if !evm_env.cfg_env.disable_fee_charge {
-            // eth_estimateGas: encode transaction for L1 fee calculation
-            tx_env.rlp_bytes = Some(tx_env.encode_for_l1_fee(evm_env.cfg_env.chain_id));
-        } else {
-            // eth_call: skip L1 fee by not providing RLP bytes
-            tx_env.rlp_bytes = None;
-        }
+        // Required by `MorphEthApi::caller_gas_allowance` (eth/call.rs) to
+        // recover the L1 data fee when capping `eth_estimateGas` allowance.
+        tx_env.rlp_bytes = Some(tx_env.encode_for_l1_fee(evm_env.cfg_env.chain_id));
 
         Ok(tx_env)
     }
@@ -338,19 +324,20 @@ mod tests {
                 difficulty: alloy_primitives::U256::ZERO,
                 prevrandao: Some(B256::ZERO),
                 blob_excess_gas_and_price: None,
+                slot_num: 0,
             },
         };
 
         EvmEnv::new(cfg, block_env)
     }
 
-    /// Test that eth_call (disable_fee_charge = true) skips RLP encoding for L1 fee calculation.
-    ///
-    /// This ensures that eth_call does not calculate L1 data fee, matching go-ethereum behavior
-    /// where ApplyMessage is called with l1Fee = 0.
+    /// RLP bytes are always populated — even on `eth_call` where
+    /// `disable_fee_charge = true`. The handler ignores them on both RPC
+    /// paths (see comment in `MorphTransactionRequest::try_into_tx_env`),
+    /// but `MorphEthApi::caller_gas_allowance` still needs them to derive
+    /// the L1 data fee for the `eth_estimateGas` gas-allowance cap.
     #[test]
-    fn test_eth_call_skips_l1_fee_encoding() {
-        // Arrange: Create a standard Ethereum transaction request
+    fn test_rlp_bytes_always_populated() {
         let request = MorphTransactionRequest {
             inner: create_basic_transaction_request(),
             fee_token_id: None,
@@ -359,18 +346,18 @@ mod tests {
             memo: None,
         };
 
-        // eth_call scenario: disable_fee_charge = true
+        // disable_fee_charge = true (eth_call path)
         let evm_env = create_evm_env(true);
-
-        // Act: Convert to TxEnv
         let tx_env = request
             .try_into_tx_env(&evm_env)
             .expect("conversion should succeed");
-
-        // Assert: rlp_bytes should be None (no L1 fee encoding)
         assert!(
-            tx_env.rlp_bytes.is_none(),
-            "eth_call should not encode RLP bytes for L1 fee calculation"
+            tx_env.rlp_bytes.is_some(),
+            "rlp_bytes should be populated even when disable_fee_charge = true"
+        );
+        assert!(
+            !tx_env.rlp_bytes.unwrap().is_empty(),
+            "RLP bytes should not be empty"
         );
     }
 
@@ -478,15 +465,21 @@ mod tests {
         );
     }
 
-    /// Test that eth_call with MorphTx still skips RLP encoding.
+    /// MorphTx converted on the `eth_call` path still carries RLP bytes.
     ///
-    /// Even though it's a MorphTx, eth_call should not encode for L1 fee.
+    /// Before reth v2.0.0 this test asserted `rlp_bytes.is_none()` on the
+    /// assumption that `eth_call` fell through to the EVM handler, which
+    /// read `rlp_bytes` for L1 fee deduction. reth v2.0.0 sets
+    /// `cfg_env.disable_fee_charge = true` on `eth_call`, causing the
+    /// handler to short-circuit before reading `rlp_bytes`, and the RLP
+    /// is instead needed by `MorphEthApi::caller_gas_allowance` to
+    /// compute the L1 fee cap on `eth_estimateGas`. We now populate it
+    /// unconditionally.
     #[test]
-    fn test_eth_call_with_morph_tx_skips_encoding() {
-        // Arrange: Create a MorphTx
+    fn test_eth_call_with_morph_tx_keeps_rlp_and_morph_fields() {
         let request = MorphTransactionRequest {
             inner: create_basic_transaction_request(),
-            fee_token_id: Some(U64::from(1)), // Use U64, not U256
+            fee_token_id: Some(U64::from(1)),
             fee_limit: Some(U256::from(1000000)),
             reference: Some(B256::random()),
             memo: Some(Bytes::from("test")),
@@ -495,18 +488,20 @@ mod tests {
         // eth_call scenario: disable_fee_charge = true
         let evm_env = create_evm_env(true);
 
-        // Act: Convert to TxEnv
         let tx_env = request
             .try_into_tx_env(&evm_env)
             .expect("conversion should succeed");
 
-        // Assert: Even for MorphTx, eth_call should not encode
         assert!(
-            tx_env.rlp_bytes.is_none(),
-            "eth_call should not encode RLP bytes even for MorphTx"
+            tx_env.rlp_bytes.is_some(),
+            "rlp_bytes should be populated even when disable_fee_charge = true"
+        );
+        assert!(
+            !tx_env.rlp_bytes.unwrap().is_empty(),
+            "RLP bytes should not be empty"
         );
 
-        // Assert: Transaction type should still be MorphTx
+        // Transaction type should still be MorphTx
         assert_eq!(
             tx_env.inner.tx_type,
             morph_primitives::MORPH_TX_TYPE_ID,
@@ -753,6 +748,7 @@ mod tests {
             hash: Some(B256::ZERO),
             block_hash: Some(B256::random()),
             block_number: Some(10),
+            block_timestamp: None,
             index: Some(0),
             base_fee: Some(1000),
         };
@@ -795,6 +791,7 @@ mod tests {
             hash: Some(B256::ZERO),
             block_hash: Some(B256::random()),
             block_number: Some(100),
+            block_timestamp: None,
             index: Some(5),
             base_fee: Some(1_000_000_000),
         };
@@ -835,6 +832,7 @@ mod tests {
             hash: Some(B256::ZERO),
             block_hash: None,
             block_number: None,
+            block_timestamp: None,
             index: None,
             base_fee: Some(1_000_000_000),
         };
@@ -870,6 +868,7 @@ mod tests {
             hash: Some(B256::ZERO),
             block_hash: Some(B256::random()),
             block_number: Some(1),
+            block_timestamp: None,
             index: Some(0),
             base_fee: Some(base_fee),
         };

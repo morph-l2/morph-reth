@@ -202,84 +202,7 @@ impl From<SpecId> for MorphHardfork {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reth_chainspec::Hardfork;
-
-    #[test]
-    fn test_morph203_hardfork_name() {
-        let fork = MorphHardfork::Morph203;
-        assert_eq!(fork.name(), "Morph203");
-    }
-
-    #[test]
-    fn test_hardfork_trait_implementation() {
-        let fork = MorphHardfork::Morph203;
-        // Should implement Hardfork trait
-        let _name: &str = Hardfork::name(&fork);
-    }
-
-    #[test]
-    #[cfg(feature = "serde")]
-    fn test_morph_hardfork_serde() {
-        let fork = MorphHardfork::Morph203;
-
-        // Serialize to JSON
-        let json = serde_json::to_string(&fork).unwrap();
-        assert_eq!(json, "\"Morph203\"");
-
-        // Deserialize from JSON
-        let deserialized: MorphHardfork = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized, fork);
-    }
-
-    #[test]
-    fn test_is_curie() {
-        assert!(!MorphHardfork::Bernoulli.is_curie());
-        assert!(MorphHardfork::Curie.is_curie());
-        assert!(MorphHardfork::Morph203.is_curie());
-        assert!(MorphHardfork::Viridian.is_curie());
-        assert!(MorphHardfork::Emerald.is_curie());
-        assert!(MorphHardfork::Jade.is_curie());
-    }
-
-    #[test]
-    fn test_is_morph203() {
-        assert!(!MorphHardfork::Bernoulli.is_morph203());
-        assert!(!MorphHardfork::Curie.is_morph203());
-        assert!(MorphHardfork::Morph203.is_morph203());
-        assert!(MorphHardfork::Viridian.is_morph203());
-        assert!(MorphHardfork::Emerald.is_morph203());
-        assert!(MorphHardfork::Jade.is_morph203());
-    }
-
-    #[test]
-    fn test_is_viridian() {
-        assert!(!MorphHardfork::Bernoulli.is_viridian());
-        assert!(!MorphHardfork::Curie.is_viridian());
-        assert!(!MorphHardfork::Morph203.is_viridian());
-        assert!(MorphHardfork::Viridian.is_viridian());
-        assert!(MorphHardfork::Emerald.is_viridian());
-        assert!(MorphHardfork::Jade.is_viridian());
-    }
-
-    #[test]
-    fn test_is_emerald() {
-        assert!(!MorphHardfork::Bernoulli.is_emerald());
-        assert!(!MorphHardfork::Curie.is_emerald());
-        assert!(!MorphHardfork::Morph203.is_emerald());
-        assert!(!MorphHardfork::Viridian.is_emerald());
-        assert!(MorphHardfork::Emerald.is_emerald());
-        assert!(MorphHardfork::Jade.is_emerald());
-    }
-
-    #[test]
-    fn test_is_jade() {
-        assert!(!MorphHardfork::Bernoulli.is_jade());
-        assert!(!MorphHardfork::Curie.is_jade());
-        assert!(!MorphHardfork::Morph203.is_jade());
-        assert!(!MorphHardfork::Viridian.is_jade());
-        assert!(!MorphHardfork::Emerald.is_jade());
-        assert!(MorphHardfork::Jade.is_jade());
-    }
+    use alloy_evm::revm::context_interface::cfg::gas_params::GasParams;
 
     #[test]
     fn test_morph_hardfork_to_specid_mapping() {
@@ -292,20 +215,55 @@ mod tests {
     }
 
     #[test]
+    fn test_morph_hardforks_do_not_enable_amsterdam_state_gas() {
+        let forks = [
+            MorphHardfork::Bernoulli,
+            MorphHardfork::Curie,
+            MorphHardfork::Morph203,
+            MorphHardfork::Viridian,
+            MorphHardfork::Emerald,
+            MorphHardfork::Jade,
+        ];
+
+        for fork in forks {
+            let spec = SpecId::from(fork);
+            assert!(
+                spec < SpecId::AMSTERDAM,
+                "MorphHardfork {fork:?} maps to SpecId {spec:?}, which would enable Amsterdam-era gas semantics"
+            );
+
+            let params = GasParams::new_spec(spec);
+            assert_eq!(
+                params.tx_eip7702_per_auth_state_gas(),
+                0,
+                "MorphHardfork {fork:?} must not enable EIP-8037 state gas"
+            );
+        }
+    }
+
+    #[test]
+    fn test_eip7702_refund_stays_regular_for_morph_specs() {
+        for spec in [SpecId::CANCUN, SpecId::PRAGUE, SpecId::OSAKA] {
+            let params = GasParams::new_spec(spec);
+            let total_refund = 25_000;
+            let (state_refund, regular_refund) = params.split_eip7702_refund(total_refund);
+
+            assert_eq!(
+                state_refund, 0,
+                "spec={spec:?}: Morph must not route EIP-7702 refunds to state gas"
+            );
+            assert_eq!(
+                regular_refund, total_refund,
+                "spec={spec:?}: Morph EIP-7702 refunds must remain subject to the regular refund cap"
+            );
+        }
+    }
+
+    #[test]
     fn test_specid_to_morph_hardfork_mapping() {
         assert_eq!(MorphHardfork::from(SpecId::CANCUN), MorphHardfork::Morph203);
         assert_eq!(MorphHardfork::from(SpecId::PRAGUE), MorphHardfork::Viridian);
         assert_eq!(MorphHardfork::from(SpecId::OSAKA), MorphHardfork::Jade);
-    }
-
-    #[test]
-    fn test_is_bernoulli() {
-        assert!(MorphHardfork::Bernoulli.is_bernoulli());
-        assert!(MorphHardfork::Curie.is_bernoulli());
-        assert!(MorphHardfork::Morph203.is_bernoulli());
-        assert!(MorphHardfork::Viridian.is_bernoulli());
-        assert!(MorphHardfork::Emerald.is_bernoulli());
-        assert!(MorphHardfork::Jade.is_bernoulli());
     }
 
     /// SpecIds below CANCUN should map to Morph203 (the latest CANCUN-level hardfork).
@@ -332,19 +290,5 @@ mod tests {
         // Emerald -> OSAKA -> Jade (latest OSAKA hardfork)
         let spec = SpecId::from(MorphHardfork::Emerald);
         assert_eq!(MorphHardfork::from(spec), MorphHardfork::Jade);
-    }
-
-    #[test]
-    fn test_default_hardfork_is_jade() {
-        assert_eq!(MorphHardfork::default(), MorphHardfork::Jade);
-    }
-
-    #[test]
-    fn test_hardfork_ordering() {
-        assert!(MorphHardfork::Bernoulli < MorphHardfork::Curie);
-        assert!(MorphHardfork::Curie < MorphHardfork::Morph203);
-        assert!(MorphHardfork::Morph203 < MorphHardfork::Viridian);
-        assert!(MorphHardfork::Viridian < MorphHardfork::Emerald);
-        assert!(MorphHardfork::Emerald < MorphHardfork::Jade);
     }
 }

@@ -43,7 +43,7 @@ use morph_primitives::{
     Block, BlockBody, MorphHeader, MorphReceipt, MorphTxEnvelope,
     transaction::morph_transaction::MORPH_TX_VERSION_1,
 };
-use reth_consensus::{Consensus, ConsensusError, FullConsensus, HeaderValidator};
+use reth_consensus::{Consensus, ConsensusError, FullConsensus, HeaderValidator, ReceiptRootBloom};
 use reth_consensus_common::validation::{
     validate_against_parent_hash_number, validate_body_against_header,
 };
@@ -159,9 +159,9 @@ impl HeaderValidator<MorphHeader> for MorphConsensus {
         if self.chain_spec.is_fee_vault_enabled()
             && header.beneficiary() != alloy_primitives::Address::ZERO
         {
-            return Err(ConsensusError::Other(
-                MorphConsensusError::InvalidCoinbase(header.beneficiary()).to_string(),
-            ));
+            return Err(ConsensusError::other(MorphConsensusError::InvalidCoinbase(
+                header.beneficiary(),
+            )));
         }
 
         // Check timestamp is not in the future
@@ -197,8 +197,8 @@ impl HeaderValidator<MorphHeader> for MorphConsensus {
             .base_fee_per_gas()
             .ok_or(ConsensusError::BaseFeeMissing)?;
         if base_fee > MORPH_MAXIMUM_BASE_FEE {
-            return Err(ConsensusError::Other(
-                MorphConsensusError::BaseFeeOverLimit(base_fee).to_string(),
+            return Err(ConsensusError::other(
+                MorphConsensusError::BaseFeeOverLimit(base_fee),
             ));
         }
         Ok(())
@@ -233,12 +233,11 @@ impl HeaderValidator<MorphHeader> for MorphConsensus {
         // decrease across blocks. This is the header-only half of L1 message
         // validation; the body-level half is in validate_block_pre_execution.
         if header.next_l1_msg_index < parent.next_l1_msg_index {
-            return Err(ConsensusError::Other(
+            return Err(ConsensusError::other(
                 MorphConsensusError::InvalidNextL1MessageIndex {
                     expected: parent.next_l1_msg_index,
                     actual: header.next_l1_msg_index,
-                }
-                .to_string(),
+                },
             ));
         }
 
@@ -278,7 +277,7 @@ impl Consensus<Block> for MorphConsensus {
         // Check no uncles allowed (Morph L2 has no uncle blocks)
         let ommers_len = block.body().ommers().map(|o| o.len()).unwrap_or_default();
         if ommers_len > 0 {
-            return Err(ConsensusError::Other("uncles not allowed".to_string()));
+            return Err(ConsensusError::msg("uncles not allowed"));
         }
 
         // Check ommers hash must be empty root hash
@@ -299,8 +298,8 @@ impl Consensus<Block> for MorphConsensus {
 
         // Check withdrawals are empty
         if block.body().withdrawals().is_some() {
-            return Err(ConsensusError::Other(
-                MorphConsensusError::WithdrawalsNonEmpty.to_string(),
+            return Err(ConsensusError::other(
+                MorphConsensusError::WithdrawalsNonEmpty,
             ));
         }
 
@@ -346,6 +345,7 @@ impl FullConsensus<morph_primitives::MorphPrimitives> for MorphConsensus {
         &self,
         block: &RecoveredBlock<Block>,
         result: &BlockExecutionResult<MorphReceipt>,
+        receipt_root_bloom: Option<ReceiptRootBloom>,
     ) -> Result<(), ConsensusError> {
         // Verify the block gas used
         let cumulative_gas_used = result
@@ -366,8 +366,19 @@ impl FullConsensus<morph_primitives::MorphPrimitives> for MorphConsensus {
             });
         }
 
-        // Verify the receipts logs bloom and root
-        verify_receipts(block.receipts_root(), block.logs_bloom(), &result.receipts)?;
+        // Verify the receipts logs bloom and root.
+        // Use pre-computed (root, bloom) from the executor when available to avoid
+        // redundant hashing; fall back to computing from receipts otherwise.
+        if let Some((receipts_root, logs_bloom)) = receipt_root_bloom {
+            verify_receipts_precomputed(
+                block.receipts_root(),
+                block.logs_bloom(),
+                receipts_root,
+                logs_bloom,
+            )?;
+        } else {
+            verify_receipts(block.receipts_root(), block.logs_bloom(), &result.receipts)?;
+        }
 
         Ok(())
     }
@@ -499,34 +510,30 @@ fn validate_l1_messages_in_block(
         if tx.is_l1_msg() {
             // Check L1 messages are only at the start of the block (before any L2 tx)
             if saw_l2_transaction {
-                return Err(ConsensusError::Other(
-                    MorphConsensusError::InvalidL1MessageOrder.to_string(),
+                return Err(ConsensusError::other(
+                    MorphConsensusError::InvalidL1MessageOrder,
                 ));
             }
 
-            let tx_queue_index = tx.queue_index().ok_or_else(|| {
-                ConsensusError::Other(MorphConsensusError::MalformedL1Message.to_string())
-            })?;
+            let tx_queue_index = tx
+                .queue_index()
+                .ok_or_else(|| ConsensusError::other(MorphConsensusError::MalformedL1Message))?;
 
             // Check queue indices are strictly sequential (each = previous + 1).
             // Use checked_add to prevent overflow at u64::MAX.
             if let Some(prev) = prev_queue_index {
                 let expected = prev.checked_add(1).ok_or_else(|| {
-                    ConsensusError::Other(
-                        MorphConsensusError::L1MessagesNotInOrder {
-                            expected: u64::MAX,
-                            actual: tx_queue_index,
-                        }
-                        .to_string(),
-                    )
+                    ConsensusError::other(MorphConsensusError::L1MessagesNotInOrder {
+                        expected: u64::MAX,
+                        actual: tx_queue_index,
+                    })
                 })?;
                 if tx_queue_index != expected {
-                    return Err(ConsensusError::Other(
+                    return Err(ConsensusError::other(
                         MorphConsensusError::L1MessagesNotInOrder {
                             expected,
                             actual: tx_queue_index,
-                        }
-                        .to_string(),
+                        },
                     ));
                 }
             }
@@ -549,26 +556,20 @@ fn validate_l1_messages_in_block(
     // monotonicity check in validate_header_against_parent handles that case.
     if l1_msg_count > 0 {
         let last_queue_index = prev_queue_index.ok_or_else(|| {
-            ConsensusError::Other(
-                "internal error: l1_msg_count > 0 but prev_queue_index is None".to_string(),
-            )
+            ConsensusError::msg("internal error: l1_msg_count > 0 but prev_queue_index is None")
         })?;
         let min_expected = last_queue_index.checked_add(1).ok_or_else(|| {
-            ConsensusError::Other(
-                MorphConsensusError::InvalidNextL1MessageIndex {
-                    expected: u64::MAX,
-                    actual: header_next_l1_msg_index,
-                }
-                .to_string(),
-            )
+            ConsensusError::other(MorphConsensusError::InvalidNextL1MessageIndex {
+                expected: u64::MAX,
+                actual: header_next_l1_msg_index,
+            })
         })?;
         if header_next_l1_msg_index < min_expected {
-            return Err(ConsensusError::Other(
+            return Err(ConsensusError::other(
                 MorphConsensusError::InvalidNextL1MessageIndex {
                     expected: min_expected,
                     actual: header_next_l1_msg_index,
-                }
-                .to_string(),
+                },
             ));
         }
     }
@@ -593,20 +594,17 @@ fn validate_morph_txs(txs: &[MorphTxEnvelope], is_jade: bool) -> Result<(), Cons
 
         // Reject MorphTx V1 before Jade fork (hardfork-gated, consensus-only check).
         if !is_jade && morph_tx.version == MORPH_TX_VERSION_1 {
-            return Err(ConsensusError::Other(
-                MorphConsensusError::InvalidBody(
-                    "MorphTx version 1 is not yet active (jade fork not reached)".into(),
-                )
-                .to_string(),
-            ));
+            return Err(ConsensusError::other(MorphConsensusError::InvalidBody(
+                "MorphTx version 1 is not yet active (jade fork not reached)".into(),
+            )));
         }
 
         // Reuse primitive-layer validation (version, fee_token_id, reference,
         // memo length, fee_limit constraints, gas price ordering).
         if let Err(reason) = morph_tx.validate() {
-            return Err(ConsensusError::Other(
-                MorphConsensusError::InvalidBody(reason.to_string()).to_string(),
-            ));
+            return Err(ConsensusError::other(MorphConsensusError::InvalidBody(
+                reason.to_string(),
+            )));
         }
     }
 
@@ -624,6 +622,33 @@ fn validate_morph_txs(txs: &[MorphTxEnvelope], is_jade: bool) -> Result<(), Cons
 /// 2. Calculates the logs bloom by combining all receipt blooms
 /// 3. Compares both against the expected values from the block header
 #[inline]
+fn verify_receipts_precomputed(
+    expected_receipts_root: B256,
+    expected_logs_bloom: Bloom,
+    receipts_root: B256,
+    logs_bloom: Bloom,
+) -> Result<(), ConsensusError> {
+    if receipts_root != expected_receipts_root {
+        return Err(ConsensusError::BodyReceiptRootDiff(
+            GotExpected {
+                got: receipts_root,
+                expected: expected_receipts_root,
+            }
+            .into(),
+        ));
+    }
+    if logs_bloom != expected_logs_bloom {
+        return Err(ConsensusError::BodyBloomLogDiff(
+            GotExpected {
+                got: logs_bloom,
+                expected: expected_logs_bloom,
+            }
+            .into(),
+        ));
+    }
+    Ok(())
+}
+
 fn verify_receipts(
     expected_receipts_root: B256,
     expected_logs_bloom: Bloom,
@@ -1891,7 +1916,7 @@ mod tests {
         let recovered =
             reth_primitives_traits::RecoveredBlock::new_unhashed(block, vec![Address::ZERO]);
 
-        let post_result = consensus.validate_block_post_execution(&recovered, &result);
+        let post_result = consensus.validate_block_post_execution(&recovered, &result, None);
         assert!(matches!(
             post_result,
             Err(ConsensusError::BlockGasUsed { .. })

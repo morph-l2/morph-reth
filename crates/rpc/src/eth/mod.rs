@@ -8,12 +8,10 @@ use eyre::Result;
 use morph_chainspec::MorphChainSpec;
 use morph_evm::MorphEvmConfig;
 use morph_primitives::{MorphHeader, MorphPrimitives};
-use reth_evm::{Database, EvmEnvFor};
 use reth_node_api::{FullNodeComponents, FullNodeTypes, NodeTypes};
 use reth_node_builder::rpc::{EthApiBuilder, EthApiCtx};
 use reth_primitives_traits::RecoveredBlock;
 use reth_provider::{BlockReader, ChainSpecProvider};
-use reth_revm::DatabaseCommit;
 use reth_rpc::EthApi;
 use reth_rpc_convert::{RpcConvert, RpcConverter, RpcTypes};
 use reth_rpc_eth_api::{
@@ -21,12 +19,14 @@ use reth_rpc_eth_api::{
     helpers::{
         EthApiSpec, EthBlocks, EthFees, EthState, EthTransactions, LoadBlock, LoadFee,
         LoadPendingBlock, LoadState, LoadTransaction, SpawnBlocking, Trace,
-        pending_block::PendingEnvBuilder,
+        bal::GetBlockAccessList, pending_block::PendingEnvBuilder,
     },
 };
-use reth_rpc_eth_types::{EthApiError, EthStateCache, FeeHistoryCache, GasPriceOracle};
+use reth_rpc_eth_types::{
+    EthApiError, EthStateCache, FeeHistoryCache, GasPriceOracle, StateCacheDb,
+};
 use reth_tasks::{
-    TaskSpawner,
+    Runtime,
     pool::{BlockingTaskGuard, BlockingTaskPool},
 };
 use std::{fmt, marker::PhantomData, sync::Arc, time::Duration};
@@ -221,7 +221,7 @@ where
     Rpc: RpcConvert<Primitives = N::Primitives, Error = EthApiError, Evm = N::Evm>,
 {
     #[inline]
-    fn io_task_spawner(&self) -> impl TaskSpawner {
+    fn io_task_spawner(&self) -> &Runtime {
         self.inner.eth_api.task_spawner()
     }
 
@@ -322,13 +322,18 @@ where
 
     async fn send_transaction(
         &self,
+        origin: reth_transaction_pool::TransactionOrigin,
         tx: reth_primitives_traits::WithEncoded<
             reth_primitives_traits::Recovered<reth_transaction_pool::PoolPooledTx<Self::Pool>>,
         >,
     ) -> Result<alloy_primitives::B256, Self::Error> {
-        reth_rpc_eth_api::helpers::EthTransactions::send_transaction(&self.inner.eth_api, tx)
-            .await
-            .map_err(Into::into)
+        reth_rpc_eth_api::helpers::EthTransactions::send_transaction(
+            &self.inner.eth_api,
+            origin,
+            tx,
+        )
+        .await
+        .map_err(Into::into)
     }
 }
 
@@ -367,17 +372,25 @@ where
     MorphEthApiError: reth_rpc_eth_types::error::FromEvmError<N::Evm>,
     Rpc: RpcConvert<Primitives = N::Primitives, Error = EthApiError, Evm = N::Evm>,
 {
-    fn apply_pre_execution_changes<DB: Send + Database + DatabaseCommit>(
+    fn apply_pre_execution_changes(
         &self,
         _block: &RecoveredBlock<<Self::Provider as BlockReader>::Block>,
-        _db: &mut DB,
-        _evm_env: &EvmEnvFor<Self::Evm>,
+        _db: &mut StateCacheDb,
     ) -> Result<(), Self::Error> {
         // Morph must skip Ethereum's 4788-style pre-block system calls during replay.
         // Standard Morph headers omit parentBeaconBlockRoot, so the default Ethereum
         // SystemCaller prelude would fail with "EIP-4788 beacon root missing".
         Ok(())
     }
+}
+
+impl<N, Rpc> GetBlockAccessList for MorphEthApi<N, Rpc>
+where
+    N: MorphNodeCore,
+    N::Provider: ChainSpecProvider<ChainSpec = MorphChainSpec>,
+    MorphEthApiError: reth_rpc_eth_types::error::FromEvmError<N::Evm>,
+    Rpc: RpcConvert<Primitives = N::Primitives, Error = EthApiError, Evm = N::Evm>,
+{
 }
 
 // ===== Internal container =====

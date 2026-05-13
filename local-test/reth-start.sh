@@ -31,13 +31,20 @@ args=(
   --http
   --http.addr "${RETH_HTTP_ADDR}"
   --http.port "${RETH_HTTP_PORT}"
-  --http.api "web3,debug,eth,txpool,net,trace,admin"
+  --http.api "web3,debug,eth,txpool,net,trace,admin,reth"
   --authrpc.addr "${RETH_AUTHRPC_ADDR}"
   --authrpc.port "${RETH_AUTHRPC_PORT}"
   --authrpc.jwtsecret "${JWT_SECRET}"
   --log.file.directory "$(dirname "${RETH_LOG_FILE}")"
   --log.file.filter info
   --rpc.eth-proof-window 1209600
+  # Local testing: explicitly avoid external IP probes such as icanhazip.com.
+  --nat none
+  # Batch MDBX writes so they don't compete with Tendermint's LevelDB fsyncs
+  # (v2.0.0 added persistence-backpressure-threshold, which must be > persistence-threshold)
+  --engine.persistence-threshold 256
+  --engine.memory-block-buffer-target 16
+  --engine.persistence-backpressure-threshold 512
 )
 
 # Start morph-reth with pm2

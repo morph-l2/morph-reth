@@ -26,7 +26,7 @@ use super::helpers::wallet_to_arc;
 async fn l1_message_rejected_by_pool() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, _wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
     let node = nodes.pop().unwrap();
 
     let l1_msg = L1MessageBuilder::new(0)
@@ -48,7 +48,7 @@ async fn l1_message_rejected_by_pool() -> eyre::Result<()> {
 async fn legacy_tx_accepted() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     // Build a legacy transaction (type 0x00)
@@ -92,7 +92,7 @@ async fn legacy_tx_accepted() -> eyre::Result<()> {
 async fn nonce_too_low_rejected() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
     let wallet = wallet_to_arc(wallet);
 
@@ -121,7 +121,7 @@ async fn nonce_too_low_rejected() -> eyre::Result<()> {
 async fn future_nonce_queued() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let node = nodes.pop().unwrap();
 
     // Submit tx with nonce=5 (account nonce is 0, so this is "future")
@@ -149,7 +149,7 @@ async fn future_nonce_queued() -> eyre::Result<()> {
 async fn future_nonce_queued_then_promoted_after_gap_filled() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     // Submit nonce=2 — this is a future nonce; nonces 0 and 1 are missing
@@ -197,7 +197,7 @@ async fn future_nonce_queued_then_promoted_after_gap_filled() -> eyre::Result<()
 #[tokio::test(flavor = "multi_thread")]
 async fn eip2930_accepted_by_pool() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     let raw_tx = morph_node::test_utils::make_eip2930_tx(wallet.chain_id, wallet.inner.clone(), 0)?;
@@ -210,7 +210,7 @@ async fn eip2930_accepted_by_pool() -> eyre::Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn eip4844_tx_rejected_by_pool() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let node = nodes.pop().unwrap();
 
     let blob_tx = make_eip4844_tx(wallet.chain_id, wallet.inner.clone(), 0)?;
@@ -225,7 +225,7 @@ async fn eip4844_tx_rejected_by_pool() -> eyre::Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn duplicate_tx_rejected_by_pool() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let node = nodes.pop().unwrap();
 
     let raw_tx = make_transfer_tx(wallet.chain_id, wallet.inner.clone(), 0).await;
@@ -238,7 +238,7 @@ async fn duplicate_tx_rejected_by_pool() -> eyre::Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn tx_gas_limit_exceeds_block_limit_rejected() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let node = nodes.pop().unwrap();
 
     use alloy_consensus::{SignableTransaction, TxEip1559};
@@ -273,7 +273,7 @@ async fn tx_gas_limit_exceeds_block_limit_rejected() -> eyre::Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn tx_max_fee_below_base_fee_accepted_for_queuing() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let node = nodes.pop().unwrap();
 
     use alloy_consensus::{SignableTransaction, TxEip1559};
@@ -310,7 +310,7 @@ async fn tx_max_fee_below_base_fee_accepted_for_queuing() -> eyre::Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn morph_tx_v1_zero_eth_balance_rejected() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let node = nodes.pop().unwrap();
 
     use morph_node::test_utils::MorphTxBuilder;

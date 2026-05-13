@@ -27,7 +27,7 @@ services:
       --authrpc.port 8551
       --authrpc.jwtsecret /var/lib/morph-reth/jwt/jwt.hex
       --http --http.addr 0.0.0.0 --http.port 8545
-      --http.api "eth,net,web3"
+      --http.api "eth,net,web3,reth"
 
   prometheus:
     restart: unless-stopped

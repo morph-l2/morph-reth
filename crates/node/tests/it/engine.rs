@@ -11,9 +11,9 @@ use jsonrpsee::core::client::ClientT;
 use morph_node::test_utils::{HardforkSchedule, TestNodeBuilder};
 use morph_payload_types::{
     AssembleL2BlockParams, ExecutableL2Data, GenericResponse, MorphPayloadAttributes,
-    MorphPayloadBuilderAttributes,
 };
-use reth_payload_primitives::{BuiltPayload, PayloadBuilderAttributes};
+use reth_payload_builder::BuildNewPayload;
+use reth_payload_primitives::BuiltPayload;
 use reth_provider::BlockReaderIdExt;
 
 use super::helpers::{build_block_no_submit, craft_and_try_import_block};
@@ -31,7 +31,7 @@ use super::helpers::{build_block_no_submit, craft_and_try_import_block};
 async fn state_root_validation_skipped_pre_jade() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, _wallet) = TestNodeBuilder::new()
+    let (mut nodes, _wallet) = TestNodeBuilder::new()
         .with_schedule(HardforkSchedule::PreJade)
         .build()
         .await?;
@@ -54,12 +54,12 @@ async fn state_root_validation_skipped_pre_jade() -> eyre::Result<()> {
     Ok(())
 }
 
-/// `engine_newL2Block` can import a block assembled over the authenticated RPC.
+/// `engine_newL2Block` can import consecutive blocks assembled over the authenticated RPC.
 #[tokio::test(flavor = "multi_thread")]
-async fn new_l2_block_imports_assembled_block_over_rpc() -> eyre::Result<()> {
+async fn new_l2_block_imports_consecutive_assembled_blocks_over_rpc() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, _wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
     let node = nodes.pop().unwrap();
 
     let auth = node.auth_server_handle();
@@ -89,6 +89,31 @@ async fn new_l2_block_imports_assembled_block_over_rpc() -> eyre::Result<()> {
         "imported canonical head should match the assembled block hash"
     );
 
+    let mut params = AssembleL2BlockParams::empty(2);
+    params.timestamp = Some(latest.timestamp() + 1);
+
+    let data: ExecutableL2Data = client.request("engine_assembleL2Block", (params,)).await?;
+    let expected_hash = data.hash;
+
+    let _: () = client.request("engine_newL2Block", (data,)).await?;
+
+    let latest = node
+        .inner
+        .provider
+        .sealed_header_by_number_or_tag(alloy_rpc_types_eth::BlockNumberOrTag::Latest)?
+        .expect("latest header must exist after importing the second block");
+
+    assert_eq!(
+        latest.number(),
+        2,
+        "engine_newL2Block should expose the first imported block as the parent immediately"
+    );
+    assert_eq!(
+        latest.hash(),
+        expected_hash,
+        "second imported canonical head should match the assembled block hash"
+    );
+
     Ok(())
 }
 
@@ -97,7 +122,7 @@ async fn new_l2_block_imports_assembled_block_over_rpc() -> eyre::Result<()> {
 async fn validate_l2_block_rejects_tampered_hash_over_rpc() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, _wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
     let node = nodes.pop().unwrap();
 
     let auth = node.auth_server_handle();
@@ -123,7 +148,7 @@ async fn validate_l2_block_rejects_tampered_hash_over_rpc() -> eyre::Result<()> 
 async fn payload_builder_hash_matches_block_hash_with_nonzero_prev_randao() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, _wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
     let node = nodes.pop().unwrap();
 
     let head = node
@@ -134,27 +159,29 @@ async fn payload_builder_hash_matches_block_hash_with_nonzero_prev_randao() -> e
         .map(|h| (h.hash(), h.timestamp()))
         .unwrap_or((B256::ZERO, 0));
 
-    let attrs = MorphPayloadBuilderAttributes::try_new(
-        head_hash,
-        MorphPayloadAttributes {
-            inner: PayloadAttributes {
-                timestamp: head_ts + 1,
-                prev_randao: B256::repeat_byte(0xAA),
-                suggested_fee_recipient: Address::ZERO,
-                withdrawals: Some(vec![]),
-                parent_beacon_block_root: Some(B256::ZERO),
-            },
-            transactions: Some(vec![]),
-            gas_limit: None,
-            base_fee_per_gas: None,
+    let rpc_attrs = MorphPayloadAttributes {
+        inner: PayloadAttributes {
+            timestamp: head_ts + 1,
+            prev_randao: B256::repeat_byte(0xAA),
+            suggested_fee_recipient: Address::ZERO,
+            withdrawals: Some(vec![]),
+            parent_beacon_block_root: Some(B256::ZERO),
+            slot_number: None,
         },
-        3,
-    )?;
+        transactions: Some(vec![]),
+        gas_limit: None,
+        base_fee_per_gas: None,
+    };
 
     let payload_id = node
         .inner
         .payload_builder_handle
-        .send_new_payload(attrs)
+        .send_new_payload(BuildNewPayload {
+            attributes: rpc_attrs,
+            parent_hash: head_hash,
+            cache: None,
+            trie_handle: None,
+        })
         .await?
         .map_err(|e| eyre::eyre!("payload build failed: {e}"))?;
 

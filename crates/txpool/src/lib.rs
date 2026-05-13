@@ -47,7 +47,9 @@ pub use maintain::maintain_morph_pool;
 mod morph_tx_validation;
 pub use morph_tx_validation::{MorphTxValidationInput, MorphTxValidationResult, validate_morph_tx};
 
-use reth_transaction_pool::{CoinbaseTipOrdering, Pool, TransactionValidationTaskExecutor};
+#[allow(unused_imports)]
+use morph_evm as _;
+use reth_transaction_pool::{CoinbaseTipOrdering, Pool, TransactionValidationTaskExecutor}; // for default type parameter MorphEvmConfig
 
 /// Type alias for default Morph transaction pool.
 ///
@@ -55,8 +57,13 @@ use reth_transaction_pool::{CoinbaseTipOrdering, Pool, TransactionValidationTask
 /// - [`MorphTransactionValidator`] for transaction validation
 /// - [`CoinbaseTipOrdering`] for transaction ordering (by effective gas tip)
 /// - [`MorphPooledTransaction`] as the pooled transaction type
-pub type MorphTransactionPool<Client, S, T = MorphPooledTransaction> = Pool<
-    TransactionValidationTaskExecutor<MorphTransactionValidator<Client, T>>,
+pub type MorphTransactionPool<
+    Client,
+    S,
+    T = MorphPooledTransaction,
+    Evm = morph_evm::MorphEvmConfig,
+> = Pool<
+    TransactionValidationTaskExecutor<MorphTransactionValidator<Client, T, Evm>>,
     CoinbaseTipOrdering<T>,
     S,
 >;

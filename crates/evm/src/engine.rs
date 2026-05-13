@@ -5,6 +5,7 @@
 
 use crate::MorphEvmConfig;
 use alloy_consensus::crypto::RecoveryError;
+use alloy_evm::block::ExecutableTxParts;
 use alloy_primitives::Address;
 use morph_payload_types::MorphExecutionData;
 use morph_primitives::{Block, MorphTxEnvelope};
@@ -87,6 +88,15 @@ impl ToTxEnv<MorphTxEnv> for RecoveredInBlock {
     }
 }
 
+impl ExecutableTxParts<MorphTxEnv, MorphTxEnvelope> for RecoveredInBlock {
+    type Recovered = Self;
+
+    fn into_parts(self) -> (MorphTxEnv, Self) {
+        let tx_env = MorphTxEnv::from_recovered_tx(self.tx(), *self.signer());
+        (tx_env, self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,7 +105,7 @@ mod tests {
     use morph_chainspec::MorphChainSpec;
     use morph_primitives::{BlockBody, MorphHeader};
     use rayon::prelude::*;
-    use reth_evm::ConfigureEngineEvm;
+    use reth_evm::{ConfigureEngineEvm, ConvertTx, ExecutableTxTuple};
 
     fn create_legacy_tx() -> MorphTxEnvelope {
         let tx = TxLegacy {
@@ -180,7 +190,7 @@ mod tests {
         assert!(result.is_ok());
 
         let tuple = result.unwrap();
-        let (iter, recover_fn): (_, _) = tuple.into();
+        let (iter, recover_fn) = tuple.into_parts();
 
         // Collect items and verify we have 2 transactions
         let items: Vec<_> = iter.into_par_iter().collect();
@@ -188,7 +198,7 @@ mod tests {
 
         // Test the recovery function works on all items
         for item in items {
-            let recovered = recover_fn(item);
+            let recovered = recover_fn.convert(item);
             assert!(recovered.is_ok());
         }
     }

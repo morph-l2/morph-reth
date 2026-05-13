@@ -8,6 +8,7 @@
 use alloy_evm::Database;
 use alloy_primitives::{Address, Bytes, U256, address, keccak256};
 use morph_chainspec::hardfork::MorphHardfork;
+use revm::Database as RevmDatabase;
 use revm::SystemCallEvm;
 use revm::{context_interface::result::EVMError, inspector::NoOpInspector};
 
@@ -94,6 +95,49 @@ impl TokenFeeInfo {
         }))
     }
 
+    /// Storage-only variant of [`Self::load_for_caller`].
+    ///
+    /// Reads the registry entry and — when the token's `balance_slot` is
+    /// known — the caller's ERC20 balance directly from contract storage.
+    /// Unlike [`Self::load_for_caller`] this never spins up a temporary
+    /// `MorphEvm`, so it is callable from RPC code paths that only have
+    /// `revm::Database` (no `Debug` bound, no `MorphContext` setup).
+    ///
+    /// Behaviour:
+    /// - Returns `Ok(None)` if the token is not registered.
+    /// - Returns `Ok(Some(Self))` with `balance = 0` and
+    ///   `balance_slot = None` if the token is registered but its balance
+    ///   slot is unknown — callers are expected to skip token-balance
+    ///   enforcement in that case (the handler re-checks the balance via
+    ///   an EVM call during execution).
+    pub fn load_storage_only<DB: RevmDatabase>(
+        db: &mut DB,
+        token_id: u16,
+        caller: Address,
+    ) -> Result<Option<Self>, DB::Error> {
+        let entry = match read_registry_entry(db, token_id)? {
+            Some(e) => e,
+            None => return Ok(None),
+        };
+
+        let balance = if let Some(slot) = entry.balance_slot {
+            read_balance_from_storage(db, entry.token_address, caller, slot)?
+        } else {
+            U256::ZERO
+        };
+
+        Ok(Some(Self {
+            token_address: entry.token_address,
+            is_active: entry.is_active,
+            decimals: entry.decimals,
+            price_ratio: entry.price_ratio,
+            scale: entry.scale,
+            caller,
+            balance,
+            balance_slot: entry.balance_slot,
+        }))
+    }
+
     /// Calculate the token amount required for a given ETH amount.
     ///
     /// Uses the price ratio and scale to convert ETH value to token amount.
@@ -118,7 +162,7 @@ impl TokenFeeInfo {
     }
 }
 
-fn read_registry_entry<DB: Database>(
+fn read_registry_entry<DB: RevmDatabase>(
     db: &mut DB,
     token_id: u16,
 ) -> Result<Option<TokenRegistryEntry>, DB::Error> {
@@ -197,7 +241,7 @@ pub fn compute_mapping_slot_for_address(base_slot: U256, account: Address) -> U2
 
 /// Load a value from a mapping in contract storage.
 #[inline]
-fn read_mapping_value<DB: Database>(
+fn read_mapping_value<DB: RevmDatabase>(
     db: &mut DB,
     contract: Address,
     base_slot: U256,
@@ -234,7 +278,7 @@ fn read_token_balance_with_fallback<DB: Database>(
 
 /// Read ERC20 balance directly from storage slot.
 #[inline]
-fn read_balance_from_storage<DB: Database>(
+fn read_balance_from_storage<DB: RevmDatabase>(
     db: &mut DB,
     token: Address,
     account: Address,

@@ -9,7 +9,8 @@ ignore = [
     # https://rustsec.org/advisories/RUSTSEC-2025-0141 bincode is unmaintained
     "RUSTSEC-2025-0141",
     # https://rustsec.org/advisories/RUSTSEC-2026-0097 rand unsound with custom logger
-    # pinned transitively via reth; no fix available upstream yet
+    # pinned transitively via reth; we don't install a custom logger so this is
+    # a false positive in our usage, but cargo-deny can't see usage
     "RUSTSEC-2026-0097",
     # https://rustsec.org/advisories/RUSTSEC-2026-0098 rustls-webpki URI name constraints
     "RUSTSEC-2026-0098",
@@ -88,5 +89,6 @@ license-files = [{ path = "LICENSE", hash = 0x001c7e6c }]
 unknown-registry = "warn"
 unknown-git = "deny"
 allow-git = [
-    "https://github.com/morph-l2/reth",
+    "https://github.com/paradigmxyz/reth",
+    "https://github.com/sigp/discv5",
 ]

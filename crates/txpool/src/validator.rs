@@ -16,8 +16,9 @@ use morph_primitives::MorphTxEnvelope;
 use morph_revm::L1BlockInfo;
 use parking_lot::RwLock;
 use reth_chainspec::ChainSpecProvider;
+use reth_evm::ConfigureEvm;
 use reth_primitives_traits::{
-    Block, GotExpected, SealedBlock, transaction::error::InvalidTransactionError,
+    Block, BlockTy, GotExpected, SealedBlock, transaction::error::InvalidTransactionError,
 };
 use reth_revm::database::StateProviderDatabase;
 use reth_storage_api::{BlockReaderIdExt, StateProviderFactory};
@@ -108,14 +109,14 @@ impl MorphL1BlockInfo {
 /// checking disabled via `disable_balance_check()`, since MorphTx users may have
 /// zero ETH balance but sufficient ERC20 tokens for gas payment.
 #[derive(Debug)]
-pub struct MorphTransactionValidator<Client, Tx> {
+pub struct MorphTransactionValidator<Client, Tx, Evm = morph_evm::MorphEvmConfig> {
     /// The type that performs the actual validation.
-    inner: EthTransactionValidator<Client, Tx>,
+    inner: EthTransactionValidator<Client, Tx, Evm>,
     /// Additional block info required for validation.
     block_info: Arc<MorphL1BlockInfo>,
 }
 
-impl<Client, Tx> MorphTransactionValidator<Client, Tx> {
+impl<Client, Tx, Evm> MorphTransactionValidator<Client, Tx, Evm> {
     /// Returns the configured chain spec.
     pub fn chain_spec(&self) -> Arc<Client::ChainSpec>
     where
@@ -163,13 +164,14 @@ fn insufficient_funds_outcome<Tx: PoolTransaction>(
     )
 }
 
-impl<Client, Tx> MorphTransactionValidator<Client, Tx>
+impl<Client, Tx, Evm> MorphTransactionValidator<Client, Tx, Evm>
 where
     Client: ChainSpecProvider<ChainSpec: MorphHardforks> + StateProviderFactory + BlockReaderIdExt,
     Tx: EthPoolTransaction<Consensus = MorphTxEnvelope>,
+    Evm: ConfigureEvm,
 {
     /// Create a new [`MorphTransactionValidator`].
-    pub fn new(inner: EthTransactionValidator<Client, Tx>) -> Self {
+    pub fn new(inner: EthTransactionValidator<Client, Tx, Evm>) -> Self {
         let this = Self::with_block_info(inner, MorphL1BlockInfo::default());
         if let Ok(Some(block)) = this
             .inner
@@ -184,7 +186,7 @@ where
 
     /// Create a new [`MorphTransactionValidator`] with the given [`MorphL1BlockInfo`].
     pub fn with_block_info(
-        inner: EthTransactionValidator<Client, Tx>,
+        inner: EthTransactionValidator<Client, Tx, Evm>,
         block_info: MorphL1BlockInfo,
     ) -> Self {
         Self {
@@ -470,12 +472,14 @@ where
     }
 }
 
-impl<Client, Tx> TransactionValidator for MorphTransactionValidator<Client, Tx>
+impl<Client, Tx, Evm> TransactionValidator for MorphTransactionValidator<Client, Tx, Evm>
 where
     Client: ChainSpecProvider<ChainSpec: MorphHardforks> + StateProviderFactory + BlockReaderIdExt,
     Tx: EthPoolTransaction<Consensus = MorphTxEnvelope>,
+    Evm: ConfigureEvm,
 {
     type Transaction = Tx;
+    type Block = BlockTy<Evm::Primitives>;
 
     async fn validate_transaction(
         &self,
@@ -487,15 +491,13 @@ where
 
     async fn validate_transactions(
         &self,
-        transactions: Vec<(TransactionOrigin, Self::Transaction)>,
+        transactions: impl IntoIterator<Item = (TransactionOrigin, Self::Transaction), IntoIter: Send>
+        + Send,
     ) -> Vec<TransactionValidationOutcome<Self::Transaction>> {
-        self.validate_all(transactions)
+        self.validate_all(transactions.into_iter().collect())
     }
 
-    fn on_new_head_block<B>(&self, new_tip_block: &SealedBlock<B>)
-    where
-        B: Block,
-    {
+    fn on_new_head_block(&self, new_tip_block: &SealedBlock<Self::Block>) {
         self.inner.on_new_head_block(new_tip_block);
         self.update_l1_block_info(new_tip_block.header());
     }
@@ -514,11 +516,12 @@ fn is_morph_tx(tx: &impl Typed2718) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_consensus::{Block, Header, Signed, TxEip1559, TxLegacy};
+    use alloy_consensus::{Signed, TxEip1559, TxLegacy};
     use alloy_eips::eip2718::Encodable2718;
     use alloy_primitives::{B256, Signature, TxKind, address};
-    use morph_chainspec::MORPH_MAINNET;
-    use morph_primitives::{TxL1Msg, TxMorph};
+    use morph_chainspec::{MORPH_MAINNET, MorphChainSpec};
+    use morph_evm::MorphEvmConfig;
+    use morph_primitives::{MorphPrimitives, TxL1Msg, TxMorph};
     use morph_revm::{
         L2_TOKEN_REGISTRY_ADDRESS, compute_mapping_slot, compute_mapping_slot_for_address,
     };
@@ -527,6 +530,12 @@ mod tests {
     use reth_transaction_pool::{
         blobstore::InMemoryBlobStore, validate::EthTransactionValidatorBuilder,
     };
+
+    fn new_mock_provider() -> MockEthProvider<MorphPrimitives, MorphChainSpec> {
+        MockEthProvider::<MorphPrimitives, _>::new()
+            .with_chain_spec((**MORPH_MAINNET).clone())
+            .with_genesis_block()
+    }
 
     fn storage_key(slot: U256) -> B256 {
         B256::from(slot.to_be_bytes::<32>())
@@ -602,12 +611,16 @@ mod tests {
     #[test]
     fn validate_l1_message_rejected() {
         // Create validator with mock provider
-        let client = MockEthProvider::default().with_chain_spec(MORPH_MAINNET.clone());
-        let eth_validator: EthTransactionValidator<_, crate::MorphPooledTransaction> =
-            EthTransactionValidatorBuilder::new(client)
-                .no_shanghai()
-                .no_cancun()
-                .build::<crate::MorphPooledTransaction, _>(InMemoryBlobStore::default());
+        let client = new_mock_provider();
+        let morph_evm_config = MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone());
+        let eth_validator: EthTransactionValidator<
+            _,
+            crate::MorphPooledTransaction,
+            MorphEvmConfig,
+        > = EthTransactionValidatorBuilder::new(client, morph_evm_config)
+            .no_shanghai()
+            .no_cancun()
+            .build::<crate::MorphPooledTransaction, _>(InMemoryBlobStore::default());
         let validator = MorphTransactionValidator::new(eth_validator);
 
         let origin = TransactionOrigin::External;
@@ -643,15 +656,19 @@ mod tests {
     #[test]
     fn validate_valid_eip1559_transaction() {
         // Create validator with mock provider and disable balance check for simplicity
-        let client = MockEthProvider::default().with_chain_spec(MORPH_MAINNET.clone());
+        let client = new_mock_provider();
         let signer = address!("0000000000000000000000000000000000000001");
         client.add_account(signer, ExtendedAccount::new(0, U256::from(10u128.pow(18))));
-        let eth_validator: EthTransactionValidator<_, crate::MorphPooledTransaction> =
-            EthTransactionValidatorBuilder::new(client)
-                .no_shanghai()
-                .no_cancun()
-                .disable_balance_check()
-                .build::<crate::MorphPooledTransaction, _>(InMemoryBlobStore::default());
+        let morph_evm_config = MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone());
+        let eth_validator: EthTransactionValidator<
+            _,
+            crate::MorphPooledTransaction,
+            MorphEvmConfig,
+        > = EthTransactionValidatorBuilder::new(client, morph_evm_config)
+            .no_shanghai()
+            .no_cancun()
+            .disable_balance_check()
+            .build::<crate::MorphPooledTransaction, _>(InMemoryBlobStore::default());
         let validator = MorphTransactionValidator::new(eth_validator);
 
         let origin = TransactionOrigin::External;
@@ -694,15 +711,19 @@ mod tests {
     #[test]
     fn validate_valid_legacy_transaction() {
         // Create validator with mock provider and disable balance check for simplicity
-        let client = MockEthProvider::default().with_chain_spec(MORPH_MAINNET.clone());
+        let client = new_mock_provider();
         let signer = address!("0000000000000000000000000000000000000001");
         client.add_account(signer, ExtendedAccount::new(0, U256::from(10u128.pow(18))));
-        let eth_validator: EthTransactionValidator<_, crate::MorphPooledTransaction> =
-            EthTransactionValidatorBuilder::new(client)
-                .no_shanghai()
-                .no_cancun()
-                .disable_balance_check()
-                .build::<crate::MorphPooledTransaction, _>(InMemoryBlobStore::default());
+        let morph_evm_config = MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone());
+        let eth_validator: EthTransactionValidator<
+            _,
+            crate::MorphPooledTransaction,
+            MorphEvmConfig,
+        > = EthTransactionValidatorBuilder::new(client, morph_evm_config)
+            .no_shanghai()
+            .no_cancun()
+            .disable_balance_check()
+            .build::<crate::MorphPooledTransaction, _>(InMemoryBlobStore::default());
         let validator = MorphTransactionValidator::new(eth_validator);
 
         let origin = TransactionOrigin::External;
@@ -742,24 +763,11 @@ mod tests {
 
     #[test]
     fn validate_morph_tx_uses_effective_gas_price_for_token_fee_path() {
-        let client = MockEthProvider::default().with_chain_spec(MORPH_MAINNET.clone());
+        let client = new_mock_provider();
         let signer = address!("0000000000000000000000000000000000000001");
         let token = address!("5300000000000000000000000000000000000042");
         let balance_slot = U256::from(7);
 
-        client.add_block(
-            B256::from([0x11; 32]),
-            Block::new(
-                Header {
-                    number: 1,
-                    timestamp: 1,
-                    gas_limit: 30_000_000,
-                    base_fee_per_gas: Some(10),
-                    ..Default::default()
-                },
-                Default::default(),
-            ),
-        );
         client.add_account(signer, ExtendedAccount::new(0, U256::ZERO));
         client.add_account(
             L2_TOKEN_REGISTRY_ADDRESS,
@@ -773,13 +781,23 @@ mod tests {
             )]),
         );
 
-        let eth_validator: EthTransactionValidator<_, crate::MorphPooledTransaction> =
-            EthTransactionValidatorBuilder::new(client)
-                .no_shanghai()
-                .no_cancun()
-                .disable_balance_check()
-                .build::<crate::MorphPooledTransaction, _>(InMemoryBlobStore::default());
+        let morph_evm_config = MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone());
+        let eth_validator: EthTransactionValidator<
+            _,
+            crate::MorphPooledTransaction,
+            MorphEvmConfig,
+        > = EthTransactionValidatorBuilder::new(client, morph_evm_config)
+            .no_shanghai()
+            .no_cancun()
+            .disable_balance_check()
+            .build::<crate::MorphPooledTransaction, _>(InMemoryBlobStore::default());
         let validator = MorphTransactionValidator::new(eth_validator);
+        // Simulate an active chain head with base_fee_per_gas = 10 so the
+        // effective gas price path is taken (min(max_fee, base_fee + priority)
+        // = min(100, 11) = 11), yielding required_token_amount = 21_000 * 11.
+        validator
+            .block_info
+            .update(L1BlockInfo::default(), 0, 0, Some(10));
 
         let tx = TxMorph {
             chain_id: 2818,

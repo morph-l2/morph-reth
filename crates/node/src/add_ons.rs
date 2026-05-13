@@ -26,7 +26,6 @@ use reth_provider::{
 use reth_rpc_builder::Identity;
 use reth_rpc_eth_api::RpcNodeCore;
 use reth_tracing::tracing;
-use tokio_stream::StreamExt;
 
 /// Morph node add-ons for RPC and Engine API.
 ///
@@ -41,9 +40,10 @@ pub struct MorphAddOns<
     PVB = MorphEngineValidatorBuilder,
     EVB = MorphTreeEngineValidatorBuilder<PVB>,
     RpcMiddleware = Identity,
+    AuthHttpMiddleware = Identity,
 > {
     /// Inner RPC add-ons from reth.
-    inner: RpcAddOns<N, EthB, PVB, NoopEngineApiBuilder, EVB, RpcMiddleware>,
+    inner: RpcAddOns<N, EthB, PVB, NoopEngineApiBuilder, EVB, RpcMiddleware, AuthHttpMiddleware>,
     /// Optional reference-index control injected by `main.rs`.  When present
     /// the add-on spawns startup indexing on launch and registers the
     /// `morph_` RPC namespace.
@@ -66,6 +66,7 @@ where
                 pvb.clone(),
                 NoopEngineApiBuilder::default(),
                 MorphTreeEngineValidatorBuilder::new(pvb),
+                Identity::default(),
                 Identity::default(),
             ),
             reference_index: None,
@@ -115,31 +116,20 @@ where
         let payload_builder = ctx.node.payload_builder_handle().clone();
         let chain_spec = ctx.node.provider().chain_spec();
         let beacon_engine_handle = ctx.beacon_engine_handle.clone();
-        let engine_events = ctx.engine_events.clone();
         let task_executor = ctx.node.task_executor().clone();
-        let engine_state_tracker =
-            std::sync::Arc::new(morph_engine_api::EngineStateTracker::default());
+        let block_tag_tracker = std::sync::Arc::new(morph_engine_api::BlockTagTracker::default());
 
         // Create Morph eth_config handler (EIP-7910 + morph extension)
         let eth_config_handler =
             MorphEthConfigHandler::new(ctx.node.provider().clone(), ctx.node.evm_config().clone());
 
-        // Keep a local view of canonical head/forkchoice from reth engine events.
-        let tracker_for_events = engine_state_tracker.clone();
-        task_executor.spawn_critical("morph engine state tracker", async move {
-            let mut listener = engine_events.new_listener();
-            while let Some(event) = listener.next().await {
-                tracker_for_events.on_consensus_engine_event(&event);
-            }
-        });
-
         // Spawn reference index startup indexing (Task A) if configured.
         let reference_rpc_handler = if let Some(control) = self.reference_index {
             let startup_control = control.clone();
             let startup_node = ctx.node.clone();
-            // spawn_critical causes node shutdown on panic/error, matching the spec
+            // spawn_critical_task causes node shutdown on panic/error, matching the spec
             // requirement that reference index startup failures are fatal.
-            task_executor.spawn_critical("morph reference index startup", async move {
+            task_executor.spawn_critical_task("morph reference index startup", async move {
                 let result = tokio::task::spawn_blocking(move || {
                     crate::exex::run_startup_indexing(&startup_node, &startup_control)
                 })
@@ -149,7 +139,7 @@ where
                 match result {
                     Ok(()) => {}
                     Err(err) => {
-                        // Propagate to spawn_critical which will shut down the node.
+                        // Propagate to spawn_critical_task which will shut down the node.
                         panic!("reference index startup failed: {err:?}");
                     }
                 }
@@ -200,7 +190,7 @@ where
                         payload_builder,
                         chain_spec,
                         beacon_engine_handle,
-                        engine_state_tracker,
+                        block_tag_tracker,
                     );
 
                 // Create the RPC handler

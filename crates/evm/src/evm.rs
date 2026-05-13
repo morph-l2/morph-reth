@@ -3,7 +3,10 @@ use alloy_evm::{
     precompiles::PrecompilesMap,
     revm::{
         Context, ExecuteEvm, InspectEvm, Inspector, SystemCallEvm,
-        context::result::{EVMError, ResultAndState},
+        context::{
+            CfgEnv,
+            result::{EVMError, ResultAndState},
+        },
         inspector::NoOpInspector,
     },
 };
@@ -176,6 +179,10 @@ where
 
     fn block(&self) -> &Self::BlockEnv {
         &self.block
+    }
+
+    fn cfg_env(&self) -> &CfgEnv<Self::Spec> {
+        &self.inner.inner.ctx.cfg
     }
 
     fn chain_id(&self) -> u64 {

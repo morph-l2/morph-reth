@@ -4,7 +4,6 @@
 //!
 //! - [`MorphL2EngineApi`]: The L2 Engine API trait for block building and validation
 //! - [`MorphL2EngineRpcServer`]: The JSON-RPC server implementation
-//! - [`MorphValidationContext`]: Validation context with Jade hardfork support
 //!
 //! # L2 Engine API
 //!
@@ -25,10 +24,8 @@ mod builder;
 mod error;
 mod metrics;
 mod rpc;
-mod validator;
 
 pub use api::MorphL2EngineApi;
-pub use builder::{EngineStateTracker, RealMorphL2EngineApi};
+pub use builder::{BlockTagTracker, RealMorphL2EngineApi};
 pub use error::{EngineApiResult, MorphEngineApiError};
 pub use rpc::{MorphL2EngineRpcHandler, MorphL2EngineRpcServer, into_rpc_result};
-pub use validator::{MorphValidationContext, should_validate_state_root};
