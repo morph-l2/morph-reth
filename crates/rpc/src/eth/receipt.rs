@@ -93,7 +93,7 @@ impl MorphReceiptBuilder {
         let receipt = MorphRpcReceipt {
             inner: core_receipt,
             l1_fee: tx_receipt_fields.l1_fee,
-            version: tx_receipt_fields.version,
+            version: tx_receipt_fields.version.map(U64::from),
             fee_token_id: tx_receipt_fields.fee_token_id.map(U64::from),
             fee_rate: tx_receipt_fields.fee_rate,
             token_scale: tx_receipt_fields.token_scale,
@@ -359,7 +359,7 @@ mod tests {
         // Morph-specific top-level RPC fields must round-trip from the
         // primitive `MorphTransactionReceipt` into `MorphRpcReceipt`.
         assert_eq!(rpc.l1_fee, U256::from(5000));
-        assert_eq!(rpc.version, Some(1));
+        assert_eq!(rpc.version, Some(U64::from(1)));
         assert_eq!(rpc.fee_token_id, Some(U64::from(3)));
         assert_eq!(rpc.fee_rate, Some(U256::from(2_000_000)));
         assert_eq!(rpc.token_scale, Some(U256::from(1_000_000)));
@@ -433,7 +433,7 @@ mod tests {
         // L1 messages have no MorphTx metadata, but RPC compatibility with
         // morph-geth still exposes absent numeric extension fields as zero.
         assert_eq!(rpc.l1_fee, U256::ZERO);
-        assert_eq!(rpc.version, Some(0));
+        assert_eq!(rpc.version, Some(U64::ZERO));
         assert_eq!(rpc.fee_token_id, Some(U64::ZERO));
         assert_eq!(rpc.fee_rate, Some(U256::ZERO));
         assert_eq!(rpc.token_scale, Some(U256::ZERO));

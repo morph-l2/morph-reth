@@ -367,7 +367,8 @@ async fn transaction_receipt_exposes_morph_fields_over_rpc() -> eyre::Result<()>
         .await?;
 
     assert_eq!(receipt["type"].as_str(), Some("0x7f"));
-    assert_eq!(receipt["version"].as_u64(), Some(1));
+    // version is JSON-RPC quantity-encoded (string "0x1"), not a number.
+    assert_eq!(receipt["version"].as_str(), Some("0x1"));
     assert_eq!(receipt["feeTokenID"].as_str(), Some("0x1"));
     assert_eq!(
         receipt["reference"].as_str(),
@@ -506,7 +507,8 @@ async fn transaction_by_hash_exposes_morph_fields_over_rpc() -> eyre::Result<()>
 
     assert_eq!(tx["hash"].as_str(), Some(tx_hash.to_string().as_str()));
     assert_eq!(tx["type"].as_str(), Some("0x7f"));
-    assert_eq!(tx["version"].as_u64(), Some(1));
+    // version is JSON-RPC quantity-encoded (string "0x1"), not a number.
+    assert_eq!(tx["version"].as_str(), Some("0x1"));
     assert_eq!(tx["feeTokenID"].as_str(), Some("0x1"));
     assert!(tx["feeLimit"].as_str().is_some());
     assert_eq!(tx["reference"].as_str(), Some(expected_reference.as_str()));
