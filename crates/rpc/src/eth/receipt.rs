@@ -3,9 +3,12 @@
 use crate::eth::{MorphEthApi, MorphNodeCore};
 use crate::types::receipt::MorphRpcReceipt;
 use alloy_consensus::{Receipt, TxReceipt};
+use alloy_eips::Typed2718;
 use alloy_primitives::{B256, Bytes, U64, U256};
 use alloy_rpc_types_eth::Log;
-use morph_primitives::{MorphReceipt, MorphReceiptEnvelope};
+use morph_primitives::{
+    L1_TX_TYPE_ID, MORPH_TX_TYPE_ID, MorphReceipt, MorphReceiptEnvelope, MorphTxType,
+};
 use reth_primitives_traits::NodePrimitives;
 use reth_rpc_convert::{
     RpcConvert,
@@ -52,6 +55,7 @@ impl MorphReceiptBuilder {
         N: NodePrimitives<Receipt = MorphReceipt>,
     {
         let tx_receipt_fields = morph_tx_receipt_fields(&input.receipt);
+        let tx_type = morph_tx_type_from_u8(input.tx.ty());
 
         let core_receipt = build_receipt(input, None, |receipt, next_log_index, meta| {
             let map_logs = |receipt: Receipt| {
@@ -68,25 +72,23 @@ impl MorphReceiptBuilder {
                 }
             };
 
-            match receipt {
-                MorphReceipt::Legacy(receipt) => {
-                    MorphReceiptEnvelope::Legacy(map_logs(receipt.inner).into_with_bloom())
-                }
-                MorphReceipt::Eip2930(receipt) => {
-                    MorphReceiptEnvelope::Eip2930(map_logs(receipt.inner).into_with_bloom())
-                }
-                MorphReceipt::Eip1559(receipt) => {
-                    MorphReceiptEnvelope::Eip1559(map_logs(receipt.inner).into_with_bloom())
-                }
-                MorphReceipt::Eip7702(receipt) => {
-                    MorphReceiptEnvelope::Eip7702(map_logs(receipt.inner).into_with_bloom())
-                }
-                MorphReceipt::L1Msg(receipt) => {
-                    MorphReceiptEnvelope::L1Message(map_logs(receipt).into_with_bloom())
-                }
-                MorphReceipt::Morph(receipt) => {
-                    MorphReceiptEnvelope::Morph(map_logs(receipt.inner).into_with_bloom())
-                }
+            let receipt = match receipt {
+                MorphReceipt::Legacy(receipt)
+                | MorphReceipt::Eip2930(receipt)
+                | MorphReceipt::Eip1559(receipt)
+                | MorphReceipt::Eip7702(receipt)
+                | MorphReceipt::Morph(receipt) => map_logs(receipt.inner),
+                MorphReceipt::L1Msg(receipt) => map_logs(receipt),
+            }
+            .into_with_bloom();
+
+            match tx_type {
+                MorphTxType::Legacy => MorphReceiptEnvelope::Legacy(receipt),
+                MorphTxType::Eip2930 => MorphReceiptEnvelope::Eip2930(receipt),
+                MorphTxType::Eip1559 => MorphReceiptEnvelope::Eip1559(receipt),
+                MorphTxType::Eip7702 => MorphReceiptEnvelope::Eip7702(receipt),
+                MorphTxType::L1Msg => MorphReceiptEnvelope::L1Message(receipt),
+                MorphTxType::Morph => MorphReceiptEnvelope::Morph(receipt),
             }
         });
 
@@ -108,6 +110,18 @@ impl MorphReceiptBuilder {
     /// Consumes the builder and returns the built receipt.
     fn build(self) -> MorphRpcReceipt {
         self.receipt
+    }
+}
+
+fn morph_tx_type_from_u8(tx_type: u8) -> MorphTxType {
+    match tx_type {
+        0 => MorphTxType::Legacy,
+        1 => MorphTxType::Eip2930,
+        2 => MorphTxType::Eip1559,
+        4 => MorphTxType::Eip7702,
+        L1_TX_TYPE_ID => MorphTxType::L1Msg,
+        MORPH_TX_TYPE_ID => MorphTxType::Morph,
+        _ => MorphTxType::Legacy,
     }
 }
 
@@ -376,6 +390,77 @@ mod tests {
         assert_eq!(rpc.inner.from, signer);
         assert_eq!(rpc.inner.block_number, Some(42));
         assert_eq!(rpc.inner.transaction_index, Some(0));
+    }
+
+    #[test]
+    fn receipt_rpc_type_follows_transaction_type_for_historical_receipts() {
+        use alloy_consensus::{Signed, TxEip1559, transaction::Recovered};
+        use alloy_primitives::{B256, Signature, U256, address};
+        use morph_primitives::{MorphPrimitives, MorphTxEnvelope, MorphTxType};
+        use reth_primitives_traits::TransactionMeta;
+        use reth_rpc_convert::transaction::{ConvertReceiptInput, ReceiptConverter};
+
+        let signer = address!("0000000000000000000000000000000000000099");
+        let envelope = MorphTxEnvelope::Eip1559(Signed::new_unchecked(
+            TxEip1559 {
+                chain_id: 2818,
+                nonce: 0,
+                gas_limit: 21_000,
+                max_fee_per_gas: 2_000_000_000,
+                max_priority_fee_per_gas: 1_000_000,
+                ..Default::default()
+            },
+            Signature::new(U256::ZERO, U256::ZERO, false),
+            B256::ZERO,
+        ));
+        let recovered: Recovered<&MorphTxEnvelope> = Recovered::new_unchecked(&envelope, signer);
+
+        // Historical receipts may be decoded from storage without preserving
+        // the original typed receipt variant. RPC must follow the transaction
+        // envelope type, not the storage receipt wrapper.
+        let receipt = MorphReceipt::Legacy(MorphTransactionReceipt {
+            inner: Receipt {
+                status: alloy_consensus::Eip658Value::Eip658(true),
+                cumulative_gas_used: 21_000,
+                logs: vec![],
+            },
+            l1_fee: U256::ZERO,
+            version: None,
+            fee_token_id: None,
+            fee_rate: None,
+            token_scale: None,
+            fee_limit: None,
+            reference: None,
+            memo: None,
+        });
+
+        let input = ConvertReceiptInput::<'_, MorphPrimitives> {
+            receipt,
+            tx: recovered,
+            gas_used: 21_000,
+            next_log_index: 0,
+            meta: TransactionMeta {
+                tx_hash: B256::ZERO,
+                index: 0,
+                block_hash: B256::ZERO,
+                block_number: 42,
+                base_fee: Some(1_000_000_000),
+                excess_blob_gas: None,
+                timestamp: 1_700_000_000,
+            },
+        };
+
+        let rpc = MorphReceiptConverter
+            .convert_receipts(vec![input])
+            .expect("morph converter should not fail")
+            .pop()
+            .expect("converter must produce one receipt per input");
+
+        assert_eq!(rpc.inner.inner.tx_type(), MorphTxType::Eip1559);
+        assert_eq!(
+            serde_json::to_value(&rpc).unwrap().get("type"),
+            Some(&serde_json::json!("0x2"))
+        );
     }
 
     /// Companion test: L1 message receipts must come back from the
