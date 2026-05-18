@@ -1,5 +1,5 @@
 use morph_chainspec::hardfork::MorphHardfork;
-use morph_revm::MorphTxEnv;
+use morph_revm::{MorphTxEnv, MorphTxExt};
 use revm::{
     context::{BlockEnv, CfgEnv, TransactionType, TxEnv},
     context_interface::{
@@ -152,12 +152,18 @@ impl MorphTestUnit {
         block
     }
 
-    pub fn morph_tx_env(&self, test: &Test) -> Result<MorphTxEnv, SchemaError> {
+    pub fn morph_tx_env(
+        &self,
+        test: &Test,
+        _fork: MorphHardfork,
+    ) -> Result<MorphTxEnv, SchemaError> {
         self.transaction.morph_tx_env(
             test.indexes.data,
             test.indexes.gas,
             test.indexes.value,
             self.env.current_chain_id,
+            test.txbytes.clone(),
+            self.env.current_base_fee.is_some(),
         )
     }
 }
@@ -169,6 +175,8 @@ impl MorphTransactionParts {
         gas_index: usize,
         value_index: usize,
         chain_id: Option<U256>,
+        txbytes: Option<Bytes>,
+        has_base_fee: bool,
     ) -> Result<MorphTxEnv, SchemaError> {
         let caller = match self.sender {
             Some(address) => address,
@@ -234,17 +242,21 @@ impl MorphTransactionParts {
             })
             .unwrap_or_default();
 
+        let gas_price = self
+            .gas_price
+            .or(self.max_fee_per_gas)
+            .unwrap_or_default()
+            .try_into()
+            .unwrap_or(u128::MAX);
+        let gas_priority_fee = self
+            .max_priority_fee_per_gas
+            .map(|fee| fee.try_into().unwrap_or(u128::MAX))
+            .or_else(|| has_base_fee.then_some(gas_price));
+
         let inner = TxEnv {
             caller,
-            gas_price: self
-                .gas_price
-                .or(self.max_fee_per_gas)
-                .unwrap_or_default()
-                .try_into()
-                .unwrap_or(u128::MAX),
-            gas_priority_fee: self
-                .max_priority_fee_per_gas
-                .map(|fee| fee.try_into().unwrap_or(u128::MAX)),
+            gas_price,
+            gas_priority_fee,
             blob_hashes: self.blob_versioned_hashes.clone(),
             max_fee_per_blob_gas: self
                 .max_fee_per_blob_gas
@@ -281,6 +293,13 @@ impl MorphTransactionParts {
             && !memo.is_empty()
         {
             tx = tx.with_memo(memo.clone());
+        }
+        if let Some(txbytes) = txbytes {
+            tx = tx.with_rlp_bytes(txbytes);
+        } else if !tx.is_l1_msg() && tx.blob_hashes.is_empty() {
+            let fallback_chain_id = chain_id.and_then(|id| id.try_into().ok()).unwrap_or_default();
+            let rlp_bytes = tx.encode_for_l1_fee(fallback_chain_id);
+            tx = tx.with_rlp_bytes(rlp_bytes);
         }
 
         Ok(tx)
@@ -389,4 +408,65 @@ where
         .map(Some)
         .map_err(|_| SchemaError::QuantityOverflow { target, value: raw })
         .map_err(de::Error::custom)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn statetest_without_txbytes_sets_l1_fee_encoding() {
+        let suite: MorphTestSuite = serde_json::from_str(
+            r#"{
+              "case": {
+                "env": {
+                  "currentChainID": "0x1",
+                  "currentCoinbase": "0x0000000000000000000000000000000000000000",
+                  "currentDifficulty": "0x0",
+                  "currentGasLimit": "0x989680",
+                  "currentNumber": "0x1",
+                  "currentTimestamp": "0x1",
+                  "currentBaseFee": "0x0"
+                },
+                "pre": {},
+                "transaction": {
+                  "nonce": "0x0",
+                  "gasPrice": "0x1",
+                  "gasLimit": ["0x5208"],
+                  "to": "0x00000000000000000000000000000000000000f1",
+                  "value": ["0x0"],
+                  "data": ["0x"],
+                  "accessLists": [null],
+                  "secretKey": "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8"
+                },
+                "post": {
+                  "Jade": [{
+                    "indexes": { "data": 0, "gas": 0, "value": 0 },
+                    "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                    "logs": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                    "expectException": null
+                  }]
+                }
+              }
+            }"#,
+        )
+        .expect("suite should parse");
+
+        let unit = suite.0.values().next().unwrap();
+        let post = &unit.post["Jade"][0];
+        let tx = unit
+            .morph_tx_env(post, MorphHardfork::Jade)
+            .expect("tx env should build");
+
+        assert!(
+            tx.rlp_bytes.as_ref().is_some_and(|bytes| !bytes.is_empty()),
+            "statetest txs without post.txbytes still need fallback L1 fee bytes"
+        );
+        assert_eq!(
+            tx.rlp_bytes.as_ref().unwrap().first(),
+            Some(&0x02),
+            "when currentBaseFee is present, fallback L1 fee encoding must match go-ethereum's dynamic-fee envelope"
+        );
+    }
+
 }
