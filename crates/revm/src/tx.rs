@@ -105,8 +105,11 @@ impl MorphTxEnv {
     /// This is used by simulation paths (`eth_call`, `eth_estimateGas`) where
     /// we have tx env fields but no pre-encoded transaction bytes.
     pub fn encode_for_l1_fee(&self, fallback_chain_id: u64) -> Bytes {
-        // Signature validity is irrelevant for fee sizing, but encoded length matters.
-        let placeholder_signature = Signature::new(Default::default(), Default::default(), false);
+        // Signature validity is irrelevant for fee sizing, but encoded zero/non-zero
+        // bytes matter for the pre-Curie calldata-gas formula. Match
+        // go-ethereum's EstimateL1DataFeeForMessage placeholder:
+        // 64 bytes of 0xff followed by yParity=1.
+        let placeholder_signature = Signature::new(U256::MAX, U256::MAX, true);
 
         match self.build_morph_tx_for_l1_fee(fallback_chain_id) {
             Some(morph_tx) => {
@@ -608,6 +611,59 @@ mod tests {
             ..Default::default()
         };
         assert!(!tx.encode_for_l1_fee(53077).is_empty());
+    }
+
+    #[test]
+    fn encode_for_l1_fee_uses_go_ethereum_placeholder_signature_shape() {
+        let tx = MorphTxEnv {
+            inner: TxEnv {
+                chain_id: Some(53077),
+                gas_limit: 21_000,
+                gas_price: 1,
+                nonce: 1,
+                kind: TxKind::Call(Address::ZERO),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let encoded = tx.encode_for_l1_fee(53077);
+        let full_ff_words = encoded
+            .windows(32)
+            .filter(|window| window.iter().all(|byte| *byte == 0xff))
+            .count();
+
+        assert_eq!(
+            full_ff_words, 2,
+            "fallback L1 fee encoding must use go-ethereum's 0xff...ff placeholder r/s words"
+        );
+    }
+
+    #[test]
+    fn encode_for_l1_fee_dynamic_matches_go_ethereum_bytes() {
+        let tx = MorphTxEnv {
+            inner: TxEnv {
+                chain_id: Some(1),
+                gas_limit: 8_000_000,
+                gas_price: 16,
+                gas_priority_fee: Some(16),
+                nonce: 0,
+                kind: TxKind::Call(Address::with_last_byte(0xf1)),
+                data: Bytes::from_static(&[
+                    0x22, 0xcf, 0xae, 0xfc, 0x92, 0xe4, 0xed, 0xb9, 0xb0, 0xae, 0x01, 0xa6,
+                    0x3a, 0x95, 0xdf, 0x11, 0xf1, 0x27, 0x9b, 0x7b, 0x6b, 0xdd, 0xe4, 0xe0,
+                    0x48, 0xf6, 0xec, 0xe8, 0xf8, 0xc8, 0xf2, 0xc2, 0xde, 0x97, 0x54, 0x4a,
+                    0x16, 0x3f, 0x7d, 0x30, 0x23, 0x15, 0xee, 0x0f, 0x78, 0x69, 0xfb, 0xdc,
+                    0xfd, 0x86,
+                ]),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        assert_eq!(
+            alloy_primitives::hex::encode_prefixed(tx.encode_for_l1_fee(1)),
+            "0x02f89501801010837a12009400000000000000000000000000000000000000f180b222cfaefc92e4edb9b0ae01a63a95df11f1279b7b6bdde4e048f6ece8f8c8f2c2de97544a163f7d302315ee0f7869fbdcfd86c001a0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffa0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        );
     }
 
     #[test]

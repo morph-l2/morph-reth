@@ -8,12 +8,15 @@ use revm::{
     context::{CfgEnv, result::ExecutionResult},
     database::{EmptyDB, PlainAccount, State},
     inspector::inspectors::TracerEip3155,
-    primitives::{Address, Log, U256, keccak256},
+    primitives::{Address, Log, U256, address, keccak256},
 };
 use revm_statetest_types::Test;
 use serde::Serialize;
 use std::{fs, io::stderr, path::Path};
 use thiserror::Error;
+
+const MORPH_STATE_TEST_FEE_VAULT_ADDRESS: Address =
+    address!("48442aa154897eef141df231cc1517fc8c1d170f");
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RunnerOptions {
@@ -115,10 +118,13 @@ fn execute_case(
         .with_spec_and_mainnet_gas_params(fork);
     cfg.disable_eip7623 = true;
 
-    let block = unit.block_env(&mut cfg);
+    let mut block = unit.block_env(&mut cfg);
+    if fork.is_curie() {
+        block.beneficiary = MORPH_STATE_TEST_FEE_VAULT_ADDRESS;
+    }
     cfg.tx_gas_limit_cap = Some(block.gas_limit);
 
-    let tx = match unit.morph_tx_env(test) {
+    let tx = match unit.morph_tx_env(test, fork) {
         Ok(tx) => tx,
         Err(error) if test.expect_exception.is_some() => {
             let exec_result: Result<ExecutionResult<morph_revm::MorphHaltReason>, String> =
@@ -130,6 +136,7 @@ fn execute_case(
                 &exec_result,
                 &state,
                 unit.out.as_ref(),
+                &[],
             ));
         }
         Err(error) => return Err(error.into()),
@@ -144,6 +151,7 @@ fn execute_case(
             .with_inspector(TracerEip3155::buffered(stderr()).without_summary());
         evm.enable_inspector();
         let exec_result = evm.transact_commit(tx);
+        let receipt_logs = collect_receipt_logs(&mut evm, &exec_result);
         return Ok(build_outcome(
             name,
             fork_name,
@@ -151,11 +159,13 @@ fn execute_case(
             &exec_result,
             &state,
             unit.out.as_ref(),
+            &receipt_logs,
         ));
     }
 
     let mut evm = MorphEvm::new(&mut state, env);
     let exec_result = evm.transact_commit(tx);
+    let receipt_logs = collect_receipt_logs(&mut evm, &exec_result);
     Ok(build_outcome(
         name,
         fork_name,
@@ -163,6 +173,7 @@ fn execute_case(
         &exec_result,
         &state,
         unit.out.as_ref(),
+        &receipt_logs,
     ))
 }
 
@@ -173,16 +184,12 @@ fn build_outcome<E>(
     exec_result: &Result<ExecutionResult<morph_revm::MorphHaltReason>, E>,
     db: &State<EmptyDB>,
     expected_output: Option<&Bytes>,
+    receipt_logs: &[Log],
 ) -> Outcome
 where
     E: std::fmt::Display,
 {
-    let logs_root = log_rlp_hash(
-        exec_result
-            .as_ref()
-            .map(|result| result.logs())
-            .unwrap_or(&[]),
-    );
+    let logs_root = log_rlp_hash(receipt_logs);
     let state_root = state_merkle_trie_root(db.cache.trie_account());
     let error_msg = validation_error(test, exec_result, expected_output, state_root, logs_root);
     let output = exec_result
@@ -211,6 +218,22 @@ where
         g: test.indexes.gas,
         v: test.indexes.value,
     }
+}
+
+fn collect_receipt_logs<DB, I, E>(
+    evm: &mut MorphEvm<DB, I>,
+    exec_result: &Result<ExecutionResult<morph_revm::MorphHaltReason>, E>,
+) -> Vec<Log>
+where
+    DB: alloy_evm::Database,
+    I: revm::Inspector<morph_revm::evm::MorphContext<DB>>,
+{
+    let mut logs = evm.take_pre_fee_logs();
+    if let Ok(result) = exec_result {
+        logs.extend(result.logs().iter().cloned());
+    }
+    logs.extend(evm.take_post_fee_logs());
+    logs
 }
 
 fn validation_error<E>(
