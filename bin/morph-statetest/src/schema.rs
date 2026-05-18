@@ -175,9 +175,23 @@ impl MorphTransactionParts {
             None => recover_address(self.secret_key.as_slice())
                 .ok_or(SchemaError::UnknownPrivateKey(self.secret_key))?,
         };
-        let tx_type = self
-            .tx_type(data_index)
-            .ok_or(SchemaError::InvalidTransactionType)? as u8;
+        // Preserve the raw tx-type byte when the JSON explicitly specifies
+        // it. Routing it through `revm::context::TransactionType` first
+        // would lossily map any non-standard byte (Morph's 0x7f, L1Msg's
+        // 0x7e, future fork types) to `Custom = 0xFF`, since revm's enum
+        // only knows the 5 vanilla Ethereum tx types. The cast-to-u8 of
+        // `Custom` then yields 0xFF, so `MorphTxExt::is_morph_tx` and
+        // `is_l1_msg` both return false and the morph fee handler /
+        // L1Message short-circuit never activate. Only fall through to
+        // the enum-based inference for txs that didn't carry a `type`
+        // field at all.
+        let tx_type = match self.tx_type {
+            Some(t) => t,
+            None => {
+                self.tx_type(data_index)
+                    .ok_or(SchemaError::InvalidTransactionType)? as u8
+            }
+        };
         let gas_limit = self
             .gas_limit
             .get(gas_index)
