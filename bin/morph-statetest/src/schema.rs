@@ -44,6 +44,10 @@ pub enum SchemaError {
     InvalidTransactionType,
     #[error("quantity does not fit in {target}: {value}")]
     QuantityOverflow { target: &'static str, value: String },
+    #[error(
+        "blob transaction without post.txbytes is not representable: morph-statetest cannot fabricate an Eip4844 envelope for L1 fee calculation, so the L1 fee path would silently fall through to 0 and mask cross-client divergence"
+    )]
+    BlobTxRequiresTxBytes,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -296,7 +300,17 @@ impl MorphTransactionParts {
         }
         if let Some(txbytes) = txbytes {
             tx = tx.with_rlp_bytes(txbytes);
-        } else if !tx.is_l1_msg() && tx.blob_hashes.is_empty() {
+        } else if !tx.blob_hashes.is_empty() {
+            // morph-reth has no Eip4844 envelope variant — see
+            // crates/primitives/src/transaction/envelope.rs. A blob tx
+            // arriving here without post.txbytes cannot be encoded for
+            // L1 fee calculation, and silently falling through would
+            // leave rlp_bytes empty in handler.rs (unwrap_or_default),
+            // making L1 fee = 0 on reth while geth charges normally.
+            // Fail loud at parse time instead of producing a phantom
+            // state divergence downstream.
+            return Err(SchemaError::BlobTxRequiresTxBytes);
+        } else if !tx.is_l1_msg() {
             let fallback_chain_id = chain_id.and_then(|id| id.try_into().ok()).unwrap_or_default();
             let rlp_bytes = tx.encode_for_l1_fee(fallback_chain_id);
             tx = tx.with_rlp_bytes(rlp_bytes);
@@ -467,6 +481,62 @@ mod tests {
             Some(&0x02),
             "when currentBaseFee is present, fallback L1 fee encoding must match go-ethereum's dynamic-fee envelope"
         );
+    }
+
+    #[test]
+    fn blob_tx_without_txbytes_errors_instead_of_silently_zeroing_l1_fee() {
+        let suite: MorphTestSuite = serde_json::from_str(
+            r#"{
+              "case": {
+                "env": {
+                  "currentChainID": "0x1",
+                  "currentCoinbase": "0x0000000000000000000000000000000000000000",
+                  "currentDifficulty": "0x0",
+                  "currentGasLimit": "0x989680",
+                  "currentNumber": "0x1",
+                  "currentTimestamp": "0x1",
+                  "currentBaseFee": "0x0"
+                },
+                "pre": {},
+                "transaction": {
+                  "type": "0x3",
+                  "nonce": "0x0",
+                  "gasLimit": ["0x5208"],
+                  "to": "0x00000000000000000000000000000000000000f1",
+                  "value": ["0x0"],
+                  "data": ["0x"],
+                  "accessLists": [null],
+                  "maxFeePerGas": "0x10",
+                  "maxPriorityFeePerGas": "0x1",
+                  "maxFeePerBlobGas": "0x20",
+                  "blobVersionedHashes": ["0x011e0690904ead419cbeb3e3f051f17f3ec476e751b7fcb7b36f4e470616b713"],
+                  "secretKey": "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8"
+                },
+                "post": {
+                  "Jade": [{
+                    "indexes": { "data": 0, "gas": 0, "value": 0 },
+                    "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                    "logs": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                    "expectException": null
+                  }]
+                }
+              }
+            }"#,
+        )
+        .expect("suite should parse");
+
+        let unit = suite.0.values().next().unwrap();
+        let post = &unit.post["Jade"][0];
+        let result = unit.morph_tx_env(post, MorphHardfork::Jade);
+
+        match result {
+            Err(SchemaError::BlobTxRequiresTxBytes) => {}
+            other => panic!(
+                "expected blob tx without txbytes to fail loudly with BlobTxRequiresTxBytes; \
+                 got {other:?}. If this assertion ever flips, double-check handler.rs is not \
+                 silently computing L1 fee against empty rlp_bytes for blob txs."
+            ),
+        }
     }
 
 }
