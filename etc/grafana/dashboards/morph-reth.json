@@ -186,7 +186,7 @@
       },
       "gridPos": {
         "h": 6,
-        "w": 12,
+        "w": 9,
         "x": 0,
         "y": 6
       },
@@ -225,6 +225,73 @@
       "title": "Connected peers",
       "transparent": true,
       "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Latest canonical block/header height reported by reth's blockchain tree.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "locale"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 9,
+        "y": 6,
+        "w": 3,
+        "h": 6
+      },
+      "id": 140,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": false
+      },
+      "pluginVersion": "12.2.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "max by (service) (reth_blockchain_tree_canonical_chain_height{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
+          "legendFormat": "{{service}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Header Height",
+      "transparent": true,
+      "type": "stat"
     },
     {
       "datasource": {
@@ -1486,7 +1553,7 @@
             "spanNulls": false,
             "stacking": {
               "group": "A",
-              "mode": "percent"
+              "mode": "none"
             },
             "thresholdsStyle": {
               "mode": "off"
@@ -1715,113 +1782,6 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "The time it takes for operations that are part of block validation, but not execution or state root, to complete.",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic-by-name"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 0,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "showValues": false,
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          },
-          "unit": "s",
-          "min": 0
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 89
-      },
-      "id": 26,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "12.2.1",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "disableTextWrap": false,
-          "editorMode": "code",
-          "expr": "reth_sync_block_validation_trie_input_duration{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=~\"(0|0.5|0.9|0.95|1)\"} > 0",
-          "fullMetaSearch": false,
-          "hide": false,
-          "includeNullMetadata": true,
-          "instant": false,
-          "legendFormat": "{{service}} · Trie input creation duration p{{quantile}}",
-          "range": true,
-          "refId": "A",
-          "useBackend": false
-        }
-      ],
-      "title": "Block validation overhead",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -2007,207 +1967,6 @@
               }
             ]
           },
-          "min": 0
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 97
-      },
-      "id": 28,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "12.2.1",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "reth_tree_root_proofs_processed_histogram{chain=\"$chain\", role=~\"$role\", service=~\"$service\",quantile=~\"(0|0.5|0.9|0.95|1)\"} > 0",
-          "instant": false,
-          "legendFormat": "{{service}} · {{quantile}} percentile",
-          "range": true,
-          "refId": "Branch Nodes"
-        }
-      ],
-      "title": "Proofs Processed",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic-by-name"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 0,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "showValues": false,
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          },
-          "unit": "s",
-          "min": 0
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 97
-      },
-      "id": 29,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "12.2.1",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "reth_tree_root_proof_calculation_duration_histogram{chain=\"$chain\", role=~\"$role\", service=~\"$service\",quantile=~\"(0|0.5|0.9|0.95|1)\"} > 0",
-          "instant": false,
-          "legendFormat": "{{service}} · {{quantile}} percentile",
-          "range": true,
-          "refId": "Branch Nodes"
-        }
-      ],
-      "title": "Proof calculation duration",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic-by-name"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 0,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "showValues": false,
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          },
           "unit": "none",
           "min": 0
         },
@@ -2217,390 +1976,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 105
-      },
-      "id": 30,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "12.2.1",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "reth_tree_root_pending_account_multiproofs_histogram{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"0.5\"} > 0",
-          "instant": false,
-          "legendFormat": "{{service}} · accounts p50",
-          "range": true,
-          "refId": "Branch Nodes"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "reth_tree_root_pending_account_multiproofs_histogram{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"0.9\"} > 0",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "{{service}} · accounts p90",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "reth_tree_root_pending_account_multiproofs_histogram{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"0.95\"} > 0",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "{{service}} · accounts p95",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "reth_tree_root_pending_account_multiproofs_histogram{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"0.99\"} > 0",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "{{service}} · accounts p99",
-          "range": true,
-          "refId": "C"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "reth_tree_root_pending_storage_multiproofs_histogram{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"0.5\"} > 0",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "{{service}} · storage p50",
-          "range": true,
-          "refId": "D"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "reth_tree_root_pending_storage_multiproofs_histogram{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"0.9\"} > 0",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "{{service}} · storage p90",
-          "range": true,
-          "refId": "E"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "reth_tree_root_pending_storage_multiproofs_histogram{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"0.95\"} > 0",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "{{service}} · storage p95",
-          "range": true,
-          "refId": "F"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "reth_tree_root_pending_storage_multiproofs_histogram{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"0.99\"} > 0",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "{{service}} · storage p99",
-          "range": true,
-          "refId": "G"
-        }
-      ],
-      "title": "Pending MultiProof requests",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic-by-name"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 0,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "showValues": false,
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          },
-          "unit": "none",
-          "min": 0
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 105
-      },
-      "id": 31,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "12.2.1",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "reth_tree_root_active_account_workers_histogram{chain=\"$chain\", role=~\"$role\", service=~\"$service\",quantile=\"0.5\"} > 0",
-          "instant": false,
-          "legendFormat": "{{service}} · accounts p50",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "reth_tree_root_active_account_workers_histogram{chain=\"$chain\", role=~\"$role\", service=~\"$service\",quantile=\"0.9\"} > 0",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "{{service}} · accounts p90",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "reth_tree_root_active_account_workers_histogram{chain=\"$chain\", role=~\"$role\", service=~\"$service\",quantile=\"0.95\"} > 0",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "{{service}} · accounts p95",
-          "range": true,
-          "refId": "C"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "reth_tree_root_active_account_workers_histogram{chain=\"$chain\", role=~\"$role\", service=~\"$service\",quantile=\"0.99\"} > 0",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "{{service}} · accounts p99",
-          "range": true,
-          "refId": "D"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "reth_tree_root_active_storage_workers_histogram{chain=\"$chain\", role=~\"$role\", service=~\"$service\",quantile=\"0.5\"} > 0",
-          "instant": false,
-          "legendFormat": "{{service}} · storages p50",
-          "range": true,
-          "refId": "E"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "reth_tree_root_active_storage_workers_histogram{chain=\"$chain\", role=~\"$role\", service=~\"$service\",quantile=\"0.9\"} > 0",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "{{service}} · storages p90",
-          "range": true,
-          "refId": "F"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "reth_tree_root_active_storage_workers_histogram{chain=\"$chain\", role=~\"$role\", service=~\"$service\",quantile=\"0.95\"} > 0",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "{{service}} · storages p95",
-          "range": true,
-          "refId": "G"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "reth_tree_root_active_storage_workers_histogram{chain=\"$chain\", role=~\"$role\", service=~\"$service\",quantile=\"0.99\"} > 0",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "{{service}} · storages p99",
-          "range": true,
-          "refId": "H"
-        }
-      ],
-      "title": "Active multiproof workers",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic-by-name"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 0,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "showValues": false,
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          },
-          "unit": "none",
-          "min": 0
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 113
+        "y": 89
       },
       "id": 32,
       "options": {
@@ -2700,8 +2076,8 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 12,
-        "y": 113
+        "x": 0,
+        "y": 97
       },
       "id": 33,
       "options": {
@@ -2733,312 +2109,6 @@
         }
       ],
       "title": "Total multiproof storage nodes",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic-by-name"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 0,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "showValues": false,
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          },
-          "unit": "none",
-          "min": 0
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 121
-      },
-      "id": 34,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "12.2.1",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "reth_sparse_state_trie_multiproof_skipped_account_nodes{chain=\"$chain\", role=~\"$role\", service=~\"$service\",quantile=~\"(0|0.5|0.9|0.95|1)\"}",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "{{service}} · Account {{quantile}} percentile",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "title": "Redundant multiproof account nodes",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic-by-name"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 0,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "showValues": false,
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          },
-          "unit": "none",
-          "min": 0
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 121
-      },
-      "id": 35,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "12.2.1",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "reth_sparse_state_trie_multiproof_skipped_storage_nodes{chain=\"$chain\", role=~\"$role\", service=~\"$service\",quantile=~\"(0|0.5|0.9|0.95|1)\"}",
-          "instant": false,
-          "legendFormat": "{{service}} · Storage {{quantile}} percentile",
-          "range": true,
-          "refId": "Branch Nodes"
-        }
-      ],
-      "title": "Redundant multiproof storage nodes",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "description": "How much time is spent in the multiproof task",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic-by-name"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 0,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "showValues": false,
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          },
-          "unit": "s",
-          "min": 0
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 129
-      },
-      "id": 36,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "12.2.1",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "reth_tree_root_multiproof_task_total_duration_histogram{chain=\"$chain\", role=~\"$role\", service=~\"$service\",quantile=~\"(0|0.5|0.9|0.95|1)\"} > 0",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "{{service}} · Task duration {{quantile}} percentile",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "title": "Proof fetching total duration",
       "type": "timeseries"
     },
     {
@@ -3109,7 +2179,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 129
+        "y": 97
       },
       "id": 37,
       "options": {
@@ -3148,12 +2218,12 @@
       "type": "timeseries"
     },
     {
-      "collapsed": false,
+      "collapsed": true,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 137
+        "y": 105
       },
       "id": 38,
       "panels": [
@@ -3307,7 +2377,7 @@
               "color": "rgba(255,0,255,0.7)"
             },
             "filterValues": {
-              "le": 1e-09
+              "le": 1E-9
             },
             "legend": {
               "show": true
@@ -3539,7 +2609,7 @@
               },
               "editorMode": "code",
               "exemplar": false,
-              "expr": "max by (service, outcome, mode) (max_over_time(reth_database_transaction_open_duration_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", outcome!=\"\", quantile=\"1.0\"}[$__interval])) > 0",
+              "expr": "max by (service, outcome, mode) (max_over_time(reth_database_transaction_open_duration_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", outcome!=\"\", quantile=\"1\"}[$__interval])) > 0",
               "format": "time_series",
               "instant": false,
               "legendFormat": "{{service}} · {{mode}}, {{outcome}}",
@@ -4054,7 +3124,7 @@
               },
               "editorMode": "code",
               "exemplar": false,
-              "expr": "max(max_over_time(reth_database_operation_large_value_duration_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"1.0\"}[$__interval])) by (service, table) > 0",
+              "expr": "max(max_over_time(reth_database_operation_large_value_duration_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"1\"}[$__interval])) by (service, table) > 0",
               "format": "time_series",
               "instant": false,
               "legendFormat": "{{service}} · {{table}}",
@@ -4485,12 +3555,32 @@
               },
               "editorMode": "code",
               "exemplar": false,
-              "expr": "sort_desc(reth_db_table_pages{chain=\"$chain\", role=~\"$role\", service=~\"$service\", type=\"overflow\"} != 0)",
+              "expr": "sort_desc(sum by (service, table) (reth_db_table_pages{chain=\"$chain\", role=~\"$role\", service=~\"$service\", type=\"overflow\"}) > 0)",
               "format": "table",
               "instant": true,
               "legendFormat": "{{service}}",
               "range": false,
               "refId": "A"
+            }
+          ],
+          "transformations": [
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "Time": true
+                },
+                "indexByName": {
+                  "service": 0,
+                  "table": 1,
+                  "Value": 2
+                },
+                "renameByName": {
+                  "service": "Service",
+                  "table": "Table",
+                  "Value": "Overflow pages"
+                }
+              }
             }
           ],
           "title": "DB Overflow Pages By Table",
@@ -4705,12 +3795,32 @@
               },
               "editorMode": "code",
               "exemplar": false,
-              "expr": "reth_static_files_segment_entries{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "sum by (service, segment) (reth_static_files_segment_entries{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "format": "table",
               "instant": true,
               "legendFormat": "{{service}}",
               "range": false,
               "refId": "A"
+            }
+          ],
+          "transformations": [
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "Time": true
+                },
+                "indexByName": {
+                  "service": 0,
+                  "segment": 1,
+                  "Value": 2
+                },
+                "renameByName": {
+                  "service": "Service",
+                  "segment": "Segment",
+                  "Value": "Entries"
+                }
+              }
             }
           ],
           "title": "Static Files Entries Per Segment",
@@ -4850,12 +3960,32 @@
               },
               "editorMode": "code",
               "exemplar": false,
-              "expr": "reth_static_files_segment_files{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "sum by (service, segment) (reth_static_files_segment_files{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "format": "table",
               "instant": true,
               "legendFormat": "{{service}}",
               "range": false,
               "refId": "A"
+            }
+          ],
+          "transformations": [
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "Time": true
+                },
+                "indexByName": {
+                  "service": 0,
+                  "segment": 1,
+                  "Value": 2
+                },
+                "renameByName": {
+                  "service": "Service",
+                  "segment": "Segment",
+                  "Value": "Files"
+                }
+              }
             }
           ],
           "title": "Static Files File Count Per Segment",
@@ -5054,7 +4184,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "max(max_over_time(reth_static_files_jar_provider_write_duration_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", operation=\"commit-writer\", quantile=\"1.0\"}[$__interval])) by (service, segment) > 0",
+              "expr": "max by (service, segment) (max_over_time(reth_static_files_jar_provider_write_duration_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", operation=\"commit-writer\", quantile=\"1\"}[$__interval])) or (0 * max by (service, segment) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}))",
               "legendFormat": "{{service}} · {{segment}}",
               "range": true,
               "refId": "A"
@@ -5474,7 +4604,7 @@
       "type": "row"
     },
     {
-      "collapsed": false,
+      "collapsed": true,
       "gridPos": {
         "h": 1,
         "w": 24,
@@ -5601,7 +4731,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "code",
-              "expr": "sum(reth_rpc_server_connections_connections_opened_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} - reth_rpc_server_connections_connections_closed_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) by (service, transport) > 0",
+              "expr": "(sum by (service, transport) (reth_rpc_server_connections_connections_opened_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) - (sum by (service, transport) (reth_rpc_server_connections_connections_closed_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) or (0 * sum by (service, transport) (reth_rpc_server_connections_connections_opened_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})))) or label_replace(0 * reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}, \"transport\", \"http\", \"service\", \".*\")",
               "format": "time_series",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
@@ -5663,7 +4793,7 @@
               "color": "rgba(255,0,255,0.7)"
             },
             "filterValues": {
-              "le": 1e-09
+              "le": 1E-9
             },
             "legend": {
               "show": true
@@ -5855,7 +4985,7 @@
               "color": "rgba(255,0,255,0.7)"
             },
             "filterValues": {
-              "le": 1e-09
+              "le": 1E-9
             },
             "legend": {
               "show": true
@@ -6263,7 +5393,7 @@
       "type": "row"
     },
     {
-      "collapsed": false,
+      "collapsed": true,
       "gridPos": {
         "h": 1,
         "w": 24,
@@ -6670,7 +5800,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "reth_executor_spawn_critical_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}- reth_executor_spawn_finished_critical_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "(reth_executor_spawn_critical_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} or (0 * reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})) - (reth_executor_spawn_finished_critical_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} or (0 * reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}))",
               "hide": false,
               "instant": false,
               "legendFormat": "{{service}} · Tasks running",
@@ -6788,7 +5918,7 @@
               "disableTextWrap": false,
               "editorMode": "code",
               "exemplar": false,
-              "expr": "rate(reth_executor_spawn_regular_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+              "expr": "rate(reth_executor_spawn_regular_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]) or (0 * reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -6804,7 +5934,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "reth_executor_spawn_regular_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} - reth_executor_spawn_finished_regular_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "(reth_executor_spawn_regular_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} or (0 * reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})) - (reth_executor_spawn_finished_regular_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} or (0 * reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}))",
               "hide": false,
               "instant": false,
               "legendFormat": "{{service}} · Tasks running",
@@ -6922,7 +6052,7 @@
               "disableTextWrap": false,
               "editorMode": "code",
               "exemplar": false,
-              "expr": "rate(reth_executor_spawn_regular_blocking_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+              "expr": "rate(reth_executor_spawn_regular_blocking_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]) or (0 * reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -6938,7 +6068,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "reth_executor_spawn_regular_blocking_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} - reth_executor_spawn_finished_regular_blocking_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "(reth_executor_spawn_regular_blocking_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} or (0 * reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})) - (reth_executor_spawn_finished_regular_blocking_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} or (0 * reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}))",
               "hide": false,
               "instant": false,
               "legendFormat": "{{service}} · Tasks running",
@@ -7055,7 +6185,7 @@
       "type": "row"
     },
     {
-      "collapsed": false,
+      "collapsed": true,
       "gridPos": {
         "h": 1,
         "w": 24,
@@ -9715,7 +8845,7 @@
       "type": "row"
     },
     {
-      "collapsed": false,
+      "collapsed": true,
       "gridPos": {
         "h": 1,
         "w": 24,
@@ -10051,18 +9181,6 @@
               "legendFormat": "{{service}} · Failed Pending Sessions",
               "range": true,
               "refId": "B"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "editorMode": "builder",
-              "expr": "rate(reth_network_invalid_messages_received_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
-              "hide": false,
-              "legendFormat": "{{service}} · Invalid Messages",
-              "range": true,
-              "refId": "C"
             }
           ],
           "title": "P2P Errors",
@@ -10354,7 +9472,7 @@
       "type": "row"
     },
     {
-      "collapsed": false,
+      "collapsed": true,
       "gridPos": {
         "h": 1,
         "w": 24,
@@ -11520,1516 +10638,6 @@
         }
       ],
       "title": "State & History",
-      "type": "row"
-    },
-    {
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 143
-      },
-      "id": 67,
-      "panels": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic-by-name"
-              },
-              "custom": {
-                "axisBorderShow": false,
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "barWidthFactor": 0.6,
-                "drawStyle": "line",
-                "fillOpacity": 0,
-                "gradientMode": "none",
-                "hideFrom": {
-                  "legend": false,
-                  "tooltip": false,
-                  "viz": false
-                },
-                "insertNulls": false,
-                "lineInterpolation": "linear",
-                "lineWidth": 1,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "auto",
-                "showValues": false,
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": 0
-                  },
-                  {
-                    "color": "red",
-                    "value": 80
-                  }
-                ]
-              },
-              "min": 0
-            },
-            "overrides": [
-              {
-                "matcher": {
-                  "id": "byFrameRefID",
-                  "options": "C"
-                },
-                "properties": [
-                  {
-                    "id": "custom.axisPlacement",
-                    "value": "right"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byFrameRefID",
-                  "options": "D"
-                },
-                "properties": [
-                  {
-                    "id": "custom.axisPlacement",
-                    "value": "right"
-                  }
-                ]
-              }
-            ]
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 12,
-            "x": 0,
-            "y": 244
-          },
-          "id": 68,
-          "options": {
-            "legend": {
-              "calcs": [],
-              "displayMode": "list",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "hideZeros": false,
-              "mode": "multi",
-              "sort": "none"
-            }
-          },
-          "pluginVersion": "12.2.1",
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "editorMode": "builder",
-              "expr": "reth_downloaders_headers_total_downloaded{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
-              "legendFormat": "{{service}} · Downloaded",
-              "range": true,
-              "refId": "A"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "editorMode": "builder",
-              "expr": "reth_downloaders_headers_total_flushed{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
-              "hide": false,
-              "legendFormat": "{{service}} · Flushed",
-              "range": true,
-              "refId": "B"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "editorMode": "builder",
-              "expr": "rate(reth_downloaders_headers_total_downloaded{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
-              "hide": false,
-              "instant": false,
-              "legendFormat": "{{service}} · Downloaded/s",
-              "range": true,
-              "refId": "C"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "editorMode": "builder",
-              "expr": "rate(reth_downloaders_headers_total_flushed{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
-              "hide": false,
-              "legendFormat": "{{service}} · Flushed/s",
-              "range": true,
-              "refId": "D"
-            }
-          ],
-          "title": "Headers I/O",
-          "type": "timeseries"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "description": "Internal errors in the header downloader. These are expected to happen from time to time.",
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic-by-name"
-              },
-              "custom": {
-                "axisBorderShow": false,
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "barWidthFactor": 0.6,
-                "drawStyle": "line",
-                "fillOpacity": 0,
-                "gradientMode": "none",
-                "hideFrom": {
-                  "legend": false,
-                  "tooltip": false,
-                  "viz": false
-                },
-                "insertNulls": false,
-                "lineInterpolation": "linear",
-                "lineWidth": 1,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "auto",
-                "showValues": false,
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": 0
-                  },
-                  {
-                    "color": "red",
-                    "value": 80
-                  }
-                ]
-              },
-              "unit": "cps",
-              "min": 0
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 12,
-            "x": 12,
-            "y": 244
-          },
-          "id": 69,
-          "options": {
-            "legend": {
-              "calcs": [],
-              "displayMode": "list",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "hideZeros": false,
-              "mode": "multi",
-              "sort": "none"
-            }
-          },
-          "pluginVersion": "12.2.1",
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "editorMode": "builder",
-              "expr": "rate(reth_downloaders_headers_timeout_errors{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
-              "legendFormat": "{{service}} · Request timed out",
-              "range": true,
-              "refId": "A"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "editorMode": "builder",
-              "expr": "rate(reth_downloaders_headers_unexpected_errors{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
-              "hide": false,
-              "legendFormat": "{{service}} · Unexpected error",
-              "range": true,
-              "refId": "B"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "editorMode": "builder",
-              "expr": "rate(reth_downloaders_headers_validation_errors{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
-              "hide": false,
-              "legendFormat": "{{service}} · Invalid response",
-              "range": true,
-              "refId": "C"
-            }
-          ],
-          "title": "Headers Errors",
-          "type": "timeseries"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "description": "The number of connected peers and in-progress requests for headers.",
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic-by-name"
-              },
-              "custom": {
-                "axisBorderShow": false,
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "barWidthFactor": 0.6,
-                "drawStyle": "line",
-                "fillOpacity": 0,
-                "gradientMode": "none",
-                "hideFrom": {
-                  "legend": false,
-                  "tooltip": false,
-                  "viz": false
-                },
-                "insertNulls": false,
-                "lineInterpolation": "linear",
-                "lineWidth": 1,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "auto",
-                "showValues": false,
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": 0
-                  },
-                  {
-                    "color": "red",
-                    "value": 80
-                  }
-                ]
-              },
-              "min": 0
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 12,
-            "x": 0,
-            "y": 252
-          },
-          "id": 70,
-          "options": {
-            "legend": {
-              "calcs": [],
-              "displayMode": "list",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "hideZeros": false,
-              "mode": "multi",
-              "sort": "none"
-            }
-          },
-          "pluginVersion": "12.2.1",
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "editorMode": "builder",
-              "expr": "reth_downloaders_headers_in_flight_requests{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
-              "legendFormat": "{{service}} · In flight requests",
-              "range": true,
-              "refId": "A"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "editorMode": "builder",
-              "expr": "reth_network_connected_peers{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
-              "hide": false,
-              "legendFormat": "{{service}} · Connected peers",
-              "range": true,
-              "refId": "B"
-            }
-          ],
-          "title": "Headers Requests",
-          "type": "timeseries"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "description": "The internal state of the headers downloader: the number of downloaded headers, and the number of headers sent to the header stage.",
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic-by-name"
-              },
-              "custom": {
-                "axisBorderShow": false,
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "barWidthFactor": 0.6,
-                "drawStyle": "line",
-                "fillOpacity": 0,
-                "gradientMode": "none",
-                "hideFrom": {
-                  "legend": false,
-                  "tooltip": false,
-                  "viz": false
-                },
-                "insertNulls": false,
-                "lineInterpolation": "linear",
-                "lineWidth": 1,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "auto",
-                "showValues": false,
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": 0
-                  },
-                  {
-                    "color": "red",
-                    "value": 80
-                  }
-                ]
-              },
-              "unit": "locale",
-              "min": 0
-            },
-            "overrides": [
-              {
-                "matcher": {
-                  "id": "byFrameRefID",
-                  "options": "C"
-                },
-                "properties": [
-                  {
-                    "id": "custom.axisPlacement",
-                    "value": "right"
-                  },
-                  {
-                    "id": "unit",
-                    "value": "ops"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byFrameRefID",
-                  "options": "D"
-                },
-                "properties": [
-                  {
-                    "id": "custom.axisPlacement",
-                    "value": "right"
-                  },
-                  {
-                    "id": "unit",
-                    "value": "ops"
-                  }
-                ]
-              }
-            ]
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 12,
-            "x": 12,
-            "y": 252
-          },
-          "id": 71,
-          "options": {
-            "legend": {
-              "calcs": [],
-              "displayMode": "list",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "hideZeros": false,
-              "mode": "multi",
-              "sort": "none"
-            }
-          },
-          "pluginVersion": "12.2.1",
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "editorMode": "builder",
-              "expr": "reth_downloaders_bodies_total_downloaded{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
-              "legendFormat": "{{service}} · Downloaded",
-              "range": true,
-              "refId": "A"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "editorMode": "builder",
-              "expr": "reth_downloaders_bodies_total_flushed{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
-              "hide": false,
-              "legendFormat": "{{service}} · Flushed",
-              "range": true,
-              "refId": "B"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "editorMode": "builder",
-              "expr": "rate(reth_downloaders_bodies_total_flushed{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
-              "hide": false,
-              "legendFormat": "{{service}} · Flushed/s",
-              "range": true,
-              "refId": "C"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "editorMode": "builder",
-              "expr": "rate(reth_downloaders_bodies_total_downloaded{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
-              "hide": false,
-              "legendFormat": "{{service}} · Downloaded/s",
-              "range": true,
-              "refId": "D"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "editorMode": "builder",
-              "expr": "reth_downloaders_bodies_buffered_responses{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
-              "hide": false,
-              "legendFormat": "{{service}} · Buffered responses",
-              "range": true,
-              "refId": "E"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "editorMode": "builder",
-              "expr": "reth_downloaders_bodies_buffered_blocks{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
-              "hide": false,
-              "legendFormat": "{{service}} · Buffered blocks",
-              "range": true,
-              "refId": "F"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "editorMode": "builder",
-              "expr": "reth_downloaders_bodies_queued_blocks{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
-              "hide": false,
-              "legendFormat": "{{service}} · Queued blocks",
-              "range": true,
-              "refId": "G"
-            }
-          ],
-          "title": "Bodies I/O",
-          "type": "timeseries"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "description": "Internal errors in the bodies downloader. These are expected to happen from time to time.",
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic-by-name"
-              },
-              "custom": {
-                "axisBorderShow": false,
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "barWidthFactor": 0.6,
-                "drawStyle": "line",
-                "fillOpacity": 0,
-                "gradientMode": "none",
-                "hideFrom": {
-                  "legend": false,
-                  "tooltip": false,
-                  "viz": false
-                },
-                "insertNulls": false,
-                "lineInterpolation": "linear",
-                "lineWidth": 1,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "auto",
-                "showValues": false,
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "mappings": [],
-              "min": 0,
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": 0
-                  }
-                ]
-              },
-              "unit": "cps"
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 12,
-            "x": 0,
-            "y": 260
-          },
-          "id": 72,
-          "options": {
-            "legend": {
-              "calcs": [],
-              "displayMode": "list",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "hideZeros": false,
-              "mode": "multi",
-              "sort": "none"
-            }
-          },
-          "pluginVersion": "12.2.1",
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "editorMode": "builder",
-              "expr": "rate(reth_downloaders_bodies_timeout_errors{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
-              "legendFormat": "{{service}} · Request timed out",
-              "range": true,
-              "refId": "A"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "editorMode": "builder",
-              "expr": "rate(reth_downloaders_bodies_unexpected_errors{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
-              "hide": false,
-              "legendFormat": "{{service}} · Unexpected error",
-              "range": true,
-              "refId": "B"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "editorMode": "builder",
-              "expr": "rate(reth_downloaders_bodies_validation_errors{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
-              "hide": false,
-              "legendFormat": "{{service}} · Invalid response",
-              "range": true,
-              "refId": "C"
-            }
-          ],
-          "title": "Bodies Errors",
-          "type": "timeseries"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "description": "The number of connected peers and in-progress requests for bodies.",
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic-by-name"
-              },
-              "custom": {
-                "axisBorderShow": false,
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "barWidthFactor": 0.6,
-                "drawStyle": "line",
-                "fillOpacity": 0,
-                "gradientMode": "none",
-                "hideFrom": {
-                  "legend": false,
-                  "tooltip": false,
-                  "viz": false
-                },
-                "insertNulls": false,
-                "lineInterpolation": "linear",
-                "lineWidth": 1,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "auto",
-                "showValues": false,
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": 0
-                  },
-                  {
-                    "color": "red",
-                    "value": 80
-                  }
-                ]
-              },
-              "min": 0
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 12,
-            "x": 12,
-            "y": 260
-          },
-          "id": 73,
-          "options": {
-            "legend": {
-              "calcs": [],
-              "displayMode": "list",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "hideZeros": false,
-              "mode": "multi",
-              "sort": "none"
-            }
-          },
-          "pluginVersion": "12.2.1",
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "editorMode": "builder",
-              "expr": "reth_downloaders_bodies_in_flight_requests{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
-              "legendFormat": "{{service}} · In flight requests",
-              "range": true,
-              "refId": "A"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "editorMode": "builder",
-              "expr": "reth_network_connected_peers{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
-              "hide": false,
-              "legendFormat": "{{service}} · Connected peers",
-              "range": true,
-              "refId": "B"
-            }
-          ],
-          "title": "Bodies Requests",
-          "type": "timeseries"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "description": "The number of blocks and size in bytes of those blocks",
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic-by-name"
-              },
-              "custom": {
-                "axisBorderShow": false,
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "barWidthFactor": 0.6,
-                "drawStyle": "line",
-                "fillOpacity": 0,
-                "gradientMode": "none",
-                "hideFrom": {
-                  "legend": false,
-                  "tooltip": false,
-                  "viz": false
-                },
-                "insertNulls": false,
-                "lineInterpolation": "linear",
-                "lineWidth": 1,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "auto",
-                "showValues": false,
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": 0
-                  },
-                  {
-                    "color": "red",
-                    "value": 80
-                  }
-                ]
-              },
-              "unit": "bytes",
-              "min": 0
-            },
-            "overrides": [
-              {
-                "matcher": {
-                  "id": "byFrameRefID",
-                  "options": "B"
-                },
-                "properties": [
-                  {
-                    "id": "custom.axisPlacement",
-                    "value": "right"
-                  },
-                  {
-                    "id": "unit",
-                    "value": "blocks"
-                  }
-                ]
-              }
-            ]
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 12,
-            "x": 0,
-            "y": 268
-          },
-          "id": 74,
-          "options": {
-            "legend": {
-              "calcs": [],
-              "displayMode": "list",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "hideZeros": false,
-              "mode": "multi",
-              "sort": "none"
-            }
-          },
-          "pluginVersion": "12.2.1",
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "editorMode": "builder",
-              "expr": "reth_downloaders_bodies_buffered_blocks_size_bytes{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
-              "hide": false,
-              "legendFormat": "{{service}} · Buffered blocks size ",
-              "range": true,
-              "refId": "A"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "editorMode": "builder",
-              "expr": "reth_downloaders_bodies_buffered_blocks{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
-              "hide": false,
-              "legendFormat": "{{service}} · Buffered blocks",
-              "range": true,
-              "refId": "B"
-            }
-          ],
-          "title": "Downloader buffer",
-          "type": "timeseries"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "description": "",
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic-by-name"
-              },
-              "custom": {
-                "axisBorderShow": false,
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "barWidthFactor": 0.6,
-                "drawStyle": "line",
-                "fillOpacity": 0,
-                "gradientMode": "none",
-                "hideFrom": {
-                  "legend": false,
-                  "tooltip": false,
-                  "viz": false
-                },
-                "insertNulls": false,
-                "lineInterpolation": "linear",
-                "lineWidth": 1,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "never",
-                "showValues": false,
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": 0
-                  },
-                  {
-                    "color": "red",
-                    "value": 80
-                  }
-                ]
-              },
-              "unit": "short",
-              "min": 0
-            },
-            "overrides": [
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "http"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "HTTP"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "ws"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "WebSocket"
-                  }
-                ]
-              }
-            ]
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 12,
-            "x": 12,
-            "y": 268
-          },
-          "id": 76,
-          "options": {
-            "legend": {
-              "calcs": [],
-              "displayMode": "list",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "hideZeros": false,
-              "maxHeight": 600,
-              "mode": "multi",
-              "sort": "none"
-            }
-          },
-          "pluginVersion": "12.2.1",
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "disableTextWrap": false,
-              "editorMode": "builder",
-              "expr": "rate(reth_network_eth_headers_requests_received_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
-              "format": "time_series",
-              "fullMetaSearch": false,
-              "includeNullMetadata": true,
-              "legendFormat": "{{service}} · Headers Requests/s",
-              "range": true,
-              "refId": "A",
-              "useBackend": false
-            }
-          ],
-          "title": "Headers Requests Received",
-          "type": "timeseries"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "description": "",
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic-by-name"
-              },
-              "custom": {
-                "axisBorderShow": false,
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "barWidthFactor": 0.6,
-                "drawStyle": "line",
-                "fillOpacity": 0,
-                "gradientMode": "none",
-                "hideFrom": {
-                  "legend": false,
-                  "tooltip": false,
-                  "viz": false
-                },
-                "insertNulls": false,
-                "lineInterpolation": "linear",
-                "lineWidth": 1,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "never",
-                "showValues": false,
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": 0
-                  },
-                  {
-                    "color": "red",
-                    "value": 80
-                  }
-                ]
-              },
-              "unit": "short",
-              "min": 0
-            },
-            "overrides": [
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "http"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "HTTP"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "ws"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "WebSocket"
-                  }
-                ]
-              }
-            ]
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 12,
-            "x": 0,
-            "y": 276
-          },
-          "id": 77,
-          "options": {
-            "legend": {
-              "calcs": [],
-              "displayMode": "list",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "hideZeros": false,
-              "maxHeight": 600,
-              "mode": "multi",
-              "sort": "none"
-            }
-          },
-          "pluginVersion": "12.2.1",
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "disableTextWrap": false,
-              "editorMode": "builder",
-              "expr": "rate(reth_network_eth_receipts_requests_received_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
-              "format": "time_series",
-              "fullMetaSearch": false,
-              "includeNullMetadata": true,
-              "legendFormat": "{{service}} · Receipts Requests/s",
-              "range": true,
-              "refId": "A",
-              "useBackend": false
-            }
-          ],
-          "title": "Receipts Requests Received",
-          "type": "timeseries"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "description": "",
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic-by-name"
-              },
-              "custom": {
-                "axisBorderShow": false,
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "barWidthFactor": 0.6,
-                "drawStyle": "line",
-                "fillOpacity": 0,
-                "gradientMode": "none",
-                "hideFrom": {
-                  "legend": false,
-                  "tooltip": false,
-                  "viz": false
-                },
-                "insertNulls": false,
-                "lineInterpolation": "linear",
-                "lineWidth": 1,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "never",
-                "showValues": false,
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": 0
-                  },
-                  {
-                    "color": "red",
-                    "value": 80
-                  }
-                ]
-              },
-              "unit": "short",
-              "min": 0
-            },
-            "overrides": [
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "http"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "HTTP"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "ws"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "WebSocket"
-                  }
-                ]
-              }
-            ]
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 12,
-            "x": 12,
-            "y": 276
-          },
-          "id": 78,
-          "options": {
-            "legend": {
-              "calcs": [],
-              "displayMode": "list",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "hideZeros": false,
-              "maxHeight": 600,
-              "mode": "multi",
-              "sort": "none"
-            }
-          },
-          "pluginVersion": "12.2.1",
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "disableTextWrap": false,
-              "editorMode": "builder",
-              "expr": "rate(reth_network_eth_bodies_requests_received_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
-              "format": "time_series",
-              "fullMetaSearch": false,
-              "includeNullMetadata": true,
-              "legendFormat": "{{service}} · Bodies Requests/s",
-              "range": true,
-              "refId": "A",
-              "useBackend": false
-            }
-          ],
-          "title": "Bodies Requests Received",
-          "type": "timeseries"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "description": "",
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic-by-name"
-              },
-              "custom": {
-                "axisBorderShow": false,
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "barWidthFactor": 0.6,
-                "drawStyle": "line",
-                "fillOpacity": 0,
-                "gradientMode": "none",
-                "hideFrom": {
-                  "legend": false,
-                  "tooltip": false,
-                  "viz": false
-                },
-                "insertNulls": false,
-                "lineInterpolation": "linear",
-                "lineWidth": 1,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "never",
-                "showValues": false,
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": 0
-                  },
-                  {
-                    "color": "red",
-                    "value": 80
-                  }
-                ]
-              },
-              "unit": "short",
-              "min": 0
-            },
-            "overrides": [
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "http"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "HTTP"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "ws"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "WebSocket"
-                  }
-                ]
-              }
-            ]
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 24,
-            "x": 0,
-            "y": 284
-          },
-          "id": 79,
-          "options": {
-            "legend": {
-              "calcs": [],
-              "displayMode": "list",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "hideZeros": false,
-              "maxHeight": 600,
-              "mode": "multi",
-              "sort": "none"
-            }
-          },
-          "pluginVersion": "12.2.1",
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "disableTextWrap": false,
-              "editorMode": "builder",
-              "expr": "rate(reth_network_eth_node_data_requests_received_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
-              "format": "time_series",
-              "fullMetaSearch": false,
-              "includeNullMetadata": true,
-              "legendFormat": "{{service}} · Node Data Requests/s",
-              "range": true,
-              "refId": "A",
-              "useBackend": false
-            }
-          ],
-          "title": "Node Data Requests Received",
-          "type": "timeseries"
-        }
-      ],
-      "title": "Sync & Downloaders",
       "type": "row"
     }
   ],
