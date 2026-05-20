@@ -60,7 +60,7 @@ jobs:
     needs: extract-version
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ needs.extract-version.outputs.ref }}
           persist-credentials: false
@@ -91,7 +91,7 @@ jobs:
             archive: morph-reth-${{ needs.extract-version.outputs.version }}-aarch64-linux
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ needs.extract-version.outputs.ref }}
           persist-credentials: false
@@ -161,7 +161,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ needs.extract-version.outputs.ref }}
           fetch-depth: 0
