@@ -199,10 +199,9 @@ impl MorphTransactionParts {
         // field at all.
         let tx_type = match self.tx_type {
             Some(t) => t,
-            None => {
-                self.tx_type(data_index)
-                    .ok_or(SchemaError::InvalidTransactionType)? as u8
-            }
+            None => self
+                .tx_type(data_index)
+                .ok_or(SchemaError::InvalidTransactionType)? as u8,
         };
         let gas_limit = self
             .gas_limit
@@ -311,7 +310,9 @@ impl MorphTransactionParts {
             // state divergence downstream.
             return Err(SchemaError::BlobTxRequiresTxBytes);
         } else if !tx.is_l1_msg() {
-            let fallback_chain_id = chain_id.and_then(|id| id.try_into().ok()).unwrap_or_default();
+            let fallback_chain_id = chain_id
+                .and_then(|id| id.try_into().ok())
+                .unwrap_or_default();
             let rlp_bytes = tx.encode_for_l1_fee(fallback_chain_id);
             tx = tx.with_rlp_bytes(rlp_bytes);
         }
@@ -538,5 +539,4 @@ mod tests {
             ),
         }
     }
-
 }
