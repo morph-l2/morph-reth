@@ -1,76 +1,16 @@
 //! Morph transaction conversion for `eth_` RPC responses.
 
 use crate::MorphTransactionRequest;
-use crate::types::transaction::MorphRpcTransaction;
-use alloy_consensus::{
-    EthereumTxEnvelope, SignableTransaction, Transaction, TxEip4844, transaction::Recovered,
-};
+use alloy_consensus::{EthereumTxEnvelope, SignableTransaction, TxEip4844};
 use alloy_network::TxSigner;
-use alloy_primitives::{Address, Signature, TxKind, U64, U256};
-use alloy_rpc_types_eth::{AccessList, Transaction as RpcTransaction, TransactionInfo};
-use reth_rpc_convert::{
-    FromConsensusTx, SignTxRequestError, SignableTxRequest, TryIntoSimTx, TryIntoTxEnv,
-};
+use alloy_primitives::{Signature, TxKind, U64, U256};
+use alloy_rpc_types_eth::AccessList;
+use reth_rpc_convert::{SignTxRequestError, SignableTxRequest, TryIntoSimTx, TryIntoTxEnv};
 use reth_rpc_eth_types::EthApiError;
-use std::convert::Infallible;
 
 use morph_primitives::{MorphTxEnvelope, TxMorph};
 use morph_revm::{MorphBlockEnv, MorphTxEnv};
 use reth_evm::EvmEnv;
-
-/// Converts a consensus [`MorphTxEnvelope`] to an RPC [`MorphRpcTransaction`].
-impl FromConsensusTx<MorphTxEnvelope> for MorphRpcTransaction {
-    type TxInfo = TransactionInfo;
-    type Err = Infallible;
-
-    fn from_consensus_tx(
-        tx: MorphTxEnvelope,
-        signer: Address,
-        tx_info: Self::TxInfo,
-    ) -> Result<Self, Self::Err> {
-        let (sender, queue_index) = match &tx {
-            MorphTxEnvelope::L1Msg(msg) => (Some(msg.sender), Some(U64::from(msg.queue_index))),
-            _ => (None, None),
-        };
-
-        // Extract MorphTx-specific fields
-        let version = tx.version();
-        let fee_token_id = tx.fee_token_id().map(U64::from);
-        let fee_limit = tx.fee_limit();
-        let reference = tx.reference();
-        let memo = tx.memo().cloned();
-
-        let effective_gas_price = tx_info.base_fee.map(|base_fee| {
-            tx.effective_tip_per_gas(base_fee)
-                .unwrap_or_default()
-                .saturating_add(base_fee as u128)
-        });
-
-        let inner = RpcTransaction {
-            inner: Recovered::new_unchecked(tx, signer),
-            block_hash: tx_info.block_hash,
-            block_number: tx_info.block_number,
-            // alloy 2.0 added an explicit `block_timestamp` to RPC transactions
-            // so receipts/transactions returned by `eth_*` align with engine API
-            // semantics. `TransactionInfo` already plumbs this through from the
-            // block header, so we just forward it.
-            block_timestamp: tx_info.block_timestamp,
-            transaction_index: tx_info.index,
-            effective_gas_price,
-        };
-
-        Ok(Self {
-            inner,
-            sender,
-            queue_index,
-            version,
-            fee_token_id,
-            fee_limit,
-            reference,
-            memo,
-        })
-    }
-}
 
 /// Converts a [`MorphTransactionRequest`] into a simulated transaction envelope.
 ///
@@ -288,9 +228,11 @@ fn try_build_morph_tx_from_request(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::{B256, Bytes, address};
-    use alloy_rpc_types_eth::TransactionRequest;
+    use crate::types::transaction::MorphRpcTransaction;
+    use alloy_primitives::{Address, B256, Bytes, address};
+    use alloy_rpc_types_eth::{TransactionInfo, TransactionRequest};
     use morph_chainspec::MorphHardfork;
+    use reth_rpc_convert::FromConsensusTx;
     use revm::context::{BlockEnv, CfgEnv};
 
     /// Helper function to create a basic TransactionRequest for testing
@@ -754,14 +696,20 @@ mod tests {
         };
 
         let rpc_tx = MorphRpcTransaction::from_consensus_tx(tx, signer, tx_info).unwrap();
-        assert_eq!(
-            rpc_tx.sender,
-            Some(address!("000000000000000000000000000000000000dead"))
-        );
-        assert_eq!(rpc_tx.queue_index, Some(U64::from(42)));
-        // L1 messages don't have MorphTx-specific fields
-        assert!(rpc_tx.version.is_none());
-        assert!(rpc_tx.fee_token_id.is_none());
+        match rpc_tx.inner.inner() {
+            MorphTxEnvelope::L1Msg(msg) => {
+                assert_eq!(
+                    msg.sender,
+                    address!("000000000000000000000000000000000000dead")
+                );
+                assert_eq!(msg.queue_index, 42);
+            }
+            other => panic!("expected L1Msg variant, got {other:?}"),
+        }
+
+        let json = serde_json::to_string(&rpc_tx).unwrap();
+        assert_eq!(json.matches("\"sender\"").count(), 1);
+        assert_eq!(json.matches("\"queueIndex\"").count(), 1);
     }
 
     #[test]
@@ -797,18 +745,68 @@ mod tests {
         };
 
         let rpc_tx = MorphRpcTransaction::from_consensus_tx(tx, signer, tx_info).unwrap();
-        // MorphTx should NOT have L1 message fields
-        assert!(rpc_tx.sender.is_none());
-        assert!(rpc_tx.queue_index.is_none());
-        // Should have MorphTx-specific fields
-        assert_eq!(
-            rpc_tx.version,
-            Some(morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_1)
-        );
-        assert_eq!(rpc_tx.fee_token_id, Some(U64::from(3)));
-        assert_eq!(rpc_tx.fee_limit, Some(U256::from(100_000)));
-        assert!(rpc_tx.reference.is_some());
-        assert_eq!(rpc_tx.memo, Some(Bytes::from("hello")));
+        match rpc_tx.inner.inner() {
+            MorphTxEnvelope::Morph(signed) => {
+                assert_eq!(
+                    signed.tx().version,
+                    morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_1
+                );
+                assert_eq!(signed.tx().fee_token_id, 3);
+                assert_eq!(signed.tx().fee_limit, U256::from(100_000));
+                assert!(signed.tx().reference.is_some());
+                assert_eq!(signed.tx().memo, Some(Bytes::from("hello")));
+            }
+            other => panic!("expected Morph variant, got {other:?}"),
+        }
+
+        let json = serde_json::to_string(&rpc_tx).unwrap();
+        assert_eq!(json.matches("\"gas\"").count(), 1);
+        assert_eq!(json.matches("\"gasLimit\"").count(), 0);
+        assert_eq!(json.matches("\"version\"").count(), 1);
+        assert_eq!(json.matches("\"feeTokenID\"").count(), 1);
+        assert_eq!(json.matches("\"feeTokenId\"").count(), 0);
+        assert_eq!(json.matches("\"feeLimit\"").count(), 1);
+        assert_eq!(json.matches("\"reference\"").count(), 1);
+        assert_eq!(json.matches("\"memo\"").count(), 1);
+    }
+
+    #[test]
+    fn from_consensus_tx_morph_tx_v0_omits_v1_fields() {
+        use alloy_consensus::Signed;
+
+        let morph_tx = TxMorph {
+            chain_id: 2818,
+            nonce: 756,
+            gas_limit: 100_000,
+            max_fee_per_gas: 85_000_000,
+            max_priority_fee_per_gas: 83_000_000,
+            fee_token_id: 2,
+            fee_limit: U256::from(10_000_000),
+            ..Default::default()
+        };
+        let tx = MorphTxEnvelope::Morph(Signed::new_unchecked(
+            morph_tx,
+            Signature::new(U256::ZERO, U256::ZERO, false),
+            Default::default(),
+        ));
+        let tx_info = TransactionInfo {
+            hash: Some(B256::ZERO),
+            block_hash: Some(B256::random()),
+            block_number: Some(19720219),
+            block_timestamp: None,
+            index: Some(0),
+            base_fee: Some(1_000_000),
+        };
+
+        let rpc_tx = MorphRpcTransaction::from_consensus_tx(tx, Address::ZERO, tx_info).unwrap();
+        let json = serde_json::to_string(&rpc_tx).unwrap();
+
+        assert_eq!(json.matches("\"gas\"").count(), 1);
+        assert_eq!(json.matches("\"feeTokenID\"").count(), 1);
+        assert_eq!(json.matches("\"feeLimit\"").count(), 1);
+        assert!(!json.contains("\"version\""));
+        assert!(!json.contains("\"reference\""));
+        assert!(!json.contains("\"memo\""));
     }
 
     #[test]
@@ -838,14 +836,17 @@ mod tests {
         };
 
         let rpc_tx = MorphRpcTransaction::from_consensus_tx(tx, signer, tx_info).unwrap();
-        // Standard tx should have no L1 message or MorphTx fields
-        assert!(rpc_tx.sender.is_none());
-        assert!(rpc_tx.queue_index.is_none());
-        assert!(rpc_tx.version.is_none());
-        assert!(rpc_tx.fee_token_id.is_none());
-        assert!(rpc_tx.fee_limit.is_none());
-        assert!(rpc_tx.reference.is_none());
-        assert!(rpc_tx.memo.is_none());
+        assert!(matches!(rpc_tx.inner.inner(), MorphTxEnvelope::Eip1559(_)));
+
+        let json = serde_json::to_string(&rpc_tx).unwrap();
+        assert!(!json.contains("\"sender\""));
+        assert!(!json.contains("\"queueIndex\""));
+        assert!(!json.contains("\"version\""));
+        assert!(!json.contains("\"feeTokenID\""));
+        assert!(!json.contains("\"feeTokenId\""));
+        assert!(!json.contains("\"feeLimit\""));
+        assert!(!json.contains("\"reference\""));
+        assert!(!json.contains("\"memo\""));
     }
 
     #[test]
@@ -877,6 +878,6 @@ mod tests {
         // effective_gas_price = min(max_priority_fee, max_fee - base_fee) + base_fee
         // = min(500_000_000, 3_000_000_000 - 1_000_000_000) + 1_000_000_000
         // = 500_000_000 + 1_000_000_000 = 1_500_000_000
-        assert_eq!(rpc_tx.inner.effective_gas_price, Some(1_500_000_000));
+        assert_eq!(rpc_tx.effective_gas_price, Some(1_500_000_000));
     }
 }

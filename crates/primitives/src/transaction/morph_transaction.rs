@@ -31,6 +31,11 @@ pub const MORPH_TX_VERSION_1: u8 = 1;
 /// Maximum length of the memo field in bytes.
 pub const MAX_MEMO_LENGTH: usize = 64;
 
+#[cfg(feature = "serde")]
+fn is_morph_tx_version_0(version: &u8) -> bool {
+    *version == MORPH_TX_VERSION_0
+}
+
 /// Canonical MorphTx-specific fields shared across modules.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -38,7 +43,15 @@ pub const MAX_MEMO_LENGTH: usize = 64;
 pub struct MorphTxFields {
     #[cfg_attr(feature = "serde", serde(default, with = "alloy_serde::quantity"))]
     pub version: u8,
-    #[cfg_attr(feature = "serde", serde(default, with = "alloy_serde::quantity"))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(
+            default,
+            with = "alloy_serde::quantity",
+            rename = "feeTokenID",
+            alias = "feeTokenId"
+        )
+    )]
     pub fee_token_id: u16,
     #[cfg_attr(feature = "serde", serde(default))]
     pub fee_limit: U256,
@@ -78,7 +91,10 @@ pub struct TxMorph {
     /// in executing this transaction. This is paid up-front, before any
     /// computation is done and may not be increased later.
     /// Matches go-ethereum's `AltFeeTx.Gas` (uint64).
-    #[cfg_attr(feature = "serde", serde(with = "alloy_serde::quantity"))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(with = "alloy_serde::quantity", rename = "gas", alias = "gasLimit")
+    )]
     pub gas_limit: u64,
 
     /// A scalar value equal to the maximum amount of gas that should be used
@@ -113,13 +129,28 @@ pub struct TxMorph {
 
     /// Version of the Morph transaction format.
     /// Used for future extensibility.
-    #[cfg_attr(feature = "serde", serde(default, with = "alloy_serde::quantity"))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(
+            default,
+            with = "alloy_serde::quantity",
+            skip_serializing_if = "is_morph_tx_version_0"
+        )
+    )]
     pub version: u8,
 
     /// Token ID for alternative fee payment.
     /// This corresponds to the token registered in the L2 Token Registry.
     /// 0 means ETH payment, > 0 means ERC20 token payment.
-    #[cfg_attr(feature = "serde", serde(default, with = "alloy_serde::quantity"))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(
+            default,
+            with = "alloy_serde::quantity",
+            rename = "feeTokenID",
+            alias = "feeTokenId"
+        )
+    )]
     pub fee_token_id: u16,
 
     /// Maximum amount of tokens the sender is willing to pay as fee.
@@ -2140,6 +2171,22 @@ mod tests {
         assert_eq!(fields.fee_limit, U256::ZERO);
         assert_eq!(fields.reference, None);
         assert_eq!(fields.memo, None);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_morph_tx_fields_serde_uses_canonical_fee_token_id_key() {
+        let fields = MorphTxFields {
+            version: 1,
+            fee_token_id: 7,
+            fee_limit: U256::from(999u64),
+            reference: None,
+            memo: None,
+        };
+
+        let json = serde_json::to_value(fields).unwrap();
+        assert_eq!(json.get("feeTokenID"), Some(&serde_json::json!("0x7")));
+        assert!(json.get("feeTokenId").is_none());
     }
 
     #[cfg(feature = "reth-codec")]
