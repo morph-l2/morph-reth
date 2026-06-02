@@ -33,18 +33,19 @@ pub const L1_TX_TYPE_ID: u8 = 0x7E;
 /// Reference: <https://github.com/morph-l2/morph/blob/main/prover/crates/primitives/src/types/tx.rs#L32-L59>
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
+#[cfg_attr(
+    feature = "serde",
+    serde(
+        from = "msg_serde::L1MsgSerdeHelper",
+        into = "msg_serde::L1MsgSerdeHelper"
+    )
+)]
 #[cfg_attr(feature = "reth-codec", derive(reth_codecs::Compact))]
 pub struct TxL1Msg {
     /// The queue index of the message in the L1 contract queue.
-    #[cfg_attr(feature = "serde", serde(with = "alloy_serde::quantity"))]
     pub queue_index: u64,
 
     /// The gas limit for the transaction. Gas is paid for when message is sent from the L1.
-    #[cfg_attr(
-        feature = "serde",
-        serde(with = "alloy_serde::quantity", rename = "gas")
-    )]
     pub gas_limit: u64,
 
     /// The destination address for the transaction.
@@ -60,7 +61,6 @@ pub struct TxL1Msg {
 
     /// The input data of the message call.
     /// Note: This field must be last for reth-codec Compact derive.
-    #[cfg_attr(feature = "serde", serde(default, alias = "data"))]
     pub input: Bytes,
 }
 
@@ -321,6 +321,81 @@ impl alloy_consensus::Sealable for TxL1Msg {
     }
 }
 
+#[cfg(feature = "serde")]
+mod msg_serde {
+    //! Serde helper for [`TxL1Msg`].
+    //!
+    //! L1 message transactions don't carry `nonce`/`v`/`r`/`s`/`yParity` at the consensus
+    //! layer — there is no signature (gas is prepaid on L1) and no L2 nonce. Every
+    //! standard EVM JSON-RPC client (ethers v5/v6, viem, web3.js — including the
+    //! `@morph-network/*` SDK adapters that wrap them) nevertheless expects those keys
+    //! on every transaction object. Following morph-geth's RPC contract, we render all
+    //! five as `"0x0"` placeholders during serialization and silently drop them on the
+    //! way back in.
+    //!
+    //! Because [`alloy_consensus::Sealed`] flattens its inner `T` into the surrounding
+    //! object, these top-level fields naturally appear at the envelope's RPC root —
+    //! no envelope-level wiring is required.
+    use super::*;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub(crate) struct L1MsgSerdeHelper {
+        #[serde(with = "alloy_serde::quantity")]
+        queue_index: u64,
+        #[serde(with = "alloy_serde::quantity", rename = "gas")]
+        gas_limit: u64,
+        to: Address,
+        value: U256,
+        sender: Address,
+        #[serde(default, alias = "data")]
+        input: Bytes,
+        // RPC parity placeholders. Always serialized as `"0x0"`; ignored on deserialize.
+        #[serde(default, with = "alloy_serde::quantity")]
+        nonce: u64,
+        #[serde(default, with = "alloy_serde::quantity")]
+        v: u64,
+        #[serde(default)]
+        r: U256,
+        #[serde(default)]
+        s: U256,
+        #[serde(default, rename = "yParity", with = "alloy_serde::quantity")]
+        y_parity: u64,
+    }
+
+    impl From<L1MsgSerdeHelper> for TxL1Msg {
+        fn from(helper: L1MsgSerdeHelper) -> Self {
+            Self {
+                queue_index: helper.queue_index,
+                gas_limit: helper.gas_limit,
+                to: helper.to,
+                value: helper.value,
+                sender: helper.sender,
+                input: helper.input,
+            }
+        }
+    }
+
+    impl From<TxL1Msg> for L1MsgSerdeHelper {
+        fn from(tx: TxL1Msg) -> Self {
+            Self {
+                queue_index: tx.queue_index,
+                gas_limit: tx.gas_limit,
+                to: tx.to,
+                value: tx.value,
+                sender: tx.sender,
+                input: tx.input,
+                nonce: 0,
+                v: 0,
+                r: U256::ZERO,
+                s: U256::ZERO,
+                y_parity: 0,
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -562,5 +637,90 @@ mod tests {
         // Should have encoded fields
         assert!(!buf.is_empty());
         assert_eq!(buf.len(), tx.fields_len());
+    }
+
+    /// JSON serialization must include the morph-geth RPC parity placeholders
+    /// `nonce`/`v`/`r`/`s`/`yParity` so downstream clients (ethers v5/v6, viem)
+    /// can parse L1 message tx objects returned by `eth_getBlockByNumber` etc.
+    /// All five live on the helper struct alongside the real fields, so they
+    /// also appear when the type is serialized standalone (not just via the
+    /// envelope).
+    #[test]
+    fn test_l1_transaction_json_includes_geth_parity_fields() {
+        let tx = TxL1Msg {
+            queue_index: 7,
+            gas_limit: 0x1e8480,
+            to: address!("5300000000000000000000000000000000000007"),
+            value: U256::ZERO,
+            input: Bytes::from(vec![0x8e, 0xf1, 0x33, 0x2e]),
+            sender: address!("ed82366effa760804dcfc3edf87fa2a6f1624415"),
+        };
+
+        let json = serde_json::to_value(&tx).expect("serialization must succeed");
+
+        assert_eq!(json["queueIndex"], "0x7");
+        assert_eq!(json["gas"], "0x1e8480");
+        assert_eq!(json["input"], "0x8ef1332e");
+        assert_eq!(json["nonce"], "0x0");
+        assert_eq!(json["v"], "0x0");
+        assert_eq!(json["r"], "0x0");
+        assert_eq!(json["s"], "0x0");
+        assert_eq!(json["yParity"], "0x0");
+    }
+
+    /// Round-trip through `serde_json` must be lossless: real fields preserved,
+    /// the `nonce` placeholder must be tolerated on the way back in.
+    #[test]
+    fn test_l1_transaction_json_round_trip() {
+        let original = TxL1Msg {
+            queue_index: 42,
+            gas_limit: 100_000,
+            to: address!("0000000000000000000000000000000000000002"),
+            value: U256::from(1_000u64),
+            input: Bytes::from(vec![0x01, 0x02]),
+            sender: address!("0000000000000000000000000000000000000001"),
+        };
+
+        let json = serde_json::to_value(&original).unwrap();
+        let decoded: TxL1Msg = serde_json::from_value(json).expect("round-trip must succeed");
+
+        assert_eq!(decoded, original);
+    }
+
+    /// End-to-end check: serializing a [`MorphTxEnvelope::L1Msg`] (the type
+    /// actually emitted by RPC) must include all the morph-geth parity fields
+    /// at the top level: type, queueIndex, sender, nonce, v, r, s, yParity, hash.
+    #[test]
+    fn test_l1_envelope_rpc_json_includes_geth_parity_fields() {
+        use crate::MorphTxEnvelope;
+        use alloy_consensus::Sealable;
+
+        let tx = TxL1Msg {
+            queue_index: 7,
+            gas_limit: 0x1e8480,
+            to: address!("5300000000000000000000000000000000000007"),
+            value: U256::ZERO,
+            input: Bytes::from(vec![0x8e, 0xf1, 0x33, 0x2e]),
+            sender: address!("ed82366effa760804dcfc3edf87fa2a6f1624415"),
+        };
+        let envelope = MorphTxEnvelope::L1Msg(tx.seal_slow());
+
+        let json = serde_json::to_value(&envelope).expect("envelope serialization must succeed");
+
+        assert_eq!(json["type"], "0x7e");
+        assert_eq!(json["queueIndex"], "0x7");
+        assert_eq!(json["gas"], "0x1e8480");
+        assert_eq!(
+            json["sender"].as_str().unwrap().to_lowercase(),
+            "0xed82366effa760804dcfc3edf87fa2a6f1624415"
+        );
+        // morph-geth RPC parity placeholders, must all be present at the top level.
+        assert_eq!(json["nonce"], "0x0");
+        assert_eq!(json["v"], "0x0");
+        assert_eq!(json["r"], "0x0");
+        assert_eq!(json["s"], "0x0");
+        assert_eq!(json["yParity"], "0x0");
+        // Sealed<T> contributes the precomputed hash.
+        assert!(json["hash"].is_string());
     }
 }
