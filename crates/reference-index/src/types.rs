@@ -32,9 +32,9 @@ impl TryFrom<u8> for BackfillState {
 /// Validated query parameters for reference lookups.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReferenceQuery {
-    pub reference: B256,
-    pub offset: u64,
-    pub limit: u64,
+    pub(crate) reference: B256,
+    pub(crate) offset: u64,
+    pub(crate) limit: u64,
 }
 
 impl ReferenceQuery {
@@ -88,6 +88,8 @@ pub enum ReferenceIndexError {
     OffsetTooLarge { offset: u64 },
     #[error("invalid backfill state: {0}")]
     InvalidBackfillState(u8),
+    #[error("reference index backfill batch size must be greater than zero")]
+    InvalidBackfillBatchSize,
     #[error("reference index chain identity mismatch: {0}")]
     ChainIdentityMismatch(&'static str),
     #[error("reference index schema mismatch: expected {expected}, got {actual}")]
