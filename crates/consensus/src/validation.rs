@@ -719,6 +719,7 @@ mod tests {
                 "morph203Time": 0,
                 "viridianTime": 0,
                 "emeraldTime": 0,
+                "jadeForkTime": 0,
                 "morph": {}
             },
             "alloc": {}
@@ -747,6 +748,31 @@ mod tests {
         let tx = TxLegacy::default();
         let sig = Signature::new(U256::ZERO, U256::ZERO, false);
         MorphTxEnvelope::Legacy(Signed::new_unchecked(tx, sig, B256::ZERO))
+    }
+
+    fn create_sealed_block(
+        timestamp: u64,
+        transactions: Vec<MorphTxEnvelope>,
+    ) -> SealedBlock<Block> {
+        use alloy_consensus::proofs::calculate_transaction_root;
+        use reth_primitives_traits::Block as _;
+
+        let transactions_root = calculate_transaction_root(&transactions);
+        let header = create_morph_header(Header {
+            timestamp,
+            transactions_root,
+            ommers_hash: EMPTY_OMMER_ROOT_HASH,
+            ..Default::default()
+        });
+        Block::new(
+            header,
+            BlockBody {
+                transactions,
+                ommers: Default::default(),
+                withdrawals: None,
+            },
+        )
+        .seal_slow()
     }
 
     /// Create a MorphHeader from a standard Header
@@ -1707,6 +1733,16 @@ mod tests {
         // V1 after jade fork should pass
         let txs = [create_morph_tx_v1(1)];
         let result = validate_morph_txs(&txs, true);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_block_pre_execution_uses_chainspec_jade_activation() {
+        let consensus = MorphConsensus::new(create_test_chainspec());
+        let block = create_sealed_block(0, vec![create_morph_tx_v1(1)]);
+
+        let result = consensus.validate_block_pre_execution(&block);
+
         assert!(result.is_ok());
     }
 
