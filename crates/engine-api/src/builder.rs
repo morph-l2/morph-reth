@@ -935,8 +935,7 @@ fn validate_resolved_block_tags(
         && safe_number > canonical_head_number
     {
         return Err(MorphEngineApiError::ValidationFailed(format!(
-            "safe block number {} exceeds canonical head number {}",
-            safe_number, canonical_head_number
+            "safe block number {safe_number} exceeds canonical head number {canonical_head_number}"
         )));
     }
 
@@ -944,8 +943,7 @@ fn validate_resolved_block_tags(
         && finalized_number > canonical_head_number
     {
         return Err(MorphEngineApiError::ValidationFailed(format!(
-            "finalized block number {} exceeds canonical head number {}",
-            finalized_number, canonical_head_number
+            "finalized block number {finalized_number} exceeds canonical head number {canonical_head_number}"
         )));
     }
 
@@ -953,8 +951,7 @@ fn validate_resolved_block_tags(
         && finalized_number > safe_number
     {
         return Err(MorphEngineApiError::ValidationFailed(format!(
-            "finalized block number {} exceeds safe block number {}",
-            finalized_number, safe_number
+            "finalized block number {finalized_number} exceeds safe block number {safe_number}"
         )));
     }
 
