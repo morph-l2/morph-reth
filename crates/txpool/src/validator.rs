@@ -343,33 +343,17 @@ where
                 // the shared helper used by both admission and maintenance.
                 // Pass &MorphTxEnvelope directly to avoid a second clone_into_consensus().
                 let sender = valid_tx.transaction().sender();
-                let validation = match self.validate_morph_tx_balance(
+                if let Err(err) = self.validate_morph_tx_balance(
                     &consensus_tx,
                     sender,
                     balance,
                     l1_data_fee,
                     hardfork,
                 ) {
-                    Ok(v) => v,
-                    Err(err) => {
-                        return TransactionValidationOutcome::Invalid(
-                            valid_tx.into_transaction(),
-                            err.into(),
-                        );
-                    }
-                };
-
-                // MorphTx with fee_token_id = 0 uses ETH fee path and must pass
-                // the same ETH affordability check as regular txs.
-                if !validation.uses_token_fee {
-                    let cost = valid_tx.transaction().cost().saturating_add(l1_data_fee);
-                    if cost > balance {
-                        return insufficient_funds_outcome(
-                            valid_tx.into_transaction(),
-                            balance,
-                            cost,
-                        );
-                    }
+                    return TransactionValidationOutcome::Invalid(
+                        valid_tx.into_transaction(),
+                        err.into(),
+                    );
                 }
             } else {
                 // Regular transaction: validate ETH balance covers cost + L1 fee

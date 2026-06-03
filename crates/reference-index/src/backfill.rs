@@ -103,6 +103,8 @@ where
         + HeaderProvider<Header = MorphHeader>,
     CS: MorphHardforks,
 {
+    validate_backfill_batch_size(batch_size)?;
+
     let state = db.backfill_state()?;
 
     // `jade_first_block_number` is our canonical lower bound; it's written as the
@@ -233,6 +235,13 @@ where
     Ok(())
 }
 
+fn validate_backfill_batch_size(batch_size: u64) -> Result<(), ReferenceIndexError> {
+    if batch_size == 0 {
+        return Err(ReferenceIndexError::InvalidBackfillBatchSize);
+    }
+    Ok(())
+}
+
 /// Re-validate and (if needed) reset `jade_first_block_number` when the DB
 /// was opened with a sentinel value (`u64::MAX`) from a previous run where
 /// Jade had not yet activated.
@@ -298,5 +307,13 @@ mod tests {
             BackfillState::Complete
         );
         assert!(BackfillState::try_from(3u8).is_err());
+    }
+
+    #[test]
+    fn backfill_batch_size_zero_is_rejected() {
+        assert!(matches!(
+            validate_backfill_batch_size(0),
+            Err(ReferenceIndexError::InvalidBackfillBatchSize)
+        ));
     }
 }

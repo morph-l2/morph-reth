@@ -512,16 +512,43 @@ where
         // stale older value — a transient `finalized > safe` violation. Updating
         // safe first keeps the invariant satisfied throughout (finalized stays
         // at its older, smaller value while safe advances).
-        if safe_block_hash != B256::ZERO {
-            self.update_block_tag(safe_block_hash, "safe", |sealed| {
-                self.provider.set_safe(sealed);
-            })?;
+        let safe = if safe_block_hash != B256::ZERO {
+            Some(self.resolve_block_tag(safe_block_hash, "safe")?)
+        } else {
+            None
+        };
+        let finalized = if finalized_block_hash != B256::ZERO {
+            Some(self.resolve_block_tag(finalized_block_hash, "finalized")?)
+        } else {
+            None
+        };
+        if safe.is_none() && finalized.is_none() {
+            return Ok(());
         }
 
-        if finalized_block_hash != B256::ZERO {
-            self.update_block_tag(finalized_block_hash, "finalized", |sealed| {
-                self.provider.set_finalized(sealed);
-            })?;
+        let canonical_head = self.current_head()?;
+        validate_resolved_block_tags(
+            safe.as_ref().map(|header| header.number()),
+            finalized.as_ref().map(|header| header.number()),
+            canonical_head.number,
+        )?;
+
+        if let Some(sealed) = safe {
+            self.provider.set_safe(sealed);
+            tracing::info!(
+                target: "morph::engine",
+                hash = %safe_block_hash,
+                "safe block tag updated"
+            );
+        }
+
+        if let Some(sealed) = finalized {
+            self.provider.set_finalized(sealed);
+            tracing::info!(
+                target: "morph::engine",
+                hash = %finalized_block_hash,
+                "finalized block tag updated"
+            );
         }
 
         // Cache the L1-based hashes so subsequent FCU calls use them instead of
@@ -545,32 +572,23 @@ where
 }
 
 impl<Provider> RealMorphL2EngineApi<Provider> {
-    /// Looks up a sealed header by hash, calls `setter` on it, and logs the tag update.
+    /// Looks up a sealed header by hash.
     ///
-    /// Used by `set_block_tags` to deduplicate the finalized/safe update paths.
-    fn update_block_tag(
+    /// Used by `set_block_tags` to validate both tag updates before mutating provider state.
+    fn resolve_block_tag(
         &self,
         hash: B256,
         tag_name: &str,
-        setter: impl FnOnce(SealedHeader<MorphHeader>),
-    ) -> EngineApiResult<()>
+    ) -> EngineApiResult<SealedHeader<MorphHeader>>
     where
         Provider: HeaderProvider<Header = MorphHeader>,
     {
-        let sealed = self
-            .provider
+        self.provider
             .sealed_header_by_hash(hash)
             .map_err(|e| MorphEngineApiError::Internal(e.to_string()))?
             .ok_or_else(|| {
                 MorphEngineApiError::Internal(format!("{tag_name} block {hash} not found"))
-            })?;
-        setter(sealed);
-        tracing::info!(
-            target: "morph::engine",
-            %hash,
-            "{tag_name} block tag updated"
-        );
-        Ok(())
+            })
     }
 
     async fn build_l2_payload(
@@ -908,6 +926,38 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
     }
 }
 
+fn validate_resolved_block_tags(
+    safe_number: Option<u64>,
+    finalized_number: Option<u64>,
+    canonical_head_number: u64,
+) -> EngineApiResult<()> {
+    if let Some(safe_number) = safe_number
+        && safe_number > canonical_head_number
+    {
+        return Err(MorphEngineApiError::ValidationFailed(format!(
+            "safe block number {safe_number} exceeds canonical head number {canonical_head_number}"
+        )));
+    }
+
+    if let Some(finalized_number) = finalized_number
+        && finalized_number > canonical_head_number
+    {
+        return Err(MorphEngineApiError::ValidationFailed(format!(
+            "finalized block number {finalized_number} exceeds canonical head number {canonical_head_number}"
+        )));
+    }
+
+    if let (Some(safe_number), Some(finalized_number)) = (safe_number, finalized_number)
+        && finalized_number > safe_number
+    {
+        return Err(MorphEngineApiError::ValidationFailed(format!(
+            "finalized block number {finalized_number} exceeds safe block number {safe_number}"
+        )));
+    }
+
+    Ok(())
+}
+
 fn payload_status_is_validated(status: &PayloadStatus) -> bool {
     matches!(status.status, PayloadStatusEnum::Valid)
 }
@@ -1237,6 +1287,28 @@ mod tests {
 
         assert_eq!(tracker.l1_safe_hash(), Some(safe_hash));
         assert_eq!(tracker.l1_finalized_hash(), Some(finalized_hash));
+    }
+
+    #[test]
+    fn test_validate_resolved_block_tags_rejects_finalized_after_safe() {
+        let err = validate_resolved_block_tags(Some(10), Some(11), 11).unwrap_err();
+        match err {
+            MorphEngineApiError::ValidationFailed(msg) => {
+                assert!(msg.contains("finalized block number 11 exceeds safe block number 10"));
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_resolved_block_tags_rejects_safe_after_canonical_head() {
+        let err = validate_resolved_block_tags(Some(12), Some(11), 11).unwrap_err();
+        match err {
+            MorphEngineApiError::ValidationFailed(msg) => {
+                assert!(msg.contains("safe block number 12 exceeds canonical head number 11"));
+            }
+            other => panic!("unexpected error: {other}"),
+        }
     }
 
     // =========================================================================
