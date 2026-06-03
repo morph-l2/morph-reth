@@ -156,8 +156,16 @@ impl Transaction for TxL1Msg {
     }
 
     fn gas_price(&self) -> Option<u128> {
-        // L1 messages have no gas price - gas is paid on L1
-        None
+        // L1 messages have no gas price (gas is prepaid on L1), but RPC
+        // serialization must surface a `"gasPrice": "0x0"` field to match
+        // morph-geth's contract — indexers compute fees from this value and
+        // would otherwise see a non-zero figure (the block baseFee picked up
+        // by alloy's generic `from_consensus_tx` path). Returning `Some(0)`
+        // here also tells `alloy_rpc_types_eth::Transaction`'s serde helper
+        // not to emit an outer `effective_gas_price` for this variant, so
+        // the inner placeholder added in `L1MsgSerdeHelper` is the single
+        // source of truth.
+        Some(0)
     }
 
     fn max_fee_per_gas(&self) -> u128 {
@@ -354,6 +362,8 @@ mod msg_serde {
         // RPC parity placeholders. Always serialized as `"0x0"`; ignored on deserialize.
         #[serde(default, with = "alloy_serde::quantity")]
         nonce: u64,
+        #[serde(default, rename = "gasPrice", with = "alloy_serde::quantity")]
+        gas_price: u64,
         #[serde(default, with = "alloy_serde::quantity")]
         v: u64,
         #[serde(default)]
@@ -387,6 +397,7 @@ mod msg_serde {
                 sender: tx.sender,
                 input: tx.input,
                 nonce: 0,
+                gas_price: 0,
                 v: 0,
                 r: U256::ZERO,
                 s: U256::ZERO,
@@ -438,7 +449,7 @@ mod tests {
         assert_eq!(tx.chain_id(), None);
         assert_eq!(Transaction::nonce(&tx), 0); // L1 messages always have nonce 0
         assert_eq!(Transaction::gas_limit(&tx), 21_000);
-        assert_eq!(tx.gas_price(), None); // L1 messages have no gas price
+        assert_eq!(tx.gas_price(), Some(0)); // L1 messages surface gasPrice=0 for RPC parity with morph-geth
         assert_eq!(tx.max_fee_per_gas(), 0);
         assert_eq!(tx.max_priority_fee_per_gas(), None);
         assert_eq!(tx.max_fee_per_blob_gas(), None);
@@ -662,6 +673,7 @@ mod tests {
         assert_eq!(json["gas"], "0x1e8480");
         assert_eq!(json["input"], "0x8ef1332e");
         assert_eq!(json["nonce"], "0x0");
+        assert_eq!(json["gasPrice"], "0x0");
         assert_eq!(json["v"], "0x0");
         assert_eq!(json["r"], "0x0");
         assert_eq!(json["s"], "0x0");
@@ -716,6 +728,7 @@ mod tests {
         );
         // morph-geth RPC parity placeholders, must all be present at the top level.
         assert_eq!(json["nonce"], "0x0");
+        assert_eq!(json["gasPrice"], "0x0");
         assert_eq!(json["v"], "0x0");
         assert_eq!(json["r"], "0x0");
         assert_eq!(json["s"], "0x0");

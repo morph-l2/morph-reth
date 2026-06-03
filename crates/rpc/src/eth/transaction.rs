@@ -710,6 +710,13 @@ mod tests {
         let json = serde_json::to_string(&rpc_tx).unwrap();
         assert_eq!(json.matches("\"sender\"").count(), 1);
         assert_eq!(json.matches("\"queueIndex\"").count(), 1);
+
+        // L1 messages must surface a single `"gasPrice":"0x0"` even though the
+        // outer block carries a non-zero baseFee — the alloy generic path would
+        // otherwise propagate baseFee into `gasPrice` and break fee indexers.
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["gasPrice"], "0x0");
+        assert_eq!(json.matches("\"gasPrice\"").count(), 1);
     }
 
     #[test]
