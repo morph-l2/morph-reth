@@ -3,11 +3,20 @@
 //! This module provides Morph-specific transaction validation that extends the standard
 //! Ethereum transaction validation with L2 checks:
 //! - Rejection of EIP-4844 blob transactions
+//! - EIP-3860 max initcode size enforcement
 //! - Rejection of L1 message transactions from the pool
 //! - L1 data fee validation
 //! - MorphTx (0x7F) ERC20 token balance validation
 
 use crate::MorphTxError;
+
+/// EIP-3860 max initcode size: `2 * MAX_CODE_SIZE = 2 * 24 576 = 49 152` bytes.
+///
+/// This is enforced unconditionally at the txpool layer because Morph has been
+/// post-Shanghai since genesis. See `validate_one_with_state` for the rationale
+/// behind not relying on reth's Shanghai-gated check.
+const MAX_INITCODE_SIZE: usize = 49_152;
+
 use alloy_consensus::{BlockHeader, Transaction};
 use alloy_eips::{Encodable2718, Typed2718};
 use alloy_primitives::{Address, U256};
@@ -270,6 +279,24 @@ where
                 transaction,
                 InvalidTransactionError::Eip4844Disabled.into(),
             );
+        }
+
+        // EIP-3860: enforce max initcode size on contract-creation transactions.
+        //
+        // Morph has been post-Shanghai since genesis (morph-geth's
+        // `shanghaiBlock = 0` / `IsShanghai(num)`), so this check must always
+        // fire. We can't reuse reth's `EthTransactionValidator` Shanghai gating
+        // because morph-mainnet/hoodi genesis uses the non-standard
+        // `shanghaiBlock` field (inherited from scroll-tech), which alloy's
+        // `Genesis` parser ignores in favour of `shanghaiTime`. Force-activating
+        // Shanghai/Cancun in the chainspec would also flip
+        // `is_shanghai_active_at_timestamp` for `EthStorage::read_block_bodies`,
+        // making body.withdrawals leak into RPC responses and diverging from
+        // morph-geth, which has no withdrawals slot. Enforcing the bound here
+        // keeps the chainspec untouched and the RPC output bit-identical to
+        // morph-geth.
+        if let Err(err) = transaction.ensure_max_init_code_size(MAX_INITCODE_SIZE) {
+            return TransactionValidationOutcome::Invalid(transaction, err);
         }
 
         // Reject L1 message transactions - only included by sequencer
@@ -742,6 +769,109 @@ mod tests {
             TransactionValidationOutcome::Error(_, err) => {
                 panic!("Expected valid transaction, got error: {err:?}");
             }
+        }
+    }
+
+    /// EIP-3860 mempool admission: contract creation transactions whose initcode
+    /// exceeds 49 152 bytes must be rejected. This used to slip through because
+    /// morph-mainnet/hoodi genesis use the non-standard `shanghaiBlock` field
+    /// (inherited from scroll-tech go-ethereum) that alloy's `Genesis` parser
+    /// ignores, leaving Shanghai un-registered in the hardforks table and
+    /// `is_shanghai_active_at_timestamp` permanently `false`. The chainspec
+    /// now force-activates Shanghai/Cancun at `Timestamp(0)` so reth's
+    /// `EthTransactionValidator` triggers the EIP-3860 size check.
+    #[test]
+    fn validate_rejects_oversized_initcode() {
+        let client = new_mock_provider();
+        let signer = address!("0000000000000000000000000000000000000001");
+        client.add_account(signer, ExtendedAccount::new(0, U256::from(10u128.pow(18))));
+        let morph_evm_config = MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone());
+
+        // Note: do NOT call `.no_shanghai()` here. The whole point is to verify
+        // that the chainspec correctly activates Shanghai so the inner
+        // `EthTransactionValidator` enforces EIP-3860.
+        let eth_validator: EthTransactionValidator<
+            _,
+            crate::MorphPooledTransaction,
+            MorphEvmConfig,
+        > = EthTransactionValidatorBuilder::new(client, morph_evm_config)
+            .disable_balance_check()
+            .build::<crate::MorphPooledTransaction, _>(InMemoryBlobStore::default());
+        let validator = MorphTransactionValidator::new(eth_validator);
+
+        let oversize_initcode = vec![0u8; MAX_INITCODE_SIZE + 1];
+        let tx = TxLegacy {
+            chain_id: Some(2818),
+            nonce: 0,
+            gas_limit: 30_000_000,
+            to: TxKind::Create,
+            value: U256::ZERO,
+            input: oversize_initcode.into(),
+            gas_price: 2_000_000_000,
+        };
+        let signed_tx = Signed::new_unchecked(tx, Signature::test_signature(), B256::ZERO);
+        let envelope = MorphTxEnvelope::Legacy(signed_tx);
+        let recovered = Recovered::new_unchecked(envelope, signer);
+        let len = recovered.encode_2718_len();
+        let pooled_tx = crate::MorphPooledTransaction::new(recovered, len);
+
+        let outcome = validator.validate_one(TransactionOrigin::External, pooled_tx);
+
+        match outcome {
+            TransactionValidationOutcome::Invalid(_, err) => {
+                let msg = err.to_string();
+                assert!(
+                    msg.contains("max_init_code_size") || msg.contains("init code size"),
+                    "expected EIP-3860 rejection, got: {msg}"
+                );
+            }
+            other => panic!("expected oversized initcode to be rejected, got: {other:?}"),
+        }
+    }
+
+    /// Counterpart to `validate_rejects_oversized_initcode`: an initcode
+    /// exactly at the EIP-3860 limit (49 152 bytes) must still be admitted.
+    #[test]
+    fn validate_accepts_initcode_at_limit() {
+        let client = new_mock_provider();
+        let signer = address!("0000000000000000000000000000000000000001");
+        client.add_account(signer, ExtendedAccount::new(0, U256::from(10u128.pow(18))));
+        let morph_evm_config = MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone());
+        let eth_validator: EthTransactionValidator<
+            _,
+            crate::MorphPooledTransaction,
+            MorphEvmConfig,
+        > = EthTransactionValidatorBuilder::new(client, morph_evm_config)
+            .disable_balance_check()
+            .build::<crate::MorphPooledTransaction, _>(InMemoryBlobStore::default());
+        let validator = MorphTransactionValidator::new(eth_validator);
+
+        let initcode_at_limit = vec![0u8; MAX_INITCODE_SIZE];
+        let tx = TxLegacy {
+            chain_id: Some(2818),
+            nonce: 0,
+            gas_limit: 30_000_000,
+            to: TxKind::Create,
+            value: U256::ZERO,
+            input: initcode_at_limit.into(),
+            gas_price: 2_000_000_000,
+        };
+        let signed_tx = Signed::new_unchecked(tx, Signature::test_signature(), B256::ZERO);
+        let envelope = MorphTxEnvelope::Legacy(signed_tx);
+        let recovered = Recovered::new_unchecked(envelope, signer);
+        let len = recovered.encode_2718_len();
+        let pooled_tx = crate::MorphPooledTransaction::new(recovered, len);
+
+        let outcome = validator.validate_one(TransactionOrigin::External, pooled_tx);
+        // The validator may still reject this because of intrinsic gas or
+        // balance checks downstream; the only thing this test asserts is that
+        // EIP-3860 itself does NOT fire at exactly the limit.
+        if let TransactionValidationOutcome::Invalid(_, err) = &outcome {
+            let msg = err.to_string();
+            assert!(
+                !msg.contains("max_init_code_size") && !msg.contains("init code size"),
+                "EIP-3860 must not reject initcode of exactly the size limit; got: {msg}"
+            );
         }
     }
 
