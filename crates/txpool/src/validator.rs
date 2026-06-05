@@ -9,14 +9,6 @@
 //! - MorphTx (0x7F) ERC20 token balance validation
 
 use crate::MorphTxError;
-
-/// EIP-3860 max initcode size: `2 * MAX_CODE_SIZE = 2 * 24 576 = 49 152` bytes.
-///
-/// This is enforced unconditionally at the txpool layer because Morph has been
-/// post-Shanghai since genesis. See `validate_one_with_state` for the rationale
-/// behind not relying on reth's Shanghai-gated check.
-const MAX_INITCODE_SIZE: usize = 49_152;
-
 use alloy_consensus::{BlockHeader, Transaction};
 use alloy_eips::{Encodable2718, Typed2718};
 use alloy_primitives::{Address, U256};
@@ -39,6 +31,15 @@ use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
+
+/// EIP-3860 max initcode size (`2 * MAX_CODE_SIZE = 2 * 24 576 = 49 152` bytes).
+///
+/// Reuses revm's canonical constant — the same `eip3860::MAX_INITCODE_SIZE` that
+/// reth's `EthTransactionValidator` uses — so it stays pinned to the EIP-170
+/// code-size base instead of a hand-copied literal. Enforced unconditionally at
+/// the txpool layer because Morph has been post-Shanghai since genesis; see
+/// `validate_one_with_state` for why we can't rely on reth's Shanghai-gated check.
+const MAX_INITCODE_SIZE: usize = reth_revm::revm::primitives::eip3860::MAX_INITCODE_SIZE;
 
 /// Tracks L1 block info for the current chain head.
 ///
@@ -281,24 +282,6 @@ where
             );
         }
 
-        // EIP-3860: enforce max initcode size on contract-creation transactions.
-        //
-        // Morph has been post-Shanghai since genesis (morph-geth's
-        // `shanghaiBlock = 0` / `IsShanghai(num)`), so this check must always
-        // fire. We can't reuse reth's `EthTransactionValidator` Shanghai gating
-        // because morph-mainnet/hoodi genesis uses the non-standard
-        // `shanghaiBlock` field (inherited from scroll-tech), which alloy's
-        // `Genesis` parser ignores in favour of `shanghaiTime`. Force-activating
-        // Shanghai/Cancun in the chainspec would also flip
-        // `is_shanghai_active_at_timestamp` for `EthStorage::read_block_bodies`,
-        // making body.withdrawals leak into RPC responses and diverging from
-        // morph-geth, which has no withdrawals slot. Enforcing the bound here
-        // keeps the chainspec untouched and the RPC output bit-identical to
-        // morph-geth.
-        if let Err(err) = transaction.ensure_max_init_code_size(MAX_INITCODE_SIZE) {
-            return TransactionValidationOutcome::Invalid(transaction, err);
-        }
-
         // Reject L1 message transactions - only included by sequencer
         if is_l1_message(&transaction) {
             return TransactionValidationOutcome::Invalid(
@@ -333,6 +316,29 @@ where
                 transaction,
                 InvalidTransactionError::TxTypeNotSupported.into(),
             );
+        }
+
+        // EIP-3860: enforce max initcode size on contract-creation transactions.
+        //
+        // Morph has been post-Shanghai since genesis (morph-geth's
+        // `shanghaiBlock = 0` / `IsShanghai(num)`), so this check must always
+        // fire. We can't reuse reth's `EthTransactionValidator` Shanghai gating
+        // because morph-mainnet/hoodi genesis uses the non-standard
+        // `shanghaiBlock` field (inherited from scroll-tech), which alloy's
+        // `Genesis` parser ignores in favour of `shanghaiTime`. Force-activating
+        // Shanghai/Cancun in the chainspec would also flip
+        // `is_shanghai_active_at_timestamp` for `EthStorage::read_block_bodies`,
+        // making body.withdrawals leak into RPC responses and diverging from
+        // morph-geth, which has no withdrawals slot. Enforcing the bound here
+        // keeps the chainspec untouched and the RPC output bit-identical to
+        // morph-geth.
+        //
+        // Placed after the L1-message / EIP-7702 / MorphTx type gates so a
+        // transaction rejected purely on its type still surfaces that type error
+        // (matching morph-geth), and before the inner validator so we skip its
+        // state lookups for oversized payloads.
+        if let Err(err) = transaction.ensure_max_init_code_size(MAX_INITCODE_SIZE) {
+            return TransactionValidationOutcome::Invalid(transaction, err);
         }
 
         let outcome = self
@@ -777,9 +783,11 @@ mod tests {
     /// morph-mainnet/hoodi genesis use the non-standard `shanghaiBlock` field
     /// (inherited from scroll-tech go-ethereum) that alloy's `Genesis` parser
     /// ignores, leaving Shanghai un-registered in the hardforks table and
-    /// `is_shanghai_active_at_timestamp` permanently `false`. The chainspec
-    /// now force-activates Shanghai/Cancun at `Timestamp(0)` so reth's
-    /// `EthTransactionValidator` triggers the EIP-3860 size check.
+    /// `is_shanghai_active_at_timestamp` permanently `false` — which means reth's
+    /// Shanghai-gated EIP-3860 check (`EthTransactionValidator`, `eth.rs:468`) is
+    /// always skipped. The rejection is therefore enforced unconditionally by
+    /// `MorphTransactionValidator` itself (see `validate_one_with_state`), not by
+    /// the chainspec or the inner reth validator.
     #[test]
     fn validate_rejects_oversized_initcode() {
         let client = new_mock_provider();
@@ -787,9 +795,10 @@ mod tests {
         client.add_account(signer, ExtendedAccount::new(0, U256::from(10u128.pow(18))));
         let morph_evm_config = MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone());
 
-        // Note: do NOT call `.no_shanghai()` here. The whole point is to verify
-        // that the chainspec correctly activates Shanghai so the inner
-        // `EthTransactionValidator` enforces EIP-3860.
+        // Built from the real `MORPH_MAINNET` chainspec, under which Shanghai is
+        // never active, so the inner `EthTransactionValidator` does not enforce
+        // EIP-3860. This test verifies that `MorphTransactionValidator` rejects
+        // the oversized initcode on its own.
         let eth_validator: EthTransactionValidator<
             _,
             crate::MorphPooledTransaction,
