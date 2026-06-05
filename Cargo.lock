@@ -5118,6 +5118,7 @@ dependencies = [
  "alloy-rlp",
  "alloy-rpc-types-engine",
  "alloy-serde 2.0.4",
+ "base64 0.22.1",
  "morph-primitives",
  "rand 0.8.6",
  "reth-ethereum-primitives",
