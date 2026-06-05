@@ -7,7 +7,7 @@ use crate::{EngineApiResult, api::MorphL2EngineApi};
 use alloy_primitives::B256;
 use jsonrpsee::{RpcModule, core::RpcResult, proc_macros::rpc};
 use morph_payload_types::{
-    AssembleL2BlockParams, AssembleV2Transactions, ExecutableL2Data, GenericResponse, SafeL2Data,
+    AssembleL2BlockParams, AssembleL2BlockV2Params, ExecutableL2Data, GenericResponse, SafeL2Data,
 };
 use morph_primitives::MorphHeader;
 use reth_rpc_api::IntoEngineApiRpcModule;
@@ -32,15 +32,11 @@ pub trait MorphL2EngineRpc {
     ///
     /// # JSON-RPC Method
     ///
-    /// `engine_assembleL2BlockV2` — three positional params (`parentHash`, `timestamp`,
-    /// `txs`). `timestamp` is a bare JSON number (not a hex quantity) and `txs` elements
-    /// are base64-encoded, matching go-ethereum's raw `[][]byte` signature.
+    /// `engine_assembleL2BlockV2`
     #[method(name = "assembleL2BlockV2")]
     async fn assemble_l2_block_v2(
         &self,
-        parent_hash: B256,
-        timestamp: Option<u64>,
-        transactions: AssembleV2Transactions,
+        params: AssembleL2BlockV2Params,
     ) -> RpcResult<ExecutableL2Data>;
 
     /// Validate an L2 block without importing it.
@@ -130,19 +126,17 @@ where
 
     async fn assemble_l2_block_v2(
         &self,
-        parent_hash: B256,
-        timestamp: Option<u64>,
-        transactions: AssembleV2Transactions,
+        params: AssembleL2BlockV2Params,
     ) -> RpcResult<ExecutableL2Data> {
         tracing::debug!(
             target: "morph::engine",
-            %parent_hash,
-            ?timestamp,
+            parent_hash = %params.parent_hash,
+            ?params.timestamp,
             "assembling L2 block (v2)"
         );
 
         self.inner
-            .assemble_l2_block_v2(parent_hash, timestamp, transactions.into_inner())
+            .assemble_l2_block_v2(params)
             .await
             .map_err(|e| {
                 tracing::error!(target: "morph::engine", error = %e, "failed to assemble L2 block (v2)");

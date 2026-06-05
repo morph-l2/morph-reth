@@ -9,12 +9,12 @@ use alloy_consensus::{
     BlockHeader, EMPTY_OMMER_ROOT_HASH, Header, proofs::calculate_transaction_root,
 };
 use alloy_eips::eip2718::Decodable2718;
-use alloy_primitives::{Address, B64, B256, Bytes, Sealable};
+use alloy_primitives::{Address, B64, B256, Sealable};
 use alloy_rpc_types_engine::{PayloadAttributes, PayloadStatus, PayloadStatusEnum};
 use morph_chainspec::MorphChainSpec;
 use morph_payload_types::{
-    AssembleL2BlockParams, ExecutableL2Data, GenericResponse, MorphBuiltPayload,
-    MorphExecutionData, MorphPayloadTypes, SafeL2Data,
+    AssembleL2BlockParams, AssembleL2BlockV2Params, ExecutableL2Data, GenericResponse,
+    MorphBuiltPayload, MorphExecutionData, MorphPayloadTypes, SafeL2Data,
 };
 use morph_primitives::{Block, BlockBody, MorphHeader, MorphTxEnvelope};
 use parking_lot::RwLock;
@@ -194,11 +194,10 @@ where
 
     async fn assemble_l2_block_v2(
         &self,
-        parent_hash: B256,
-        timestamp: Option<u64>,
-        transactions: Vec<Bytes>,
+        params: AssembleL2BlockV2Params,
     ) -> EngineApiResult<ExecutableL2Data> {
         let started = Instant::now();
+        let parent_hash = params.parent_hash;
 
         // Derive the block number from the pinned parent (parent + 1). The parent is
         // looked up by hash and need not be the canonical head — that is the point of V2
@@ -211,14 +210,14 @@ where
                 MorphEngineApiError::Internal(format!("parent block not found: {parent_hash}"))
             })?;
 
-        let params = AssembleL2BlockParams {
+        let assemble_params = AssembleL2BlockParams {
             number: parent.number() + 1,
-            transactions,
-            timestamp,
+            transactions: params.transactions,
+            timestamp: params.timestamp,
         };
 
         let result = self
-            .build_l2_payload(params, None, None, Some(parent_hash))
+            .build_l2_payload(assemble_params, None, None, Some(parent_hash))
             .await;
         self.metrics
             .assemble_l2_block_duration_seconds

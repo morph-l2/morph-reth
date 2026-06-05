@@ -37,7 +37,7 @@ pub use attributes::{
 };
 pub use built::MorphBuiltPayload;
 pub use executable_l2_data::ExecutableL2Data;
-pub use params::{AssembleL2BlockParams, AssembleV2Transactions, GenericResponse};
+pub use params::{AssembleL2BlockParams, AssembleL2BlockV2Params, GenericResponse};
 pub use safe_l2_data::SafeL2Data;
 
 // =============================================================================

@@ -324,8 +324,8 @@ async fn new_safe_l2_block_with_parent_hash_reorgs_onto_non_head_parent() -> eyr
 /// V2 keys assembly on a parent hash rather than a block number, so the sequencer can
 /// build on any parent — including one that is no longer the canonical head. Here a
 /// second block 1' is assembled on genesis after block 1 is already canonical, then
-/// imported as a reorg. The three params are positional (`parentHash`, `timestamp`,
-/// `txs`), with `timestamp` as a bare JSON number, matching go-ethereum's signature.
+/// imported as a reorg. V2 uses a single params object, matching the V1
+/// `engine_assembleL2Block` style.
 #[tokio::test(flavor = "multi_thread")]
 async fn assemble_l2_block_v2_builds_on_explicit_parent() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -347,13 +347,15 @@ async fn assemble_l2_block_v2_builds_on_explicit_parent() -> eyre::Result<()> {
         .expect("genesis header");
     let genesis_hash = genesis.hash();
 
-    let empty_txs: Vec<alloy_primitives::Bytes> = Vec::new();
-
     // Assemble + import block 1 on genesis.
     let block1: ExecutableL2Data = client
         .request(
             "engine_assembleL2BlockV2",
-            (genesis_hash, Some(now - 6), empty_txs.clone()),
+            (serde_json::json!({
+                "parentHash": genesis_hash,
+                "timestamp": format!("{:#x}", now - 6),
+                "transactions": [],
+            }),),
         )
         .await?;
     assert_eq!(block1.number, 1, "assembled block is at height 1");
@@ -369,7 +371,11 @@ async fn assemble_l2_block_v2_builds_on_explicit_parent() -> eyre::Result<()> {
     let block1_prime: ExecutableL2Data = client
         .request(
             "engine_assembleL2BlockV2",
-            (genesis_hash, Some(now - 3), empty_txs),
+            (serde_json::json!({
+                "parentHash": genesis_hash,
+                "timestamp": format!("{:#x}", now - 3),
+                "transactions": [],
+            }),),
         )
         .await?;
     assert_eq!(block1_prime.parent_hash, genesis_hash);

@@ -5,8 +5,10 @@
 //! by the sequencer to produce new blocks.
 
 use crate::EngineApiResult;
-use alloy_primitives::{B256, Bytes};
-use morph_payload_types::{AssembleL2BlockParams, ExecutableL2Data, GenericResponse, SafeL2Data};
+use alloy_primitives::B256;
+use morph_payload_types::{
+    AssembleL2BlockParams, AssembleL2BlockV2Params, ExecutableL2Data, GenericResponse, SafeL2Data,
+};
 use morph_primitives::MorphHeader;
 
 /// Morph L2 Engine API trait.
@@ -54,18 +56,17 @@ pub trait MorphL2EngineApi: Send + Sync {
     ///
     /// # Arguments
     ///
-    /// * `parent_hash` - Hash of the parent block to build on
-    /// * `timestamp` - Optional block timestamp; defaults to a local clock value
-    /// * `transactions` - RLP-encoded transactions (typically the L1 messages) to include
+    /// * `params` - The parameters for assembling the block, including:
+    ///   - `parent_hash`: Hash of the parent block to build on
+    ///   - `transactions`: RLP-encoded transactions to include in the block
+    ///   - `timestamp`: Optional block timestamp; defaults to a local clock value
     ///
     /// # Returns
     ///
     /// Returns the execution result including state root, receipts root, etc.
     async fn assemble_l2_block_v2(
         &self,
-        parent_hash: B256,
-        timestamp: Option<u64>,
-        transactions: Vec<Bytes>,
+        params: AssembleL2BlockV2Params,
     ) -> EngineApiResult<ExecutableL2Data>;
 
     /// Validate an L2 block without importing it.
