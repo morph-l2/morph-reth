@@ -254,6 +254,38 @@ async fn next_l1_msg_index_decreases_rejected() -> eyre::Result<()> {
     Ok(())
 }
 
+/// From Jade onward, an empty block must not advance `next_l1_msg_index`.
+///
+/// geth PR #331 derives the expected value from the parent index plus the number of
+/// processed L1 messages in the block. For an empty block that count is zero, so the
+/// child header must keep the parent's value exactly.
+#[tokio::test(flavor = "multi_thread")]
+async fn next_l1_msg_index_empty_block_cannot_advance_post_jade() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+    let (mut nodes, _wallet) = TestNodeBuilder::new()
+        .with_schedule(HardforkSchedule::AllActive)
+        .build()
+        .await?;
+    let mut node = nodes.pop().unwrap();
+
+    // Block 1 includes queue indices 0 and 1, so the parent index becomes 2.
+    let l1_msgs = L1MessageBuilder::build_sequential(0, 2);
+    advance_block_with_l1_messages(&mut node, l1_msgs).await?;
+
+    // Block 2 has no L1 messages. Advancing the index would skip queue index 2.
+    let base = build_block_no_submit(&mut node, vec![]).await?;
+    let accepted = craft_and_try_import_block(&mut node, &base, |block| {
+        block.header.next_l1_msg_index = 3;
+    })
+    .await?;
+
+    assert!(
+        !accepted,
+        "post-Jade: empty block must not advance next_l1_msg_index"
+    );
+    Ok(())
+}
+
 /// A block with L1 messages but next_l1_msg_index too low is rejected.
 ///
 /// Block has L1 messages with queue indices 0, 1 -> next_l1_msg_index should be >= 2.
@@ -277,11 +309,47 @@ async fn next_l1_msg_index_insufficient_for_l1_msgs() -> eyre::Result<()> {
     Ok(())
 }
 
-/// A block may advance `next_l1_msg_index` past the included messages to account for skips.
+/// From Jade onward, `next_l1_msg_index` must equal `last_queue_index + 1` exactly:
+/// advancing past the included messages (a trailing skip) is rejected.
+///
+/// Matches go-ethereum's `writeBlockStateWithoutHead` hard-fail (PR #331). The field is
+/// not covered by the block hash, so an inflated value — which would make the consensus
+/// client skip unprocessed L1 messages — is rejected against the in-block L1 message
+/// stream. The pre-Jade counterpart below still permits the skip.
 #[tokio::test(flavor = "multi_thread")]
-async fn next_l1_msg_index_can_skip_past_included_messages() -> eyre::Result<()> {
+async fn next_l1_msg_index_skip_past_included_messages_rejected_post_jade() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
+    // Default schedule is AllActive (Jade on).
     let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+
+    // Block includes queue indices 0,1 (last=1, so the only valid next is 2); advancing
+    // header.next_l1_msg_index to 4 (skipping 2,3) must be rejected under Jade.
+    let l1_msgs = L1MessageBuilder::build_sequential(0, 2);
+    let base = build_block_no_submit(&mut node, l1_msgs).await?;
+
+    let accepted = craft_and_try_import_block(&mut node, &base, |block| {
+        block.header.next_l1_msg_index = 4;
+    })
+    .await?;
+
+    assert!(
+        !accepted,
+        "post-Jade: next_l1_msg_index advanced past the included messages must be rejected"
+    );
+    Ok(())
+}
+
+/// Pre-Jade, a block may advance `next_l1_msg_index` past the included messages to
+/// represent skipped queue indices ("early L1 msg skip"). The Jade counterpart above
+/// rejects this; together they pin the Jade hardfork boundary for the exact-index rule.
+#[tokio::test(flavor = "multi_thread")]
+async fn next_l1_msg_index_can_skip_past_included_messages_pre_jade() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+    let (mut nodes, _wallet) = TestNodeBuilder::new()
+        .with_schedule(HardforkSchedule::PreJade)
+        .build()
+        .await?;
     let mut node = nodes.pop().unwrap();
 
     // Build block with queue indices 0,1 and then advance header.next_l1_msg_index to 4.
@@ -296,7 +364,7 @@ async fn next_l1_msg_index_can_skip_past_included_messages() -> eyre::Result<()>
 
     assert!(
         accepted,
-        "next_l1_msg_index may advance past included L1 messages to represent skipped queue indices"
+        "pre-Jade: next_l1_msg_index may advance past included L1 messages (skipped indices)"
     );
     Ok(())
 }

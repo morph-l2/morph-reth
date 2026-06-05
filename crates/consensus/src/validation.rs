@@ -89,13 +89,15 @@ const GAS_LIMIT_BOUND_DIVISOR: u64 = 1024;
 ///    start, have sequential queue indices, and are consistent with `header.next_l1_msg_index`.
 /// 2. **Cross-block monotonicity** (`validate_header_against_parent`): `header.next_l1_msg_index`
 ///    is monotonically non-decreasing relative to the parent.
+/// 3. **Parent-aware exactness** (`MorphBasicEngineValidator`): once the engine tree has
+///    both parent header and block body, Jade blocks must exactly match the value derived
+///    from `parent.next_l1_msg_index` and the block's leading L1 messages.
 ///
-/// These two methods have no ordering dependency and share no mutable state. The strict
+/// The consensus trait methods have no ordering dependency and share no mutable state. The strict
 /// cross-block equality check (`header.next == parent.next + l1_count`) requires simultaneous
 /// access to both parent header and block body, which reth's trait API does not provide in
-/// any single method. In Morph's single-sequencer model, the remaining gap (queue index
-/// skipping) is prevented by the trusted sequencer and verified by the L1 message queue
-/// contract.
+/// any single method, so Morph performs that final check in the engine tree payload validator
+/// before a block is accepted.
 #[derive(Debug, Clone)]
 pub struct MorphConsensus {
     /// Chain specification containing hardfork information and chain config.
@@ -318,6 +320,7 @@ impl Consensus<Block> for MorphConsensus {
         validate_l1_messages_in_block(
             &block.body().transactions,
             block.header().next_l1_msg_index,
+            is_jade,
         )?;
 
         Ok(())
@@ -473,10 +476,13 @@ fn validate_against_parent_gas_limit<H: BlockHeader>(
 /// 2. **Sequential Queue Index**: L1 messages must have strictly sequential
 ///    `queue_index` values (each = previous + 1).
 ///
-/// 3. **Header Consistency**: If L1 messages are present,
-///    `header.next_l1_msg_index` must be >= `last_queue_index + 1`. It may be
-///    strictly greater because Morph allows L1 messages to be "skipped" — the
-///    sequencer can advance past queue indices not included in the block body.
+/// 3. **Header Consistency**: If L1 messages are present, `header.next_l1_msg_index`
+///    is checked against `last_queue_index + 1`. The strictness depends on the fork:
+///    - **Jade onward** (`is_jade == true`): must equal `last_queue_index + 1` exactly,
+///      matching go-ethereum's `writeBlockStateWithoutHead` hard-fail (PR #331).
+///    - **Pre-Jade**: must be `>= last_queue_index + 1`; it may be strictly greater
+///      because the sequencer was permitted to "skip" queue indices not included in
+///      the block body ("early L1 msg skip").
 ///
 /// # Cross-Block Validation
 ///
@@ -488,8 +494,9 @@ fn validate_against_parent_gas_limit<H: BlockHeader>(
 ///
 /// ```text
 /// [L1Msg(queue=5), L1Msg(queue=6), L1Msg(queue=7), RegularTx]
-/// // header.next_l1_msg_index = 8  ✓ (exact match)
-/// // header.next_l1_msg_index = 10 ✓ (skipped queue indices 8, 9)
+/// // header.next_l1_msg_index = 8  ✓ (exact match, required from Jade onward)
+/// // header.next_l1_msg_index = 10 ✓ pre-Jade only (skipped queue indices 8, 9);
+/// //                              ❌ rejected from Jade onward
 /// ```
 ///
 /// # Example (Invalid - L1 after L2)
@@ -501,6 +508,7 @@ fn validate_against_parent_gas_limit<H: BlockHeader>(
 fn validate_l1_messages_in_block(
     txs: &[MorphTxEnvelope],
     header_next_l1_msg_index: u64,
+    is_jade: bool,
 ) -> Result<(), ConsensusError> {
     let mut l1_msg_count = 0u64;
     let mut saw_l2_transaction = false;
@@ -545,29 +553,37 @@ fn validate_l1_messages_in_block(
         }
     }
 
-    // Validate header consistency: header.next_l1_msg_index must be at least
-    // last_queue_index + 1 (cannot go backwards relative to included messages).
-    // It may be strictly greater because Morph allows L1 messages to be
-    // "skipped" — the sequencer can advance past queue indices that are not
-    // included in the block body (e.g., messages that failed on L1 relay).
-    // go-eth's NumL1MessagesProcessed() comment: "This count includes both
-    // skipped and included messages."
-    // For blocks with no L1 messages, this check is skipped — the cross-block
-    // monotonicity check in validate_header_against_parent handles that case.
+    // Validate header consistency against the L1 messages included in this block.
+    //
+    // Jade onward: if this block contains L1 messages, `header.next_l1_msg_index`
+    // must EXACTLY equal `last_queue_index + 1`.
+    //
+    // Pre-Jade keeps the lenient lower bound (`>= last_queue_index + 1`): the sequencer
+    // was permitted to advance past queue indices not included in the block body
+    // ("early L1 msg skip"), so the value may be strictly greater.
+    //
+    // For blocks with no L1 messages this stateless check is skipped. The engine
+    // tree payload validator performs the parent-aware exact check (`parent.next + 0`)
+    // once both parent header and block body are available.
     if l1_msg_count > 0 {
         let last_queue_index = prev_queue_index.ok_or_else(|| {
             ConsensusError::msg("internal error: l1_msg_count > 0 but prev_queue_index is None")
         })?;
-        let min_expected = last_queue_index.checked_add(1).ok_or_else(|| {
+        let expected = last_queue_index.checked_add(1).ok_or_else(|| {
             ConsensusError::other(MorphConsensusError::InvalidNextL1MessageIndex {
                 expected: u64::MAX,
                 actual: header_next_l1_msg_index,
             })
         })?;
-        if header_next_l1_msg_index < min_expected {
+        let inconsistent = if is_jade {
+            header_next_l1_msg_index != expected
+        } else {
+            header_next_l1_msg_index < expected
+        };
+        if inconsistent {
             return Err(ConsensusError::other(
                 MorphConsensusError::InvalidNextL1MessageIndex {
-                    expected: min_expected,
+                    expected,
                     actual: header_next_l1_msg_index,
                 },
             ));
@@ -796,7 +812,7 @@ mod tests {
         ];
 
         // L1 msgs: 0, 1 → last+1=2==header_next
-        assert!(validate_l1_messages_in_block(&txs, 2).is_ok());
+        assert!(validate_l1_messages_in_block(&txs, 2, true).is_ok());
     }
 
     #[test]
@@ -807,7 +823,7 @@ mod tests {
             create_l1_msg_tx(1),
         ];
 
-        assert!(validate_l1_messages_in_block(&txs, 2).is_err());
+        assert!(validate_l1_messages_in_block(&txs, 2, true).is_err());
     }
 
     #[test]
@@ -933,9 +949,9 @@ mod tests {
         // Empty block: no L1 messages → internal check always passes.
         // Any header_next value is accepted because the cross-block
         // monotonicity check is in validate_header_against_parent.
-        assert!(validate_l1_messages_in_block(&txs, 0).is_ok());
-        assert!(validate_l1_messages_in_block(&txs, 5).is_ok());
-        assert!(validate_l1_messages_in_block(&txs, 100).is_ok());
+        assert!(validate_l1_messages_in_block(&txs, 0, true).is_ok());
+        assert!(validate_l1_messages_in_block(&txs, 5, true).is_ok());
+        assert!(validate_l1_messages_in_block(&txs, 100, true).is_ok());
     }
 
     #[test]
@@ -947,7 +963,7 @@ mod tests {
         ];
 
         // last=2, 2+1=3==header_next
-        assert!(validate_l1_messages_in_block(&txs, 3).is_ok());
+        assert!(validate_l1_messages_in_block(&txs, 3, true).is_ok());
     }
 
     #[test]
@@ -959,7 +975,7 @@ mod tests {
         ];
 
         // No L1 messages → internal check passes (header_next not checked)
-        assert!(validate_l1_messages_in_block(&txs, 0).is_ok());
+        assert!(validate_l1_messages_in_block(&txs, 0, true).is_ok());
     }
 
     #[test]
@@ -967,7 +983,7 @@ mod tests {
         // Block has 0 then 2 (skipping 1) — caught by sequential check
         let txs = [create_l1_msg_tx(0), create_l1_msg_tx(2)];
 
-        let result = validate_l1_messages_in_block(&txs, 3);
+        let result = validate_l1_messages_in_block(&txs, 3, true);
         assert!(result.is_err());
         let err_str = result.unwrap_err().to_string();
         assert!(err_str.contains("expected 1"));
@@ -984,7 +1000,38 @@ mod tests {
         ];
 
         // last=101, 101+1=102==header_next
-        assert!(validate_l1_messages_in_block(&txs, 102).is_ok());
+        assert!(validate_l1_messages_in_block(&txs, 102, true).is_ok());
+    }
+
+    #[test]
+    fn test_validate_l1_messages_jade_rejects_skipped_forward_index() {
+        // Jade onward: header.next_l1_msg_index must equal last_queue_index + 1 exactly.
+        // Here last=1, so the only valid value is 2; a "skipped forward" 5 is rejected,
+        // matching go-ethereum's writeBlockStateWithoutHead hard-fail (PR #331).
+        let txs = [create_l1_msg_tx(0), create_l1_msg_tx(1)];
+        let result = validate_l1_messages_in_block(&txs, 5, true);
+        assert!(
+            result.is_err(),
+            "Jade must reject next_l1_msg_index > last_queue_index + 1"
+        );
+    }
+
+    #[test]
+    fn test_validate_l1_messages_pre_jade_allows_skipped_forward_index() {
+        // Pre-Jade keeps the lenient lower bound: the sequencer was permitted to advance
+        // past queue indices not included in the block body ("early L1 msg skip").
+        let txs = [create_l1_msg_tx(0), create_l1_msg_tx(1)];
+        assert!(
+            validate_l1_messages_in_block(&txs, 5, false).is_ok(),
+            "pre-Jade must allow next_l1_msg_index > last_queue_index + 1"
+        );
+    }
+
+    #[test]
+    fn test_validate_l1_messages_jade_accepts_exact_index() {
+        // The exact value (last_queue_index + 1) is accepted under Jade.
+        let txs = [create_l1_msg_tx(0), create_l1_msg_tx(1)];
+        assert!(validate_l1_messages_in_block(&txs, 2, true).is_ok());
     }
 
     #[test]
@@ -992,7 +1039,7 @@ mod tests {
         // Duplicate index: 0, 0 — caught by sequential check (prev=0, expected 1, got 0)
         let txs = [create_l1_msg_tx(0), create_l1_msg_tx(0)];
 
-        let result = validate_l1_messages_in_block(&txs, 1);
+        let result = validate_l1_messages_in_block(&txs, 1, true);
         assert!(result.is_err());
         let err_str = result.unwrap_err().to_string();
         assert!(err_str.contains("expected 1"));
@@ -1004,7 +1051,7 @@ mod tests {
         // Block has 1 then 0 — caught by sequential check (prev=1, expected 2, got 0)
         let txs = [create_l1_msg_tx(1), create_l1_msg_tx(0)];
 
-        let result = validate_l1_messages_in_block(&txs, 2);
+        let result = validate_l1_messages_in_block(&txs, 2, true);
         assert!(result.is_err());
     }
 
@@ -1019,7 +1066,7 @@ mod tests {
         ];
 
         // Header says 2 but should be 3 (last=2, 2+1=3). Value < min_expected triggers error.
-        let result = validate_l1_messages_in_block(&txs, 2);
+        let result = validate_l1_messages_in_block(&txs, 2, true);
         assert!(result.is_err());
         let err_str = result.unwrap_err().to_string();
         assert!(err_str.contains("expected 3"));
@@ -1036,7 +1083,7 @@ mod tests {
             create_l1_msg_tx(2),
         ];
 
-        assert!(validate_l1_messages_in_block(&txs, 3).is_err());
+        assert!(validate_l1_messages_in_block(&txs, 3, true).is_err());
     }
 
     // ========================================================================
@@ -1891,7 +1938,7 @@ mod tests {
         let txs = [create_l1_msg_tx(u64::MAX - 1), create_l1_msg_tx(u64::MAX)];
 
         // last=MAX, MAX+1 overflows
-        let result = validate_l1_messages_in_block(&txs, 0);
+        let result = validate_l1_messages_in_block(&txs, 0, true);
         assert!(result.is_err());
     }
 
@@ -1899,9 +1946,9 @@ mod tests {
     fn test_validate_l1_messages_in_block_single_l1() {
         let txs = [create_l1_msg_tx(42)];
         // last=42, 42+1=43==header_next
-        assert!(validate_l1_messages_in_block(&txs, 43).is_ok());
+        assert!(validate_l1_messages_in_block(&txs, 43, true).is_ok());
         // Wrong header_next
-        assert!(validate_l1_messages_in_block(&txs, 42).is_err());
+        assert!(validate_l1_messages_in_block(&txs, 42, true).is_err());
     }
 
     // ========================================================================
