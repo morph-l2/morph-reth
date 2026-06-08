@@ -303,12 +303,15 @@ impl Consensus<Block> for MorphConsensus {
             ));
         }
 
-        // Validate MorphTx version and field constraints.
+        // Validate MorphTx activation, version and field constraints.
         // Matches go-ethereum's BlockValidator.ValidateBody() → ValidateMorphTxVersion().
+        let is_emerald = self
+            .chain_spec
+            .is_emerald_active_at_timestamp(block.header().timestamp());
         let is_jade = self
             .chain_spec
             .is_jade_active_at_timestamp(block.header().timestamp());
-        validate_morph_txs(&block.body().transactions, is_jade)?;
+        validate_morph_txs(&block.body().transactions, is_emerald, is_jade)?;
 
         // Validate L1 messages ordering and internal consistency with header.
         // This is the body-level half of L1 validation; it verifies that the L1
@@ -579,18 +582,30 @@ fn validate_l1_messages_in_block(
 
 /// Validates all MorphTx (0x7F) transactions in a block.
 ///
-/// Performs two checks per MorphTx:
-/// 1. **Hardfork gate**: rejects V1 transactions before the Jade fork is active
-/// 2. **Field validation**: delegates to [`TxMorph::validate()`] for version-specific
+/// Performs three checks per MorphTx:
+/// 1. **Type hardfork gate**: rejects MorphTx before the Emerald fork is active
+/// 2. **Version hardfork gate**: rejects V1 transactions before the Jade fork is active
+/// 3. **Field validation**: delegates to [`TxMorph::validate()`] for version-specific
 ///    field constraints, memo length, and gas price ordering
 ///
 /// See [`TxMorph::validate()`] for the detailed per-version rules.
-fn validate_morph_txs(txs: &[MorphTxEnvelope], is_jade: bool) -> Result<(), ConsensusError> {
+fn validate_morph_txs(
+    txs: &[MorphTxEnvelope],
+    is_emerald: bool,
+    is_jade: bool,
+) -> Result<(), ConsensusError> {
     for tx in txs {
         let morph_tx = match tx {
             MorphTxEnvelope::Morph(signed) => signed.tx(),
             _ => continue,
         };
+
+        // Match geth's signer gate: MorphTx type is not supported before Emerald.
+        if !is_emerald {
+            return Err(ConsensusError::other(MorphConsensusError::InvalidBody(
+                "MorphTx type is not yet active (emerald fork not reached)".into(),
+            )));
+        }
 
         // Reject MorphTx V1 before Jade fork (hardfork-gated, consensus-only check).
         if !is_jade && morph_tx.version == MORPH_TX_VERSION_1 {
@@ -1658,7 +1673,7 @@ mod tests {
     fn test_validate_morph_tx_v0_valid() {
         // V0 with fee_token_id > 0 and no reference/memo
         let txs = [create_morph_tx_v0(1)];
-        let result = validate_morph_txs(&txs, false);
+        let result = validate_morph_txs(&txs, true, false);
         assert!(result.is_ok());
     }
 
@@ -1666,7 +1681,7 @@ mod tests {
     fn test_validate_morph_tx_v0_zero_fee_token_rejected() {
         // V0 with fee_token_id == 0 should be rejected
         let txs = [create_morph_tx_v0(0)];
-        let result = validate_morph_txs(&txs, false);
+        let result = validate_morph_txs(&txs, true, false);
         assert!(result.is_err());
         assert!(
             result
@@ -1704,7 +1719,7 @@ mod tests {
         ));
 
         let txs = [envelope];
-        let result = validate_morph_txs(&txs, false);
+        let result = validate_morph_txs(&txs, true, false);
         assert!(result.is_err());
         assert!(
             result
@@ -1718,7 +1733,7 @@ mod tests {
     fn test_validate_morph_tx_v1_before_jade_rejected() {
         // V1 before jade fork should be rejected
         let txs = [create_morph_tx_v1(1)];
-        let result = validate_morph_txs(&txs, false);
+        let result = validate_morph_txs(&txs, true, false);
         assert!(result.is_err());
         assert!(
             result
@@ -1732,7 +1747,7 @@ mod tests {
     fn test_validate_morph_tx_v1_after_jade_valid() {
         // V1 after jade fork should pass
         let txs = [create_morph_tx_v1(1)];
-        let result = validate_morph_txs(&txs, true);
+        let result = validate_morph_txs(&txs, true, true);
         assert!(result.is_ok());
     }
 
@@ -1744,6 +1759,46 @@ mod tests {
         let result = consensus.validate_block_pre_execution(&block);
 
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_block_pre_execution_rejects_morph_tx_before_emerald() {
+        let genesis_json = serde_json::json!({
+            "config": {
+                "chainId": 1337,
+                "homesteadBlock": 0,
+                "eip150Block": 0,
+                "eip155Block": 0,
+                "eip158Block": 0,
+                "byzantiumBlock": 0,
+                "constantinopleBlock": 0,
+                "petersburgBlock": 0,
+                "istanbulBlock": 0,
+                "berlinBlock": 0,
+                "londonBlock": 0,
+                "bernoulliBlock": 0,
+                "curieBlock": 0,
+                "morph203Time": 0,
+                "viridianTime": 0,
+                "emeraldTime": 1000,
+                "jadeForkTime": 2000,
+                "morph": {}
+            },
+            "alloc": {}
+        });
+        let genesis: Genesis = serde_json::from_value(genesis_json).unwrap();
+        let consensus = MorphConsensus::new(Arc::new(MorphChainSpec::from(genesis)));
+        let block = create_sealed_block(999, vec![create_morph_tx_v0(1)]);
+
+        let result = consensus.validate_block_pre_execution(&block);
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("emerald fork not reached")
+        );
     }
 
     #[test]
@@ -1775,7 +1830,7 @@ mod tests {
         ));
 
         let txs = [envelope];
-        let result = validate_morph_txs(&txs, true);
+        let result = validate_morph_txs(&txs, true, true);
         assert!(result.is_err());
         assert!(
             result
@@ -1813,7 +1868,7 @@ mod tests {
         ));
 
         let txs = [envelope];
-        let result = validate_morph_txs(&txs, true);
+        let result = validate_morph_txs(&txs, true, true);
         assert!(result.is_err());
         assert!(
             result
@@ -1851,7 +1906,7 @@ mod tests {
         ));
 
         let txs = [envelope];
-        let result = validate_morph_txs(&txs, true);
+        let result = validate_morph_txs(&txs, true, true);
         assert!(result.is_err());
         assert!(
             result
@@ -1865,7 +1920,7 @@ mod tests {
     fn test_validate_morph_txs_skips_non_morph_tx() {
         // Regular transactions should be skipped entirely
         let txs = [create_regular_tx(), create_l1_msg_tx(0)];
-        let result = validate_morph_txs(&txs, false);
+        let result = validate_morph_txs(&txs, false, false);
         assert!(result.is_ok());
     }
 
@@ -1877,7 +1932,7 @@ mod tests {
             create_regular_tx(),
             create_morph_tx_v0(1),
         ];
-        let result = validate_morph_txs(&txs, false);
+        let result = validate_morph_txs(&txs, true, false);
         assert!(result.is_ok());
     }
 
