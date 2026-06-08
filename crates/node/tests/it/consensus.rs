@@ -368,3 +368,87 @@ async fn next_l1_msg_index_can_skip_past_included_messages_pre_jade() -> eyre::R
     );
     Ok(())
 }
+
+/// From Jade onward, a block whose first L1 message does not continue the parent's
+/// queue stream is rejected (a "forward skip").
+///
+/// The parent index is 2, but the block's leading L1 message claims queue index 5,
+/// silently dropping queue indices 2, 3, 4. The in-block messages are internally
+/// contiguous (5, 6) and the header's `next_l1_msg_index` equals last + 1 (= 7), so
+/// neither the stateless consensus check nor the trailing-skip check catches it. Only
+/// the parent-aware validator, which has both the parent index and the block body, can
+/// reject it. `queue_index` does not affect execution (L1 message nonce is always 0),
+/// so the crafted block's state root stays valid — isolating the continuity violation.
+#[tokio::test(flavor = "multi_thread")]
+async fn next_l1_msg_index_first_msg_skips_parent_rejected_post_jade() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+    // Default schedule is AllActive (Jade on).
+    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+
+    // Block 1 includes queue indices 0, 1, so the parent index becomes 2.
+    advance_block_with_l1_messages(&mut node, L1MessageBuilder::build_sequential(0, 2)).await?;
+
+    // Block 2 is built with the valid continuation (queue 2, 3) so it executes and seals
+    // with a correct state root, then we rewrite the queue indices to 5, 6.
+    let base = build_block_no_submit(&mut node, L1MessageBuilder::build_sequential(2, 2)).await?;
+
+    let accepted = craft_and_try_import_block(&mut node, &base, |block| {
+        rewrite_l1_queue_indices(block, 3);
+        // Keep the header consistent with the rewritten in-block stream (last 6 + 1).
+        block.header.next_l1_msg_index = 7;
+    })
+    .await?;
+
+    assert!(
+        !accepted,
+        "post-Jade: a block whose first L1 message skips past the parent index must be rejected"
+    );
+    Ok(())
+}
+
+/// Pre-Jade, the parent-aware exact-index rule is not enforced, so a forward skip of
+/// queue indices is tolerated. Pins the Jade boundary against the post-Jade test above.
+#[tokio::test(flavor = "multi_thread")]
+async fn next_l1_msg_index_first_msg_skips_parent_allowed_pre_jade() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+    let (mut nodes, _wallet) = TestNodeBuilder::new()
+        .with_schedule(HardforkSchedule::PreJade)
+        .build()
+        .await?;
+    let mut node = nodes.pop().unwrap();
+
+    advance_block_with_l1_messages(&mut node, L1MessageBuilder::build_sequential(0, 2)).await?;
+    let base = build_block_no_submit(&mut node, L1MessageBuilder::build_sequential(2, 2)).await?;
+
+    let accepted = craft_and_try_import_block(&mut node, &base, |block| {
+        rewrite_l1_queue_indices(block, 3);
+        block.header.next_l1_msg_index = 7;
+    })
+    .await?;
+
+    assert!(
+        accepted,
+        "pre-Jade: a forward skip of L1 queue indices is tolerated"
+    );
+    Ok(())
+}
+
+/// Shift every leading L1 message's `queue_index` up by `delta`, re-sealing each tx.
+///
+/// Used to craft a block whose L1 stream no longer continues the parent's queue index
+/// while keeping execution identical (L1 message nonce is always 0, so `queue_index`
+/// does not influence the state root). Re-sealing recomputes the cached hash; the wire
+/// encoding and the recomputed transactions root both reflect the new indices.
+fn rewrite_l1_queue_indices(block: &mut morph_primitives::Block, delta: u64) {
+    use alloy_consensus::Sealable;
+    use morph_primitives::MorphTxEnvelope;
+
+    for tx in block.body.transactions.iter_mut() {
+        if let MorphTxEnvelope::L1Msg(sealed) = tx {
+            let mut inner = sealed.inner().clone();
+            inner.queue_index += delta;
+            *sealed = inner.seal_slow();
+        }
+    }
+}
