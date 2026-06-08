@@ -904,16 +904,9 @@ where
             let queue_index = tx.queue_index().ok_or_else(|| {
                 ConsensusError::msg("L1 message transaction is missing queue index")
             })?;
-            // Each leading L1 message must continue the parent's queue stream exactly:
-            // the first equals the parent index, the rest are contiguous. A forward skip
-            // (queue_index > expected) would silently drop unprocessed L1 messages, which
-            // go-ethereum prevents by deriving the index from its canonical L1 queue.
-            if queue_index != expected {
-                return Err(ConsensusError::msg(format!(
-                    "invalid block.NextL1MsgIndex: expected {expected}, got {queue_index}"
-                )));
-            }
-            expected = expected.checked_add(1).ok_or_else(|| {
+            // Match geth's `NumL1MessagesProcessed(parent_queue_index)`: forward skips
+            // are counted as processed, so the derived next index is last_queue + 1.
+            expected = queue_index.checked_add(1).ok_or_else(|| {
                 ConsensusError::msg(format!(
                     "invalid block.NextL1MsgIndex: expected {}, got {}",
                     u64::MAX,

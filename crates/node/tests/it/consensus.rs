@@ -319,8 +319,10 @@ async fn next_l1_msg_index_insufficient_for_l1_msgs() -> eyre::Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn next_l1_msg_index_skip_past_included_messages_rejected_post_jade() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
-    // Default schedule is AllActive (Jade on).
-    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, _wallet) = TestNodeBuilder::new()
+        .with_schedule(HardforkSchedule::AllActive)
+        .build()
+        .await?;
     let mut node = nodes.pop().unwrap();
 
     // Block includes queue indices 0,1 (last=1, so the only valid next is 2); advancing
@@ -369,21 +371,23 @@ async fn next_l1_msg_index_can_skip_past_included_messages_pre_jade() -> eyre::R
     Ok(())
 }
 
-/// From Jade onward, a block whose first L1 message does not continue the parent's
-/// queue stream is rejected (a "forward skip").
+/// From Jade onward, a block whose first L1 message skips past the parent's queue
+/// index is accepted when the header matches geth's derived processed count.
 ///
 /// The parent index is 2, but the block's leading L1 message claims queue index 5,
 /// silently dropping queue indices 2, 3, 4. The in-block messages are internally
-/// contiguous (5, 6) and the header's `next_l1_msg_index` equals last + 1 (= 7), so
-/// neither the stateless consensus check nor the trailing-skip check catches it. Only
-/// the parent-aware validator, which has both the parent index and the block body, can
-/// reject it. `queue_index` does not affect execution (L1 message nonce is always 0),
-/// so the crafted block's state root stays valid — isolating the continuity violation.
+/// contiguous (5, 6) and the header's `next_l1_msg_index` equals last + 1 (= 7).
+/// This matches go-ethereum PR #331: `NumL1MessagesProcessed(parent.next)` derives
+/// `last_queue_index - parent.next + 1`, so forward skips are counted as processed.
+/// `queue_index` does not affect execution (L1 message nonce is always 0), so the
+/// crafted block's state root stays valid while exercising only the index rule.
 #[tokio::test(flavor = "multi_thread")]
-async fn next_l1_msg_index_first_msg_skips_parent_rejected_post_jade() -> eyre::Result<()> {
+async fn next_l1_msg_index_first_msg_skips_parent_allowed_post_jade() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
-    // Default schedule is AllActive (Jade on).
-    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, _wallet) = TestNodeBuilder::new()
+        .with_schedule(HardforkSchedule::AllActive)
+        .build()
+        .await?;
     let mut node = nodes.pop().unwrap();
 
     // Block 1 includes queue indices 0, 1, so the parent index becomes 2.
@@ -401,14 +405,15 @@ async fn next_l1_msg_index_first_msg_skips_parent_rejected_post_jade() -> eyre::
     .await?;
 
     assert!(
-        !accepted,
-        "post-Jade: a block whose first L1 message skips past the parent index must be rejected"
+        accepted,
+        "post-Jade: forward skips are accepted when header.next matches geth's derived index"
     );
     Ok(())
 }
 
 /// Pre-Jade, the parent-aware exact-index rule is not enforced, so a forward skip of
-/// queue indices is tolerated. Pins the Jade boundary against the post-Jade test above.
+/// queue indices is also tolerated. Pins the fork boundary against the post-Jade
+/// trailing-skip rejection tests above.
 #[tokio::test(flavor = "multi_thread")]
 async fn next_l1_msg_index_first_msg_skips_parent_allowed_pre_jade() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
