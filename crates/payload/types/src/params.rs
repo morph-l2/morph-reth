@@ -219,6 +219,23 @@ mod tests {
     }
 
     #[test]
+    fn test_assemble_v2_params_serde_explicit_null_timestamp() {
+        // geth's gencodec MarshalJSON always emits the `timestamp` field, writing
+        // `null` (not omitting it) when the sequencer passes no timestamp. The reth
+        // server must decode that production payload to `None` rather than erroring.
+        let json = r#"{
+            "parentHash": "0xabababababababababababababababababababababababababababababababab",
+            "transactions": ["0xdead"],
+            "timestamp": null
+        }"#;
+
+        let params: AssembleL2BlockV2Params = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(params.parent_hash, B256::repeat_byte(0xab));
+        assert_eq!(params.transactions, vec![Bytes::from(vec![0xde, 0xad])]);
+        assert!(params.timestamp.is_none());
+    }
+
+    #[test]
     fn test_generic_response_serde() {
         let response = GenericResponse::success();
 
