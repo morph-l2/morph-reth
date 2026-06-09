@@ -208,9 +208,12 @@ impl PayloadValidator<MorphPayloadTypes> for MorphEngineValidator {
         let expected_withdraw_trie_root = payload.expected_withdraw_trie_root;
         let sealed_block = Arc::unwrap_or_clone(payload.block);
 
-        let expectation = expected_withdraw_trie_root
-            .map(WithdrawTrieRootExpectation::Verify)
-            .unwrap_or(WithdrawTrieRootExpectation::SkipValidation);
+        let expectation = match expected_withdraw_trie_root {
+            Some(root) if root != B256::ZERO => WithdrawTrieRootExpectation::Verify(root),
+            // Match morph-geth: zero means the caller did not provide this optional
+            // CL/EL cross-check value, not that the expected root is actually zero.
+            _ => WithdrawTrieRootExpectation::SkipValidation,
+        };
         self.record_withdraw_trie_root_expectation(sealed_block.hash(), expectation);
 
         Ok(sealed_block)
@@ -523,6 +526,39 @@ mod tests {
             .validate_block_post_execution_with_hashed_state(&HashedPostState::default(), &block);
 
         assert!(result.is_ok());
+    }
+
+    /// A zero withdraw-trie root from the CL means the value was not provided,
+    /// matching morph-geth's long-standing zero-value compatibility behavior.
+    #[test]
+    fn validate_block_post_execution_treats_zero_expected_root_as_skip_validation() {
+        let validator = MorphEngineValidator::new();
+        let hash = B256::from([0x44; 32]);
+        let block = empty_recovered_block_with_hash(hash);
+        let payload = morph_payload_types::MorphExecutionData::with_expected_withdraw_trie_root(
+            Arc::new(block.clone().into_sealed_block()),
+            B256::ZERO,
+        );
+
+        validator
+            .convert_payload_to_block(payload)
+            .expect("payload conversion should succeed");
+
+        let hashed_address = keccak256(L2_MESSAGE_QUEUE_ADDRESS);
+        let hashed_slot = keccak256(B256::from(L2_MESSAGE_QUEUE_WITHDRAW_TRIE_ROOT_SLOT));
+        let actual = B256::from([0xff; 32]);
+        let state = HashedPostState::from_hashed_storage(
+            hashed_address,
+            HashedStorage::from_iter(false, [(hashed_slot, U256::from_be_bytes(actual.0))]),
+        );
+
+        let result = validator.validate_block_post_execution_with_hashed_state(&state, &block);
+
+        assert!(
+            result.is_ok(),
+            "zero expected withdraw root should skip validation, got {:?}",
+            result.err()
+        );
     }
 
     /// Verify expectation that mismatches an actually-updated slot must fail.
