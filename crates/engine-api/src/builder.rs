@@ -13,8 +13,8 @@ use alloy_primitives::{Address, B64, B256, Sealable};
 use alloy_rpc_types_engine::{PayloadAttributes, PayloadStatus, PayloadStatusEnum};
 use morph_chainspec::MorphChainSpec;
 use morph_payload_types::{
-    AssembleL2BlockParams, ExecutableL2Data, GenericResponse, MorphBuiltPayload,
-    MorphExecutionData, MorphPayloadTypes, SafeL2Data,
+    AssembleL2BlockParams, AssembleL2BlockV2Params, ExecutableL2Data, GenericResponse,
+    MorphBuiltPayload, MorphExecutionData, MorphPayloadTypes, SafeL2Data,
 };
 use morph_primitives::{Block, BlockBody, MorphHeader, MorphTxEnvelope};
 use parking_lot::RwLock;
@@ -171,7 +171,7 @@ where
         params: AssembleL2BlockParams,
     ) -> EngineApiResult<ExecutableL2Data> {
         let started = Instant::now();
-        let result = self.build_l2_payload(params, None, None).await;
+        let result = self.build_l2_payload(params, None, None, None).await;
         self.metrics
             .assemble_l2_block_duration_seconds
             .record(started.elapsed());
@@ -187,6 +187,54 @@ where
             gas_used = executable_data.gas_used,
             tx_count = executable_data.transactions.len(),
             "L2 block assembled successfully"
+        );
+
+        Ok(executable_data)
+    }
+
+    async fn assemble_l2_block_v2(
+        &self,
+        params: AssembleL2BlockV2Params,
+    ) -> EngineApiResult<ExecutableL2Data> {
+        let started = Instant::now();
+        let parent_hash = params.parent_hash;
+
+        // Derive the block number from the pinned parent (parent + 1). The parent is
+        // looked up by hash and need not be the canonical head — that is the point of V2
+        // (the sequencer can build on a parent that diverges from its current head).
+        let parent = self
+            .provider
+            .sealed_header_by_hash(parent_hash)
+            .map_err(|e| MorphEngineApiError::Database(e.to_string()))?
+            .ok_or_else(|| {
+                MorphEngineApiError::Internal(format!("parent block not found: {parent_hash}"))
+            })?;
+
+        let assemble_params = AssembleL2BlockParams {
+            number: parent.number() + 1,
+            transactions: params.transactions,
+            timestamp: params.timestamp,
+        };
+
+        let result = self
+            .build_l2_payload(assemble_params, None, None, Some(parent_hash))
+            .await;
+        self.metrics
+            .assemble_l2_block_duration_seconds
+            .record(started.elapsed());
+
+        let built_payload = result.inspect_err(|_| {
+            self.metrics.assemble_l2_block_failures_total.increment(1);
+        })?;
+        let executable_data = built_payload.executable_data;
+
+        tracing::debug!(
+            target: "morph::engine",
+            block_hash = %executable_data.hash,
+            parent_hash = %parent_hash,
+            gas_used = executable_data.gas_used,
+            tx_count = executable_data.transactions.len(),
+            "L2 block assembled successfully (v2)"
         );
 
         Ok(executable_data)
@@ -400,31 +448,85 @@ where
         Ok(())
     }
 
+    async fn new_l2_block_v2(&self, data: ExecutableL2Data) -> EngineApiResult<MorphHeader> {
+        let started = Instant::now();
+        tracing::debug!(
+            target: "morph::engine",
+            block_number = data.number,
+            block_hash = %data.hash,
+            parent_hash = %data.parent_hash,
+            "importing new L2 block (v2, reorg-capable)"
+        );
+
+        // 1. Parent selection by hash. Relaxed from V1's "parent must be the current
+        //    head" to "parent must exist": when the parent is not the canonical head,
+        //    the forkchoice update inside import_l2_block_via_engine reorganizes the
+        //    chain onto this block. This is the centralized-sequencer import path,
+        //    where the sequencer may rebuild and replace recent blocks.
+        let parent = self
+            .provider
+            .sealed_header_by_hash(data.parent_hash)
+            .map_err(|e| MorphEngineApiError::Database(e.to_string()))?
+            .ok_or_else(|| {
+                MorphEngineApiError::Internal(format!(
+                    "parent block not found: {}",
+                    data.parent_hash
+                ))
+            })?;
+
+        // 2. Block number must be exactly parent + 1.
+        let expected_number = parent.number() + 1;
+        if data.number != expected_number {
+            self.metrics.new_l2_block_failures_total.increment(1);
+            self.metrics
+                .new_l2_block_duration_seconds
+                .record(started.elapsed());
+            return Err(MorphEngineApiError::DiscontinuousBlockNumber {
+                expected: expected_number,
+                actual: data.number,
+            });
+        }
+
+        // 3. Import via the engine tree (newPayload + forkchoiceUpdated). The hash check
+        //    against data.hash happens inside execution_payload_from_executable_data; the
+        //    FCU advances or reorgs the canonical head onto data.hash.
+        let block_timestamp = data.timestamp;
+        let header = self
+            .import_l2_block_via_engine(data)
+            .await
+            .inspect_err(|_| {
+                self.metrics.new_l2_block_failures_total.increment(1);
+                self.metrics
+                    .new_l2_block_duration_seconds
+                    .record(started.elapsed());
+            })?;
+
+        self.metrics
+            .new_l2_block_duration_seconds
+            .record(started.elapsed());
+        self.record_head_metrics(block_timestamp);
+
+        Ok(header)
+    }
+
     async fn new_safe_l2_block(&self, mut data: SafeL2Data) -> EngineApiResult<MorphHeader> {
         let started = Instant::now();
         tracing::debug!(
             target: "morph::engine",
             block_number = data.number,
+            parent_hash = ?data.parent_hash,
             "importing safe L2 block from L1 derivation"
         );
 
-        // 1. Get latest block number
-        let latest_number = self.current_head()?.number;
-
-        if data.number != latest_number + 1 {
-            self.metrics.new_safe_l2_block_failures_total.increment(1);
-            self.metrics
-                .new_safe_l2_block_duration_seconds
-                .record(started.elapsed());
-            return Err(MorphEngineApiError::DiscontinuousBlockNumber {
-                expected: latest_number + 1,
-                actual: data.number,
-            });
-        }
-
         let block_timestamp = data.timestamp;
 
-        // 2. Assemble the block from SafeL2Data inputs.
+        // Parent selection: caller-pinned (derivation reorg path, deriveForce) or the
+        // current head (legacy sequential path). The block-number invariant
+        // (`number == parent + 1`) is validated inside build_l2_payload against the
+        // resolved parent, so callers that pin a non-head parent reorg correctly.
+        let parent_override = data.parent_hash;
+
+        // Assemble the block from SafeL2Data inputs.
         let assemble_params = AssembleL2BlockParams {
             number: data.number,
             // Move transactions out of data to avoid cloning the full Vec<Bytes>.
@@ -433,7 +535,12 @@ where
         };
 
         let built_payload = self
-            .build_l2_payload(assemble_params, Some(data.gas_limit), data.base_fee_per_gas)
+            .build_l2_payload(
+                assemble_params,
+                Some(data.gas_limit),
+                data.base_fee_per_gas,
+                parent_override,
+            )
             .await
             .inspect_err(|_| {
                 self.metrics.new_safe_l2_block_failures_total.increment(1);
@@ -596,6 +703,7 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
         params: AssembleL2BlockParams,
         gas_limit_override: Option<u64>,
         base_fee_override: Option<u128>,
+        parent_override: Option<B256>,
     ) -> EngineApiResult<MorphBuiltPayload>
     where
         Provider:
@@ -608,20 +716,45 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
             "assembling L2 block"
         );
 
-        // 1. Validate block number (must be current_head + 1).
-        let current_head = self.current_head()?;
-        if params.number != current_head.number + 1 {
+        // 1. Resolve the parent: caller-pinned (reorg path, e.g. derivation deriveForce
+        //    or assembleL2BlockV2) or the current canonical head (sequential path). When
+        //    pinned, the parent need not be the head — building on it lets the subsequent
+        //    forkchoice update reorganize the chain onto the new block.
+        let (parent_number, parent_hash, parent_timestamp) = match parent_override {
+            Some(parent_hash) => {
+                let parent = self
+                    .provider
+                    .sealed_header_by_hash(parent_hash)
+                    .map_err(|e| MorphEngineApiError::Database(e.to_string()))?
+                    .ok_or_else(|| {
+                        MorphEngineApiError::Internal(format!(
+                            "parent block not found: {parent_hash}"
+                        ))
+                    })?;
+                (parent.number(), parent_hash, parent.timestamp())
+            }
+            None => {
+                let current_head = self.current_head()?;
+                (
+                    current_head.number,
+                    current_head.hash,
+                    current_head.timestamp,
+                )
+            }
+        };
+
+        // 2. Validate block number (must be parent + 1).
+        if params.number != parent_number + 1 {
             return Err(MorphEngineApiError::DiscontinuousBlockNumber {
-                expected: current_head.number + 1,
+                expected: parent_number + 1,
                 actual: params.number,
             });
         }
 
-        // 2. Build payload attributes.
-        let parent_hash = current_head.hash;
+        // 3. Build payload attributes.
         let timestamp = params.timestamp.unwrap_or_else(|| {
             std::cmp::max(
-                current_head.timestamp + 1,
+                parent_timestamp + 1,
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -713,9 +846,6 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
         let new_payload_elapsed = new_payload_started.elapsed();
         ensure_payload_status_valid(&payload_status, "newPayload")?;
 
-        // Morph uses Tendermint consensus with instant finality — every committed
-        // block is final and no reorgs are possible.
-        //
         // The safe/finalized hashes passed here serve two purposes in reth's engine
         // tree: (1) driving changeset-cache eviction and sidechain pruning (memory
         // management), and (2) setting the RPC-visible "safe"/"finalized" block tags.

@@ -74,10 +74,11 @@ where
 impl<Node, PVB> EngineValidatorBuilder<Node> for MorphTreeEngineValidatorBuilder<PVB>
 where
     Node: FullNodeComponents<
-        Evm: reth_node_api::ConfigureEngineEvm<
-            <<Node::Types as NodeTypes>::Payload as PayloadTypes>::ExecutionData,
+            Types = MorphNode,
+            Evm: reth_node_api::ConfigureEngineEvm<
+                <<Node::Types as NodeTypes>::Payload as PayloadTypes>::ExecutionData,
+            >,
         >,
-    >,
     Node::Provider: ChainSpecProvider<ChainSpec = MorphChainSpec>,
     PVB: PayloadValidatorBuilder<Node>,
     PVB::Validator: reth_node_api::PayloadValidator<

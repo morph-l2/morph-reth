@@ -1,6 +1,6 @@
 //! Request/response types for L2 Engine API methods.
 
-use alloy_primitives::Bytes;
+use alloy_primitives::{B256, Bytes};
 
 /// Parameters for engine_assembleL2Block.
 ///
@@ -42,6 +42,53 @@ impl AssembleL2BlockParams {
     pub fn empty(number: u64) -> Self {
         Self {
             number,
+            transactions: Vec::new(),
+            timestamp: None,
+        }
+    }
+}
+
+/// Parameters for `engine_assembleL2BlockV2`.
+///
+/// V2 mirrors V1's single-struct JSON-RPC parameter style while selecting the
+/// parent by hash instead of by block number. Transactions use the normal
+/// Ethereum JSON-RPC bytes encoding (`0x...` hex strings).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssembleL2BlockV2Params {
+    /// Parent block hash to build on.
+    pub parent_hash: B256,
+
+    /// Transactions to include in the block.
+    /// These are RLP-encoded transaction bytes.
+    #[serde(default)]
+    pub transactions: Vec<Bytes>,
+
+    /// Optional block timestamp.
+    ///
+    /// If not provided, builder can choose a local current timestamp.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "alloy_serde::quantity::opt"
+    )]
+    pub timestamp: Option<u64>,
+}
+
+impl AssembleL2BlockV2Params {
+    /// Create a new [`AssembleL2BlockV2Params`].
+    pub fn new(parent_hash: B256, transactions: Vec<Bytes>) -> Self {
+        Self {
+            parent_hash,
+            transactions,
+            timestamp: None,
+        }
+    }
+
+    /// Create params for an empty block.
+    pub fn empty(parent_hash: B256) -> Self {
+        Self {
+            parent_hash,
             transactions: Vec::new(),
             timestamp: None,
         }
@@ -120,6 +167,72 @@ mod tests {
         let decoded: AssembleL2BlockParams = serde_json::from_str(&json).expect("deserialize");
 
         assert_eq!(params, decoded);
+    }
+
+    #[test]
+    fn test_assemble_v2_params_new() {
+        let parent_hash = B256::repeat_byte(0xab);
+        let params = AssembleL2BlockV2Params::new(parent_hash, vec![Bytes::from(vec![0x01])]);
+        assert_eq!(params.parent_hash, parent_hash);
+        assert_eq!(params.transactions.len(), 1);
+        assert!(params.timestamp.is_none());
+    }
+
+    #[test]
+    fn test_assemble_v2_params_empty() {
+        let parent_hash = B256::repeat_byte(0xcd);
+        let params = AssembleL2BlockV2Params::empty(parent_hash);
+        assert_eq!(params.parent_hash, parent_hash);
+        assert!(params.transactions.is_empty());
+        assert!(params.timestamp.is_none());
+    }
+
+    #[test]
+    fn test_assemble_v2_params_serde() {
+        let parent_hash = B256::repeat_byte(0xab);
+        let params = AssembleL2BlockV2Params {
+            parent_hash,
+            transactions: vec![Bytes::from(vec![0xde, 0xad])],
+            timestamp: Some(0x6553f100),
+        };
+
+        let json = serde_json::to_string(&params).expect("serialize");
+        assert!(json.contains("parentHash"));
+        assert!(json.contains("\"0xdead\""));
+
+        let decoded: AssembleL2BlockV2Params = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(params, decoded);
+    }
+
+    #[test]
+    fn test_assemble_v2_params_serde_with_hex_timestamp_and_txs() {
+        let json = r#"{
+            "parentHash": "0xabababababababababababababababababababababababababababababababab",
+            "transactions": ["0xdead"],
+            "timestamp": "0x6553f100"
+        }"#;
+
+        let params: AssembleL2BlockV2Params = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(params.parent_hash, B256::repeat_byte(0xab));
+        assert_eq!(params.transactions, vec![Bytes::from(vec![0xde, 0xad])]);
+        assert_eq!(params.timestamp, Some(0x6553f100));
+    }
+
+    #[test]
+    fn test_assemble_v2_params_serde_explicit_null_timestamp() {
+        // geth's gencodec MarshalJSON always emits the `timestamp` field, writing
+        // `null` (not omitting it) when the sequencer passes no timestamp. The reth
+        // server must decode that production payload to `None` rather than erroring.
+        let json = r#"{
+            "parentHash": "0xabababababababababababababababababababababababababababababababab",
+            "transactions": ["0xdead"],
+            "timestamp": null
+        }"#;
+
+        let params: AssembleL2BlockV2Params = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(params.parent_hash, B256::repeat_byte(0xab));
+        assert_eq!(params.transactions, vec![Bytes::from(vec![0xde, 0xad])]);
+        assert!(params.timestamp.is_none());
     }
 
     #[test]

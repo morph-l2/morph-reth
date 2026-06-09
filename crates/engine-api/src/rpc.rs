@@ -6,7 +6,9 @@
 use crate::{EngineApiResult, api::MorphL2EngineApi};
 use alloy_primitives::B256;
 use jsonrpsee::{RpcModule, core::RpcResult, proc_macros::rpc};
-use morph_payload_types::{AssembleL2BlockParams, ExecutableL2Data, GenericResponse, SafeL2Data};
+use morph_payload_types::{
+    AssembleL2BlockParams, AssembleL2BlockV2Params, ExecutableL2Data, GenericResponse, SafeL2Data,
+};
 use morph_primitives::MorphHeader;
 use reth_rpc_api::IntoEngineApiRpcModule;
 use std::sync::Arc;
@@ -26,6 +28,17 @@ pub trait MorphL2EngineRpc {
     async fn assemble_l2_block(&self, params: AssembleL2BlockParams)
     -> RpcResult<ExecutableL2Data>;
 
+    /// Build a new L2 block on an explicitly given parent hash.
+    ///
+    /// # JSON-RPC Method
+    ///
+    /// `engine_assembleL2BlockV2`
+    #[method(name = "assembleL2BlockV2")]
+    async fn assemble_l2_block_v2(
+        &self,
+        params: AssembleL2BlockV2Params,
+    ) -> RpcResult<ExecutableL2Data>;
+
     /// Validate an L2 block without importing it.
     ///
     /// # JSON-RPC Method
@@ -41,6 +54,14 @@ pub trait MorphL2EngineRpc {
     /// `engine_newL2Block`
     #[method(name = "newL2Block")]
     async fn new_l2_block(&self, data: ExecutableL2Data) -> RpcResult<()>;
+
+    /// Import a new L2 block with reorg support (parent selected by hash).
+    ///
+    /// # JSON-RPC Method
+    ///
+    /// `engine_newL2BlockV2`
+    #[method(name = "newL2BlockV2")]
+    async fn new_l2_block_v2(&self, data: ExecutableL2Data) -> RpcResult<MorphHeader>;
 
     /// Import a safe L2 block from derivation.
     ///
@@ -103,6 +124,26 @@ where
         })
     }
 
+    async fn assemble_l2_block_v2(
+        &self,
+        params: AssembleL2BlockV2Params,
+    ) -> RpcResult<ExecutableL2Data> {
+        tracing::debug!(
+            target: "morph::engine",
+            parent_hash = %params.parent_hash,
+            ?params.timestamp,
+            "assembling L2 block (v2)"
+        );
+
+        self.inner
+            .assemble_l2_block_v2(params)
+            .await
+            .map_err(|e| {
+                tracing::error!(target: "morph::engine", error = %e, "failed to assemble L2 block (v2)");
+                e.into()
+            })
+    }
+
     async fn validate_l2_block(&self, data: ExecutableL2Data) -> RpcResult<GenericResponse> {
         tracing::debug!(
             target: "morph::engine",
@@ -127,6 +168,20 @@ where
 
         self.inner.new_l2_block(data).await.map_err(|e| {
             tracing::error!(target: "morph::engine", error = %e, "failed to import L2 block");
+            e.into()
+        })
+    }
+
+    async fn new_l2_block_v2(&self, data: ExecutableL2Data) -> RpcResult<MorphHeader> {
+        tracing::debug!(
+            target: "morph::engine",
+            block_number = data.number,
+            block_hash = %data.hash,
+            "RPC newL2BlockV2 called"
+        );
+
+        self.inner.new_l2_block_v2(data).await.map_err(|e| {
+            tracing::error!(target: "morph::engine", error = %e, "failed to import L2 block (v2)");
             e.into()
         })
     }
