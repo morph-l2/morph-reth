@@ -60,7 +60,8 @@ use reth_revm::database::StateProviderDatabase;
 use reth_trie_sparse::debug_recorder::TrieDebugRecorder;
 
 use crate::gate::state_root_enforced_at;
-use morph_chainspec::MorphChainSpec;
+use morph_chainspec::{MorphChainSpec, MorphHardforks};
+use morph_primitives::{MorphHeader, MorphTxEnvelope};
 use reth_chain_state::{DeferredTrieData, ExecutedBlock, ExecutionTimingStats, LazyOverlay};
 use reth_consensus::{ConsensusError, FullConsensus, ReceiptRootBloom};
 use reth_engine_primitives::{
@@ -164,7 +165,11 @@ where
 
 impl<N, P, Evm, V> MorphBasicEngineValidator<P, Evm, V>
 where
-    N: NodePrimitives,
+    N: NodePrimitives<
+            Block = morph_primitives::Block,
+            BlockHeader = MorphHeader,
+            SignedTx = MorphTxEnvelope,
+        >,
     P: DatabaseProviderFactory<
             Provider: BlockReader
                           + StageCheckpointReader
@@ -872,6 +877,54 @@ where
         Ok(())
     }
 
+    /// Validates Morph's parent-aware L1 message index invariant.
+    ///
+    /// go-ethereum derives `NextL1MsgIndex` from the parent queue index plus the
+    /// L1 messages processed by this block. Since `next_l1_msg_index` is not part
+    /// of the block hash, Jade and later must reject any mismatch before accepting
+    /// the payload.
+    fn validate_next_l1_msg_index_against_parent(
+        &self,
+        block: &RecoveredBlock<morph_primitives::Block>,
+        parent_block: &SealedHeader<MorphHeader>,
+    ) -> Result<(), ConsensusError> {
+        if !self
+            .chain_spec
+            .is_jade_active_at_timestamp(block.header().timestamp())
+        {
+            return Ok(());
+        }
+
+        let mut expected = parent_block.next_l1_msg_index;
+        for tx in block.body().transactions() {
+            if !tx.is_l1_msg() {
+                break;
+            }
+
+            let queue_index = tx.queue_index().ok_or_else(|| {
+                ConsensusError::msg("L1 message transaction is missing queue index")
+            })?;
+            // Match geth's `NumL1MessagesProcessed(parent_queue_index)`: forward skips
+            // are counted as processed, so the derived next index is last_queue + 1.
+            expected = queue_index.checked_add(1).ok_or_else(|| {
+                ConsensusError::msg(format!(
+                    "invalid block.NextL1MsgIndex: expected {}, got {}",
+                    u64::MAX,
+                    block.header().next_l1_msg_index
+                ))
+            })?;
+        }
+
+        let actual = block.header().next_l1_msg_index;
+        if actual != expected {
+            return Err(ConsensusError::msg(format!(
+                "invalid block.NextL1MsgIndex: expected {expected}, got {actual}"
+            )));
+        }
+
+        Ok(())
+    }
+
     /// Executes a block with the given state provider.
     ///
     /// This method orchestrates block execution:
@@ -1389,6 +1442,16 @@ where
             return Err(e.into());
         }
         drop(_enter);
+
+        if let Err(e) = self.validate_next_l1_msg_index_against_parent(block, parent_block) {
+            warn!(
+                target: "engine::tree::payload_validator",
+                ?block,
+                "Failed to validate NextL1MsgIndex against parent for block {}: {e}",
+                block.hash()
+            );
+            return Err(e.into());
+        }
 
         // Validate block post-execution rules
         let _enter =
@@ -1955,7 +2018,11 @@ where
         + HashedPostStateProvider
         + Clone
         + 'static,
-    N: NodePrimitives,
+    N: NodePrimitives<
+            Block = morph_primitives::Block,
+            BlockHeader = MorphHeader,
+            SignedTx = MorphTxEnvelope,
+        >,
     V: PayloadValidator<Types, Block = N::Block> + Clone,
     Evm: ConfigureEngineEvm<Types::ExecutionData, Primitives = N> + 'static,
     Types: PayloadTypes<BuiltPayload: BuiltPayload<Primitives = N>>,

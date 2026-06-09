@@ -6,7 +6,9 @@
 
 use crate::EngineApiResult;
 use alloy_primitives::B256;
-use morph_payload_types::{AssembleL2BlockParams, ExecutableL2Data, GenericResponse, SafeL2Data};
+use morph_payload_types::{
+    AssembleL2BlockParams, AssembleL2BlockV2Params, ExecutableL2Data, GenericResponse, SafeL2Data,
+};
 use morph_primitives::MorphHeader;
 
 /// Morph L2 Engine API trait.
@@ -45,6 +47,28 @@ pub trait MorphL2EngineApi: Send + Sync {
         params: AssembleL2BlockParams,
     ) -> EngineApiResult<ExecutableL2Data>;
 
+    /// Build a new L2 block on an explicitly given parent hash.
+    ///
+    /// Unlike [`assemble_l2_block`](Self::assemble_l2_block), which builds on the
+    /// current canonical head keyed by block number, this method keys assembly on
+    /// `parent_hash`, allowing the sequencer to build on any existing parent — including
+    /// one that is no longer the head. The block number is derived as `parent + 1`.
+    ///
+    /// # Arguments
+    ///
+    /// * `params` - The parameters for assembling the block, including:
+    ///   - `parent_hash`: Hash of the parent block to build on
+    ///   - `transactions`: RLP-encoded transactions to include in the block
+    ///   - `timestamp`: Optional block timestamp; defaults to a local clock value
+    ///
+    /// # Returns
+    ///
+    /// Returns the execution result including state root, receipts root, etc.
+    async fn assemble_l2_block_v2(
+        &self,
+        params: AssembleL2BlockV2Params,
+    ) -> EngineApiResult<ExecutableL2Data>;
+
     /// Validate an L2 block without importing it.
     ///
     /// This method validates a block by forwarding it to the reth engine tree
@@ -74,6 +98,24 @@ pub trait MorphL2EngineApi: Send + Sync {
     ///
     /// Returns `Ok(())` on success.
     async fn new_l2_block(&self, data: ExecutableL2Data) -> EngineApiResult<()>;
+
+    /// Import a new L2 block, selecting the parent by `data.parent_hash`.
+    ///
+    /// Unlike [`new_l2_block`](Self::new_l2_block), which requires the block to
+    /// extend the current canonical head, this method only requires that the
+    /// parent referenced by `data.parent_hash` exists. When that parent is not the
+    /// current head, the engine's forkchoice update reorganizes the canonical chain
+    /// onto the new block. This is the import path used by the centralized
+    /// sequencer, where recent blocks may be rebuilt and replaced.
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - The block data to import
+    ///
+    /// # Returns
+    ///
+    /// Returns the header of the imported block.
+    async fn new_l2_block_v2(&self, data: ExecutableL2Data) -> EngineApiResult<MorphHeader>;
 
     /// Import a safe L2 block from derivation.
     ///

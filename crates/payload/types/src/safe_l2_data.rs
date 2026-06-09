@@ -2,7 +2,7 @@
 //!
 //! This type is used for NewSafeL2Block in the derivation pipeline.
 
-use alloy_primitives::Bytes;
+use alloy_primitives::{B256, Bytes};
 
 /// Safe L2 block data, used for NewSafeL2Block (derivation).
 ///
@@ -38,6 +38,16 @@ pub struct SafeL2Data {
     /// RLP-encoded transactions.
     #[serde(default)]
     pub transactions: Vec<Bytes>,
+
+    /// Optional parent hash for the derivation reorg path.
+    ///
+    /// When set, the block is executed on top of this parent (looked up by hash)
+    /// and the engine reorganizes the canonical chain onto it via forkchoice
+    /// update — used by `derivation.deriveForce` to apply the L1-canonical chain
+    /// on top of a non-head parent. When `None`, the legacy "extend the current
+    /// head" semantics apply. Mirrors go-ethereum's `SafeL2Data.ParentHash`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_hash: Option<B256>,
 }
 
 impl SafeL2Data {
@@ -78,6 +88,7 @@ mod tests {
             base_fee_per_gas: Some(1_000_000_000),
             timestamp: 1234567890,
             transactions: vec![Bytes::from(vec![0x01, 0x02])],
+            parent_hash: None,
         };
 
         let json = serde_json::to_string(&data).expect("serialize");
@@ -94,6 +105,7 @@ mod tests {
             base_fee_per_gas: None,
             timestamp: 1234567890,
             transactions: vec![],
+            parent_hash: None,
         };
 
         let json = serde_json::to_string(&data).expect("serialize");
@@ -141,6 +153,62 @@ mod tests {
     }
 
     #[test]
+    fn test_serde_parent_hash_roundtrip() {
+        let hash = alloy_primitives::B256::repeat_byte(0xab);
+        let data = SafeL2Data {
+            number: 7,
+            gas_limit: 30_000_000,
+            base_fee_per_gas: None,
+            timestamp: 100,
+            transactions: vec![],
+            parent_hash: Some(hash),
+        };
+
+        let json = serde_json::to_string(&data).expect("serialize");
+        assert!(
+            json.contains("parentHash"),
+            "parentHash must be serialized when set: {json}"
+        );
+
+        let decoded: SafeL2Data = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded.parent_hash, Some(hash));
+    }
+
+    #[test]
+    fn test_serde_without_parent_hash_omits_field() {
+        let data = SafeL2Data {
+            parent_hash: None,
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&data).expect("serialize");
+        assert!(
+            !json.contains("parentHash"),
+            "parentHash must be omitted when None: {json}"
+        );
+
+        let decoded: SafeL2Data = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded.parent_hash, None);
+    }
+
+    #[test]
+    fn test_serde_parent_hash_from_camel_case_json() {
+        let json = r#"{
+            "number": "0x64",
+            "gasLimit": "0x1c9c380",
+            "timestamp": "0x499602d2",
+            "transactions": [],
+            "parentHash": "0xabababababababababababababababababababababababababababababababab"
+        }"#;
+
+        let data: SafeL2Data = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(
+            data.parent_hash,
+            Some(alloy_primitives::B256::repeat_byte(0xab))
+        );
+    }
+
+    #[test]
     fn test_clone_and_equality() {
         let data = SafeL2Data {
             number: 42,
@@ -148,6 +216,7 @@ mod tests {
             base_fee_per_gas: Some(100),
             timestamp: 999,
             transactions: vec![Bytes::from(vec![0x01, 0x02])],
+            parent_hash: None,
         };
 
         let cloned = data.clone();
