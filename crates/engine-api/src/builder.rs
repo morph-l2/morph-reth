@@ -22,7 +22,7 @@ use reth_payload_builder::{BuildNewPayload, PayloadBuilderHandle};
 #[cfg(test)]
 use reth_primitives_traits::RecoveredBlock;
 use reth_primitives_traits::{FastInstant as Instant, SealedBlock, SealedHeader};
-use reth_provider::{BlockIdReader, BlockNumReader, CanonChainTracker, HeaderProvider};
+use reth_provider::{BlockNumReader, CanonChainTracker, HeaderProvider};
 use std::sync::Arc;
 
 // =============================================================================
@@ -47,7 +47,7 @@ pub struct RealMorphL2EngineApi<Provider> {
     /// Handle to the running reth engine tree pipeline.
     engine_handle: reth_node_api::ConsensusEngineHandle<MorphPayloadTypes>,
 
-    /// Tracks L1-derived safe/finalized block tags for FCU updates.
+    /// Tracks L1-derived finalized block tags for FCU updates.
     block_tag_tracker: Arc<BlockTagTracker>,
 
     /// Prometheus metrics for custom Morph L2 Engine API endpoints and chain head health.
@@ -61,50 +61,31 @@ struct CanonicalHead {
     timestamp: u64,
 }
 
-/// Allow FCU tag fallback to head only while the imported block is clearly historical.
+/// Tracks the L1-derived finalized block hash from `set_block_tags` so that FCU
+/// calls can forward it to the engine tree.
 ///
-/// Once imported blocks are close to wall-clock time, we stop synthesizing safe/finalized and
-/// wait for Morph node's real `set_block_tags` updates instead.
-const FCU_TAG_FALLBACK_MAX_AGE_SECS: u64 = 60;
-
-/// Tracks L1-based safe/finalized block hashes from `set_block_tags` so that
-/// FCU calls can pass them to the engine tree, keeping both memory cleanup and
-/// RPC-visible tags consistent.
+/// Only finalized is cached. FCU safe is passed by the import caller, not cached or
+/// derived from the head, so reorg-capable imports never reuse a stale safe tag.
 #[derive(Debug, Default)]
 pub struct BlockTagTracker {
-    /// Last L1-based safe/finalized hashes from `set_block_tags`.
-    /// `None` means `set_block_tags` has not yet provided a value (e.g. during
-    /// historical sync when all batches are already finalized on L1).
-    block_tags: RwLock<BlockTagCache>,
-}
-
-/// Cached L1-based block tag hashes from `set_block_tags`.
-#[derive(Debug, Default, Clone, Copy)]
-struct BlockTagCache {
-    safe_hash: Option<B256>,
-    finalized_hash: Option<B256>,
+    /// Last L1-derived finalized hash from `set_block_tags`. `None` means
+    /// `set_block_tags` has not yet provided a value (e.g. a validator not running
+    /// BlockTagService, or before the first L1-finalized batch).
+    finalized_hash: RwLock<Option<B256>>,
 }
 
 impl BlockTagTracker {
-    /// Caches L1-based block tag hashes from a successful `set_block_tags` call.
-    pub fn record_block_tags(&self, safe_hash: Option<B256>, finalized_hash: Option<B256>) {
-        let mut tags = self.block_tags.write();
-        if let Some(h) = safe_hash {
-            tags.safe_hash = Some(h);
-        }
+    /// Caches the L1-derived finalized hash from a successful `set_block_tags` call.
+    /// `None` is ignored, so a previously-supplied finalized is preserved.
+    pub fn record_finalized_hash(&self, finalized_hash: Option<B256>) {
         if let Some(h) = finalized_hash {
-            tags.finalized_hash = Some(h);
+            *self.finalized_hash.write() = Some(h);
         }
     }
 
-    /// Returns the last L1-based finalized hash, or `None` if not yet set.
+    /// Returns the last L1-derived finalized hash, or `None` if not yet set.
     fn l1_finalized_hash(&self) -> Option<B256> {
-        self.block_tags.read().finalized_hash
-    }
-
-    /// Returns the last L1-based safe hash, or `None` if not yet set.
-    fn l1_safe_hash(&self) -> Option<B256> {
-        self.block_tags.read().safe_hash
+        *self.finalized_hash.read()
     }
 }
 
@@ -158,7 +139,6 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
 impl<Provider> MorphL2EngineApi for RealMorphL2EngineApi<Provider>
 where
     Provider: HeaderProvider<Header = MorphHeader>
-        + BlockIdReader
         + BlockNumReader
         + CanonChainTracker<Header = MorphHeader>
         + Clone
@@ -424,7 +404,7 @@ where
         let block_hash = data.hash;
         let block_number = data.number;
         let block_timestamp = data.timestamp;
-        self.import_l2_block_via_engine(data)
+        self.import_l2_block_via_engine(data, B256::ZERO)
             .await
             .inspect_err(|_| {
                 self.metrics.new_l2_block_failures_total.increment(1);
@@ -492,7 +472,7 @@ where
         //    FCU advances or reorgs the canonical head onto data.hash.
         let block_timestamp = data.timestamp;
         let header = self
-            .import_l2_block_via_engine(data)
+            .import_l2_block_via_engine(data, B256::ZERO)
             .await
             .inspect_err(|_| {
                 self.metrics.new_l2_block_failures_total.increment(1);
@@ -552,10 +532,13 @@ where
         // Save hash before moving executable_data into the import call.
         let block_hash = executable_data.hash;
 
-        // 3. Import the block through reth engine tree and return the in-path header
-        // (do not rely on immediate DB visibility after FCU).
+        // 3. Import the block through reth engine tree, marking the imported block safe
+        // in the same FCU. Do not mark it finalized: L1 derivation can still reorg this
+        // block, and finalized is only authoritative when supplied by BlockTagService via
+        // set_block_tags. Return the in-path header (do not rely on immediate DB
+        // visibility after FCU).
         let header = self
-            .import_l2_block_via_engine(executable_data)
+            .import_l2_block_via_engine(executable_data, block_hash)
             .await
             .inspect_err(|_| {
                 self.metrics.new_safe_l2_block_failures_total.increment(1);
@@ -568,29 +551,6 @@ where
             .new_safe_l2_block_duration_seconds
             .record(started.elapsed());
         self.record_head_metrics(block_timestamp);
-
-        // Update safe block tag and seed finalized for memory cleanup.
-        //
-        // Validator / derivation mode does not run BlockTagService, so
-        // set_block_tags is never called externally.  Without a cached
-        // finalized hash the FCU falls back to B256::ZERO once blocks are
-        // near wall-clock time, disabling changeset-cache eviction.
-        //
-        // Passing block_hash as finalized here seeds the tracker so the
-        // engine tree can keep evicting.  Once validators adopt
-        // BlockTagService the L1-derived finalized value will naturally
-        // supersede this hint.
-        //
-        // Best-effort: block import already succeeded, so don't fail the
-        // whole call if only the tag update encounters an issue.
-        if let Err(e) = self.set_block_tags(block_hash, block_hash).await {
-            tracing::warn!(
-                target: "morph::engine",
-                block_hash = %block_hash,
-                error = %e,
-                "failed to update safe tag after block import; tag can be set later via setBlockTags"
-            );
-        }
 
         tracing::debug!(
             target: "morph::engine",
@@ -658,21 +618,15 @@ where
             );
         }
 
-        // Cache the L1-based hashes so subsequent FCU calls use them instead of
-        // falling back to head.  This keeps engine-tree finalization and
-        // RPC-visible tags aligned with the actual L1 finalization status.
-        self.block_tag_tracker.record_block_tags(
-            if safe_block_hash != B256::ZERO {
-                Some(safe_block_hash)
-            } else {
-                None
-            },
-            if finalized_block_hash != B256::ZERO {
+        // Cache the L1-derived finalized hash so subsequent FCU calls can forward it.
+        // Safe is not cached: FCU safe is supplied by each import caller, and the
+        // RPC-visible safe tag can also be advanced by set_block_tags.
+        self.block_tag_tracker
+            .record_finalized_hash(if finalized_block_hash != B256::ZERO {
                 Some(finalized_block_hash)
             } else {
                 None
-            },
-        );
+            });
 
         Ok(())
     }
@@ -825,10 +779,10 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
     async fn import_l2_block_via_engine(
         &self,
         data: ExecutableL2Data,
+        safe_block_hash: B256,
     ) -> EngineApiResult<MorphHeader>
     where
         Provider: HeaderProvider<Header = MorphHeader>
-            + BlockIdReader
             + BlockNumReader
             + CanonChainTracker<Header = MorphHeader>,
     {
@@ -846,41 +800,18 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
         let new_payload_elapsed = new_payload_started.elapsed();
         ensure_payload_status_valid(&payload_status, "newPayload")?;
 
-        // The safe/finalized hashes passed here serve two purposes in reth's engine
-        // tree: (1) driving changeset-cache eviction and sidechain pruning (memory
-        // management), and (2) setting the RPC-visible "safe"/"finalized" block tags.
-        //
-        // When BlockTagService has provided L1-based tags via set_block_tags, we
-        // forward those so the engine tree and RPC layer stay consistent with the
-        // actual L1 finalization status.
-        //
-        // During deep historical sync, BlockTagService may be unable to provide
-        // tags for already-finalized batches. In that case we temporarily fall back
-        // to head so the engine tree can continue evicting old changesets.
-        //
-        // Once imported blocks are close to wall-clock time, we stop synthesizing
-        // safe/finalized and wait for real L1-derived tags to avoid falsely
-        // advertising live blocks as finalized in the catch-up window.
-        let now_timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let finalized_hash = resolve_fcu_block_tag_hash(
-            self.block_tag_tracker.l1_finalized_hash(),
-            data.hash,
-            data.timestamp,
-            now_timestamp,
-        );
-        let safe_hash = resolve_fcu_block_tag_hash(
-            self.block_tag_tracker.l1_safe_hash(),
-            data.hash,
-            data.timestamp,
-            now_timestamp,
-        );
+        // FCU safe/finalized must be canonical ancestors. Unsafe imports pass safe zero;
+        // new_safe_l2_block passes the imported block itself, never a cached old safe.
+        // Forward only the L1-derived finalized tag; zero is a no-op when it is absent,
+        // and pinned reth v2.2.0 still cleans changesets/canonical memory without
+        // finalized.
         let forkchoice = alloy_rpc_types_engine::ForkchoiceState {
             head_block_hash: data.hash,
-            safe_block_hash: safe_hash,
-            finalized_block_hash: finalized_hash,
+            safe_block_hash,
+            finalized_block_hash: self
+                .block_tag_tracker
+                .l1_finalized_hash()
+                .unwrap_or_default(),
         };
 
         self.provider.on_forkchoice_update_received(&forkchoice);
@@ -1156,21 +1087,6 @@ fn apply_executable_data_overrides(
     Ok(RecoveredBlock::new_unhashed(block, senders))
 }
 
-fn resolve_fcu_block_tag_hash(
-    l1_tag_hash: Option<B256>,
-    head_hash: B256,
-    block_timestamp: u64,
-    now_timestamp: u64,
-) -> B256 {
-    match l1_tag_hash {
-        Some(hash) => hash,
-        None if now_timestamp.saturating_sub(block_timestamp) > FCU_TAG_FALLBACK_MAX_AGE_SECS => {
-            head_hash
-        }
-        None => B256::ZERO,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1218,34 +1134,6 @@ mod tests {
             }
             other => panic!("unexpected error: {other}"),
         }
-    }
-
-    #[test]
-    fn test_resolve_fcu_block_tag_hash_uses_l1_tag_when_available() {
-        let l1_tag = B256::from([0x11; 32]);
-        let head = B256::from([0x22; 32]);
-
-        let resolved = resolve_fcu_block_tag_hash(Some(l1_tag), head, 1_700_000_000, 1_700_000_030);
-
-        assert_eq!(resolved, l1_tag);
-    }
-
-    #[test]
-    fn test_resolve_fcu_block_tag_hash_falls_back_to_head_for_historical_blocks() {
-        let head = B256::from([0x33; 32]);
-
-        let resolved = resolve_fcu_block_tag_hash(None, head, 1_700_000_000, 1_700_000_000 + 300);
-
-        assert_eq!(resolved, head);
-    }
-
-    #[test]
-    fn test_resolve_fcu_block_tag_hash_returns_zero_near_live_without_l1_tag() {
-        let head = B256::from([0x44; 32]);
-
-        let resolved = resolve_fcu_block_tag_hash(None, head, 1_700_000_000, 1_700_000_000 + 5);
-
-        assert_eq!(resolved, B256::ZERO);
     }
 
     #[test]
@@ -1408,14 +1296,15 @@ mod tests {
     }
 
     #[test]
-    fn test_block_tag_tracker_records_l1_block_tags() {
+    fn test_block_tag_tracker_records_finalized_hash() {
         let tracker = BlockTagTracker::default();
-        let safe_hash = B256::from([0x11; 32]);
         let finalized_hash = B256::from([0x22; 32]);
 
-        tracker.record_block_tags(Some(safe_hash), Some(finalized_hash));
+        tracker.record_finalized_hash(Some(finalized_hash));
+        assert_eq!(tracker.l1_finalized_hash(), Some(finalized_hash));
 
-        assert_eq!(tracker.l1_safe_hash(), Some(safe_hash));
+        // `None` is ignored: a previously-supplied finalized is preserved.
+        tracker.record_finalized_hash(None);
         assert_eq!(tracker.l1_finalized_hash(), Some(finalized_hash));
     }
 
