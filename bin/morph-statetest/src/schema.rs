@@ -313,7 +313,16 @@ impl MorphTransactionParts {
             let fallback_chain_id = chain_id
                 .and_then(|id| id.try_into().ok())
                 .unwrap_or_default();
-            let rlp_bytes = tx.encode_for_l1_fee(fallback_chain_id);
+            // go-ethereum's statetest harness sizes the L1 fee of any untyped
+            // tx as a dynamic-fee envelope whenever the env has a base fee
+            // (EstimateL1DataFeeForMessage → asUnsignedTx). Mirror that quirk
+            // here only, so reth state roots match geth-generated fixtures.
+            // Drop once geth derives the fee envelope from the actual tx type.
+            let mut fee_env = tx.clone();
+            if self.tx_type.is_none() && has_base_fee {
+                fee_env.inner.tx_type = TransactionType::Eip1559.into();
+            }
+            let rlp_bytes = fee_env.encode_for_l1_fee(fallback_chain_id);
             tx = tx.with_rlp_bytes(rlp_bytes);
         }
 
