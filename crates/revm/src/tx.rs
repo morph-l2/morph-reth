@@ -413,7 +413,9 @@ impl TransactionEnvMut for MorphTxEnv {
     }
 
     fn set_access_list(&mut self, access_list: AccessList) {
-        self.inner.access_list = access_list;
+        // Delegate so the upstream Legacy → Eip2930 tx_type upgrade applies;
+        // the type byte is authoritative for fallback L1 fee encoding.
+        self.inner.set_access_list(access_list);
     }
 }
 
@@ -756,6 +758,13 @@ mod tests {
             panic!("expected EIP-7702 fallback envelope");
         };
         assert_eq!(decoded.tx().authorization_list, vec![signed_authorization]);
+    }
+
+    #[test]
+    fn set_access_list_upgrades_legacy_tx_type_like_upstream() {
+        let mut tx = MorphTxEnv::default();
+        tx.set_access_list(AccessList::default());
+        assert_eq!(tx.inner.tx_type, u8::from(TransactionType::Eip2930));
     }
 
     #[test]
