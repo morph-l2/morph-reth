@@ -15,7 +15,7 @@ use morph_payload_types::{
 use morph_primitives::MorphHeader;
 use reth_payload_builder::BuildNewPayload;
 use reth_payload_primitives::BuiltPayload;
-use reth_provider::BlockReaderIdExt;
+use reth_provider::{BlockIdReader, BlockReaderIdExt};
 
 use super::helpers::{build_block_no_submit, craft_and_try_import_block};
 
@@ -113,6 +113,48 @@ async fn new_l2_block_imports_consecutive_assembled_blocks_over_rpc() -> eyre::R
         latest.hash(),
         expected_hash,
         "second imported canonical head should match the assembled block hash"
+    );
+
+    Ok(())
+}
+
+/// Unsafe `engine_newL2Block` imports must not advance the safe tag.
+///
+/// The FCU sent by the import path should keep `safe` as zero unless the caller explicitly
+/// updates safe through `engine_setBlockTags` / `engine_newSafeL2Block`. Otherwise each
+/// unsafe block would mark its parent safe, which is not Morph's L1-derived safe semantics.
+#[tokio::test(flavor = "multi_thread")]
+async fn new_l2_block_does_not_advance_safe_tag() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
+    let node = nodes.pop().unwrap();
+    let auth = node.auth_server_handle();
+    let client = auth.http_client();
+
+    let initial_safe = node.inner.provider.safe_block_hash()?;
+
+    let mut params = AssembleL2BlockParams::empty(1);
+    params.timestamp = Some(1);
+    let block1: ExecutableL2Data = client.request("engine_assembleL2Block", (params,)).await?;
+    let block1_hash = block1.hash;
+    let _: () = client.request("engine_newL2Block", (block1,)).await?;
+
+    let mut params = AssembleL2BlockParams::empty(2);
+    params.timestamp = Some(2);
+    let block2: ExecutableL2Data = client.request("engine_assembleL2Block", (params,)).await?;
+    let _: () = client.request("engine_newL2Block", (block2,)).await?;
+
+    let safe_after_unsafe_imports = node.inner.provider.safe_block_hash()?;
+
+    assert_eq!(
+        safe_after_unsafe_imports, initial_safe,
+        "unsafe imports must not advance the RPC-visible safe tag"
+    );
+    assert_ne!(
+        safe_after_unsafe_imports,
+        Some(block1_hash),
+        "unsafe import must not mark the previous unsafe block as safe"
     );
 
     Ok(())
@@ -315,6 +357,90 @@ async fn new_safe_l2_block_with_parent_hash_reorgs_onto_non_head_parent() -> eyr
         header.hash_slow(),
         "canonical head must match the returned safe header"
     );
+
+    Ok(())
+}
+
+/// A safe block reorged away by a later `engine_newSafeL2Block(parentHash)` must not leave a
+/// stale `safe` tag that fails the next forkchoice.
+///
+/// Regression for the FCU carrying a cached/stale safe hash: block 2A is imported via the
+/// *safe* path (which sets it as the canonical safe block), then re-derivation pins block 2B
+/// onto block 1, reorging 2A away. The import forkchoice must not carry the now-non-canonical
+/// 2A as `safe` — reth rejects a non-canonical safe with `invalid_state`, failing the import.
+/// Unlike `new_safe_l2_block_with_parent_hash_reorgs_onto_non_head_parent`, here 2A is
+/// imported via the safe path, so it IS recorded as the safe block before the reorg.
+#[tokio::test(flavor = "multi_thread")]
+async fn safe_block_reorg_does_not_carry_stale_safe_into_forkchoice() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
+    let node = nodes.pop().unwrap();
+    let auth = node.auth_server_handle();
+    let client = auth.http_client();
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    // Block 1 on genesis.
+    let mut p1 = AssembleL2BlockParams::empty(1);
+    p1.timestamp = Some(now - 6);
+    let block1: ExecutableL2Data = client.request("engine_assembleL2Block", (p1,)).await?;
+    let block1_hash = block1.hash;
+    let gas_limit = block1.gas_limit;
+    let base_fee = block1.base_fee_per_gas;
+    let _: MorphHeader = client.request("engine_newL2BlockV2", (block1,)).await?;
+
+    // Block 2A imported via the SAFE path (parent = head = block 1) → 2A becomes the
+    // canonical safe block.
+    let safe_2a = SafeL2Data {
+        number: 2,
+        gas_limit,
+        base_fee_per_gas: base_fee,
+        timestamp: now - 4,
+        transactions: vec![],
+        parent_hash: Some(block1_hash),
+    };
+    let header_2a: MorphHeader = client.request("engine_newSafeL2Block", (safe_2a,)).await?;
+    let block2a_hash = header_2a.hash_slow();
+    let safe_after_2a = node.inner.provider.safe_block_hash()?;
+    assert_eq!(
+        safe_after_2a,
+        Some(block2a_hash),
+        "precondition: 2A must be recorded as safe before reorg test"
+    );
+
+    // Re-derive block 2B pinned to block 1, reorging 2A away. The forkchoice must not carry
+    // the stale safe (2A): it is no longer canonical, so reth would return invalid_state.
+    let safe_2b = SafeL2Data {
+        number: 2,
+        gas_limit,
+        base_fee_per_gas: base_fee,
+        timestamp: now - 2,
+        transactions: vec![],
+        parent_hash: Some(block1_hash),
+    };
+    let header_2b: MorphHeader = client.request("engine_newSafeL2Block", (safe_2b,)).await?;
+    assert_ne!(
+        header_2b.hash_slow(),
+        block2a_hash,
+        "2B must differ from 2A"
+    );
+
+    let head = node
+        .inner
+        .provider
+        .sealed_header_by_number_or_tag(alloy_rpc_types_eth::BlockNumberOrTag::Latest)?
+        .expect("head after safe reorg");
+    assert_eq!(
+        head.number(),
+        2,
+        "head stays at height 2 after the safe reorg"
+    );
+    assert_eq!(head.hash(), header_2b.hash_slow(), "head reorged onto 2B");
+    assert_ne!(head.hash(), block2a_hash, "head reorged off 2A");
 
     Ok(())
 }
