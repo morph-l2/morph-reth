@@ -268,7 +268,6 @@ where
         }
 
         // 2. Convert and forward to reth engine tree (`newPayload` path).
-        let convert_started = Instant::now();
         let (payload, _) = match self.execution_payload_from_executable_data(&data) {
             Ok(v) => v,
             Err(err) => {
@@ -285,9 +284,7 @@ where
                 return Ok(GenericResponse { success: false });
             }
         };
-        let convert_elapsed = convert_started.elapsed();
 
-        let new_payload_started = Instant::now();
         let status = match self.engine_handle.new_payload(payload).await {
             Ok(status) => status,
             Err(err) => {
@@ -304,7 +301,6 @@ where
                 return Ok(GenericResponse { success: false });
             }
         };
-        let new_payload_elapsed = new_payload_started.elapsed();
 
         tracing::debug!(
             target: "morph::engine",
@@ -314,18 +310,6 @@ where
         );
 
         let success = payload_status_is_validated(&status);
-        tracing::info!(
-            target: "morph::engine",
-            block_number = data.number,
-            block_hash = %data.hash,
-            convert_elapsed = ?convert_elapsed,
-            new_payload_elapsed = ?new_payload_elapsed,
-            total_elapsed = ?validate_started.elapsed(),
-            status = ?status.status,
-            success,
-            "validate_l2_block timing"
-        );
-
         self.metrics
             .validate_l2_block_duration_seconds
             .record(validate_started.elapsed());
@@ -786,18 +770,13 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
             + BlockNumReader
             + CanonChainTracker<Header = MorphHeader>,
     {
-        let import_started = Instant::now();
-        let convert_started = Instant::now();
         let (payload, header) = self.execution_payload_from_executable_data(&data)?;
-        let convert_elapsed = convert_started.elapsed();
 
-        let new_payload_started = Instant::now();
         let payload_status = self
             .engine_handle
             .new_payload(payload)
             .await
             .map_err(|e| MorphEngineApiError::ExecutionFailed(e.to_string()))?;
-        let new_payload_elapsed = new_payload_started.elapsed();
         ensure_payload_status_valid(&payload_status, "newPayload")?;
 
         // FCU safe/finalized must be canonical ancestors. Unsafe imports pass safe zero;
@@ -816,27 +795,12 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
 
         self.provider.on_forkchoice_update_received(&forkchoice);
 
-        let fcu_started = Instant::now();
         let fcu_result = self
             .engine_handle
             .fork_choice_updated(forkchoice, None)
             .await
             .map_err(|e| MorphEngineApiError::ExecutionFailed(e.to_string()))?;
-        let fcu_elapsed = fcu_started.elapsed();
         ensure_payload_status_valid(&fcu_result.payload_status, "forkchoiceUpdated")?;
-
-        tracing::info!(
-            target: "morph::engine",
-            block_number = data.number,
-            block_hash = %data.hash,
-            convert_elapsed = ?convert_elapsed,
-            new_payload_elapsed = ?new_payload_elapsed,
-            fcu_elapsed = ?fcu_elapsed,
-            total_elapsed = ?import_started.elapsed(),
-            new_payload_status = ?payload_status.status,
-            fcu_status = ?fcu_result.payload_status.status,
-            "new_l2_block engine timing"
-        );
 
         Ok(header)
     }
