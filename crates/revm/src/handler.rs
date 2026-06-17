@@ -231,9 +231,7 @@ where
         // MorphTx maps to `TransactionType::Custom`, so revm's standard path
         // does not enforce EIP-1559 fee-cap rules. Those rules are independent
         // of which asset ultimately pays the fee, matching Morph geth's preCheck.
-        if evm.ctx_ref().tx().is_morph_tx()
-            && !evm.ctx_ref().cfg().is_fee_charge_disabled()
-        {
+        if evm.ctx_ref().tx().is_morph_tx() && !evm.ctx_ref().cfg().is_fee_charge_disabled() {
             let base_fee = Some(evm.ctx_ref().block().basefee() as u128);
             validation::validate_priority_fee_tx(
                 evm.ctx_ref().tx().max_fee_per_gas(),
@@ -1008,8 +1006,8 @@ mod tests {
     use super::*;
     use crate::MorphBlockEnv;
     use alloy_primitives::{Bytes, TxKind, address, keccak256};
-    use morph_primitives::MORPH_TX_TYPE_ID;
     use morph_chainspec::hardfork::MorphHardfork;
+    use morph_primitives::MORPH_TX_TYPE_ID;
     use revm::{
         context::{BlockEnv, TxEnv},
         context_interface::result::InvalidTransaction,
@@ -1063,11 +1061,9 @@ mod tests {
             ..Default::default()
         };
 
-        let err = <MorphEvmHandler<_, _> as Handler>::validate_env(
-            &MorphEvmHandler::default(),
-            &mut evm,
-        )
-        .unwrap_err();
+        let err =
+            <MorphEvmHandler<_, _> as Handler>::validate_env(&MorphEvmHandler::default(), &mut evm)
+                .unwrap_err();
 
         assert!(matches!(
             err,

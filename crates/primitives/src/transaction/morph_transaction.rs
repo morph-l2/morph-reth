@@ -241,7 +241,10 @@ impl TxMorph {
                 }
                 // Version 0 treats an all-zero Reference as absent, matching geth's
                 // RPC normalization for backward-compatible V0 transactions.
-                if self.reference.is_some_and(|reference| reference != B256::ZERO) {
+                if self
+                    .reference
+                    .is_some_and(|reference| reference != B256::ZERO)
+                {
                     return Err("version 0 MorphTx does not support Reference field");
                 }
                 // Version 0 does not support Memo field
