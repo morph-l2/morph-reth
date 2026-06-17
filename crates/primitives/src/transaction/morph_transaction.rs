@@ -384,9 +384,9 @@ impl TxMorph {
         let first_byte = buf[0];
 
         // Check first byte to determine version:
-        // - V0 format (legacy AltFeeTx): first byte is RLP list prefix (0xC0-0xFF), no version prefix
+        // - V0 format (legacy AltFeeTx): first byte is 0 or RLP list prefix (0xC0-0xFF), no version prefix
         // - V1+ format: first byte is version (0x01, 0x02, ...) followed by RLP
-        if first_byte >= 0xC0 {
+        if first_byte == 0 || first_byte >= 0xC0 {
             // V0 format: direct RLP decode (legacy compatible)
             Self::decode_fields_v0(buf)
         } else if first_byte == MORPH_TX_VERSION_1 {
@@ -1473,6 +1473,24 @@ mod tests {
         assert!(
             result.is_err(),
             "Decoding should fail when data is truncated"
+        );
+    }
+
+    /// Issue-1: V0 payload with leading zero byte must be routed to V0
+    /// decoding, matching go-ethereum's `decode()` which routes `firstByte == 0`
+    /// to V0. The resulting error should be about RLP (not "unsupported version").
+    #[test]
+    fn test_decode_fields_accepts_zero_byte_as_v0() {
+        // A single zero byte is not valid RLP, but the routing should go to V0
+        // (not produce "unsupported morph tx version").
+        let mut buf: &[u8] = &[0x00];
+        let result = TxMorph::decode_fields(&mut buf);
+        assert!(result.is_err());
+        // Must not be the "unsupported version" error.
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            !err_msg.contains("unsupported"),
+            "expected RLP-level error, got: {err_msg}"
         );
     }
 
