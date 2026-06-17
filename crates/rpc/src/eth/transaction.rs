@@ -185,6 +185,10 @@ fn try_build_morph_tx_from_request(
         return Ok(None);
     }
 
+    if req.gas_price.is_some() {
+        return Err("gas_price cannot be used with Morph transaction fields");
+    }
+
     let version = morph_tx_version(reference.as_ref(), memo.as_ref());
 
     // Now build the MorphTx
@@ -193,7 +197,7 @@ fn try_build_morph_tx_from_request(
         .ok_or("missing chain_id for morph transaction")?;
     let gas_limit = req.gas.unwrap_or_default();
     let nonce = req.nonce.unwrap_or_default();
-    let max_fee_per_gas = req.max_fee_per_gas.or(req.gas_price).unwrap_or_default();
+    let max_fee_per_gas = req.max_fee_per_gas.unwrap_or_default();
     let max_priority_fee_per_gas = req.max_priority_fee_per_gas.unwrap_or_default();
     let access_list: AccessList = req.access_list.clone().unwrap_or_default();
     let input = req.input.clone().into_input().unwrap_or_default();
@@ -252,6 +256,15 @@ mod tests {
             nonce: Some(1),
             chain_id: Some(2818),
             ..Default::default()
+        }
+    }
+
+    fn create_morph_transaction_request() -> TransactionRequest {
+        TransactionRequest {
+            gas_price: None,
+            max_fee_per_gas: Some(1_000_000_000),
+            max_priority_fee_per_gas: Some(100_000_000),
+            ..create_basic_transaction_request()
         }
     }
 
@@ -359,7 +372,7 @@ mod tests {
         let memo = Bytes::from("test memo");
 
         let request = MorphTransactionRequest {
-            inner: create_basic_transaction_request(),
+            inner: create_morph_transaction_request(),
             fee_token_id: Some(U64::from(1)), // Triggers MorphTx (use U64, not U256)
             fee_limit: Some(U256::from(1000000)),
             reference: Some(reference),
@@ -416,7 +429,7 @@ mod tests {
     #[test]
     fn test_fee_token_only_tx_env_uses_morph_tx_version_0() {
         let request = MorphTransactionRequest {
-            inner: create_basic_transaction_request(),
+            inner: create_morph_transaction_request(),
             fee_token_id: Some(U64::from(1)),
             fee_limit: Some(U256::from(1000000)),
             reference: None,
@@ -447,7 +460,7 @@ mod tests {
     #[test]
     fn test_eth_call_with_morph_tx_keeps_rlp_and_morph_fields() {
         let request = MorphTransactionRequest {
-            inner: create_basic_transaction_request(),
+            inner: create_morph_transaction_request(),
             fee_token_id: Some(U64::from(1)),
             fee_limit: Some(U256::from(1000000)),
             reference: Some(B256::random()),
@@ -622,7 +635,7 @@ mod tests {
 
     #[test]
     fn try_build_morph_tx_with_fee_token_id() {
-        let req = create_basic_transaction_request();
+        let req = create_morph_transaction_request();
         let result =
             try_build_morph_tx_from_request(&req, U64::from(1), U256::from(1_000_000), None, None);
         assert!(result.is_ok());
@@ -636,8 +649,20 @@ mod tests {
     }
 
     #[test]
-    fn try_build_morph_tx_with_reference_only() {
+    fn try_build_morph_tx_rejects_gas_price_with_morph_fields() {
         let req = create_basic_transaction_request();
+        let result =
+            try_build_morph_tx_from_request(&req, U64::from(1), U256::from(1_000_000), None, None);
+
+        assert_eq!(
+            result.unwrap_err(),
+            "gas_price cannot be used with Morph transaction fields"
+        );
+    }
+
+    #[test]
+    fn try_build_morph_tx_with_reference_only() {
+        let req = create_morph_transaction_request();
         let reference = B256::random();
         let result =
             try_build_morph_tx_from_request(&req, U64::ZERO, U256::ZERO, Some(reference), None);
@@ -649,7 +674,7 @@ mod tests {
 
     #[test]
     fn try_build_morph_tx_with_memo_only() {
-        let req = create_basic_transaction_request();
+        let req = create_morph_transaction_request();
         let memo = Bytes::from("hello world");
         let result =
             try_build_morph_tx_from_request(&req, U64::ZERO, U256::ZERO, None, Some(memo.clone()));
@@ -660,7 +685,7 @@ mod tests {
 
     #[test]
     fn try_build_morph_tx_empty_memo_is_not_trigger() {
-        let req = create_basic_transaction_request();
+        let req = create_morph_transaction_request();
         let result =
             try_build_morph_tx_from_request(&req, U64::ZERO, U256::ZERO, None, Some(Bytes::new()));
         assert!(result.is_ok());
@@ -670,7 +695,7 @@ mod tests {
 
     #[test]
     fn try_build_morph_tx_requires_chain_id() {
-        let mut req = create_basic_transaction_request();
+        let mut req = create_morph_transaction_request();
         req.chain_id = None;
         let result =
             try_build_morph_tx_from_request(&req, U64::from(1), U256::from(100), None, None);
@@ -680,7 +705,7 @@ mod tests {
 
     #[test]
     fn try_build_morph_tx_sets_correct_tx_fields() {
-        let req = create_basic_transaction_request();
+        let req = create_morph_transaction_request();
         let result = try_build_morph_tx_from_request(
             &req,
             U64::from(2),
@@ -692,7 +717,7 @@ mod tests {
         assert_eq!(tx.chain_id, 2818);
         assert_eq!(tx.gas_limit, 100000);
         assert_eq!(tx.nonce, 1);
-        assert_eq!(tx.max_fee_per_gas, 1_000_000_000); // falls back to gas_price
+        assert_eq!(tx.max_fee_per_gas, 1_000_000_000);
         assert_eq!(tx.value, U256::from(1000));
     }
 
