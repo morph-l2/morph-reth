@@ -111,9 +111,14 @@ fn sload_morph<DB: Database>(context: InstructionContext<'_, MorphContext<DB>, E
             if storage.is_cold {
                 // Read the true committed value from DB (hits State<DB> cache, O(1)).
                 // This matches go-eth's GetCommittedState() returning the un-modified DB value.
-                let db_original = context.host.journaled_state.database.storage(target, key);
-                if let Ok(db_original) = db_original
-                    && let Some(acc) = context.host.journaled_state.inner.state.get_mut(&target)
+                let db_original = match context.host.journaled_state.database.storage(target, key) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        context.interpreter.halt_fatal();
+                        return;
+                    }
+                };
+                if let Some(acc) = context.host.journaled_state.inner.state.get_mut(&target)
                     && let Some(slot) = acc.storage.get_mut(&key)
                     && slot.original_value != db_original
                 {
@@ -212,10 +217,14 @@ fn sstore_morph<DB: Database>(context: InstructionContext<'_, MorphContext<DB>, 
     // Morph fix: on cold access, restore original_value from the DB-committed value.
     // Mirrors sload_morph. Only fires on cold path; zero overhead on warm SSTOREs.
     if state_load.is_cold {
-        let db_original = context.host.journaled_state.database.storage(target, index);
-        if let Ok(db_original) = db_original
-            && state_load.data.original_value != db_original
-        {
+        let db_original = match context.host.journaled_state.database.storage(target, index) {
+            Ok(value) => value,
+            Err(_) => {
+                context.interpreter.halt_fatal();
+                return;
+            }
+        };
+        if state_load.data.original_value != db_original {
             state_load.data.original_value = db_original;
             if let Some(acc) = context.host.journaled_state.inner.state.get_mut(&target)
                 && let Some(slot) = acc.storage.get_mut(&index)
