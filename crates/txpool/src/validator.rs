@@ -885,7 +885,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_morph_tx_uses_effective_gas_price_for_token_fee_path() {
+    fn validate_morph_tx_uses_max_fee_for_token_fee_admission() {
         let client = new_mock_provider();
         let signer = address!("0000000000000000000000000000000000000001");
         let token = address!("5300000000000000000000000000000000000042");
@@ -915,9 +915,9 @@ mod tests {
             .disable_balance_check()
             .build::<crate::MorphPooledTransaction, _>(InMemoryBlobStore::default());
         let validator = MorphTransactionValidator::new(eth_validator);
-        // Simulate an active chain head with base_fee_per_gas = 10 so the
-        // effective gas price path is taken (min(max_fee, base_fee + priority)
-        // = min(100, 11) = 11), yielding required_token_amount = 21_000 * 11.
+        // Simulate an active chain head with base_fee_per_gas = 10. Execution
+        // would use effective gas price = min(100, 10 + 1) = 11, but txpool
+        // admission follows geth's conservative max_fee_per_gas budget.
         validator
             .block_info
             .update(L1BlockInfo::default(), 0, 0, Some(10));
@@ -944,7 +944,7 @@ mod tests {
             B256::ZERO,
         ));
         let recovered = Recovered::new_unchecked(envelope, signer);
-        let validation = validator
+        let err = validator
             .validate_morph_tx_balance(
                 &recovered,
                 signer,
@@ -952,9 +952,15 @@ mod tests {
                 U256::ZERO,
                 morph_chainspec::hardfork::MorphHardfork::Viridian,
             )
-            .expect("MorphTx should be affordable when priced with the effective gas price");
+            .expect_err("MorphTx should require the max-fee token budget in txpool admission");
 
-        assert!(validation.uses_token_fee);
-        assert_eq!(validation.required_token_amount, U256::from(231_000u64));
+        assert!(matches!(
+            err,
+            crate::MorphTxError::InsufficientTokenBalance {
+                required,
+                balance,
+                ..
+            } if required == U256::from(2_100_000u64) && balance == U256::from(300_000u64)
+        ));
     }
 }

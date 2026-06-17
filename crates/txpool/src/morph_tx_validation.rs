@@ -89,7 +89,6 @@ pub fn validate_morph_tx<DB: Database>(
     // Shared fee components used by both ETH-fee and token-fee branches.
     let gas_limit = U256::from(morph_tx.gas_limit);
     let max_fee_per_gas = U256::from(morph_tx.max_fee_per_gas);
-    let effective_gas_price = U256::from(morph_tx.effective_gas_price(input.base_fee_per_gas));
     let gas_fee = gas_limit.saturating_mul(max_fee_per_gas);
     let total_eth_fee = gas_fee.saturating_add(input.l1_data_fee);
     let total_eth_cost = total_eth_fee.saturating_add(tx_value);
@@ -133,7 +132,9 @@ pub fn validate_morph_tx<DB: Database>(
         });
     }
 
-    let token_gas_fee = gas_limit.saturating_mul(effective_gas_price);
+    // Txpool admission follows geth's conservative budget check and requires
+    // enough tokens for the max fee cap. Execution still charges the effective price.
+    let token_gas_fee = gas_fee;
     let total_token_fee = token_gas_fee.saturating_add(input.l1_data_fee);
     let required_token_amount = token_info.eth_to_token_amount(total_token_fee);
 
