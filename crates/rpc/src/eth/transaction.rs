@@ -134,6 +134,7 @@ impl<Spec> TryIntoTxEnv<MorphTxEnv, Spec, MorphBlockEnv> for MorphTransactionReq
         if is_morph_tx {
             tx_env.inner.tx_type = morph_primitives::MORPH_TX_TYPE_ID;
             tx_env.version = Some(morph_tx_version(reference.as_ref(), memo.as_ref()));
+            validate_morph_tx_env(&tx_env, evm_env.cfg_env.chain_id)?;
         }
 
         // Required by `MorphEthApi::caller_gas_allowance` (eth/call.rs) to
@@ -248,6 +249,31 @@ fn morph_tx_version(reference: Option<&B256>, memo: Option<&Bytes>) -> u8 {
 
 fn is_nonzero_reference(reference: Option<&B256>) -> bool {
     reference.is_some_and(|reference| *reference != B256::ZERO)
+}
+
+fn validate_morph_tx_env(tx_env: &MorphTxEnv, fallback_chain_id: u64) -> Result<(), EthApiError> {
+    let morph_tx = TxMorph {
+        chain_id: tx_env.inner.chain_id.unwrap_or(fallback_chain_id),
+        nonce: tx_env.inner.nonce,
+        gas_limit: tx_env.inner.gas_limit,
+        max_fee_per_gas: tx_env.inner.gas_price,
+        max_priority_fee_per_gas: tx_env.inner.gas_priority_fee.unwrap_or_default(),
+        to: tx_env.inner.kind,
+        value: tx_env.inner.value,
+        access_list: tx_env.inner.access_list.clone(),
+        input: tx_env.inner.data.clone(),
+        fee_token_id: tx_env.fee_token_id.unwrap_or_default(),
+        fee_limit: tx_env.fee_limit.unwrap_or_default(),
+        version: tx_env
+            .version
+            .unwrap_or(morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_1),
+        reference: tx_env.reference,
+        memo: tx_env.memo.clone(),
+    };
+
+    morph_tx
+        .validate()
+        .map_err(|reason| EthApiError::InvalidParams(reason.to_string()))
 }
 
 #[cfg(test)]
@@ -480,6 +506,24 @@ mod tests {
             .expect("conversion should default missing chain_id from EVM env");
 
         assert_eq!(tx_env.inner.chain_id, Some(2818));
+    }
+
+    #[test]
+    fn test_morph_tx_env_rejects_invalid_morph_fields() {
+        let request = MorphTransactionRequest {
+            inner: create_morph_transaction_request(),
+            fee_token_id: None,
+            fee_limit: Some(U256::from(1)),
+            reference: None,
+            memo: Some(Bytes::from_static(b"memo")),
+        };
+
+        let evm_env = create_evm_env(false);
+        let err = request
+            .try_into_tx_env(&evm_env)
+            .expect_err("tx-env conversion should validate MorphTx structural fields");
+
+        assert!(err.to_string().contains("FeeLimit"));
     }
 
     /// MorphTx converted on the `eth_call` path still carries RLP bytes.
