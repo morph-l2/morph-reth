@@ -203,8 +203,16 @@ fn try_build_morph_tx_from_request(
     let max_fee_per_gas = req.max_fee_per_gas.unwrap_or_default();
     let max_priority_fee_per_gas = req.max_priority_fee_per_gas.unwrap_or_default();
     let access_list: AccessList = req.access_list.clone().unwrap_or_default();
-    let input = req.input.clone().into_input().unwrap_or_default();
+    let input = req
+        .input
+        .clone()
+        .try_into_unique_input()
+        .map_err(|_| "data and input fields must match")?
+        .unwrap_or_default();
     let to = req.to.unwrap_or(TxKind::Create);
+    if matches!(to, TxKind::Create) && input.is_empty() {
+        return Err("contract creation requires initcode");
+    }
 
     let morph_tx = TxMorph {
         chain_id,
@@ -247,7 +255,7 @@ mod tests {
     use super::*;
     use crate::types::transaction::MorphRpcTransaction;
     use alloy_primitives::{Address, B256, Bytes, address};
-    use alloy_rpc_types_eth::{TransactionInfo, TransactionRequest};
+    use alloy_rpc_types_eth::{TransactionInfo, TransactionInput, TransactionRequest};
     use morph_chainspec::MorphHardfork;
     use reth_rpc_convert::FromConsensusTx;
     use revm::context::{BlockEnv, CfgEnv};
@@ -743,6 +751,31 @@ mod tests {
             try_build_morph_tx_from_request(&req, U64::from(1), U256::from(100), None, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("chain_id"));
+    }
+
+    #[test]
+    fn try_build_morph_tx_rejects_conflicting_data_and_input() {
+        let mut req = create_morph_transaction_request();
+        req.input = TransactionInput {
+            input: Some(Bytes::from_static(&[0x01])),
+            data: Some(Bytes::from_static(&[0x02])),
+        };
+
+        let result =
+            try_build_morph_tx_from_request(&req, U64::from(1), U256::from(100), None, None);
+
+        assert_eq!(result.unwrap_err(), "data and input fields must match");
+    }
+
+    #[test]
+    fn try_build_morph_tx_rejects_empty_contract_creation() {
+        let mut req = create_morph_transaction_request();
+        req.to = None;
+
+        let result =
+            try_build_morph_tx_from_request(&req, U64::from(1), U256::from(100), None, None);
+
+        assert_eq!(result.unwrap_err(), "contract creation requires initcode");
     }
 
     #[test]
