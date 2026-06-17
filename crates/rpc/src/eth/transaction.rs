@@ -107,7 +107,10 @@ impl<Spec> TryIntoTxEnv<MorphTxEnv, Spec, MorphBlockEnv> for MorphTransactionReq
         let fee_limit = self.fee_limit;
         let reference = self.reference;
         let memo = self.memo;
-        let inner = self.inner;
+        let mut inner = self.inner;
+        if inner.chain_id.is_none() {
+            inner.chain_id = Some(evm_env.cfg_env.chain_id);
+        }
 
         let inner_tx_env = inner.try_into_tx_env(evm_env).map_err(EthApiError::from)?;
 
@@ -449,6 +452,26 @@ mod tests {
             tx_env.version,
             Some(morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_0)
         );
+    }
+
+    #[test]
+    fn test_morph_tx_env_defaults_missing_chain_id_from_evm_env() {
+        let mut inner = create_morph_transaction_request();
+        inner.chain_id = None;
+        let request = MorphTransactionRequest {
+            inner,
+            fee_token_id: Some(U64::from(1)),
+            fee_limit: Some(U256::from(1000000)),
+            reference: None,
+            memo: None,
+        };
+
+        let evm_env = create_evm_env(false);
+        let tx_env = request
+            .try_into_tx_env(&evm_env)
+            .expect("conversion should default missing chain_id from EVM env");
+
+        assert_eq!(tx_env.inner.chain_id, Some(2818));
     }
 
     /// MorphTx converted on the `eth_call` path still carries RLP bytes.
