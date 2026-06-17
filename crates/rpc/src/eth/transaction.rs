@@ -125,7 +125,7 @@ impl<Spec> TryIntoTxEnv<MorphTxEnv, Spec, MorphBlockEnv> for MorphTransactionReq
 
         // Determine if this is a MorphTx based on Morph-specific fields
         let is_morph_tx = fee_token_id.is_some_and(|id| id.to::<u64>() > 0)
-            || reference.is_some()
+            || is_nonzero_reference(reference.as_ref())
             || memo.as_ref().is_some_and(|m| !m.is_empty());
 
         if is_morph_tx {
@@ -177,7 +177,7 @@ fn try_build_morph_tx_from_request(
 
     // Check if this should be a MorphTx
     let has_fee_token = fee_token_id_u16 > 0;
-    let has_reference = reference.is_some();
+    let has_reference = is_nonzero_reference(reference.as_ref());
     let has_memo = memo.as_ref().is_some_and(|m| !m.is_empty());
 
     if !has_fee_token && !has_reference && !has_memo {
@@ -228,11 +228,15 @@ fn try_build_morph_tx_from_request(
 }
 
 fn morph_tx_version(reference: Option<&B256>, memo: Option<&Bytes>) -> u8 {
-    if reference.is_some() || memo.is_some_and(|m| !m.is_empty()) {
+    if is_nonzero_reference(reference) || memo.is_some_and(|m| !m.is_empty()) {
         morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_1
     } else {
         morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_0
     }
+}
+
+fn is_nonzero_reference(reference: Option<&B256>) -> bool {
+    reference.is_some_and(|reference| *reference != B256::ZERO)
 }
 
 #[cfg(test)]
@@ -670,6 +674,21 @@ mod tests {
         let tx = result.unwrap().unwrap();
         assert_eq!(tx.reference, Some(reference));
         assert_eq!(tx.fee_token_id, 0);
+    }
+
+    #[test]
+    fn try_build_morph_tx_treats_zero_reference_as_absent() {
+        let req = create_morph_transaction_request();
+        let result =
+            try_build_morph_tx_from_request(&req, U64::from(1), U256::ZERO, Some(B256::ZERO), None);
+
+        assert!(result.is_ok());
+        let tx = result.unwrap().unwrap();
+        assert_eq!(
+            tx.version,
+            morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_0
+        );
+        assert_eq!(tx.reference, Some(B256::ZERO));
     }
 
     #[test]

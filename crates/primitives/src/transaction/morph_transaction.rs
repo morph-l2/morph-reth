@@ -239,8 +239,9 @@ impl TxMorph {
                 if self.fee_token_id == 0 {
                     return Err("version 0 MorphTx requires FeeTokenID > 0");
                 }
-                // Version 0 does not support Reference field
-                if self.reference.is_some() {
+                // Version 0 treats an all-zero Reference as absent, matching geth's
+                // RPC normalization for backward-compatible V0 transactions.
+                if self.reference.is_some_and(|reference| reference != B256::ZERO) {
                     return Err("version 0 MorphTx does not support Reference field");
                 }
                 // Version 0 does not support Memo field
@@ -1144,6 +1145,17 @@ mod tests {
             v0_with_ref.validate().unwrap_err(),
             "version 0 MorphTx does not support Reference field"
         );
+
+        // Valid: V0 with a zero Reference is treated as absent for geth compatibility.
+        let v0_with_zero_ref = TxMorph {
+            max_fee_per_gas: 100,
+            max_priority_fee_per_gas: 50,
+            version: MORPH_TX_VERSION_0,
+            fee_token_id: 1,
+            reference: Some(B256::ZERO),
+            ..Default::default()
+        };
+        assert!(v0_with_zero_ref.validate().is_ok());
 
         // Invalid: V0 with Memo
         let v0_with_memo = TxMorph {
