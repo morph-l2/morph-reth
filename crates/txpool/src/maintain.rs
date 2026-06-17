@@ -104,6 +104,10 @@ fn consume_token_budget(
     true
 }
 
+fn exceeds_block_gas_limit(tx_gas_limit: u64, block_gas_limit: u64) -> bool {
+    tx_gas_limit > block_gas_limit
+}
+
 /// Maintains the Morph transaction pool by revalidating MorphTx transactions.
 ///
 /// This task runs continuously and:
@@ -134,6 +138,7 @@ where
         let new_tip = event.tip();
         let block_number = new_tip.number();
         let block_timestamp = new_tip.timestamp();
+        let block_gas_limit = new_tip.gas_limit();
 
         tracing::trace!(
             target: "morph::txpool::maintain",
@@ -231,6 +236,19 @@ where
                 // Access the consensus tx by reference (via Deref chain) instead of
                 // cloning. Use the pool tx's cached EIP-2718 encoding for L1 fee.
                 let consensus_tx = tx.transaction();
+
+                if exceeds_block_gas_limit(consensus_tx.gas_limit(), block_gas_limit) {
+                    tracing::debug!(
+                        target: "morph::txpool::maintain",
+                        tx_hash = ?tx.hash(),
+                        ?sender,
+                        tx_gas_limit = consensus_tx.gas_limit(),
+                        block_gas_limit,
+                        "Removing MorphTx: gas limit exceeds current block gas limit"
+                    );
+                    to_remove.push(*tx.hash());
+                    break;
+                }
 
                 let l1_data_fee = l1_block_info.calculate_tx_l1_cost(tx.encoded_2718(), hardfork);
 
@@ -452,5 +470,11 @@ mod tests {
             budget.token_balances.get(&3).copied(),
             Some(U256::from(30u64))
         );
+    }
+
+    #[test]
+    fn gas_limit_check_rejects_transactions_above_block_limit() {
+        assert!(exceeds_block_gas_limit(30_000_001, 30_000_000));
+        assert!(!exceeds_block_gas_limit(30_000_000, 30_000_000));
     }
 }
