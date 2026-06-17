@@ -3,7 +3,7 @@
 use crate::MorphTransactionRequest;
 use alloy_consensus::{EthereumTxEnvelope, SignableTransaction, TxEip4844};
 use alloy_network::TxSigner;
-use alloy_primitives::{Signature, TxKind, U64, U256};
+use alloy_primitives::{B256, Bytes, Signature, TxKind, U64, U256};
 use alloy_rpc_types_eth::AccessList;
 use reth_rpc_convert::{SignTxRequestError, SignableTxRequest, TryIntoSimTx, TryIntoTxEnv};
 use reth_rpc_eth_types::EthApiError;
@@ -15,7 +15,7 @@ use reth_evm::EvmEnv;
 /// Converts a [`MorphTransactionRequest`] into a simulated transaction envelope.
 ///
 /// Handles both standard Ethereum transactions and Morph-specific fee token transactions.
-/// All MorphTx transactions are constructed as Version 1.
+/// MorphTx version is selected from the Morph-specific fields.
 impl TryIntoSimTx<MorphTxEnvelope> for MorphTransactionRequest {
     fn try_into_sim_tx(self) -> Result<MorphTxEnvelope, alloy_consensus::error::ValueError<Self>> {
         // Try to build a MorphTx; returns None if this should be a standard Ethereum tx
@@ -55,7 +55,7 @@ impl TryIntoSimTx<MorphTxEnvelope> for MorphTransactionRequest {
 /// Builds and signs a transaction from an RPC request.
 ///
 /// Supports both standard Ethereum transactions and Morph fee token transactions.
-/// All MorphTx transactions are constructed as Version 1.
+/// MorphTx version is selected from the Morph-specific fields.
 impl SignableTxRequest<MorphTxEnvelope> for MorphTransactionRequest {
     async fn try_build_and_sign(
         self,
@@ -95,7 +95,7 @@ impl SignableTxRequest<MorphTxEnvelope> for MorphTransactionRequest {
 /// Converts a transaction request into a transaction environment for EVM execution.
 ///
 /// Also encodes the transaction for L1 fee calculation.
-/// All MorphTx transactions are constructed as Version 1.
+/// MorphTx version is selected from the Morph-specific fields.
 impl<Spec> TryIntoTxEnv<MorphTxEnv, Spec, MorphBlockEnv> for MorphTransactionRequest {
     type Err = EthApiError;
 
@@ -130,8 +130,7 @@ impl<Spec> TryIntoTxEnv<MorphTxEnv, Spec, MorphBlockEnv> for MorphTransactionReq
 
         if is_morph_tx {
             tx_env.inner.tx_type = morph_primitives::MORPH_TX_TYPE_ID;
-            tx_env.version =
-                Some(morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_1);
+            tx_env.version = Some(morph_tx_version(reference.as_ref(), memo.as_ref()));
         }
 
         // Required by `MorphEthApi::caller_gas_allowance` (eth/call.rs) to
@@ -159,7 +158,7 @@ fn morph_envelope_from_ethereum(
 
 /// Attempts to build a [`TxMorph`] from an RPC transaction request.
 ///
-/// Returns `Ok(Some(tx))` if a MorphTx should be constructed (always Version 1),
+/// Returns `Ok(Some(tx))` if a MorphTx should be constructed,
 /// `Ok(None)` if this should be a standard Ethereum transaction,
 /// or `Err(...)` if there's a validation error.
 ///
@@ -186,8 +185,7 @@ fn try_build_morph_tx_from_request(
         return Ok(None);
     }
 
-    // All MorphTx are constructed as Version 1
-    let version = morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_1;
+    let version = morph_tx_version(reference.as_ref(), memo.as_ref());
 
     // Now build the MorphTx
     let chain_id = req
@@ -223,6 +221,14 @@ fn try_build_morph_tx_from_request(
     morph_tx.validate()?;
 
     Ok(Some(morph_tx))
+}
+
+fn morph_tx_version(reference: Option<&B256>, memo: Option<&Bytes>) -> u8 {
+    if reference.is_some() || memo.is_some_and(|m| !m.is_empty()) {
+        morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_1
+    } else {
+        morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_0
+    }
 }
 
 #[cfg(test)]
@@ -404,6 +410,27 @@ mod tests {
             tx_env.version,
             Some(morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_1),
             "version should be set to MORPH_TX_VERSION_1"
+        );
+    }
+
+    #[test]
+    fn test_fee_token_only_tx_env_uses_morph_tx_version_0() {
+        let request = MorphTransactionRequest {
+            inner: create_basic_transaction_request(),
+            fee_token_id: Some(U64::from(1)),
+            fee_limit: Some(U256::from(1000000)),
+            reference: None,
+            memo: None,
+        };
+
+        let evm_env = create_evm_env(false);
+        let tx_env = request
+            .try_into_tx_env(&evm_env)
+            .expect("conversion should succeed");
+
+        assert_eq!(
+            tx_env.version,
+            Some(morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_0)
         );
     }
 
@@ -604,7 +631,7 @@ mod tests {
         assert_eq!(tx.fee_limit, U256::from(1_000_000));
         assert_eq!(
             tx.version,
-            morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_1
+            morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_0
         );
     }
 
