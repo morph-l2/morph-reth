@@ -228,11 +228,10 @@ where
         // which skips gas-price checks entirely.
         validation::validate_env::<_, Self::Error>(evm.ctx())?;
 
-        // MorphTx V1 ETH-fee: enforce the EIP-1559 priority-fee rule.
-        // Token-fee MorphTx skips it (fees paid in ERC20); simulation
-        // paths also skip it.
+        // MorphTx maps to `TransactionType::Custom`, so revm's standard path
+        // does not enforce EIP-1559 fee-cap rules. Those rules are independent
+        // of which asset ultimately pays the fee, matching Morph geth's preCheck.
         if evm.ctx_ref().tx().is_morph_tx()
-            && !evm.ctx_ref().tx().uses_token_fee()
             && !evm.ctx_ref().cfg().is_fee_charge_disabled()
         {
             let base_fee = Some(evm.ctx_ref().block().basefee() as u128);
@@ -1008,10 +1007,12 @@ fn calculate_caller_fee_with_l1_cost(
 mod tests {
     use super::*;
     use crate::MorphBlockEnv;
-    use alloy_primitives::{Bytes, address, keccak256};
+    use alloy_primitives::{Bytes, TxKind, address, keccak256};
+    use morph_primitives::MORPH_TX_TYPE_ID;
     use morph_chainspec::hardfork::MorphHardfork;
     use revm::{
-        context::BlockEnv,
+        context::{BlockEnv, TxEnv},
+        context_interface::result::InvalidTransaction,
         database::{CacheDB, EmptyDB},
         inspector::NoOpInspector,
         state::{AccountInfo, Bytecode},
@@ -1035,6 +1036,45 @@ mod tests {
             0x00, // PUSH1 offset 0
             0xf3, // RETURN
         ])
+    }
+
+    #[test]
+    fn validate_env_rejects_token_fee_morph_tx_below_base_fee() {
+        let mut evm = MorphEvm::new(
+            MorphContext::new(CacheDB::new(EmptyDB::default()), MorphHardfork::default()),
+            NoOpInspector,
+        );
+        evm.block = MorphBlockEnv {
+            inner: BlockEnv {
+                basefee: 100,
+                ..Default::default()
+            },
+        };
+        evm.tx = MorphTxEnv {
+            inner: TxEnv {
+                tx_type: MORPH_TX_TYPE_ID,
+                gas_limit: 21_000,
+                gas_price: 99,
+                gas_priority_fee: Some(1),
+                kind: TxKind::Call(Address::ZERO),
+                ..Default::default()
+            },
+            fee_token_id: Some(1),
+            ..Default::default()
+        };
+
+        let err = <MorphEvmHandler<_, _> as Handler>::validate_env(
+            &MorphEvmHandler::default(),
+            &mut evm,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            EVMError::Transaction(MorphInvalidTransaction::EthInvalidTransaction(
+                InvalidTransaction::GasPriceLessThanBasefee
+            ))
+        ));
     }
 
     #[test]
