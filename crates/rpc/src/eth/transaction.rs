@@ -112,33 +112,27 @@ impl<Spec> TryIntoTxEnv<MorphTxEnv, Spec, MorphBlockEnv> for MorphTransactionReq
             inner.chain_id = Some(evm_env.cfg_env.chain_id);
         }
 
-        // Determine MorphTx intent before delegating to the standard conversion so
-        // simulation rejects the same invalid request shape as signing/building.
-        let is_morph_tx = fee_token_id.is_some_and(|id| id.to::<u64>() > 0)
-            || is_nonzero_reference(reference.as_ref())
-            || memo.as_ref().is_some_and(|m| !m.is_empty());
-
-        if is_morph_tx && inner.gas_price.is_some() {
-            return Err(EthApiError::InvalidParams(
-                "gas_price cannot be used with Morph transaction fields".to_string(),
-            ));
-        }
+        // Match geth: legacy gas_price takes precedence over Morph-specific
+        // fields, so the request is treated as a standard transaction.
+        let is_morph_tx = inner.gas_price.is_none()
+            && (fee_token_id.is_some_and(|id| id.to::<u64>() > 0)
+                || is_nonzero_reference(reference.as_ref())
+                || memo.as_ref().is_some_and(|m| !m.is_empty()));
 
         let inner_tx_env = inner.try_into_tx_env(evm_env).map_err(EthApiError::from)?;
 
         let mut tx_env = MorphTxEnv::new(inner_tx_env);
-        tx_env.fee_token_id = match fee_token_id {
-            Some(id) => Some(
-                u16::try_from(id.to::<u64>())
-                    .map_err(|_| EthApiError::InvalidParams("invalid token".to_string()))?,
-            ),
-            None => None,
-        };
-        tx_env.fee_limit = fee_limit;
-        tx_env.reference = reference;
-        tx_env.memo = memo.clone();
-
         if is_morph_tx {
+            tx_env.fee_token_id = match fee_token_id {
+                Some(id) => Some(
+                    u16::try_from(id.to::<u64>())
+                        .map_err(|_| EthApiError::InvalidParams("invalid token".to_string()))?,
+                ),
+                None => None,
+            };
+            tx_env.fee_limit = fee_limit;
+            tx_env.reference = reference;
+            tx_env.memo = memo.clone();
             tx_env.inner.tx_type = morph_primitives::MORPH_TX_TYPE_ID;
             tx_env.version = Some(morph_tx_version(reference.as_ref(), memo.as_ref()));
         }
@@ -184,6 +178,10 @@ fn try_build_morph_tx_from_request(
     memo: Option<alloy_primitives::Bytes>,
 ) -> Result<Option<TxMorph>, &'static str> {
     let reference = normalize_reference(reference);
+    if req.gas_price.is_some() {
+        return Ok(None);
+    }
+
     let fee_token_id_u16 = u16::try_from(fee_token_id.to::<u64>()).map_err(|_| "invalid token")?;
 
     // Check if this should be a MorphTx
@@ -194,10 +192,6 @@ fn try_build_morph_tx_from_request(
     if !has_fee_token && !has_reference && !has_memo {
         // No Morph-specific fields → standard Ethereum tx
         return Ok(None);
-    }
-
-    if req.gas_price.is_some() {
-        return Err("gas_price cannot be used with Morph transaction fields");
     }
 
     let version = morph_tx_version(reference.as_ref(), memo.as_ref());
@@ -475,7 +469,7 @@ mod tests {
     }
 
     #[test]
-    fn test_morph_tx_env_rejects_gas_price_with_morph_fields() {
+    fn test_morph_tx_env_treats_gas_price_with_morph_fields_as_standard_tx() {
         let request = MorphTransactionRequest {
             inner: create_basic_transaction_request(),
             fee_token_id: Some(U64::from(1)),
@@ -485,13 +479,16 @@ mod tests {
         };
 
         let evm_env = create_evm_env(false);
-        let err = request
+        let tx_env = request
             .try_into_tx_env(&evm_env)
-            .expect_err("gas_price with Morph fields should be rejected");
+            .expect("gas_price should force the standard transaction path");
 
-        assert!(
-            matches!(err, EthApiError::InvalidParams(message) if message == "gas_price cannot be used with Morph transaction fields")
-        );
+        assert_ne!(tx_env.inner.tx_type, morph_primitives::MORPH_TX_TYPE_ID);
+        assert!(tx_env.fee_token_id.is_none());
+        assert!(tx_env.fee_limit.is_none());
+        assert!(tx_env.reference.is_none());
+        assert!(tx_env.memo.is_none());
+        assert!(tx_env.version.is_none());
     }
 
     #[test]
@@ -716,15 +713,13 @@ mod tests {
     }
 
     #[test]
-    fn try_build_morph_tx_rejects_gas_price_with_morph_fields() {
+    fn try_build_morph_tx_treats_gas_price_with_morph_fields_as_standard_tx() {
         let req = create_basic_transaction_request();
         let result =
             try_build_morph_tx_from_request(&req, U64::from(1), U256::from(1_000_000), None, None);
 
-        assert_eq!(
-            result.unwrap_err(),
-            "gas_price cannot be used with Morph transaction fields"
-        );
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
     }
 
     #[test]
