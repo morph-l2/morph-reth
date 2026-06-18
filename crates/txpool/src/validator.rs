@@ -445,7 +445,6 @@ where
             sender,
             eth_balance,
             l1_data_fee,
-            base_fee_per_gas: self.block_info.base_fee_per_gas(),
             hardfork,
         };
 

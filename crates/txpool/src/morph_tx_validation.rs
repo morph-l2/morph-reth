@@ -25,8 +25,6 @@ pub struct MorphTxValidationInput<'a> {
     pub eth_balance: U256,
     /// L1 data fee (pre-calculated)
     pub l1_data_fee: U256,
-    /// Current block base fee used to derive the effective gas price.
-    pub base_fee_per_gas: Option<u64>,
     /// Current hardfork
     pub hardfork: MorphHardfork,
 }
@@ -202,7 +200,6 @@ mod tests {
             sender,
             eth_balance: U256::from(1_000_000_000_000_000_000u128), // 1 ETH
             l1_data_fee: U256::from(100_000),
-            base_fee_per_gas: Some(1_000_000_000),
             hardfork: MorphHardfork::Viridian,
         };
 
@@ -241,7 +238,6 @@ mod tests {
             sender,
             eth_balance: U256::from(1_000_000_000_000_000_000u128),
             l1_data_fee: U256::ZERO,
-            base_fee_per_gas: Some(1_000_000_000),
             hardfork: MorphHardfork::Jade,
         };
         let mut db = EmptyDB::default();
@@ -283,7 +279,6 @@ mod tests {
             sender,
             eth_balance: U256::from(1_000_000_000_000_000_000u128),
             l1_data_fee: U256::ZERO,
-            base_fee_per_gas: Some(1_000_000_000),
             hardfork: MorphHardfork::Viridian,
         };
         let mut db = EmptyDB::default();
@@ -321,7 +316,6 @@ mod tests {
             sender,
             eth_balance: U256::from(100u64), // Insufficient ETH
             l1_data_fee: U256::ZERO,
-            base_fee_per_gas: Some(1_000_000_000),
             hardfork: MorphHardfork::Viridian,
         };
         let mut db = EmptyDB::default();
@@ -363,7 +357,6 @@ mod tests {
             sender,
             eth_balance: U256::from(10u128.pow(18)), // 1 ETH (sufficient)
             l1_data_fee: U256::from(1000u64),
-            base_fee_per_gas: Some(1_000_000_000),
             hardfork: MorphHardfork::Jade,
         };
         let mut db = EmptyDB::default();
@@ -406,7 +399,6 @@ mod tests {
             sender,
             eth_balance: U256::from(100u64), // Way too low
             l1_data_fee: U256::from(1000u64),
-            base_fee_per_gas: Some(1_000_000_000),
             hardfork: MorphHardfork::Jade,
         };
         let mut db = EmptyDB::default();
@@ -445,7 +437,6 @@ mod tests {
             sender,
             eth_balance: U256::from(10u128.pow(18)),
             l1_data_fee: U256::ZERO,
-            base_fee_per_gas: Some(1_000_000_000),
             hardfork: MorphHardfork::Viridian,
         };
         let mut db = EmptyDB::default();

@@ -756,11 +756,11 @@ impl RlpEcdsaDecodableTx for TxMorph {
 
         // Detect version:
         // - V1: first byte is version byte (0x01), skip it
-        // - V0: first byte is RLP list prefix (>= 0xC0), no version prefix
+        // - V0: first byte is 0 or RLP list prefix (>= 0xC0), no version prefix
         let version = if first_byte == MORPH_TX_VERSION_1 {
             *buf = &buf[1..]; // skip version byte
             MORPH_TX_VERSION_1
-        } else if first_byte >= 0xC0 {
+        } else if first_byte == MORPH_TX_VERSION_0 || first_byte >= 0xC0 {
             MORPH_TX_VERSION_0
         } else {
             return Err(alloy_rlp::Error::Custom("unsupported morph tx version"));
@@ -856,11 +856,11 @@ impl Decodable for TxMorph {
         if first_byte == MORPH_TX_VERSION_1 {
             // V1: skip version byte, then decode RLP
             *buf = &buf[1..];
-        } else if first_byte < 0xC0 {
+        } else if first_byte != MORPH_TX_VERSION_0 && first_byte < 0xC0 {
             // Invalid: not a version we support and not an RLP list
             return Err(alloy_rlp::Error::Custom("unsupported morph tx version"));
         }
-        // V0: first_byte is RLP list prefix (>= 0xC0)
+        // V0: first_byte is 0 or RLP list prefix (>= 0xC0)
 
         let header = Header::decode(buf)?;
         if !header.list {
@@ -1502,6 +1502,32 @@ mod tests {
         let result = TxMorph::decode_fields(&mut buf);
         assert!(result.is_err());
         // Must not be the "unsupported version" error.
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            !err_msg.contains("unsupported"),
+            "expected RLP-level error, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_signed_decode_accepts_zero_byte_as_v0() {
+        let mut buf: &[u8] = &[0x00];
+        let result = TxMorph::rlp_decode_with_signature(&mut buf);
+
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            !err_msg.contains("unsupported"),
+            "expected RLP-level error, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_decodable_accepts_zero_byte_as_v0() {
+        let mut buf: &[u8] = &[0x00];
+        let result = <TxMorph as Decodable>::decode(&mut buf);
+
+        assert!(result.is_err());
         let err_msg = format!("{}", result.unwrap_err());
         assert!(
             !err_msg.contains("unsupported"),
