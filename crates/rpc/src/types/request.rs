@@ -9,10 +9,11 @@ use serde::{Deserialize, Serialize};
 /// Extends standard Ethereum transaction request with:
 /// - `feeTokenID`: Token ID for ERC20 gas payment
 /// - `feeLimit`: Maximum token amount willing to pay for fees
+/// - `version`: Explicit MorphTx version selector
 /// - `reference`: 32-byte reference key for transaction indexing
 /// - `memo`: Arbitrary memo data (up to 64 bytes)
 ///
-/// All MorphTx transactions are constructed as Version 1 (the latest format).
+/// When omitted, MorphTx version is inferred from Morph-specific fields.
 #[derive(
     Debug,
     Clone,
@@ -44,6 +45,10 @@ pub struct MorphTransactionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fee_limit: Option<U256>,
 
+    /// Explicit MorphTx version selector (only for MorphTx type 0x7F).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<U64>,
+
     /// Reference key for transaction indexing (32 bytes).
     /// Used for looking up transactions by external systems.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -71,13 +76,14 @@ impl AsMut<TransactionRequest> for MorphTransactionRequest {
 
 /// Creates a [`MorphTransactionRequest`] from a standard [`TransactionRequest`].
 ///
-/// Sets `fee_token_id`, `fee_limit`, `reference`, and `memo` to `None`.
+/// Sets `fee_token_id`, `fee_limit`, `version`, `reference`, and `memo` to `None`.
 impl From<TransactionRequest> for MorphTransactionRequest {
     fn from(value: TransactionRequest) -> Self {
         Self {
             inner: value,
             fee_token_id: None,
             fee_limit: None,
+            version: None,
             reference: None,
             memo: None,
         }
@@ -114,6 +120,7 @@ mod tests {
         assert_eq!(morph_req.inner, inner);
         assert!(morph_req.fee_token_id.is_none());
         assert!(morph_req.fee_limit.is_none());
+        assert!(morph_req.version.is_none());
         assert!(morph_req.reference.is_none());
         assert!(morph_req.memo.is_none());
     }
@@ -124,6 +131,7 @@ mod tests {
             inner: basic_inner_request(),
             fee_token_id: Some(U64::from(1)),
             fee_limit: Some(U256::from(500)),
+            version: Some(U64::from(1)),
             reference: Some(b256!(
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             )),
@@ -178,6 +186,7 @@ mod tests {
             inner: basic_inner_request(),
             fee_token_id: Some(U64::from(5)),
             fee_limit: Some(U256::from(999)),
+            version: Some(U64::from(1)),
             reference: Some(b256!(
                 "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
             )),
@@ -194,11 +203,13 @@ mod tests {
             inner: basic_inner_request(),
             fee_token_id: Some(U64::from(1)),
             fee_limit: Some(U256::from(100)),
+            version: Some(U64::from(1)),
             ..Default::default()
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"feeTokenID\""));
         assert!(json.contains("\"feeLimit\""));
+        assert!(json.contains("\"version\""));
     }
 
     #[test]
@@ -210,6 +221,7 @@ mod tests {
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("feeTokenID"));
         assert!(!json.contains("feeLimit"));
+        assert!(!json.contains("version"));
         assert!(!json.contains("reference"));
         assert!(!json.contains("memo"));
     }
@@ -220,6 +232,7 @@ mod tests {
         assert_eq!(req.inner, TransactionRequest::default());
         assert!(req.fee_token_id.is_none());
         assert!(req.fee_limit.is_none());
+        assert!(req.version.is_none());
         assert!(req.reference.is_none());
         assert!(req.memo.is_none());
     }
