@@ -118,10 +118,10 @@ where
     ) -> RpcResult<ExecutableL2Data> {
         tracing::debug!(target: "morph::engine", block_number = params.number, "assembling L2 block");
 
-        self.inner.assemble_l2_block(params).await.map_err(|e| {
-            tracing::error!(target: "morph::engine", error = %e, "failed to assemble L2 block");
-            e.into()
-        })
+        self.inner
+            .assemble_l2_block(params)
+            .await
+            .map_err(|e| e.into())
     }
 
     async fn assemble_l2_block_v2(
@@ -138,10 +138,7 @@ where
         self.inner
             .assemble_l2_block_v2(params)
             .await
-            .map_err(|e| {
-                tracing::error!(target: "morph::engine", error = %e, "failed to assemble L2 block (v2)");
-                e.into()
-            })
+            .map_err(|e| e.into())
     }
 
     async fn validate_l2_block(&self, data: ExecutableL2Data) -> RpcResult<GenericResponse> {
@@ -152,10 +149,10 @@ where
             "validating L2 block"
         );
 
-        self.inner.validate_l2_block(data).await.map_err(|e| {
-            tracing::error!(target: "morph::engine", error = %e, "failed to validate L2 block");
-            e.into()
-        })
+        self.inner
+            .validate_l2_block(data)
+            .await
+            .map_err(|e| e.into())
     }
 
     async fn new_l2_block(&self, data: ExecutableL2Data) -> RpcResult<()> {
@@ -166,10 +163,7 @@ where
             "RPC newL2Block called"
         );
 
-        self.inner.new_l2_block(data).await.map_err(|e| {
-            tracing::error!(target: "morph::engine", error = %e, "failed to import L2 block");
-            e.into()
-        })
+        self.inner.new_l2_block(data).await.map_err(|e| e.into())
     }
 
     async fn new_l2_block_v2(&self, data: ExecutableL2Data) -> RpcResult<MorphHeader> {
@@ -180,10 +174,7 @@ where
             "RPC newL2BlockV2 called"
         );
 
-        self.inner.new_l2_block_v2(data).await.map_err(|e| {
-            tracing::error!(target: "morph::engine", error = %e, "failed to import L2 block (v2)");
-            e.into()
-        })
+        self.inner.new_l2_block_v2(data).await.map_err(|e| e.into())
     }
 
     async fn new_safe_l2_block(&self, data: SafeL2Data) -> RpcResult<MorphHeader> {
@@ -193,10 +184,10 @@ where
             "RPC newSafeL2Block called"
         );
 
-        self.inner.new_safe_l2_block(data).await.map_err(|e| {
-            tracing::error!(target: "morph::engine", error = %e, "failed to import safe L2 block");
-            e.into()
-        })
+        self.inner
+            .new_safe_l2_block(data)
+            .await
+            .map_err(|e| e.into())
     }
 
     async fn set_block_tags(
@@ -214,10 +205,7 @@ where
         self.inner
             .set_block_tags(safe_block_hash, finalized_block_hash)
             .await
-            .map_err(|e| {
-                tracing::error!(target: "morph::engine", error = %e, "failed to set block tags");
-                e.into()
-            })
+            .map_err(|e| e.into())
     }
 }
 

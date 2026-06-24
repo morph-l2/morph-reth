@@ -25,8 +25,6 @@ pub struct MorphTxValidationInput<'a> {
     pub eth_balance: U256,
     /// L1 data fee (pre-calculated)
     pub l1_data_fee: U256,
-    /// Current block base fee used to derive the effective gas price.
-    pub base_fee_per_gas: Option<u64>,
     /// Current hardfork
     pub hardfork: MorphHardfork,
 }
@@ -89,7 +87,6 @@ pub fn validate_morph_tx<DB: Database>(
     // Shared fee components used by both ETH-fee and token-fee branches.
     let gas_limit = U256::from(morph_tx.gas_limit);
     let max_fee_per_gas = U256::from(morph_tx.max_fee_per_gas);
-    let effective_gas_price = U256::from(morph_tx.effective_gas_price(input.base_fee_per_gas));
     let gas_fee = gas_limit.saturating_mul(max_fee_per_gas);
     let total_eth_fee = gas_fee.saturating_add(input.l1_data_fee);
     let total_eth_cost = total_eth_fee.saturating_add(tx_value);
@@ -133,7 +130,9 @@ pub fn validate_morph_tx<DB: Database>(
         });
     }
 
-    let token_gas_fee = gas_limit.saturating_mul(effective_gas_price);
+    // Txpool admission follows geth's conservative budget check and requires
+    // enough tokens for the max fee cap. Execution still charges the effective price.
+    let token_gas_fee = gas_fee;
     let total_token_fee = token_gas_fee.saturating_add(input.l1_data_fee);
     let required_token_amount = token_info.eth_to_token_amount(total_token_fee);
 
@@ -201,7 +200,6 @@ mod tests {
             sender,
             eth_balance: U256::from(1_000_000_000_000_000_000u128), // 1 ETH
             l1_data_fee: U256::from(100_000),
-            base_fee_per_gas: Some(1_000_000_000),
             hardfork: MorphHardfork::Viridian,
         };
 
@@ -240,7 +238,6 @@ mod tests {
             sender,
             eth_balance: U256::from(1_000_000_000_000_000_000u128),
             l1_data_fee: U256::ZERO,
-            base_fee_per_gas: Some(1_000_000_000),
             hardfork: MorphHardfork::Jade,
         };
         let mut db = EmptyDB::default();
@@ -282,7 +279,6 @@ mod tests {
             sender,
             eth_balance: U256::from(1_000_000_000_000_000_000u128),
             l1_data_fee: U256::ZERO,
-            base_fee_per_gas: Some(1_000_000_000),
             hardfork: MorphHardfork::Viridian,
         };
         let mut db = EmptyDB::default();
@@ -320,7 +316,6 @@ mod tests {
             sender,
             eth_balance: U256::from(100u64), // Insufficient ETH
             l1_data_fee: U256::ZERO,
-            base_fee_per_gas: Some(1_000_000_000),
             hardfork: MorphHardfork::Viridian,
         };
         let mut db = EmptyDB::default();
@@ -362,7 +357,6 @@ mod tests {
             sender,
             eth_balance: U256::from(10u128.pow(18)), // 1 ETH (sufficient)
             l1_data_fee: U256::from(1000u64),
-            base_fee_per_gas: Some(1_000_000_000),
             hardfork: MorphHardfork::Jade,
         };
         let mut db = EmptyDB::default();
@@ -405,7 +399,6 @@ mod tests {
             sender,
             eth_balance: U256::from(100u64), // Way too low
             l1_data_fee: U256::from(1000u64),
-            base_fee_per_gas: Some(1_000_000_000),
             hardfork: MorphHardfork::Jade,
         };
         let mut db = EmptyDB::default();
@@ -444,7 +437,6 @@ mod tests {
             sender,
             eth_balance: U256::from(10u128.pow(18)),
             l1_data_fee: U256::ZERO,
-            base_fee_per_gas: Some(1_000_000_000),
             hardfork: MorphHardfork::Viridian,
         };
         let mut db = EmptyDB::default();
