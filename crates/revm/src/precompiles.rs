@@ -252,7 +252,7 @@ fn bn256_pairing_with_4pair_limit(
 /// All 9 Berlin addresses are present (so they get warmed via EIP-2929), but 0x03/0x09
 /// consume all forwarded gas and return failure when called.
 ///
-/// Matches: <https://github.com/morph-l2/go-ethereum/blob/main/core/vm/contracts.go#L136-L148>
+/// Matches: <https://github.com/morph-l2/go-ethereum/blob/main/core/vm/contracts.go#L124-L134>
 pub fn bernoulli() -> &'static Precompiles {
     static INSTANCE: OnceLock<Precompiles> = OnceLock::new();
     INSTANCE.get_or_init(|| {

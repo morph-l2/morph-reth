@@ -22,7 +22,7 @@ use reth_payload_builder::{BuildNewPayload, PayloadBuilderHandle};
 #[cfg(test)]
 use reth_primitives_traits::RecoveredBlock;
 use reth_primitives_traits::{FastInstant as Instant, SealedBlock, SealedHeader};
-use reth_provider::{BlockNumReader, CanonChainTracker, HeaderProvider};
+use reth_provider::{BlockNumReader, BlockReaderIdExt, CanonChainTracker, HeaderProvider};
 use std::sync::Arc;
 
 // =============================================================================
@@ -140,6 +140,7 @@ impl<Provider> MorphL2EngineApi for RealMorphL2EngineApi<Provider>
 where
     Provider: HeaderProvider<Header = MorphHeader>
         + BlockNumReader
+        + BlockReaderIdExt<Header = MorphHeader>
         + CanonChainTracker<Header = MorphHeader>
         + Clone
         + Send
@@ -644,8 +645,13 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
         parent_override: Option<B256>,
     ) -> EngineApiResult<MorphBuiltPayload>
     where
-        Provider:
-            HeaderProvider<Header = MorphHeader> + BlockNumReader + Clone + Send + Sync + 'static,
+        Provider: HeaderProvider<Header = MorphHeader>
+            + BlockNumReader
+            + BlockReaderIdExt<Header = MorphHeader>
+            + Clone
+            + Send
+            + Sync
+            + 'static,
     {
         tracing::debug!(
             target: "morph::engine",
@@ -926,26 +932,19 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
 
     fn current_head(&self) -> EngineApiResult<CanonicalHead>
     where
-        Provider: HeaderProvider + BlockNumReader,
+        Provider: BlockReaderIdExt<Header = MorphHeader>,
     {
-        let info = self
-            .provider
-            .chain_info()
-            .map_err(|e| MorphEngineApiError::Database(e.to_string()))?;
         let header = self
             .provider
-            .sealed_header_by_hash(info.best_hash)
+            .latest_header()
             .map_err(|e| MorphEngineApiError::Database(e.to_string()))?
             .ok_or_else(|| {
-                MorphEngineApiError::Internal(format!(
-                    "canonical head header {} ({}) not found",
-                    info.best_number, info.best_hash
-                ))
+                MorphEngineApiError::Internal("canonical head header not found".to_string())
             })?;
 
         Ok(CanonicalHead {
-            number: info.best_number,
-            hash: info.best_hash,
+            number: header.number(),
+            hash: header.hash(),
             timestamp: header.timestamp(),
         })
     }
