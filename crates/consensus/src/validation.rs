@@ -328,6 +328,10 @@ impl Consensus<Block> for MorphConsensus {
 
         Ok(())
     }
+
+    fn is_transient_error(&self, error: &ConsensusError) -> bool {
+        matches!(error, ConsensusError::TimestampIsInFuture { .. })
+    }
 }
 
 // ============================================================================
@@ -1129,6 +1133,18 @@ mod tests {
             result,
             Err(ConsensusError::TimestampIsInFuture { .. })
         ));
+    }
+
+    #[test]
+    fn test_timestamp_in_future_is_transient_error() {
+        let chain_spec = create_test_chainspec();
+        let consensus = MorphConsensus::new(chain_spec);
+        let error = ConsensusError::TimestampIsInFuture {
+            timestamp: 2,
+            present_timestamp: 1,
+        };
+
+        assert!(Consensus::<Block>::is_transient_error(&consensus, &error));
     }
 
     #[test]
