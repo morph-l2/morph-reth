@@ -22,6 +22,9 @@ ignore = [
     # https://rustsec.org/advisories/RUSTSEC-2026-0119 hickory-proto O(n^2) name compression
     # fixed in hickory-proto 0.26.1, but hickory-resolver ^0.25 cannot select it
     "RUSTSEC-2026-0119",
+    # https://rustsec.org/advisories/RUSTSEC-2026-0173 proc-macro-error2 is unmaintained
+    # build-time proc-macro pulled transitively via alloy-sol-macro; no fix available
+    "RUSTSEC-2026-0173",
 ]
 
 # This section is considered when running `cargo deny check bans`.
