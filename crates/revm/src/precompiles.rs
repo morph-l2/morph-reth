@@ -116,8 +116,8 @@ impl MorphPrecompiles {
             MorphHardfork::Bernoulli | MorphHardfork::Curie => bernoulli(),
             // Morph203 and Viridian share the same precompile set
             MorphHardfork::Morph203 | MorphHardfork::Viridian => morph203(),
-            // Emerald and Jade share the same precompile set.
-            MorphHardfork::Emerald | MorphHardfork::Jade => emerald(),
+            // Emerald, Jade and Onyx share the same precompile set.
+            MorphHardfork::Emerald | MorphHardfork::Jade | MorphHardfork::Onyx => emerald(),
             hardfork => unreachable!("unsupported Morph hardfork: {hardfork:?}"),
         };
 

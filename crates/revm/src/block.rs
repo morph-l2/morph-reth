@@ -12,6 +12,19 @@ pub struct MorphBlockEnv {
     #[deref]
     #[deref_mut]
     pub inner: BlockEnv,
+
+    /// Sub-second millisecond portion of the block timestamp.
+    pub timestamp_millis_part: u64,
+}
+
+impl MorphBlockEnv {
+    /// Returns the block timestamp in milliseconds.
+    pub fn timestamp_millis(&self) -> U256 {
+        self.inner
+            .timestamp
+            .saturating_mul(U256::from(1000))
+            .saturating_add(U256::from(self.timestamp_millis_part))
+    }
 }
 
 impl Block for MorphBlockEnv {

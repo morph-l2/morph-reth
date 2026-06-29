@@ -330,6 +330,7 @@ async fn new_safe_l2_block_with_parent_hash_reorgs_onto_non_head_parent() -> eyr
         gas_limit,
         base_fee_per_gas: base_fee,
         timestamp: now - 2,
+        timestamp_millis_part: 0,
         transactions: vec![],
         parent_hash: Some(block1_hash),
     };
@@ -400,6 +401,7 @@ async fn safe_block_reorg_does_not_carry_stale_safe_into_forkchoice() -> eyre::R
         gas_limit,
         base_fee_per_gas: base_fee,
         timestamp: now - 4,
+        timestamp_millis_part: 0,
         transactions: vec![],
         parent_hash: Some(block1_hash),
     };
@@ -419,6 +421,7 @@ async fn safe_block_reorg_does_not_carry_stale_safe_into_forkchoice() -> eyre::R
         gas_limit,
         base_fee_per_gas: base_fee,
         timestamp: now - 2,
+        timestamp_millis_part: 0,
         transactions: vec![],
         parent_hash: Some(block1_hash),
     };
@@ -581,6 +584,7 @@ async fn payload_builder_hash_matches_block_hash_with_nonzero_prev_randao() -> e
             parent_beacon_block_root: Some(B256::ZERO),
             slot_number: None,
         },
+        timestamp_millis_part: 0,
         transactions: Some(vec![]),
         gas_limit: None,
         base_fee_per_gas: None,

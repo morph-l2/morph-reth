@@ -70,7 +70,10 @@ impl ConfigureEvm for MorphEvmConfig {
 
         Ok(EvmEnv {
             cfg_env,
-            block_env: MorphBlockEnv { inner: block_env },
+            block_env: MorphBlockEnv {
+                inner: block_env,
+                timestamp_millis_part: header.timestamp_millis_part(),
+            },
         })
     }
 
@@ -121,7 +124,10 @@ impl ConfigureEvm for MorphEvmConfig {
 
         Ok(EvmEnv {
             cfg_env,
-            block_env: MorphBlockEnv { inner: block_env },
+            block_env: MorphBlockEnv {
+                inner: block_env,
+                timestamp_millis_part: attributes.timestamp_millis_part,
+            },
         })
     }
 
@@ -213,6 +219,7 @@ mod tests {
                 ..Default::default()
             },
             next_l1_msg_index: 0,
+            timestamp_millis_part: None,
         }
     }
 
@@ -232,11 +239,14 @@ mod tests {
         let chain_spec = create_test_chainspec();
         let config = MorphEvmConfig::new_with_default_factory(chain_spec);
 
-        let header = create_morph_header(100, 1000);
+        let mut header = create_morph_header(100, 1000);
+        header.set_timestamp_millis_part(321);
         let env = config.evm_env(&header).unwrap();
 
         assert_eq!(env.block_env.inner.number, U256::from(100u64));
         assert_eq!(env.block_env.inner.timestamp, U256::from(1000u64));
+        assert_eq!(env.block_env.timestamp_millis_part, 321);
+        assert_eq!(env.block_env.timestamp_millis(), U256::from(1_000_321u64));
         assert_eq!(env.block_env.inner.gas_limit, 30_000_000);
         assert_eq!(env.block_env.inner.basefee, 1_000_000);
     }
@@ -283,6 +293,7 @@ mod tests {
                 extra_data: Bytes::new(),
                 slot_number: None,
             },
+            timestamp_millis_part: 654,
             base_fee_per_gas: Some(500_000),
         };
 
@@ -290,6 +301,8 @@ mod tests {
 
         assert_eq!(env.block_env.inner.number, U256::from(100u64));
         assert_eq!(env.block_env.inner.timestamp, U256::from(1001u64));
+        assert_eq!(env.block_env.timestamp_millis_part, 654);
+        assert_eq!(env.block_env.timestamp_millis(), U256::from(1_001_654u64));
         assert_eq!(env.block_env.inner.basefee, 500_000);
     }
 
@@ -333,6 +346,7 @@ mod tests {
                 extra_data: Bytes::new(),
                 slot_number: None,
             },
+            timestamp_millis_part: 0,
             base_fee_per_gas: None,
         };
 

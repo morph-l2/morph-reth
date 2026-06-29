@@ -344,6 +344,7 @@ mod tests {
                 blob_excess_gas_and_price: None,
                 slot_num: 0,
             },
+            timestamp_millis_part: 0,
         };
 
         EvmEnv::new(cfg, block_env)

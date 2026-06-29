@@ -35,6 +35,10 @@ pub struct SafeL2Data {
     #[serde(with = "alloy_serde::quantity")]
     pub timestamp: u64,
 
+    /// Sub-second millisecond portion of the block timestamp.
+    #[serde(default, with = "alloy_serde::quantity")]
+    pub timestamp_millis_part: u64,
+
     /// RLP-encoded transactions.
     #[serde(default)]
     pub transactions: Vec<Bytes>,
@@ -87,6 +91,7 @@ mod tests {
             gas_limit: 30_000_000,
             base_fee_per_gas: Some(1_000_000_000),
             timestamp: 1234567890,
+            timestamp_millis_part: 0,
             transactions: vec![Bytes::from(vec![0x01, 0x02])],
             parent_hash: None,
         };
@@ -104,6 +109,7 @@ mod tests {
             gas_limit: 30_000_000,
             base_fee_per_gas: None,
             timestamp: 1234567890,
+            timestamp_millis_part: 0,
             transactions: vec![],
             parent_hash: None,
         };
@@ -160,6 +166,7 @@ mod tests {
             gas_limit: 30_000_000,
             base_fee_per_gas: None,
             timestamp: 100,
+            timestamp_millis_part: 0,
             transactions: vec![],
             parent_hash: Some(hash),
         };
@@ -215,6 +222,7 @@ mod tests {
             gas_limit: 30_000_000,
             base_fee_per_gas: Some(100),
             timestamp: 999,
+            timestamp_millis_part: 0,
             transactions: vec![Bytes::from(vec![0x01, 0x02])],
             parent_hash: None,
         };

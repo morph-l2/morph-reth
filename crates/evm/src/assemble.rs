@@ -2,12 +2,12 @@ use crate::MorphEvmConfig;
 use alloy_consensus::{BlockBody, EMPTY_OMMER_ROOT_HASH, Header, TxReceipt, proofs};
 use alloy_evm::block::{BlockExecutionError, BlockExecutionResult};
 use alloy_primitives::{Address, B64, logs_bloom};
-use morph_chainspec::MorphChainSpec;
+use morph_chainspec::{MorphChainSpec, hardfork::MorphHardforks};
 use morph_primitives::{MorphHeader, receipt::calculate_receipt_root_no_memo};
 use reth_chainspec::EthereumHardforks;
 use reth_evm::execute::{BlockAssembler, BlockAssemblerInput};
 use revm::context::Block;
-use std::sync::Arc;
+use std::{num::NonZeroU64, sync::Arc};
 
 /// Assembler for Morph blocks.
 ///
@@ -79,6 +79,7 @@ impl BlockAssembler<MorphEvmConfig> for MorphBlockAssembler {
         } = input;
 
         let timestamp = evm_env.block_env.timestamp();
+        let timestamp_secs = timestamp.to();
         let block_number: u64 = evm_env.block_env.number().to();
 
         // Calculate roots and bloom
@@ -99,7 +100,7 @@ impl BlockAssembler<MorphEvmConfig> for MorphBlockAssembler {
             receipts_root,
             withdrawals_root: None,
             logs_bloom,
-            timestamp: timestamp.to(),
+            timestamp: timestamp_secs,
             // Morph L2 keeps mix_hash fixed to zero, matching geth's L2 header shape.
             mix_hash: Default::default(),
             nonce: B64::ZERO,
@@ -125,6 +126,11 @@ impl BlockAssembler<MorphEvmConfig> for MorphBlockAssembler {
         let header = MorphHeader {
             inner,
             next_l1_msg_index: parent.header().next_l1_msg_index,
+            timestamp_millis_part: self
+                .chain_spec
+                .is_onyx_active_at_timestamp(timestamp_secs)
+                .then(|| NonZeroU64::new(evm_env.block_env.timestamp_millis_part))
+                .flatten(),
         };
 
         Ok(alloy_consensus::Block::new(

@@ -143,7 +143,10 @@ fn execute_case(
     };
     let env = EvmEnv {
         cfg_env: cfg,
-        block_env: MorphBlockEnv { inner: block },
+        block_env: MorphBlockEnv {
+            inner: block,
+            timestamp_millis_part: 0,
+        },
     };
 
     if options.trace {

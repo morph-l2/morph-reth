@@ -130,6 +130,7 @@ mod tests {
                 ..Default::default()
             },
             next_l1_msg_index: 0,
+            timestamp_millis_part: None,
         };
 
         let body = BlockBody {

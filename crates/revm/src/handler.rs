@@ -1047,6 +1047,7 @@ mod tests {
                 basefee: 100,
                 ..Default::default()
             },
+            timestamp_millis_part: 0,
         };
         evm.tx = MorphTxEnv {
             inner: TxEnv {
@@ -1106,6 +1107,7 @@ mod tests {
         );
         evm.block = MorphBlockEnv {
             inner: BlockEnv::default(),
+            timestamp_millis_part: 0,
         };
 
         let err = transfer_erc20_with_evm(
@@ -1165,6 +1167,7 @@ mod tests {
         );
         evm.block = MorphBlockEnv {
             inner: BlockEnv::default(),
+            timestamp_millis_part: 0,
         };
 
         let err =
@@ -1207,6 +1210,7 @@ mod tests {
         );
         evm.block = MorphBlockEnv {
             inner: BlockEnv::default(),
+            timestamp_millis_part: 0,
         };
 
         let journal = evm.ctx_mut().journal_mut();
@@ -1253,6 +1257,7 @@ mod tests {
         );
         evm.block = MorphBlockEnv {
             inner: BlockEnv::default(),
+            timestamp_millis_part: 0,
         };
 
         let balance = evm_call_balance_of(&mut evm, token, account);

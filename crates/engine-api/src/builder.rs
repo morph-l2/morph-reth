@@ -11,7 +11,7 @@ use alloy_consensus::{
 use alloy_eips::eip2718::Decodable2718;
 use alloy_primitives::{Address, B64, B256, Sealable};
 use alloy_rpc_types_engine::{PayloadAttributes, PayloadStatus, PayloadStatusEnum};
-use morph_chainspec::MorphChainSpec;
+use morph_chainspec::{MorphChainSpec, hardfork::MorphHardforks};
 use morph_payload_types::{
     AssembleL2BlockParams, AssembleL2BlockV2Params, ExecutableL2Data, GenericResponse,
     MorphBuiltPayload, MorphExecutionData, MorphPayloadTypes, SafeL2Data,
@@ -23,7 +23,7 @@ use reth_payload_builder::{BuildNewPayload, PayloadBuilderHandle};
 use reth_primitives_traits::RecoveredBlock;
 use reth_primitives_traits::{FastInstant as Instant, SealedBlock, SealedHeader};
 use reth_provider::{BlockNumReader, BlockReaderIdExt, CanonChainTracker, HeaderProvider};
-use std::sync::Arc;
+use std::{num::NonZeroU64, sync::Arc};
 
 // =============================================================================
 // Real Implementation
@@ -59,6 +59,7 @@ struct CanonicalHead {
     number: u64,
     hash: B256,
     timestamp: u64,
+    timestamp_millis_part: u64,
 }
 
 /// Tracks the L1-derived finalized block hash from `set_block_tags` so that FCU
@@ -195,6 +196,7 @@ where
             number: parent.number() + 1,
             transactions: params.transactions,
             timestamp: params.timestamp,
+            timestamp_millis_part: params.timestamp_millis_part,
         };
 
         let result = self
@@ -497,6 +499,7 @@ where
             // Move transactions out of data to avoid cloning the full Vec<Bytes>.
             transactions: std::mem::take(&mut data.transactions),
             timestamp: Some(data.timestamp),
+            timestamp_millis_part: Some(data.timestamp_millis_part),
         };
 
         let built_payload = self
@@ -664,28 +667,35 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
         //    or assembleL2BlockV2) or the current canonical head (sequential path). When
         //    pinned, the parent need not be the head — building on it lets the subsequent
         //    forkchoice update reorganize the chain onto the new block.
-        let (parent_number, parent_hash, parent_timestamp) = match parent_override {
-            Some(parent_hash) => {
-                let parent = self
-                    .provider
-                    .sealed_header_by_hash(parent_hash)
-                    .map_err(|e| MorphEngineApiError::Database(e.to_string()))?
-                    .ok_or_else(|| {
-                        MorphEngineApiError::Internal(format!(
-                            "parent block not found: {parent_hash}"
-                        ))
-                    })?;
-                (parent.number(), parent_hash, parent.timestamp())
-            }
-            None => {
-                let current_head = self.current_head()?;
-                (
-                    current_head.number,
-                    current_head.hash,
-                    current_head.timestamp,
-                )
-            }
-        };
+        let (parent_number, parent_hash, parent_timestamp, parent_timestamp_millis_part) =
+            match parent_override {
+                Some(parent_hash) => {
+                    let parent = self
+                        .provider
+                        .sealed_header_by_hash(parent_hash)
+                        .map_err(|e| MorphEngineApiError::Database(e.to_string()))?
+                        .ok_or_else(|| {
+                            MorphEngineApiError::Internal(format!(
+                                "parent block not found: {parent_hash}"
+                            ))
+                        })?;
+                    (
+                        parent.number(),
+                        parent_hash,
+                        parent.timestamp(),
+                        parent.timestamp_millis_part(),
+                    )
+                }
+                None => {
+                    let current_head = self.current_head()?;
+                    (
+                        current_head.number,
+                        current_head.hash,
+                        current_head.timestamp,
+                        current_head.timestamp_millis_part,
+                    )
+                }
+            };
 
         // 2. Validate block number (must be parent + 1).
         if params.number != parent_number + 1 {
@@ -696,15 +706,47 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
         }
 
         // 3. Build payload attributes.
-        let timestamp = params.timestamp.unwrap_or_else(|| {
-            std::cmp::max(
-                parent_timestamp + 1,
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs(),
-            )
-        });
+        let (timestamp, mut timestamp_millis_part) = if let Some(timestamp) = params.timestamp {
+            (timestamp, params.timestamp_millis_part.unwrap_or_default())
+        } else {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
+            let now_millis = now.as_millis() as u64;
+            let now_secs = now_millis / 1000;
+            let parent_next = parent_timestamp + 1;
+            if parent_next > now_secs {
+                (parent_next, 0)
+            } else {
+                (now_secs, now_millis % 1000)
+            }
+        };
+        if timestamp_millis_part >= 1000 {
+            return Err(MorphEngineApiError::BlockBuildError(format!(
+                "timestampMillisPart must be < 1000, got {timestamp_millis_part}"
+            )));
+        }
+        if !self.chain_spec.is_onyx_active_at_timestamp(timestamp) {
+            if params.timestamp_millis_part.unwrap_or_default() != 0 {
+                return Err(MorphEngineApiError::BlockBuildError(
+                    "timestampMillisPart must be zero before Onyx".to_string(),
+                ));
+            }
+            timestamp_millis_part = 0;
+        }
+        let timestamp_millis = timestamp
+            .saturating_mul(1000)
+            .saturating_add(timestamp_millis_part);
+        let parent_timestamp_millis = parent_timestamp
+            .saturating_mul(1000)
+            .saturating_add(parent_timestamp_millis_part);
+        if self.chain_spec.is_onyx_active_at_timestamp(timestamp)
+            && timestamp_millis <= parent_timestamp_millis
+        {
+            return Err(MorphEngineApiError::BlockBuildError(format!(
+                "timestampMillis {timestamp_millis} must be greater than parent timestampMillis {parent_timestamp_millis}"
+            )));
+        }
         let base_fee_override = base_fee_override
             .map(|fee| {
                 u64::try_from(fee).map_err(|_| {
@@ -726,6 +768,7 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
                 // Morph L2 has no PoS slot semantics; introduced in alloy 2.0.
                 slot_number: None,
             },
+            timestamp_millis_part,
             transactions: Some(params.transactions),
             gas_limit: gas_limit_override,
             base_fee_per_gas: base_fee_override,
@@ -833,6 +876,20 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
                 data.hash
             )));
         }
+        if data.timestamp_millis_part >= 1000 {
+            return Err(MorphEngineApiError::ValidationFailed(format!(
+                "timestampMillisPart must be < 1000, got {} in block {}",
+                data.timestamp_millis_part, data.hash
+            )));
+        }
+        if !self.chain_spec.is_onyx_active_at_timestamp(data.timestamp)
+            && data.timestamp_millis_part != 0
+        {
+            return Err(MorphEngineApiError::ValidationFailed(format!(
+                "timestampMillisPart must be zero before Onyx in block {}",
+                data.hash
+            )));
+        }
 
         let mut txs = Vec::with_capacity(data.transactions.len());
         for (index, tx_bytes) in data.transactions.iter().enumerate() {
@@ -891,6 +948,11 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
                 block_access_list_hash: None,
                 slot_number: None,
             },
+            timestamp_millis_part: self
+                .chain_spec
+                .is_onyx_active_at_timestamp(data.timestamp)
+                .then(|| NonZeroU64::new(data.timestamp_millis_part))
+                .flatten(),
         };
         let body = BlockBody {
             transactions: txs,
@@ -946,6 +1008,7 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
             number: header.number(),
             hash: header.hash(),
             timestamp: header.timestamp(),
+            timestamp_millis_part: header.timestamp_millis_part(),
         })
     }
 }
@@ -1045,6 +1108,7 @@ fn apply_executable_data_overrides(
         header.inner.base_fee_per_gas = base_fee_per_gas;
         header.inner.logs_bloom = logs_bloom;
         header.next_l1_msg_index = data.next_l1_message_index;
+        header.set_timestamp_millis_part(data.timestamp_millis_part);
         header
     });
     Ok(RecoveredBlock::new_unhashed(block, senders))
@@ -1106,6 +1170,7 @@ mod tests {
 
         let target_header = MorphHeader {
             next_l1_msg_index: 42,
+            timestamp_millis_part: None,
             inner: Header {
                 parent_hash: B256::from([0x11; 32]),
                 beneficiary: Address::from([0x22; 20]),
@@ -1129,6 +1194,7 @@ mod tests {
             gas_limit: target_header.inner.gas_limit,
             base_fee_per_gas: target_header.inner.base_fee_per_gas.map(u128::from),
             timestamp: target_header.inner.timestamp,
+            timestamp_millis_part: target_header.timestamp_millis_part(),
             transactions: Vec::new(),
             state_root: target_header.inner.state_root,
             gas_used: target_header.inner.gas_used,
@@ -1183,6 +1249,7 @@ mod tests {
     fn test_apply_executable_data_overrides_sets_header_fields_exactly() {
         let source_header = MorphHeader {
             next_l1_msg_index: 1,
+            timestamp_millis_part: None,
             inner: Header {
                 parent_hash: B256::from([0x01; 32]),
                 beneficiary: Address::from([0x02; 20]),
@@ -1205,6 +1272,7 @@ mod tests {
             gas_limit: 30_000_000,
             base_fee_per_gas: Some(1_000_000_000),
             timestamp: 1_700_000_009,
+            timestamp_millis_part: 321,
             transactions: Vec::new(),
             state_root: B256::from([0x33; 32]),
             gas_used: 21_009,
@@ -1233,6 +1301,7 @@ mod tests {
         );
         assert_eq!(header.inner.logs_bloom.as_slice(), data.logs_bloom.as_ref());
         assert_eq!(header.next_l1_msg_index, data.next_l1_message_index);
+        assert_eq!(header.timestamp_millis_part(), data.timestamp_millis_part);
     }
 
     #[test]

@@ -3,28 +3,29 @@
 //! This module defines the Morph-specific header type that includes:
 //! - `next_l1_msg_index`: The next L1 message queue index to process
 //!
-//! This field is NOT included in the block hash calculation to maintain
-//! compatibility with standard Ethereum header hashing (matching go-ethereum's behavior).
+//! Historical headers without the millisecond timestamp remainder retain
+//! compatibility with standard Ethereum header hashing.
 
 use alloy_consensus::{BlockHeader, Header, Sealable};
-use alloy_primitives::{Address, B64, B256, BlockNumber, Bloom, Bytes, U256};
-use alloy_rlp::{RlpDecodable, RlpEncodable};
+use alloy_primitives::{Address, B64, B256, BlockNumber, Bloom, Bytes, U256, keccak256};
+use alloy_rlp::{Encodable, Header as RlpHeader, RlpDecodable, RlpEncodable};
+use core::num::NonZeroU64;
 
 /// Morph block header.
 ///
 /// This header extends the standard Ethereum header with Morph-specific fields:
 /// - `next_l1_msg_index`: Next L1 message queue index to process
 ///
-/// **Important**: The `hash_slow()` method only hashes the inner Ethereum header,
-/// excluding `next_l1_msg_index`. This matches go-ethereum's `Header.Hash()` behavior
-/// where L2-specific fields are not part of the block hash calculation.
+/// **Important**: Historical headers without `timestamp_millis_part` hash only the
+/// inner Ethereum header. Headers carrying a non-zero millisecond remainder bind
+/// that remainder into block identity while `next_l1_msg_index` remains excluded.
 ///
-/// Note: The `inner` field must be placed last for the `Compact` derive macro,
-/// as fields with unknown size must come last in the struct definition.
+/// `timestamp_millis_part` is a trailing RLP field so pre-Onyx blocks decode with
+/// the default millisecond remainder of zero.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, RlpEncodable, RlpDecodable)]
-#[cfg_attr(feature = "reth-codec", derive(reth_codecs::Compact))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
+#[rlp(trailing)]
 pub struct MorphHeader {
     /// Next L1 message queue index to process.
     /// Not part of the header hash calculation.
@@ -32,9 +33,23 @@ pub struct MorphHeader {
     pub next_l1_msg_index: u64,
 
     /// Standard Ethereum header (flattened in JSON serialization).
-    /// Must be placed last due to Compact derive requirements.
     #[cfg_attr(feature = "serde", serde(flatten))]
     pub inner: Header,
+
+    /// Sub-second millisecond portion of the block timestamp.
+    ///
+    /// The standard Ethereum timestamp remains seconds-based. This field is
+    /// interpreted after the Onyx hardfork and must be zero before it. `None`
+    /// represents historical headers encoded before this trailing field existed.
+    #[cfg_attr(
+        feature = "serde",
+        serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "alloy_serde::quantity::opt"
+        )
+    )]
+    pub timestamp_millis_part: Option<NonZeroU64>,
 }
 
 impl From<Header> for MorphHeader {
@@ -42,6 +57,7 @@ impl From<Header> for MorphHeader {
         Self {
             inner,
             next_l1_msg_index: 0,
+            timestamp_millis_part: None,
         }
     }
 }
@@ -49,6 +65,26 @@ impl From<Header> for MorphHeader {
 impl AsRef<Self> for MorphHeader {
     fn as_ref(&self) -> &Self {
         self
+    }
+}
+
+impl MorphHeader {
+    /// Returns the sub-second millisecond portion of the block timestamp.
+    pub fn timestamp_millis_part(&self) -> u64 {
+        self.timestamp_millis_part.map_or(0, NonZeroU64::get)
+    }
+
+    /// Sets the sub-second millisecond portion of the block timestamp.
+    pub fn set_timestamp_millis_part(&mut self, timestamp_millis_part: u64) {
+        self.timestamp_millis_part = NonZeroU64::new(timestamp_millis_part);
+    }
+
+    /// Returns the block timestamp in milliseconds.
+    pub fn timestamp_millis(&self) -> u64 {
+        self.inner
+            .timestamp()
+            .saturating_mul(1000)
+            .saturating_add(self.timestamp_millis_part())
     }
 }
 
@@ -151,20 +187,128 @@ impl BlockHeader for MorphHeader {
 
 /// Sealable implementation for MorphHeader.
 ///
-/// **Critical**: The `hash_slow()` method only hashes the inner Ethereum header,
-/// NOT the `next_l1_msg_index` field. This matches go-ethereum's `Header.Hash()`
-/// behavior which explicitly excludes L2-specific fields from the hash calculation.
+/// **Critical**: Historical headers without the trailing millisecond field keep the
+/// old inner-header hash. New headers with a non-zero millisecond remainder bind
+/// that remainder into the hash while preserving Morph's existing exclusion of
+/// `next_l1_msg_index`.
 impl Sealable for MorphHeader {
     fn hash_slow(&self) -> B256 {
-        // Only hash the inner header to match go-ethereum behavior.
-        // next_l1_msg_index is NOT part of the hash.
-        self.inner.hash_slow()
+        if let Some(timestamp_millis_part) = self.timestamp_millis_part {
+            morph_header_hash_with_millis(&self.inner, timestamp_millis_part.get())
+        } else {
+            // Historical headers were hashed by the inner Ethereum header only.
+            self.inner.hash_slow()
+        }
+    }
+}
+
+fn morph_header_hash_with_millis(inner: &Header, timestamp_millis_part: u64) -> B256 {
+    let payload_length = header_payload_length(inner) + timestamp_millis_part.length();
+    let mut out =
+        Vec::with_capacity(payload_length + alloy_rlp::length_of_length(payload_length) + 1);
+    RlpHeader {
+        list: true,
+        payload_length,
+    }
+    .encode(&mut out);
+    encode_header_payload(inner, &mut out);
+    timestamp_millis_part.encode(&mut out);
+    keccak256(out)
+}
+
+fn header_payload_length(inner: &Header) -> usize {
+    let mut length = inner.parent_hash.length()
+        + inner.ommers_hash.length()
+        + inner.beneficiary.length()
+        + inner.state_root.length()
+        + inner.transactions_root.length()
+        + inner.receipts_root.length()
+        + inner.logs_bloom.length()
+        + inner.difficulty.length()
+        + U256::from(inner.number).length()
+        + U256::from(inner.gas_limit).length()
+        + U256::from(inner.gas_used).length()
+        + inner.timestamp.length()
+        + inner.extra_data.length()
+        + inner.mix_hash.length()
+        + inner.nonce.length();
+
+    if let Some(base_fee_per_gas) = inner.base_fee_per_gas {
+        length += U256::from(base_fee_per_gas).length();
+    }
+    if let Some(withdrawals_root) = inner.withdrawals_root {
+        length += withdrawals_root.length();
+    }
+    if let Some(blob_gas_used) = inner.blob_gas_used {
+        length += U256::from(blob_gas_used).length();
+    }
+    if let Some(excess_blob_gas) = inner.excess_blob_gas {
+        length += U256::from(excess_blob_gas).length();
+    }
+    if let Some(parent_beacon_block_root) = inner.parent_beacon_block_root {
+        length += parent_beacon_block_root.length();
+    }
+    if let Some(requests_hash) = inner.requests_hash {
+        length += requests_hash.length();
+    }
+    if let Some(block_access_list_hash) = inner.block_access_list_hash {
+        length += block_access_list_hash.length();
+    }
+    if let Some(slot_number) = inner.slot_number {
+        length += U256::from(slot_number).length();
+    }
+
+    length
+}
+
+fn encode_header_payload(inner: &Header, out: &mut dyn alloy_rlp::BufMut) {
+    inner.parent_hash.encode(out);
+    inner.ommers_hash.encode(out);
+    inner.beneficiary.encode(out);
+    inner.state_root.encode(out);
+    inner.transactions_root.encode(out);
+    inner.receipts_root.encode(out);
+    inner.logs_bloom.encode(out);
+    inner.difficulty.encode(out);
+    U256::from(inner.number).encode(out);
+    U256::from(inner.gas_limit).encode(out);
+    U256::from(inner.gas_used).encode(out);
+    inner.timestamp.encode(out);
+    inner.extra_data.encode(out);
+    inner.mix_hash.encode(out);
+    inner.nonce.encode(out);
+
+    if let Some(base_fee_per_gas) = inner.base_fee_per_gas {
+        U256::from(base_fee_per_gas).encode(out);
+    }
+    if let Some(withdrawals_root) = inner.withdrawals_root {
+        withdrawals_root.encode(out);
+    }
+    if let Some(blob_gas_used) = inner.blob_gas_used {
+        U256::from(blob_gas_used).encode(out);
+    }
+    if let Some(excess_blob_gas) = inner.excess_blob_gas {
+        U256::from(excess_blob_gas).encode(out);
+    }
+    if let Some(parent_beacon_block_root) = inner.parent_beacon_block_root {
+        parent_beacon_block_root.encode(out);
+    }
+    if let Some(requests_hash) = inner.requests_hash {
+        requests_hash.encode(out);
+    }
+    if let Some(block_access_list_hash) = inner.block_access_list_hash {
+        block_access_list_hash.encode(out);
+    }
+    if let Some(slot_number) = inner.slot_number {
+        U256::from(slot_number).encode(out);
     }
 }
 
 impl reth_primitives_traits::InMemorySize for MorphHeader {
     fn size(&self) -> usize {
-        reth_primitives_traits::InMemorySize::size(&self.inner) + core::mem::size_of::<u64>() // next_l1_msg_index
+        reth_primitives_traits::InMemorySize::size(&self.inner)
+            + core::mem::size_of::<u64>() // next_l1_msg_index
+            + core::mem::size_of::<Option<u64>>() // timestamp_millis_part
     }
 }
 
@@ -202,6 +346,62 @@ impl reth_primitives_traits::header::HeaderMut for MorphHeader {
     fn set_parent_beacon_block_root(&mut self, parent_beacon_block_root: Option<B256>) {
         self.inner
             .set_parent_beacon_block_root(parent_beacon_block_root);
+    }
+}
+
+#[cfg(feature = "reth-codec")]
+mod codec {
+    use crate::MorphHeader;
+    use alloy_consensus::Header;
+    use alloy_rlp::Decodable;
+
+    const COMPACT_RLP_MARKER: &[u8; 8] = b"MORPHMS1";
+
+    #[derive(Clone, Debug, Default, Eq, Hash, PartialEq, reth_codecs::Compact)]
+    struct OldMorphHeaderCompact {
+        pub next_l1_msg_index: u64,
+        pub inner: Header,
+    }
+
+    impl reth_codecs::Compact for MorphHeader {
+        fn to_compact<B>(&self, buf: &mut B) -> usize
+        where
+            B: alloy_rlp::bytes::BufMut + AsMut<[u8]>,
+        {
+            if self.timestamp_millis_part.is_none() {
+                let header = OldMorphHeaderCompact {
+                    next_l1_msg_index: self.next_l1_msg_index,
+                    inner: self.inner.clone(),
+                };
+                return header.to_compact(buf);
+            }
+
+            let encoded = alloy_rlp::encode(self);
+            buf.put_slice(COMPACT_RLP_MARKER);
+            buf.put_slice(encoded.as_ref());
+            COMPACT_RLP_MARKER.len() + encoded.len()
+        }
+
+        fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
+            let value = &buf[..len];
+            if let Some(encoded) = value.strip_prefix(COMPACT_RLP_MARKER) {
+                let mut rlp = encoded;
+                if let Ok(header) = Self::decode(&mut rlp)
+                    && rlp.is_empty()
+                {
+                    return (header, &buf[len..]);
+                }
+            }
+
+            let (header_compat, buf) = OldMorphHeaderCompact::from_compact(buf, len);
+            let header = Self {
+                next_l1_msg_index: header_compat.next_l1_msg_index,
+                inner: header_compat.inner,
+                timestamp_millis_part: None,
+            };
+
+            (header, buf)
+        }
     }
 }
 
@@ -269,6 +469,7 @@ mod tests {
 
         assert_eq!(header.inner, inner);
         assert_eq!(header.next_l1_msg_index, 0);
+        assert_eq!(header.timestamp_millis_part(), 0);
     }
 
     #[test]
@@ -277,27 +478,109 @@ mod tests {
         let header = MorphHeader {
             inner,
             next_l1_msg_index: 100,
+            timestamp_millis_part: None,
         };
 
         assert_eq!(header.next_l1_msg_index, 100);
     }
 
     #[test]
+    fn test_morph_header_timestamp_millis_combines_seconds_and_remainder() {
+        let inner = Header {
+            timestamp: 1_700_000_000,
+            ..create_test_header()
+        };
+        let header = MorphHeader {
+            inner,
+            next_l1_msg_index: 0,
+            timestamp_millis_part: NonZeroU64::new(987),
+        };
+
+        assert_eq!(header.timestamp(), 1_700_000_000);
+        assert_eq!(header.timestamp_millis_part(), 987);
+        assert_eq!(header.timestamp_millis(), 1_700_000_000_987);
+    }
+
+    #[test]
     fn test_morph_header_hash_excludes_l2_fields() {
         let inner = create_test_header();
 
-        // Create two headers with different next_l1_msg_index values
+        // A non-zero millisecond remainder is bound into the block hash.
         let header1: MorphHeader = inner.clone().into();
         let header2 = MorphHeader {
             inner: inner.clone(),
             next_l1_msg_index: 999,
+            timestamp_millis_part: NonZeroU64::new(999),
         };
 
-        // Both should have the same hash since L2 fields are excluded
-        assert_eq!(header1.hash_slow(), header2.hash_slow());
+        assert_ne!(header1.hash_slow(), header2.hash_slow());
 
-        // And they should match the inner header's hash
+        // Historical headers without the trailing timestamp field retain the old hash.
         assert_eq!(header1.hash_slow(), inner.hash_slow());
+
+        // Morph's existing L1 message index remains excluded from the hash.
+        let header3 = MorphHeader {
+            inner: inner.clone(),
+            next_l1_msg_index: 0,
+            timestamp_millis_part: NonZeroU64::new(999),
+        };
+        assert_eq!(header2.hash_slow(), header3.hash_slow());
+    }
+
+    #[test]
+    fn test_morph_header_hash_uses_flat_geth_field_order_with_millis() {
+        use alloy_rlp::{Encodable, Header as RlpHeader};
+
+        let inner = create_test_header();
+        let header = MorphHeader {
+            inner: inner.clone(),
+            next_l1_msg_index: 999,
+            timestamp_millis_part: NonZeroU64::new(987),
+        };
+
+        let millis = 987u64;
+        let payload_len = inner.parent_hash.length()
+            + inner.ommers_hash.length()
+            + inner.beneficiary.length()
+            + inner.state_root.length()
+            + inner.transactions_root.length()
+            + inner.receipts_root.length()
+            + inner.logs_bloom.length()
+            + inner.difficulty.length()
+            + U256::from(inner.number).length()
+            + U256::from(inner.gas_limit).length()
+            + U256::from(inner.gas_used).length()
+            + inner.timestamp.length()
+            + inner.extra_data.length()
+            + inner.mix_hash.length()
+            + inner.nonce.length()
+            + U256::from(inner.base_fee_per_gas.unwrap()).length()
+            + millis.length();
+        let mut expected_rlp = Vec::new();
+        RlpHeader {
+            list: true,
+            payload_length: payload_len,
+        }
+        .encode(&mut expected_rlp);
+        inner.parent_hash.encode(&mut expected_rlp);
+        inner.ommers_hash.encode(&mut expected_rlp);
+        inner.beneficiary.encode(&mut expected_rlp);
+        inner.state_root.encode(&mut expected_rlp);
+        inner.transactions_root.encode(&mut expected_rlp);
+        inner.receipts_root.encode(&mut expected_rlp);
+        inner.logs_bloom.encode(&mut expected_rlp);
+        inner.difficulty.encode(&mut expected_rlp);
+        U256::from(inner.number).encode(&mut expected_rlp);
+        U256::from(inner.gas_limit).encode(&mut expected_rlp);
+        U256::from(inner.gas_used).encode(&mut expected_rlp);
+        inner.timestamp.encode(&mut expected_rlp);
+        inner.extra_data.encode(&mut expected_rlp);
+        inner.mix_hash.encode(&mut expected_rlp);
+        inner.nonce.encode(&mut expected_rlp);
+        U256::from(inner.base_fee_per_gas.unwrap()).encode(&mut expected_rlp);
+        millis.encode(&mut expected_rlp);
+
+        assert_eq!(header.hash_slow(), keccak256(expected_rlp));
     }
 
     #[test]
@@ -332,6 +615,7 @@ mod tests {
         let header = MorphHeader {
             inner,
             next_l1_msg_index: 42,
+            timestamp_millis_part: None,
         };
 
         let json = serde_json::to_string(&header).expect("serialization failed");
@@ -347,6 +631,7 @@ mod tests {
         let header = MorphHeader {
             inner,
             next_l1_msg_index: 42,
+            timestamp_millis_part: NonZeroU64::new(123),
         };
 
         let mut buf = Vec::new();
@@ -359,18 +644,82 @@ mod tests {
     }
 
     #[test]
+    fn test_morph_header_rlp_decodes_without_trailing_timestamp_millis_part() {
+        #[derive(RlpEncodable)]
+        struct OldMorphHeader {
+            next_l1_msg_index: u64,
+            inner: Header,
+        }
+
+        let old_header = OldMorphHeader {
+            next_l1_msg_index: 42,
+            inner: create_test_header(),
+        };
+
+        let mut buf = Vec::new();
+        alloy_rlp::Encodable::encode(&old_header, &mut buf);
+        let decoded = <MorphHeader as alloy_rlp::Decodable>::decode(&mut buf.as_slice())
+            .expect("old header shape should decode");
+
+        assert_eq!(decoded.next_l1_msg_index, 42);
+        assert_eq!(decoded.timestamp_millis_part, None);
+        assert_eq!(decoded.timestamp_millis_part(), 0);
+    }
+
+    #[test]
     fn test_morph_header_size() {
         let inner = create_test_header();
         let header = MorphHeader {
             inner: inner.clone(),
             next_l1_msg_index: 0,
+            timestamp_millis_part: None,
         };
 
         let inner_size = reth_primitives_traits::InMemorySize::size(&inner);
         let header_size = reth_primitives_traits::InMemorySize::size(&header);
 
-        // MorphHeader size = inner size + size_of::<u64>() for next_l1_msg_index
-        assert_eq!(header_size, inner_size + core::mem::size_of::<u64>());
+        assert_eq!(header_size - inner_size, 24);
+    }
+
+    #[cfg(feature = "reth-codec")]
+    #[test]
+    fn test_morph_header_compact_decodes_old_layout_without_timestamp_millis_part() {
+        #[derive(Clone, Debug, Default, Eq, Hash, PartialEq, reth_codecs::Compact)]
+        struct OldMorphHeaderCompact {
+            pub next_l1_msg_index: u64,
+            pub inner: Header,
+        }
+
+        let old_header = OldMorphHeaderCompact {
+            next_l1_msg_index: 42,
+            inner: create_test_header(),
+        };
+
+        let mut buf = Vec::new();
+        let len = reth_codecs::Compact::to_compact(&old_header, &mut buf);
+        let (decoded, remaining) = <MorphHeader as reth_codecs::Compact>::from_compact(&buf, len);
+
+        assert!(remaining.is_empty());
+        assert_eq!(decoded.next_l1_msg_index, 42);
+        assert_eq!(decoded.timestamp_millis_part, None);
+        assert_eq!(decoded.timestamp_millis_part(), 0);
+    }
+
+    #[cfg(feature = "reth-codec")]
+    #[test]
+    fn test_morph_header_compact_roundtrip_with_timestamp_millis_part() {
+        let header = MorphHeader {
+            inner: create_test_header(),
+            next_l1_msg_index: 42,
+            timestamp_millis_part: NonZeroU64::new(789),
+        };
+
+        let mut buf = Vec::new();
+        let len = reth_codecs::Compact::to_compact(&header, &mut buf);
+        let (decoded, remaining) = <MorphHeader as reth_codecs::Compact>::from_compact(&buf, len);
+
+        assert!(remaining.is_empty());
+        assert_eq!(decoded, header);
     }
 
     #[test]

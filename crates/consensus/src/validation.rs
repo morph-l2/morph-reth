@@ -169,13 +169,41 @@ impl HeaderValidator<MorphHeader> for MorphConsensus {
         // Check timestamp is not in the future
         let now = std::time::SystemTime::now()
             .duration_since(std::time::SystemTime::UNIX_EPOCH)
-            .expect("system time should never be before UNIX EPOCH")
-            .as_secs();
+            .expect("system time should never be before UNIX EPOCH");
+        let now_secs = now.as_secs();
 
-        if header.timestamp() > now {
+        if header.timestamp() > now_secs {
             return Err(ConsensusError::TimestampIsInFuture {
                 timestamp: header.timestamp(),
-                present_timestamp: now,
+                present_timestamp: now_secs,
+            });
+        }
+
+        if header.timestamp_millis_part() >= 1000 {
+            return Err(ConsensusError::msg(format!(
+                "timestampMillisPart must be < 1000, got {}",
+                header.timestamp_millis_part()
+            )));
+        }
+
+        if !self
+            .chain_spec
+            .is_onyx_active_at_timestamp(header.timestamp())
+            && header.timestamp_millis_part() != 0
+        {
+            return Err(ConsensusError::msg(
+                "timestampMillisPart must be zero before Onyx",
+            ));
+        }
+
+        if self
+            .chain_spec
+            .is_onyx_active_at_timestamp(header.timestamp())
+            && header.timestamp_millis() > now.as_millis() as u64
+        {
+            return Err(ConsensusError::TimestampIsInFuture {
+                timestamp: header.timestamp(),
+                present_timestamp: now_secs,
             });
         }
 
@@ -227,6 +255,16 @@ impl HeaderValidator<MorphHeader> for MorphConsensus {
             .chain_spec
             .is_emerald_active_at_timestamp(header.timestamp());
         validate_against_parent_timestamp(header.header(), parent.header(), is_emerald)?;
+        if self
+            .chain_spec
+            .is_onyx_active_at_timestamp(header.timestamp())
+            && header.timestamp_millis() <= parent.timestamp_millis()
+        {
+            return Err(ConsensusError::TimestampIsInPast {
+                parent_timestamp: parent.timestamp_millis(),
+                timestamp: header.timestamp_millis(),
+            });
+        }
 
         // Validate gas limit change
         validate_against_parent_gas_limit(header.header(), parent.header())?;
@@ -764,6 +802,36 @@ mod tests {
         Arc::new(MorphChainSpec::from(genesis))
     }
 
+    fn create_onyx_test_chainspec() -> Arc<MorphChainSpec> {
+        let genesis_json = serde_json::json!({
+            "config": {
+                "chainId": 1337,
+                "homesteadBlock": 0,
+                "eip150Block": 0,
+                "eip155Block": 0,
+                "eip158Block": 0,
+                "byzantiumBlock": 0,
+                "constantinopleBlock": 0,
+                "petersburgBlock": 0,
+                "istanbulBlock": 0,
+                "berlinBlock": 0,
+                "londonBlock": 0,
+                "bernoulliBlock": 0,
+                "curieBlock": 0,
+                "morph203Time": 0,
+                "viridianTime": 0,
+                "emeraldTime": 0,
+                "jadeForkTime": 0,
+                "onyxForkTime": 0,
+                "morph": {}
+            },
+            "alloc": {}
+        });
+
+        let genesis: Genesis = serde_json::from_value(genesis_json).unwrap();
+        Arc::new(MorphChainSpec::from(genesis))
+    }
+
     fn create_l1_msg_tx(queue_index: u64) -> MorphTxEnvelope {
         use alloy_consensus::Sealed;
         let tx = TxL1Msg {
@@ -1240,6 +1308,62 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    #[test]
+    fn test_validate_header_rejects_timestamp_millis_part_before_onyx() {
+        let chain_spec = create_test_chainspec();
+        let consensus = MorphConsensus::new(chain_spec);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut header = create_morph_header(Header {
+            nonce: B64::ZERO,
+            ommers_hash: EMPTY_OMMER_ROOT_HASH,
+            gas_limit: 30_000_000,
+            timestamp: now - 10,
+            base_fee_per_gas: Some(1_000_000),
+            ..Default::default()
+        });
+        header.set_timestamp_millis_part(1);
+
+        let sealed = SealedHeader::seal_slow(header);
+        let err = consensus
+            .validate_header(&sealed)
+            .expect_err("pre-Onyx nonzero millis should fail");
+        assert!(
+            err.to_string()
+                .contains("timestampMillisPart must be zero before Onyx")
+        );
+    }
+
+    #[test]
+    fn test_validate_header_rejects_timestamp_millis_part_at_or_above_1000() {
+        let chain_spec = create_onyx_test_chainspec();
+        let consensus = MorphConsensus::new(chain_spec);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut header = create_morph_header(Header {
+            nonce: B64::ZERO,
+            ommers_hash: EMPTY_OMMER_ROOT_HASH,
+            gas_limit: 30_000_000,
+            timestamp: now - 10,
+            base_fee_per_gas: Some(1_000_000),
+            ..Default::default()
+        });
+        header.set_timestamp_millis_part(1000);
+
+        let sealed = SealedHeader::seal_slow(header);
+        let err = consensus
+            .validate_header(&sealed)
+            .expect_err("millis part >= 1000 should fail");
+        assert!(
+            err.to_string()
+                .contains("timestampMillisPart must be < 1000")
+        );
+    }
+
     // ========================================================================
     // Header Against Parent Validation Tests
     // ========================================================================
@@ -1349,6 +1473,45 @@ mod tests {
 
         let result = consensus.validate_header_against_parent(&child_sealed, &parent_sealed);
         // timestamp >= parent is valid
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_header_against_parent_onyx_rejects_equal_millis_timestamp() {
+        let chain_spec = create_onyx_test_chainspec();
+        let consensus = MorphConsensus::new(chain_spec);
+
+        let mut parent = create_valid_morph_header(1000, 30_000_000, 100);
+        parent.set_timestamp_millis_part(500);
+        let parent_sealed = SealedHeader::seal_slow(parent);
+
+        let mut child = create_valid_morph_header(1000, 30_000_000, 101);
+        child.inner.parent_hash = parent_sealed.hash();
+        child.set_timestamp_millis_part(500);
+        let child_sealed = SealedHeader::seal_slow(child);
+
+        let result = consensus.validate_header_against_parent(&child_sealed, &parent_sealed);
+        assert!(matches!(
+            result,
+            Err(ConsensusError::TimestampIsInPast { .. })
+        ));
+    }
+
+    #[test]
+    fn test_validate_header_against_parent_onyx_accepts_same_second_greater_millis() {
+        let chain_spec = create_onyx_test_chainspec();
+        let consensus = MorphConsensus::new(chain_spec);
+
+        let mut parent = create_valid_morph_header(1000, 30_000_000, 100);
+        parent.set_timestamp_millis_part(500);
+        let parent_sealed = SealedHeader::seal_slow(parent);
+
+        let mut child = create_valid_morph_header(1000, 30_000_000, 101);
+        child.inner.parent_hash = parent_sealed.hash();
+        child.set_timestamp_millis_part(501);
+        let child_sealed = SealedHeader::seal_slow(child);
+
+        let result = consensus.validate_header_against_parent(&child_sealed, &parent_sealed);
         assert!(result.is_ok());
     }
 

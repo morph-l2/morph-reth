@@ -26,6 +26,14 @@ pub struct AssembleL2BlockParams {
         with = "alloy_serde::quantity::opt"
     )]
     pub timestamp: Option<u64>,
+
+    /// Optional sub-second millisecond portion of the block timestamp.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "alloy_serde::quantity::opt"
+    )]
+    pub timestamp_millis_part: Option<u64>,
 }
 
 impl AssembleL2BlockParams {
@@ -35,6 +43,7 @@ impl AssembleL2BlockParams {
             number,
             transactions,
             timestamp: None,
+            timestamp_millis_part: None,
         }
     }
 
@@ -44,6 +53,7 @@ impl AssembleL2BlockParams {
             number,
             transactions: Vec::new(),
             timestamp: None,
+            timestamp_millis_part: None,
         }
     }
 }
@@ -73,6 +83,14 @@ pub struct AssembleL2BlockV2Params {
         with = "alloy_serde::quantity::opt"
     )]
     pub timestamp: Option<u64>,
+
+    /// Optional sub-second millisecond portion of the block timestamp.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "alloy_serde::quantity::opt"
+    )]
+    pub timestamp_millis_part: Option<u64>,
 }
 
 impl AssembleL2BlockV2Params {
@@ -82,6 +100,7 @@ impl AssembleL2BlockV2Params {
             parent_hash,
             transactions,
             timestamp: None,
+            timestamp_millis_part: None,
         }
     }
 
@@ -91,6 +110,7 @@ impl AssembleL2BlockV2Params {
             parent_hash,
             transactions: Vec::new(),
             timestamp: None,
+            timestamp_millis_part: None,
         }
     }
 }
@@ -194,6 +214,7 @@ mod tests {
             parent_hash,
             transactions: vec![Bytes::from(vec![0xde, 0xad])],
             timestamp: Some(0x6553f100),
+            timestamp_millis_part: None,
         };
 
         let json = serde_json::to_string(&params).expect("serialize");

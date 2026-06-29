@@ -1,11 +1,11 @@
 //! Morph engine validator.
 
 use crate::MorphNode;
-use alloy_consensus::BlockHeader;
 use alloy_primitives::{B256, keccak256};
 use dashmap::DashMap;
 use morph_chainspec::{
     L2_MESSAGE_QUEUE_ADDRESS, L2_MESSAGE_QUEUE_WITHDRAW_TRIE_ROOT_SLOT, MorphChainSpec,
+    hardfork::MorphHardforks,
 };
 use morph_payload_types::{MorphExecutionData, MorphPayloadTypes};
 use morph_primitives::MorphHeader;
@@ -14,7 +14,7 @@ use reth_chainspec::EthChainSpec;
 use reth_errors::ConsensusError;
 use reth_node_api::{
     AddOnsContext, FullNodeComponents, InvalidPayloadAttributesError, NewPayloadError, NodeTypes,
-    PayloadAttributes, PayloadTypes, PayloadValidator,
+    PayloadTypes, PayloadValidator,
 };
 use reth_node_builder::{
     invalid_block_hook::InvalidBlockHookExt,
@@ -39,8 +39,10 @@ where
 {
     type Validator = MorphEngineValidator;
 
-    async fn build(self, _ctx: &AddOnsContext<'_, Node>) -> eyre::Result<Self::Validator> {
-        Ok(MorphEngineValidator::new())
+    async fn build(self, ctx: &AddOnsContext<'_, Node>) -> eyre::Result<Self::Validator> {
+        Ok(MorphEngineValidator::new_with_chain_spec(
+            ctx.node.provider().chain_spec(),
+        ))
     }
 }
 
@@ -125,6 +127,7 @@ where
 #[derive(Debug, Default, Clone)]
 #[non_exhaustive]
 pub struct MorphEngineValidator {
+    chain_spec: Option<Arc<MorphChainSpec>>,
     expected_withdraw_trie_roots: Arc<DashMap<B256, WithdrawTrieRootExpectation>>,
     expected_withdraw_trie_root_order: Arc<Mutex<VecDeque<B256>>>,
 }
@@ -141,6 +144,14 @@ impl MorphEngineValidator {
     /// Creates a new [`MorphEngineValidator`].
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Creates a new [`MorphEngineValidator`] with hardfork-aware timestamp checks.
+    pub fn new_with_chain_spec(chain_spec: Arc<MorphChainSpec>) -> Self {
+        Self {
+            chain_spec: Some(chain_spec),
+            ..Self::default()
+        }
     }
 
     fn record_withdraw_trie_root_expectation(
@@ -269,8 +280,26 @@ impl PayloadValidator<MorphPayloadTypes> for MorphEngineValidator {
         attr: &<MorphPayloadTypes as reth_node_api::PayloadTypes>::PayloadAttributes,
         header: &MorphHeader,
     ) -> Result<(), InvalidPayloadAttributesError> {
-        // Ensure that payload attributes timestamp is not in the past
-        if attr.timestamp() < header.timestamp() {
+        if attr.timestamp_millis_part >= 1000 {
+            return Err(InvalidPayloadAttributesError::InvalidTimestamp);
+        }
+
+        let attr_millis = attr.timestamp_millis();
+        let header_millis = header.timestamp_millis();
+        let timestamp_is_invalid = if let Some(chain_spec) = &self.chain_spec {
+            let is_onyx = chain_spec.is_onyx_active_at_timestamp(attr.inner.timestamp);
+            if !is_onyx && attr.timestamp_millis_part != 0 {
+                return Err(InvalidPayloadAttributesError::InvalidTimestamp);
+            }
+            if is_onyx {
+                attr_millis <= header_millis
+            } else {
+                attr_millis < header_millis
+            }
+        } else {
+            attr_millis < header_millis
+        };
+        if timestamp_is_invalid {
             return Err(InvalidPayloadAttributesError::InvalidTimestamp);
         }
         Ok(())
@@ -280,8 +309,39 @@ impl PayloadValidator<MorphPayloadTypes> for MorphEngineValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_genesis::Genesis;
     use alloy_primitives::U256;
     use reth_trie::{HashedPostState, HashedStorage};
+
+    fn create_onyx_test_chainspec() -> Arc<MorphChainSpec> {
+        let genesis_json = serde_json::json!({
+            "config": {
+                "chainId": 1337,
+                "homesteadBlock": 0,
+                "eip150Block": 0,
+                "eip155Block": 0,
+                "eip158Block": 0,
+                "byzantiumBlock": 0,
+                "constantinopleBlock": 0,
+                "petersburgBlock": 0,
+                "istanbulBlock": 0,
+                "berlinBlock": 0,
+                "londonBlock": 0,
+                "bernoulliBlock": 0,
+                "curieBlock": 0,
+                "morph203Time": 0,
+                "viridianTime": 0,
+                "emeraldTime": 0,
+                "jadeForkTime": 0,
+                "onyxForkTime": 0,
+                "morph": {}
+            },
+            "alloc": {}
+        });
+
+        let genesis: Genesis = serde_json::from_value(genesis_json).unwrap();
+        Arc::new(MorphChainSpec::from(genesis))
+    }
 
     #[test]
     fn test_extract_updated_withdraw_trie_root_from_hashed_state() {
@@ -618,6 +678,7 @@ mod tests {
                 parent_beacon_block_root: None,
                 slot_number: None,
             },
+            timestamp_millis_part: 0,
             transactions: None,
             gas_limit: None,
             base_fee_per_gas: None,
@@ -638,6 +699,7 @@ mod tests {
                 parent_beacon_block_root: None,
                 slot_number: None,
             },
+            timestamp_millis_part: 0,
             transactions: None,
             gas_limit: None,
             base_fee_per_gas: None,
@@ -658,6 +720,7 @@ mod tests {
                 parent_beacon_block_root: None,
                 slot_number: None,
             },
+            timestamp_millis_part: 0,
             transactions: None,
             gas_limit: None,
             base_fee_per_gas: None,
@@ -665,6 +728,54 @@ mod tests {
         assert!(
             validator
                 .validate_payload_attributes_against_header(&attr_future, parent.header())
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_validate_payload_attributes_onyx_requires_strictly_greater_millis() {
+        use alloy_rpc_types_engine::PayloadAttributes;
+        use morph_payload_types::MorphPayloadAttributes;
+        use reth_node_api::PayloadValidator;
+
+        let validator = MorphEngineValidator::new_with_chain_spec(create_onyx_test_chainspec());
+        let mut parent_header = MorphHeader {
+            inner: alloy_consensus::Header {
+                timestamp: 100,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        parent_header.set_timestamp_millis_part(500);
+        let parent = reth_primitives_traits::SealedHeader::seal_slow(parent_header);
+
+        let attr_same_millis = MorphPayloadAttributes {
+            inner: PayloadAttributes {
+                timestamp: 100,
+                prev_randao: B256::ZERO,
+                suggested_fee_recipient: alloy_primitives::Address::ZERO,
+                withdrawals: None,
+                parent_beacon_block_root: None,
+                slot_number: None,
+            },
+            timestamp_millis_part: 500,
+            transactions: None,
+            gas_limit: None,
+            base_fee_per_gas: None,
+        };
+        assert!(
+            validator
+                .validate_payload_attributes_against_header(&attr_same_millis, parent.header())
+                .is_err()
+        );
+
+        let attr_later_millis = MorphPayloadAttributes {
+            timestamp_millis_part: 501,
+            ..attr_same_millis
+        };
+        assert!(
+            validator
+                .validate_payload_attributes_against_header(&attr_later_millis, parent.header())
                 .is_ok()
         );
     }

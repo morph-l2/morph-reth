@@ -40,7 +40,7 @@ impl TryFrom<&OtherFields> for MorphGenesisInfo {
 /// the Morph hardforks were activated.
 ///
 /// Note: Bernoulli and Curie use block-based activation, while Morph203, Viridian,
-/// Emerald, and Jade use timestamp-based activation (matching go-ethereum behavior).
+/// Emerald, Jade, and Onyx use timestamp-based activation (matching go-ethereum behavior).
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MorphHardforkInfo {
@@ -62,6 +62,9 @@ pub struct MorphHardforkInfo {
     /// Jade hardfork timestamp.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub jade_fork_time: Option<u64>,
+    /// Onyx hardfork timestamp.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub onyx_fork_time: Option<u64>,
 }
 
 impl MorphHardforkInfo {
@@ -136,7 +139,8 @@ mod tests {
           "morph203Time": 3000,
           "viridianTime": 4000,
           "emeraldTime": 5000,
-          "jadeForkTime": 6000
+          "jadeForkTime": 6000,
+          "onyxForkTime": 7000
         }
         "#;
 
@@ -152,6 +156,7 @@ mod tests {
                 viridian_time: Some(4000),
                 emerald_time: Some(5000),
                 jade_fork_time: Some(6000),
+                onyx_fork_time: Some(7000),
             }
         );
     }

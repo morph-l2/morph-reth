@@ -7,6 +7,9 @@ pub struct MorphNextBlockEnvAttributes {
     #[deref]
     pub inner: NextBlockEnvAttributes,
 
+    /// Sub-second millisecond portion of the block timestamp.
+    pub timestamp_millis_part: u64,
+
     /// Optional base fee override for deterministic derivation/safe imports.
     pub base_fee_per_gas: Option<u64>,
 }
@@ -20,6 +23,7 @@ impl reth_rpc_eth_api::helpers::pending_block::BuildPendingEnv<morph_primitives:
     ) -> Self {
         Self {
             inner: NextBlockEnvAttributes::build_pending_env(parent),
+            timestamp_millis_part: 0,
             base_fee_per_gas: None,
         }
     }

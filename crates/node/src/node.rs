@@ -23,7 +23,7 @@ use alloy_consensus::BlockHeader;
 use alloy_hardforks::EthereumHardforks;
 use alloy_primitives::{Address, B256};
 use alloy_rpc_types_engine::PayloadAttributes;
-use morph_chainspec::MorphChainSpec;
+use morph_chainspec::{MorphChainSpec, hardfork::MorphHardforks};
 use morph_payload_builder::MorphBuilderConfig;
 use morph_payload_types::{MorphPayloadAttributes, MorphPayloadTypes};
 use morph_primitives::{Block, MorphHeader, MorphPrimitives, MorphReceipt, MorphTxEnvelope};
@@ -196,7 +196,17 @@ impl PayloadAttributesBuilder<MorphPayloadAttributes, MorphHeader>
     for MorphPayloadAttributesBuilder
 {
     fn build(&self, parent: &SealedHeader<MorphHeader>) -> MorphPayloadAttributes {
-        let timestamp = std::cmp::max(parent.timestamp().saturating_add(1), unix_timestamp_now());
+        let now_millis = unix_timestamp_now_millis();
+        let now_secs = now_millis / 1000;
+        let (timestamp, mut timestamp_millis_part) =
+            if parent.timestamp().saturating_add(1) > now_secs {
+                (parent.timestamp().saturating_add(1), 0)
+            } else {
+                (now_secs, now_millis % 1000)
+            };
+        if !self.chain_spec.is_onyx_active_at_timestamp(timestamp) {
+            timestamp_millis_part = 0;
+        }
 
         MorphPayloadAttributes {
             inner: PayloadAttributes {
@@ -214,6 +224,7 @@ impl PayloadAttributesBuilder<MorphPayloadAttributes, MorphHeader>
                 // Morph L2 has no PoS slot semantics; field added in alloy 2.0.
                 slot_number: None,
             },
+            timestamp_millis_part,
             // No L1 transactions in local mining mode
             transactions: None,
             gas_limit: None,
@@ -223,11 +234,17 @@ impl PayloadAttributesBuilder<MorphPayloadAttributes, MorphHeader>
 }
 
 /// Returns the current unix timestamp in seconds.
+#[cfg(test)]
 fn unix_timestamp_now() -> u64 {
+    unix_timestamp_now_millis() / 1000
+}
+
+/// Returns the current unix timestamp in milliseconds.
+fn unix_timestamp_now_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs()
+        .as_millis() as u64
 }
 
 #[cfg(test)]
@@ -276,6 +293,7 @@ mod tests {
 
         // Timestamp should be at least parent + 1
         assert!(attrs.inner.timestamp > 1_000_000);
+        assert_eq!(attrs.timestamp_millis_part, 0);
         // No L1 transactions in local mining mode
         assert!(attrs.transactions.is_none());
         assert!(attrs.gas_limit.is_none());
@@ -303,6 +321,7 @@ mod tests {
         let now = unix_timestamp_now();
         assert!(attrs.inner.timestamp >= now.saturating_sub(2));
         assert!(attrs.inner.timestamp <= now.saturating_add(2));
+        assert_eq!(attrs.timestamp_millis_part, 0);
     }
 
     #[test]

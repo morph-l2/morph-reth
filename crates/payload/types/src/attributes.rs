@@ -23,6 +23,10 @@ pub struct MorphPayloadAttributes {
     #[serde(flatten)]
     pub inner: PayloadAttributes,
 
+    /// Sub-second millisecond portion of the block timestamp.
+    #[serde(default, with = "alloy_serde::quantity")]
+    pub timestamp_millis_part: u64,
+
     /// L1 message transactions to include at the beginning of the block.
     ///
     /// **IMPORTANT**: This field contains **only L1 messages** (L1→L2 deposit transactions).
@@ -81,12 +85,21 @@ impl MorphPayloadAttributes {
     pub fn morph_payload_id(&self, parent_hash: &B256) -> PayloadId {
         payload_id_morph(parent_hash, self, MORPH_PAYLOAD_BUILDER_VERSION)
     }
+
+    /// Returns the block timestamp in milliseconds.
+    pub fn timestamp_millis(&self) -> u64 {
+        self.inner
+            .timestamp
+            .saturating_mul(1000)
+            .saturating_add(self.timestamp_millis_part)
+    }
 }
 
 impl From<PayloadAttributes> for MorphPayloadAttributes {
     fn from(inner: PayloadAttributes) -> Self {
         Self {
             inner,
+            timestamp_millis_part: 0,
             transactions: None,
             gas_limit: None,
             base_fee_per_gas: None,
@@ -112,6 +125,9 @@ pub struct MorphPayloadBuilderAttributes {
 
     /// Block timestamp.
     pub timestamp: u64,
+
+    /// Sub-second millisecond portion of the block timestamp.
+    pub timestamp_millis_part: u64,
 
     /// Suggested fee recipient.
     pub suggested_fee_recipient: Address,
@@ -177,6 +193,7 @@ impl MorphPayloadBuilderAttributes {
             id,
             parent,
             timestamp: attributes.inner.timestamp,
+            timestamp_millis_part: attributes.timestamp_millis_part,
             suggested_fee_recipient: attributes.inner.suggested_fee_recipient,
             prev_randao: attributes.inner.prev_randao,
             withdrawals: attributes.inner.withdrawals.unwrap_or_default().into(),
@@ -200,6 +217,13 @@ impl MorphPayloadBuilderAttributes {
     /// Returns the block timestamp.
     pub fn timestamp(&self) -> u64 {
         self.timestamp
+    }
+
+    /// Returns the block timestamp in milliseconds.
+    pub fn timestamp_millis(&self) -> u64 {
+        self.timestamp
+            .saturating_mul(1000)
+            .saturating_add(self.timestamp_millis_part)
     }
 
     /// Returns the optional parent beacon block root.
@@ -264,6 +288,7 @@ fn payload_id_morph(parent: &B256, attributes: &MorphPayloadAttributes, version:
 
     // Hash timestamp
     hasher.update(&attributes.inner.timestamp.to_be_bytes()[..]);
+    hasher.update(&attributes.timestamp_millis_part.to_be_bytes()[..]);
 
     // Hash prev_randao
     hasher.update(attributes.inner.prev_randao.as_slice());
@@ -335,6 +360,7 @@ mod tests {
                 // Morph L2 has no PoS slot semantics; field added in alloy 2.0.
                 slot_number: None,
             },
+            timestamp_millis_part: 0,
             transactions: None,
             gas_limit: None,
             base_fee_per_gas: None,
@@ -468,6 +494,42 @@ mod tests {
         let id2 = payload_id_morph(&parent, &attrs2, 1);
 
         assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn test_payload_id_different_timestamp_millis_parts() {
+        let parent = B256::random();
+        let mut attrs1 = create_test_attributes();
+        attrs1.inner.timestamp = 100;
+        attrs1.timestamp_millis_part = 1;
+        let mut attrs2 = create_test_attributes();
+        attrs2.inner.timestamp = 100;
+        attrs2.timestamp_millis_part = 2;
+
+        let id1 = payload_id_morph(&parent, &attrs1, 1);
+        let id2 = payload_id_morph(&parent, &attrs2, 1);
+
+        assert_ne!(id1, id2);
+        assert_eq!(attrs1.timestamp_millis(), 100_001);
+        assert_eq!(attrs2.timestamp_millis(), 100_002);
+    }
+
+    #[test]
+    fn test_payload_attributes_serde_with_timestamp_millis_part() {
+        let json = r#"{
+            "timestamp": "0x64",
+            "timestampMillisPart": "0x7b",
+            "prevRandao": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "suggestedFeeRecipient": "0x0000000000000000000000000000000000000002"
+        }"#;
+
+        let attrs: MorphPayloadAttributes = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(attrs.inner.timestamp, 100);
+        assert_eq!(attrs.timestamp_millis_part, 123);
+        assert_eq!(attrs.timestamp_millis(), 100_123);
+
+        let encoded = serde_json::to_string(&attrs).expect("serialize");
+        assert!(encoded.contains("timestampMillisPart"));
     }
 
     #[test]

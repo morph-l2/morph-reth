@@ -721,6 +721,7 @@ where
             // Morph L2 has no PoS slot semantics; field added in alloy 2.0.
             slot_number: None,
         },
+        timestamp_millis_part: attributes.timestamp_millis_part,
         base_fee_per_gas: attributes.base_fee_per_gas,
     };
 
@@ -871,6 +872,7 @@ where
         gas_limit: header.gas_limit(),
         base_fee_per_gas: header.base_fee_per_gas().map(|f| f as u128),
         timestamp: header.timestamp(),
+        timestamp_millis_part: header.timestamp_millis_part(),
         transactions: executed_txs,
         state_root: header.state_root(),
         gas_used: execution_result.gas_used,
