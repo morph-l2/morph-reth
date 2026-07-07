@@ -250,21 +250,13 @@ impl HeaderValidator<MorphHeader> for MorphConsensus {
         // Validate parent hash and block number
         validate_against_parent_hash_number(header.header(), parent)?;
 
-        // Validate timestamp against parent (pre-Emerald: strict >, post-Emerald: >=)
+        let is_onyx = self
+            .chain_spec
+            .is_onyx_active_at_timestamp(header.timestamp());
         let is_emerald = self
             .chain_spec
             .is_emerald_active_at_timestamp(header.timestamp());
-        validate_against_parent_timestamp(header.header(), parent.header(), is_emerald)?;
-        if self
-            .chain_spec
-            .is_onyx_active_at_timestamp(header.timestamp())
-            && header.timestamp_millis() <= parent.timestamp_millis()
-        {
-            return Err(ConsensusError::TimestampIsInPast {
-                parent_timestamp: parent.timestamp_millis(),
-                timestamp: header.timestamp_millis(),
-            });
-        }
+        validate_against_parent_timestamp(header.header(), parent.header(), is_emerald, is_onyx)?;
 
         // Validate gas limit change
         validate_against_parent_gas_limit(header.header(), parent.header())?;
@@ -446,11 +438,24 @@ impl FullConsensus<morph_primitives::MorphPrimitives> for MorphConsensus {
 /// Returns [`ConsensusError::TimestampIsInPast`] if the header's timestamp
 /// violates the hardfork-specific constraint.
 #[inline]
-fn validate_against_parent_timestamp<H: BlockHeader>(
-    header: &H,
-    parent: &H,
+fn validate_against_parent_timestamp(
+    header: &MorphHeader,
+    parent: &MorphHeader,
     is_emerald: bool,
+    is_onyx: bool,
 ) -> Result<(), ConsensusError> {
+    // Onyx switches parent timestamp validation to the full millisecond value.
+    // Before Onyx, keep Morph's existing second-level Emerald behavior.
+    if is_onyx {
+        if header.timestamp_millis() <= parent.timestamp_millis() {
+            return Err(ConsensusError::TimestampIsInPast {
+                parent_timestamp: parent.timestamp_millis(),
+                timestamp: header.timestamp_millis(),
+            });
+        }
+        return Ok(());
+    }
+
     if header.timestamp() < parent.timestamp()
         || (header.timestamp() == parent.timestamp() && !is_emerald)
     {
@@ -1728,21 +1733,22 @@ mod tests {
 
     #[test]
     fn test_validate_against_parent_timestamp_valid() {
-        let parent = create_valid_header(1000, 30_000_000, 100);
-        let child = create_valid_header(1001, 30_000_000, 101);
+        let parent = create_morph_header(create_valid_header(1000, 30_000_000, 100));
+        let child = create_morph_header(create_valid_header(1001, 30_000_000, 101));
 
         // Both pre-Emerald and post-Emerald: strictly greater is always ok
-        assert!(validate_against_parent_timestamp(&child, &parent, false).is_ok());
-        assert!(validate_against_parent_timestamp(&child, &parent, true).is_ok());
+        assert!(validate_against_parent_timestamp(&child, &parent, false, false).is_ok());
+        assert!(validate_against_parent_timestamp(&child, &parent, true, false).is_ok());
+        assert!(validate_against_parent_timestamp(&child, &parent, true, true).is_ok());
     }
 
     #[test]
     fn test_validate_against_parent_timestamp_equal_pre_emerald() {
-        let parent = create_valid_header(1000, 30_000_000, 100);
-        let child = create_valid_header(1000, 30_000_000, 101); // Same timestamp
+        let parent = create_morph_header(create_valid_header(1000, 30_000_000, 100));
+        let child = create_morph_header(create_valid_header(1000, 30_000_000, 101));
 
         // Pre-Emerald: equal timestamp is rejected
-        let result = validate_against_parent_timestamp(&child, &parent, false);
+        let result = validate_against_parent_timestamp(&child, &parent, false, false);
         assert!(matches!(
             result,
             Err(ConsensusError::TimestampIsInPast { .. })
@@ -1751,26 +1757,30 @@ mod tests {
 
     #[test]
     fn test_validate_against_parent_timestamp_equal_post_emerald() {
-        let parent = create_valid_header(1000, 30_000_000, 100);
-        let child = create_valid_header(1000, 30_000_000, 101); // Same timestamp
+        let parent = create_morph_header(create_valid_header(1000, 30_000_000, 100));
+        let child = create_morph_header(create_valid_header(1000, 30_000_000, 101));
 
         // Post-Emerald: equal timestamp is allowed
-        let result = validate_against_parent_timestamp(&child, &parent, true);
+        let result = validate_against_parent_timestamp(&child, &parent, true, false);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_validate_against_parent_timestamp_past() {
-        let parent = create_valid_header(1000, 30_000_000, 100);
-        let child = create_valid_header(999, 30_000_000, 101); // Earlier timestamp
+        let parent = create_morph_header(create_valid_header(1000, 30_000_000, 100));
+        let child = create_morph_header(create_valid_header(999, 30_000_000, 101));
 
         // Both pre-Emerald and post-Emerald: strictly less is always rejected
         assert!(matches!(
-            validate_against_parent_timestamp(&child, &parent, false),
+            validate_against_parent_timestamp(&child, &parent, false, false),
             Err(ConsensusError::TimestampIsInPast { .. })
         ));
         assert!(matches!(
-            validate_against_parent_timestamp(&child, &parent, true),
+            validate_against_parent_timestamp(&child, &parent, true, false),
+            Err(ConsensusError::TimestampIsInPast { .. })
+        ));
+        assert!(matches!(
+            validate_against_parent_timestamp(&child, &parent, true, true),
             Err(ConsensusError::TimestampIsInPast { .. })
         ));
     }
