@@ -40,7 +40,7 @@ else
   : "${MORPH_NODE_L1_BEACON_RPC:=${MORPH_NODE_L1_ETH_BEACON_RPC:-https://ethereum-hoodi-beacon-api.publicnode.com}}"
   : "${MORPH_NODE_DEPOSIT_CONTRACT:=${MORPH_NODE_SYNC_DEPOSIT_CONTRACT_ADDRESS:-0xd7f39d837f4790b215ba67e0ab63665912648dbe}}"
   : "${MORPH_NODE_ROLLUP_CONTRACT:=0x57e0e6dde89dc52c01fe785774271504b1e04664}"
-  : "${MORPH_NODE_EXTRA_FLAGS:=}"
+  : "${MORPH_NODE_EXTRA_FLAGS:=--hoodi}"
   : "${CONFIG_ZIP_URL:=https://raw.githubusercontent.com/morph-l2/run-morph-node/main/hoodi/data.zip}"
   : "${CONFIG_ZIP_PATH:=./local-test/hoodi-data.zip}"
   : "${MORPH_CHAIN:=hoodi}"
