@@ -29,6 +29,7 @@ args=(
   --l2.eth "http://${RETH_HTTP_ADDR}:${RETH_HTTP_PORT}"
   --l2.engine "http://${RETH_AUTHRPC_ADDR}:${RETH_AUTHRPC_PORT}"
   --l1.rpc "${MORPH_NODE_L1_RPC}"
+  --l1.beaconrpc "${MORPH_NODE_L1_BEACON_RPC}"
   --sync.depositContractAddr "${MORPH_NODE_DEPOSIT_CONTRACT}"
   --log.filename "${NODE_LOG_FILE}"
 )
