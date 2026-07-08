@@ -67,7 +67,8 @@ All defaults can be overridden via environment variables. Common ones:
 | `MORPHNODE_BIN` | `../morph/node/build/bin/morphnode` | Path to morphnode binary |
 | `RETH_HTTP_PORT` | `8545` | HTTP RPC port |
 | `RETH_AUTHRPC_PORT` | `8551` | Engine API auth RPC port |
-| `MORPH_NODE_L1_RPC` | *(per-network default)* | L1 Ethereum RPC endpoint |
+| `MORPH_NODE_L1_RPC` | *(per-network default)* | L1 Ethereum execution RPC endpoint |
+| `MORPH_NODE_L1_BEACON_RPC` | *(per-network default)* | L1 Ethereum beacon (blob) RPC endpoint — required for L1 derivation |
 
 Example with overrides:
 
