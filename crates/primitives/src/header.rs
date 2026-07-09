@@ -203,105 +203,28 @@ impl Sealable for MorphHeader {
 }
 
 fn morph_header_hash_with_millis(inner: &Header, timestamp_millis_part: u64) -> B256 {
-    let payload_length = header_payload_length(inner) + timestamp_millis_part.length();
-    let mut out =
-        Vec::with_capacity(payload_length + alloy_rlp::length_of_length(payload_length) + 1);
+    // alloy's `Header` RLP is exactly geth's flat field list; the Onyx hash simply
+    // appends the millisecond remainder as a trailing element. We re-encode `inner`
+    // and splice the remainder in rather than enumerating its fields by hand, so new
+    // upstream header fields flow through automatically instead of silently drifting
+    // the hash whenever alloy's `Header` grows a field.
+    let inner_rlp = alloy_rlp::encode(inner);
+    let mut payload = inner_rlp.as_slice();
+    let inner_header = RlpHeader::decode(&mut payload).expect("inner header is valid RLP");
+    let payload = &payload[..inner_header.payload_length];
+
+    let payload_length = inner_header.payload_length + timestamp_millis_part.length();
+    // length_of_length already counts the list header's lead byte, so this is the
+    // exact encoded size: header prefix + payload.
+    let mut out = Vec::with_capacity(payload_length + alloy_rlp::length_of_length(payload_length));
     RlpHeader {
         list: true,
         payload_length,
     }
     .encode(&mut out);
-    encode_header_payload(inner, &mut out);
+    out.extend_from_slice(payload);
     timestamp_millis_part.encode(&mut out);
     keccak256(out)
-}
-
-fn header_payload_length(inner: &Header) -> usize {
-    let mut length = inner.parent_hash.length()
-        + inner.ommers_hash.length()
-        + inner.beneficiary.length()
-        + inner.state_root.length()
-        + inner.transactions_root.length()
-        + inner.receipts_root.length()
-        + inner.logs_bloom.length()
-        + inner.difficulty.length()
-        + U256::from(inner.number).length()
-        + U256::from(inner.gas_limit).length()
-        + U256::from(inner.gas_used).length()
-        + inner.timestamp.length()
-        + inner.extra_data.length()
-        + inner.mix_hash.length()
-        + inner.nonce.length();
-
-    if let Some(base_fee_per_gas) = inner.base_fee_per_gas {
-        length += U256::from(base_fee_per_gas).length();
-    }
-    if let Some(withdrawals_root) = inner.withdrawals_root {
-        length += withdrawals_root.length();
-    }
-    if let Some(blob_gas_used) = inner.blob_gas_used {
-        length += U256::from(blob_gas_used).length();
-    }
-    if let Some(excess_blob_gas) = inner.excess_blob_gas {
-        length += U256::from(excess_blob_gas).length();
-    }
-    if let Some(parent_beacon_block_root) = inner.parent_beacon_block_root {
-        length += parent_beacon_block_root.length();
-    }
-    if let Some(requests_hash) = inner.requests_hash {
-        length += requests_hash.length();
-    }
-    if let Some(block_access_list_hash) = inner.block_access_list_hash {
-        length += block_access_list_hash.length();
-    }
-    if let Some(slot_number) = inner.slot_number {
-        length += U256::from(slot_number).length();
-    }
-
-    length
-}
-
-fn encode_header_payload(inner: &Header, out: &mut dyn alloy_rlp::BufMut) {
-    inner.parent_hash.encode(out);
-    inner.ommers_hash.encode(out);
-    inner.beneficiary.encode(out);
-    inner.state_root.encode(out);
-    inner.transactions_root.encode(out);
-    inner.receipts_root.encode(out);
-    inner.logs_bloom.encode(out);
-    inner.difficulty.encode(out);
-    U256::from(inner.number).encode(out);
-    U256::from(inner.gas_limit).encode(out);
-    U256::from(inner.gas_used).encode(out);
-    inner.timestamp.encode(out);
-    inner.extra_data.encode(out);
-    inner.mix_hash.encode(out);
-    inner.nonce.encode(out);
-
-    if let Some(base_fee_per_gas) = inner.base_fee_per_gas {
-        U256::from(base_fee_per_gas).encode(out);
-    }
-    if let Some(withdrawals_root) = inner.withdrawals_root {
-        withdrawals_root.encode(out);
-    }
-    if let Some(blob_gas_used) = inner.blob_gas_used {
-        U256::from(blob_gas_used).encode(out);
-    }
-    if let Some(excess_blob_gas) = inner.excess_blob_gas {
-        U256::from(excess_blob_gas).encode(out);
-    }
-    if let Some(parent_beacon_block_root) = inner.parent_beacon_block_root {
-        parent_beacon_block_root.encode(out);
-    }
-    if let Some(requests_hash) = inner.requests_hash {
-        requests_hash.encode(out);
-    }
-    if let Some(block_access_list_hash) = inner.block_access_list_hash {
-        block_access_list_hash.encode(out);
-    }
-    if let Some(slot_number) = inner.slot_number {
-        U256::from(slot_number).encode(out);
-    }
 }
 
 impl reth_primitives_traits::InMemorySize for MorphHeader {
@@ -520,7 +443,7 @@ mod tests {
 
         // Morph's existing L1 message index remains excluded from the hash.
         let header3 = MorphHeader {
-            inner: inner.clone(),
+            inner,
             next_l1_msg_index: 0,
             timestamp_millis_part: NonZeroU64::new(999),
         };
