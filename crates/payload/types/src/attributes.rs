@@ -334,6 +334,7 @@ mod tests {
                 parent_beacon_block_root: None,
                 // Morph L2 has no PoS slot semantics; field added in alloy 2.0.
                 slot_number: None,
+                target_gas_limit: None,
             },
             transactions: None,
             gas_limit: None,

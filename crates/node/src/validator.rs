@@ -6,12 +6,26 @@ use alloy_primitives::{B256, keccak256};
 use dashmap::DashMap;
 use morph_chainspec::{
     L2_MESSAGE_QUEUE_ADDRESS, L2_MESSAGE_QUEUE_WITHDRAW_TRIE_ROOT_SLOT, MorphChainSpec,
+    MorphHardforks,
 };
 use morph_payload_types::{MorphExecutionData, MorphPayloadTypes};
-use morph_primitives::MorphHeader;
+use morph_primitives::{MorphHeader, MorphPrimitives};
 use parking_lot::Mutex;
+use reth_chain_state::{ExecutedBlock, StateTrieOverlayManager};
 use reth_chainspec::EthChainSpec;
-use reth_errors::ConsensusError;
+use reth_engine_tree::tree::payload_validator::TreeCtx;
+use reth_engine_tree::tree::{
+    BasicEngineValidator, CacheWaitDurations, EngineApiTreeState, EngineValidator, WaitForCaches,
+    error::{InsertBlockError, InsertBlockErrorKind},
+    state_root_strategy::{
+        DefaultStateRootStrategy, LazyHashedPostState, PayloadStateRootHandle,
+        PayloadStateRootJobContext, PreparedStateRootJob, StateRootJob, StateRootJobContext,
+        StateRootJobOutcome, StateRootStrategy,
+    },
+};
+use reth_errors::{ConsensusError, ProviderResult};
+use reth_evm::{ConfigureEvm, revm::context::Block as _};
+use reth_execution_cache::SavedCache;
 use reth_node_api::{
     AddOnsContext, FullNodeComponents, InvalidPayloadAttributesError, NewPayloadError, NodeTypes,
     PayloadAttributes, PayloadTypes, PayloadValidator,
@@ -20,8 +34,12 @@ use reth_node_builder::{
     invalid_block_hook::InvalidBlockHookExt,
     rpc::{EngineValidatorBuilder, PayloadValidatorBuilder},
 };
+use reth_payload_primitives::BuiltPayloadExecutedBlock;
 use reth_primitives_traits::{RecoveredBlock, SealedBlock};
-use reth_provider::ChainSpecProvider;
+use reth_provider::{
+    BlockExecutionOutput, BlockReader, ChainSpecProvider, StateProviderFactory, StateReader,
+    StateRootProvider,
+};
 use reth_tracing::tracing;
 use std::{collections::VecDeque, sync::Arc};
 
@@ -80,20 +98,16 @@ where
             >,
         >,
     Node::Provider: ChainSpecProvider<ChainSpec = MorphChainSpec>,
-    PVB: PayloadValidatorBuilder<Node>,
-    PVB::Validator: reth_node_api::PayloadValidator<
-            <Node::Types as NodeTypes>::Payload,
-            Block = reth_node_api::BlockTy<Node::Types>,
-        > + Clone,
+    PVB: PayloadValidatorBuilder<Node, Validator = MorphEngineValidator>,
 {
-    type EngineValidator =
-        morph_engine_tree_ext::MorphBasicEngineValidator<Node::Provider, Node::Evm, PVB::Validator>;
+    type EngineValidator = MorphTreeEngineValidator<Node::Provider, Node::Evm>;
 
     async fn build_tree_validator(
         self,
         ctx: &AddOnsContext<'_, Node>,
         tree_config: reth_node_api::TreeConfig,
         changeset_cache: reth_trie_db::ChangesetCache,
+        state_trie_overlays: StateTrieOverlayManager<MorphPrimitives>,
     ) -> eyre::Result<Self::EngineValidator> {
         let validator = self.payload_validator_builder.build(ctx).await?;
         let data_dir = ctx
@@ -103,17 +117,336 @@ where
             .resolve_datadir(ctx.config.chain.chain());
         let invalid_block_hook = ctx.create_invalid_block_hook(&data_dir).await?;
         let chain_spec = ctx.node.provider().chain_spec();
+        let post_execution_validator = validator.clone();
 
-        Ok(morph_engine_tree_ext::MorphBasicEngineValidator::new(
-            ctx.node.provider().clone(),
+        let provider = ctx.node.provider().clone();
+        let state_root_strategy: Arc<
+            dyn StateRootStrategy<MorphPrimitives, Node::Provider, Node::Evm>,
+        > = Arc::new(MorphStateRootStrategy::new(chain_spec.clone()));
+        let tree_config = strict_morph_tree_config(tree_config);
+        let validator = BasicEngineValidator::new(
+            provider.clone(),
             Arc::new(ctx.node.consensus().clone()),
             ctx.node.evm_config().clone(),
             validator,
             tree_config,
             invalid_block_hook,
             changeset_cache,
+            state_trie_overlays,
             ctx.node.task_executor().clone(),
+        )
+        .with_state_root_strategy(state_root_strategy);
+
+        Ok(MorphTreeEngineValidator::new(
+            validator,
+            provider,
             chain_spec,
+            post_execution_validator,
+        ))
+    }
+}
+
+/// Morph only relaxes the header-root equality check before Jade, through
+/// [`MorphStateRootStrategy`]. The upstream debug skip also suppresses trie
+/// updates, so allowing it here would make both pre-Jade persistence and
+/// post-Jade validation unsafe.
+fn strict_morph_tree_config(tree_config: reth_node_api::TreeConfig) -> reth_node_api::TreeConfig {
+    if tree_config.skip_state_root() {
+        tracing::warn!(
+            target: "reth::cli",
+            "ignoring --debug.skip-state-root: Morph requires trie updates before Jade and strict state-root validation from Jade onward"
+        );
+    }
+    tree_config.with_skip_state_root(false)
+}
+
+/// Upstream engine validator plus Morph-specific validation hooks.
+///
+/// State execution, caching and trie maintenance remain entirely upstream. This
+/// wrapper preserves the parent-aware L1 queue invariant and the optional
+/// consensus-layer withdraw-trie-root cross-check.
+pub struct MorphTreeEngineValidator<P, Evm>
+where
+    Evm: ConfigureEvm,
+{
+    inner: BasicEngineValidator<P, Evm, MorphEngineValidator>,
+    provider: P,
+    chain_spec: Arc<MorphChainSpec>,
+    post_execution_validator: MorphEngineValidator,
+}
+
+impl<P, Evm> MorphTreeEngineValidator<P, Evm>
+where
+    Evm: ConfigureEvm,
+{
+    const fn new(
+        inner: BasicEngineValidator<P, Evm, MorphEngineValidator>,
+        provider: P,
+        chain_spec: Arc<MorphChainSpec>,
+        post_execution_validator: MorphEngineValidator,
+    ) -> Self {
+        Self {
+            inner,
+            provider,
+            chain_spec,
+            post_execution_validator,
+        }
+    }
+}
+
+impl<P, Evm> MorphTreeEngineValidator<P, Evm>
+where
+    Evm: ConfigureEvm<Primitives = MorphPrimitives>,
+    P: BlockReader<Header = MorphHeader>,
+{
+    fn validate_next_l1_msg_index(
+        &self,
+        block: &SealedBlock<morph_primitives::Block>,
+        ctx: &TreeCtx<'_, MorphPrimitives>,
+    ) -> Result<(), InsertBlockErrorKind> {
+        if !self
+            .chain_spec
+            .is_jade_active_at_timestamp(block.header().timestamp())
+        {
+            return Ok(());
+        }
+
+        let parent_hash = block.parent_hash();
+        let parent = match ctx.state().tree_state().sealed_header_by_hash(&parent_hash) {
+            Some(parent) => Some(parent),
+            None => self.provider.sealed_header_by_hash(parent_hash)?,
+        };
+        let Some(parent) = parent else {
+            // The upstream validator reports the missing parent with the
+            // canonical provider error before executing the block.
+            return Ok(());
+        };
+
+        let mut expected = parent.next_l1_msg_index;
+        for tx in block.body().transactions() {
+            if !tx.is_l1_msg() {
+                break;
+            }
+            let queue_index = tx.queue_index().ok_or_else(|| {
+                ConsensusError::msg("L1 message transaction is missing queue index")
+            })?;
+            expected = queue_index.checked_add(1).ok_or_else(|| {
+                ConsensusError::msg(format!(
+                    "invalid block.NextL1MsgIndex: expected {}, got {}",
+                    u64::MAX,
+                    block.header().next_l1_msg_index
+                ))
+            })?;
+        }
+
+        let actual = block.header().next_l1_msg_index;
+        if actual != expected {
+            return Err(ConsensusError::msg(format!(
+                "invalid block.NextL1MsgIndex: expected {expected}, got {actual}"
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
+    fn validate_next_l1_msg_index_for_block(
+        &self,
+        block: &SealedBlock<morph_primitives::Block>,
+        ctx: &TreeCtx<'_, MorphPrimitives>,
+    ) -> Result<(), reth_engine_tree::tree::error::InsertPayloadError<morph_primitives::Block>>
+    {
+        self.validate_next_l1_msg_index(block, ctx)
+            .map_err(|kind| InsertBlockError::new(block.clone(), kind).into())
+    }
+
+    fn validate_withdraw_trie_root(
+        &self,
+        output: reth_engine_tree::tree::ValidationOutput<MorphPrimitives>,
+    ) -> reth_engine_tree::tree::ValidationOutcome<MorphPrimitives> {
+        let block = output.executed_block.recovered_block();
+        if let Err(err) = self
+            .post_execution_validator
+            .validate_withdraw_trie_root_update(block.hash(), || {
+                output.executed_block.hashed_state()
+            })
+        {
+            return Err(InsertBlockError::consensus_error(
+                err,
+                output.executed_block.sealed_block().clone(),
+            )
+            .into());
+        }
+
+        Ok(output)
+    }
+}
+
+impl<P, Evm> EngineValidator<MorphPayloadTypes, MorphPrimitives>
+    for MorphTreeEngineValidator<P, Evm>
+where
+    P: BlockReader<Header = MorphHeader> + Send + Sync + 'static,
+    Evm: ConfigureEvm<Primitives = MorphPrimitives> + 'static,
+    BasicEngineValidator<P, Evm, MorphEngineValidator>:
+        EngineValidator<MorphPayloadTypes, MorphPrimitives>,
+{
+    fn validate_payload_attributes_against_header(
+        &self,
+        attr: &<MorphPayloadTypes as PayloadTypes>::PayloadAttributes,
+        header: &MorphHeader,
+    ) -> Result<(), InvalidPayloadAttributesError> {
+        self.inner
+            .validate_payload_attributes_against_header(attr, header)
+    }
+
+    fn convert_payload_to_block(
+        &self,
+        payload: MorphExecutionData,
+    ) -> Result<SealedBlock<morph_primitives::Block>, NewPayloadError> {
+        self.inner.convert_payload_to_block(payload)
+    }
+
+    fn validate_payload(
+        &mut self,
+        payload: MorphExecutionData,
+        ctx: TreeCtx<'_, MorphPrimitives>,
+    ) -> reth_engine_tree::tree::ValidationOutcome<MorphPrimitives> {
+        let block_hash = payload.block.hash();
+        self.validate_next_l1_msg_index_for_block(payload.block.as_ref(), &ctx)?;
+        match self.inner.validate_payload(payload, ctx) {
+            Ok(output) => self.validate_withdraw_trie_root(output),
+            Err(err) => {
+                self.post_execution_validator
+                    .take_withdraw_trie_root_expectation(block_hash);
+                Err(err)
+            }
+        }
+    }
+
+    fn validate_block(
+        &mut self,
+        block: SealedBlock<morph_primitives::Block>,
+        ctx: TreeCtx<'_, MorphPrimitives>,
+    ) -> reth_engine_tree::tree::ValidationOutcome<MorphPrimitives> {
+        self.validate_next_l1_msg_index_for_block(&block, &ctx)?;
+        let output = self.inner.validate_block(block, ctx)?;
+        self.validate_withdraw_trie_root(output)
+    }
+
+    fn on_inserted_executed_block(
+        &self,
+        block: BuiltPayloadExecutedBlock<MorphPrimitives>,
+    ) -> ProviderResult<ExecutedBlock<MorphPrimitives>> {
+        self.inner.on_inserted_executed_block(block)
+    }
+
+    fn cache_for(&self, block_hash: B256) -> Option<SavedCache> {
+        self.inner.cache_for(block_hash)
+    }
+
+    fn payload_state_root_handle_for(
+        &self,
+        parent_hash: B256,
+        parent_header: &MorphHeader,
+        timestamp: u64,
+        state: &mut EngineApiTreeState<MorphPrimitives>,
+    ) -> Option<PayloadStateRootHandle> {
+        self.inner
+            .payload_state_root_handle_for(parent_hash, parent_header, timestamp, state)
+    }
+}
+
+impl<P, Evm> WaitForCaches for MorphTreeEngineValidator<P, Evm>
+where
+    Evm: ConfigureEvm,
+    BasicEngineValidator<P, Evm, MorphEngineValidator>: WaitForCaches,
+{
+    fn wait_for_caches(&self) -> CacheWaitDurations {
+        self.inner.wait_for_caches()
+    }
+}
+
+/// Uses upstream's optimized state-root path from Jade onward. Before Jade it
+/// computes and persists the real MPT updates but trusts the historical header
+/// root, which is a ZK-trie commitment and cannot be compared to the MPT root.
+#[derive(Debug)]
+struct MorphStateRootStrategy {
+    chain_spec: Arc<MorphChainSpec>,
+    default: DefaultStateRootStrategy,
+}
+
+impl MorphStateRootStrategy {
+    fn new(chain_spec: Arc<MorphChainSpec>) -> Self {
+        Self {
+            chain_spec,
+            default: DefaultStateRootStrategy::default(),
+        }
+    }
+}
+
+impl<P, Evm> StateRootStrategy<MorphPrimitives, P, Evm> for MorphStateRootStrategy
+where
+    P: BlockReader<Header = MorphHeader>
+        + StateProviderFactory
+        + StateReader
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+    Evm: ConfigureEvm<Primitives = MorphPrimitives> + 'static,
+    DefaultStateRootStrategy: StateRootStrategy<MorphPrimitives, P, Evm>,
+{
+    fn prepare(
+        &self,
+        ctx: StateRootJobContext<'_, MorphPrimitives, P, Evm>,
+    ) -> ProviderResult<PreparedStateRootJob<MorphPrimitives>> {
+        let timestamp: u64 = ctx.env().evm_env.block_env.timestamp().saturating_to();
+        if self.chain_spec.is_jade_active_at_timestamp(timestamp) {
+            return self.default.prepare(ctx);
+        }
+
+        Ok(PreparedStateRootJob::new(
+            Box::new(PreJadeStateRootJob {
+                provider_builder: ctx.provider_builder(),
+            }),
+            None,
+        ))
+    }
+
+    fn prepare_payload_builder(
+        &self,
+        ctx: PayloadStateRootJobContext<'_, MorphPrimitives, P>,
+    ) -> ProviderResult<Option<PayloadStateRootHandle>> {
+        if self.chain_spec.is_jade_active_at_timestamp(ctx.timestamp()) {
+            return self.default.prepare_payload_builder(ctx);
+        }
+        Ok(None)
+    }
+}
+
+struct PreJadeStateRootJob<P> {
+    provider_builder: reth_engine_tree::tree::StateProviderBuilder<MorphPrimitives, P>,
+}
+
+impl<P> StateRootJob<MorphPrimitives> for PreJadeStateRootJob<P>
+where
+    P: BlockReader + StateProviderFactory + StateReader + Clone + Send + Sync + 'static,
+{
+    fn name(&self) -> &'static str {
+        "morph-pre-jade-trusted-header"
+    }
+
+    fn finish(
+        &mut self,
+        block: &RecoveredBlock<morph_primitives::Block>,
+        _output: Arc<BlockExecutionOutput<morph_primitives::MorphReceipt>>,
+        hashed_state: &LazyHashedPostState,
+    ) -> ProviderResult<StateRootJobOutcome> {
+        let provider = self.provider_builder.build()?;
+        let (_mpt_root, trie_updates) =
+            provider.state_root_with_updates(hashed_state.get().as_ref().clone())?;
+        Ok(StateRootJobOutcome::new(
+            block.header().state_root(),
+            Arc::new(trie_updates),
         ))
     }
 }
@@ -184,8 +517,8 @@ impl MorphEngineValidator {
         removed
     }
 
-    fn updated_withdraw_trie_root_from_hashed_state(
-        state_updates: &reth_trie::HashedPostState,
+    fn updated_withdraw_trie_root_from_sorted_hashed_state(
+        state_updates: &reth_trie::HashedPostStateSorted,
     ) -> Option<B256> {
         let hashed_address = keccak256(L2_MESSAGE_QUEUE_ADDRESS);
         let hashed_slot = keccak256(B256::from(L2_MESSAGE_QUEUE_WITHDRAW_TRIE_ROOT_SLOT));
@@ -193,8 +526,44 @@ impl MorphEngineValidator {
         state_updates
             .storages
             .get(&hashed_address)
-            .and_then(|storage| storage.storage.get(&hashed_slot).copied())
-            .map(B256::from)
+            .and_then(|storage| {
+                storage
+                    .storage_slots
+                    .binary_search_by_key(&hashed_slot, |(slot, _)| *slot)
+                    .ok()
+                    .map(|index| B256::from(storage.storage_slots[index].1))
+            })
+    }
+
+    fn validate_withdraw_trie_root_update(
+        &self,
+        block_hash: B256,
+        state_updates: impl FnOnce() -> Arc<reth_trie::HashedPostStateSorted>,
+    ) -> Result<(), ConsensusError> {
+        let Some(expectation) = self.take_withdraw_trie_root_expectation(block_hash) else {
+            tracing::debug!(
+                target: "morph::engine_validator",
+                %block_hash,
+                "no withdraw trie root expectation registered; skipping CL cross-check"
+            );
+            return Ok(());
+        };
+        let WithdrawTrieRootExpectation::Verify(expected) = expectation else {
+            return Ok(());
+        };
+
+        let Some(actual) =
+            Self::updated_withdraw_trie_root_from_sorted_hashed_state(state_updates().as_ref())
+        else {
+            // The slot was not touched, so its value is unchanged from the parent.
+            return Ok(());
+        };
+        if actual != expected {
+            return Err(ConsensusError::msg(format!(
+                "withdraw trie root mismatch: expected {expected}, got {actual}"
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -219,51 +588,6 @@ impl PayloadValidator<MorphPayloadTypes> for MorphEngineValidator {
         Ok(sealed_block)
     }
 
-    fn validate_block_post_execution_with_hashed_state(
-        &self,
-        state_updates: &reth_trie::HashedPostState,
-        block: &RecoveredBlock<Self::Block>,
-    ) -> Result<(), ConsensusError> {
-        let Some(expectation) = self.take_withdraw_trie_root_expectation(block.hash()) else {
-            // No CL-supplied expectation. Reachable on the Block-input path
-            // (P2P-downloaded blocks, pipeline backfill, and buffered blocks
-            // whose expectation was evicted from the bounded LRU before
-            // reattach) — `convert_payload_to_block` was never invoked to
-            // register one. Treat as SkipValidation so sync isn't stalled;
-            // the strict post-Jade state-root check upstream still covers
-            // withdraw-trie consistency through state-root equality.
-            tracing::debug!(
-                target: "morph::engine_validator",
-                block_hash = %block.hash(),
-                "no withdraw trie root expectation registered; skipping CL cross-check"
-            );
-            return Ok(());
-        };
-        let WithdrawTrieRootExpectation::Verify(expected_withdraw_trie_root) = expectation else {
-            return Ok(());
-        };
-
-        // Only validate if the withdraw trie root slot was actually updated in this block.
-        // If the slot is absent from hashed_state, the root is unchanged from the parent —
-        // the consensus layer guarantees the expected value is correct in that case.
-        // Doing a DB read for the parent state here would be expensive (history_by_block_hash
-        // + storage lookup) and would occur while holding the execution cache write lock,
-        // causing lock contention with the next block's cache lookup.
-        let Some(actual_withdraw_trie_root) =
-            Self::updated_withdraw_trie_root_from_hashed_state(state_updates)
-        else {
-            return Ok(());
-        };
-
-        if actual_withdraw_trie_root != expected_withdraw_trie_root {
-            return Err(ConsensusError::msg(format!(
-                "withdraw trie root mismatch: expected {expected_withdraw_trie_root}, got {actual_withdraw_trie_root}"
-            )));
-        }
-
-        Ok(())
-    }
-
     fn validate_payload_attributes_against_header(
         &self,
         attr: &<MorphPayloadTypes as reth_node_api::PayloadTypes>::PayloadAttributes,
@@ -284,6 +608,13 @@ mod tests {
     use reth_trie::{HashedPostState, HashedStorage};
 
     #[test]
+    fn morph_tree_config_never_uses_upstream_empty_update_state_root_skip() {
+        let config = reth_node_api::TreeConfig::default().with_skip_state_root(true);
+
+        assert!(!strict_morph_tree_config(config).skip_state_root());
+    }
+
+    #[test]
     fn test_extract_updated_withdraw_trie_root_from_hashed_state() {
         let expected = B256::from([0x11; 32]);
         let hashed_address = keccak256(L2_MESSAGE_QUEUE_ADDRESS);
@@ -295,7 +626,9 @@ mod tests {
         );
 
         assert_eq!(
-            MorphEngineValidator::updated_withdraw_trie_root_from_hashed_state(&state),
+            MorphEngineValidator::updated_withdraw_trie_root_from_sorted_hashed_state(
+                &state.into_sorted(),
+            ),
             Some(expected)
         );
     }
@@ -304,7 +637,9 @@ mod tests {
     fn test_extract_updated_withdraw_trie_root_from_hashed_state_missing_slot() {
         let state = HashedPostState::default();
         assert_eq!(
-            MorphEngineValidator::updated_withdraw_trie_root_from_hashed_state(&state),
+            MorphEngineValidator::updated_withdraw_trie_root_from_sorted_hashed_state(
+                &state.into_sorted(),
+            ),
             None
         );
     }
@@ -436,7 +771,10 @@ mod tests {
             HashedStorage::from_iter(false, [(hashed_slot, U256::from_be_bytes([0x11; 32]))]),
         );
         assert!(
-            MorphEngineValidator::updated_withdraw_trie_root_from_hashed_state(&state).is_none()
+            MorphEngineValidator::updated_withdraw_trie_root_from_sorted_hashed_state(
+                &state.into_sorted(),
+            )
+            .is_none()
         );
     }
 
@@ -450,7 +788,10 @@ mod tests {
             HashedStorage::from_iter(false, [(wrong_slot, U256::from_be_bytes([0x22; 32]))]),
         );
         assert!(
-            MorphEngineValidator::updated_withdraw_trie_root_from_hashed_state(&state).is_none()
+            MorphEngineValidator::updated_withdraw_trie_root_from_sorted_hashed_state(
+                &state.into_sorted(),
+            )
+            .is_none()
         );
     }
 
@@ -475,8 +816,10 @@ mod tests {
         let validator = MorphEngineValidator::new();
         let block = empty_recovered_block_with_hash(B256::from([0xab; 32]));
 
-        let result = validator
-            .validate_block_post_execution_with_hashed_state(&HashedPostState::default(), &block);
+        let state = HashedPostState::default();
+        let result = validator.validate_withdraw_trie_root_update(block.hash(), || {
+            Arc::new(state.clone().into_sorted())
+        });
 
         assert!(
             result.is_ok(),
@@ -496,8 +839,10 @@ mod tests {
         );
         let block = empty_recovered_block_with_hash(hash);
 
-        let result = validator
-            .validate_block_post_execution_with_hashed_state(&HashedPostState::default(), &block);
+        let state = HashedPostState::default();
+        let result = validator.validate_withdraw_trie_root_update(block.hash(), || {
+            Arc::new(state.clone().into_sorted())
+        });
 
         assert!(result.is_ok());
         // expectation must be consumed.
@@ -522,8 +867,10 @@ mod tests {
 
         // empty hashed state → no withdraw-slot diff → skip per the doc-comment
         // explanation in the validator.
-        let result = validator
-            .validate_block_post_execution_with_hashed_state(&HashedPostState::default(), &block);
+        let state = HashedPostState::default();
+        let result = validator.validate_withdraw_trie_root_update(block.hash(), || {
+            Arc::new(state.clone().into_sorted())
+        });
 
         assert!(result.is_ok());
     }
@@ -552,7 +899,9 @@ mod tests {
             HashedStorage::from_iter(false, [(hashed_slot, U256::from_be_bytes(actual.0))]),
         );
 
-        let result = validator.validate_block_post_execution_with_hashed_state(&state, &block);
+        let result = validator.validate_withdraw_trie_root_update(block.hash(), || {
+            Arc::new(state.clone().into_sorted())
+        });
 
         assert!(
             result.is_ok(),
@@ -582,7 +931,9 @@ mod tests {
 
         let block = empty_recovered_block_with_hash(hash);
         let err = validator
-            .validate_block_post_execution_with_hashed_state(&state, &block)
+            .validate_withdraw_trie_root_update(block.hash(), || {
+                Arc::new(state.clone().into_sorted())
+            })
             .expect_err("mismatched root must fail");
         assert!(
             err.to_string().contains("withdraw trie root mismatch"),
@@ -617,6 +968,7 @@ mod tests {
                 withdrawals: None,
                 parent_beacon_block_root: None,
                 slot_number: None,
+                target_gas_limit: None,
             },
             transactions: None,
             gas_limit: None,
@@ -637,6 +989,7 @@ mod tests {
                 withdrawals: None,
                 parent_beacon_block_root: None,
                 slot_number: None,
+                target_gas_limit: None,
             },
             transactions: None,
             gas_limit: None,
@@ -657,6 +1010,7 @@ mod tests {
                 withdrawals: None,
                 parent_beacon_block_root: None,
                 slot_number: None,
+                target_gas_limit: None,
             },
             transactions: None,
             gas_limit: None,

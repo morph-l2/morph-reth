@@ -89,7 +89,7 @@ const GAS_LIMIT_BOUND_DIVISOR: u64 = 1024;
 ///    start, have sequential queue indices, and are consistent with `header.next_l1_msg_index`.
 /// 2. **Cross-block monotonicity** (`validate_header_against_parent`): `header.next_l1_msg_index`
 ///    is monotonically non-decreasing relative to the parent.
-/// 3. **Parent-aware exactness** (`MorphBasicEngineValidator`): once the engine tree has
+/// 3. **Parent-aware exactness** (`MorphTreeEngineValidator`): once the engine tree has
 ///    both parent header and block body, Jade blocks must exactly match the value derived
 ///    from `parent.next_l1_msg_index` and the block's leading L1 messages.
 ///
@@ -356,6 +356,7 @@ impl FullConsensus<morph_primitives::MorphPrimitives> for MorphConsensus {
         block: &RecoveredBlock<Block>,
         result: &BlockExecutionResult<MorphReceipt>,
         receipt_root_bloom: Option<ReceiptRootBloom>,
+        _block_access_list_hash: Option<B256>,
     ) -> Result<(), ConsensusError> {
         // Verify the block gas used
         let cumulative_gas_used = result
@@ -2070,7 +2071,7 @@ mod tests {
         let recovered =
             reth_primitives_traits::RecoveredBlock::new_unhashed(block, vec![Address::ZERO]);
 
-        let post_result = consensus.validate_block_post_execution(&recovered, &result, None);
+        let post_result = consensus.validate_block_post_execution(&recovered, &result, None, None);
         assert!(matches!(
             post_result,
             Err(ConsensusError::BlockGasUsed { .. })

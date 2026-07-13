@@ -19,8 +19,7 @@ use alloy_consensus::transaction::TxHashRef;
 use alloy_evm::{
     Database, Evm, RecoveredTx,
     block::{
-        BlockExecutionError, BlockExecutionResult, BlockExecutor, ExecutableTx, GasOutput,
-        OnStateHook, StateChangeSource, TxResult,
+        BlockExecutionError, BlockExecutionResult, BlockExecutor, ExecutableTx, GasOutput, TxResult,
     },
 };
 use alloy_primitives::{Address, Log, U256};
@@ -96,9 +95,6 @@ pub struct MorphBlockExecutor<DB: Database, I> {
     /// Cached hardfork for this block (constant across all transactions).
     /// Set in `apply_pre_execution_changes`, reused in `commit_transaction`.
     hardfork: MorphHardfork,
-    /// Hook for notifying the engine about per-transaction state changes.
-    /// Used by `StateRootTask` for incremental sparse trie computation.
-    state_hook: Option<Box<dyn OnStateHook>>,
 }
 
 impl<DB, I> MorphBlockExecutor<DB, I>
@@ -124,7 +120,6 @@ where
             receipts: Vec::new(),
             gas_used: 0,
             hardfork: MorphHardfork::default(),
-            state_hook: None,
         }
     }
 
@@ -275,11 +270,6 @@ where
             post_fee_logs,
         } = output;
 
-        // Notify the state hook (e.g. StateRootTask) BEFORE committing.
-        if let Some(hook) = &mut self.state_hook {
-            hook.on_state(StateChangeSource::Transaction(self.receipts.len()), &state);
-        }
-
         // EIP-8037 separates regular and state gas; pre-Amsterdam morph treats
         // them as a single number, so use the unified `tx_gas_used` getter.
         let gas_used = result.gas().tx_gas_used();
@@ -332,10 +322,6 @@ where
                 blob_gas_used: 0,
             },
         ))
-    }
-
-    fn set_state_hook(&mut self, hook: Option<Box<dyn OnStateHook>>) {
-        self.state_hook = hook;
     }
 
     fn evm_mut(&mut self) -> &mut Self::Evm {

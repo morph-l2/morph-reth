@@ -4,7 +4,7 @@ use alloy_evm::{
     revm::{
         Context, ExecuteEvm, InspectEvm, Inspector, SystemCallEvm,
         context::{
-            CfgEnv,
+            CfgEnv, DBErrorMarker,
             result::{EVMError, ResultAndState},
         },
         inspector::NoOpInspector,
@@ -26,8 +26,7 @@ impl EvmFactory for MorphEvmFactory {
     type Evm<DB: Database, I: Inspector<Self::Context<DB>>> = MorphEvm<DB, I>;
     type Context<DB: Database> = MorphContext<DB>;
     type Tx = MorphTxEnv;
-    type Error<DBError: std::error::Error + Send + Sync + 'static> =
-        EVMError<DBError, MorphInvalidTransaction>;
+    type Error<DBError: DBErrorMarker> = EVMError<DBError, MorphInvalidTransaction>;
     type HaltReason = MorphHaltReason;
     type Spec = MorphHardfork;
     type BlockEnv = MorphBlockEnv;

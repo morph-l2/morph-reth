@@ -57,6 +57,10 @@ where
         self.eth_api().max_simulate_blocks()
     }
 
+    fn compute_state_root_for_eth_simulate(&self) -> bool {
+        self.eth_api().compute_state_root_for_eth_simulate()
+    }
+
     fn evm_memory_limit(&self) -> u64 {
         self.eth_api().evm_memory_limit()
     }

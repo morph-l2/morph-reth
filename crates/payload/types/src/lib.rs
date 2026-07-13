@@ -83,6 +83,12 @@ impl MorphExecutionData {
     }
 }
 
+impl From<MorphBuiltPayload> for MorphExecutionData {
+    fn from(value: MorphBuiltPayload) -> Self {
+        Self::new(value.block)
+    }
+}
+
 impl ExecutionPayload for MorphExecutionData {
     fn parent_hash(&self) -> B256 {
         self.block.parent_hash()
@@ -140,6 +146,7 @@ impl PayloadTypes for MorphPayloadTypes {
         block: SealedBlock<
             <<Self::BuiltPayload as BuiltPayload>::Primitives as NodePrimitives>::Block,
         >,
+        _bal: Option<Bytes>,
     ) -> Self::ExecutionData {
         MorphExecutionData::new(Arc::new(block))
     }
@@ -237,7 +244,7 @@ mod tests {
     fn test_block_to_payload() {
         let block = create_test_block();
         let hash = block.hash();
-        let data = MorphPayloadTypes::block_to_payload(block);
+        let data = MorphPayloadTypes::block_to_payload(block, None);
         assert_eq!(data.block_hash(), hash);
         assert!(data.expected_withdraw_trie_root.is_none());
     }

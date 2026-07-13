@@ -354,6 +354,7 @@ pub async fn advance_empty_block(node: &mut MorphTestNode) -> eyre::Result<Morph
             withdrawals: Some(vec![]),
             parent_beacon_block_root: Some(B256::ZERO),
             slot_number: None,
+            target_gas_limit: None,
         },
         transactions: Some(vec![]),
         gas_limit: None,
@@ -367,7 +368,7 @@ pub async fn advance_empty_block(node: &mut MorphTestNode) -> eyre::Result<Morph
             attributes: rpc_attrs,
             parent_hash: head_hash,
             cache: None,
-            trie_handle: None,
+            state_root_handle: None,
         })
         .await?
         .map_err(|e| eyre::eyre!("payload build failed: {e}"))?;
@@ -571,6 +572,7 @@ pub fn morph_payload_attributes(timestamp: u64) -> morph_payload_types::MorphPay
             withdrawals: Some(vec![]),
             parent_beacon_block_root: Some(B256::ZERO),
             slot_number: None,
+            target_gas_limit: None,
         },
         transactions: None,
         gas_limit: None,
