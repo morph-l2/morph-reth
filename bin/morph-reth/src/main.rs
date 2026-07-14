@@ -3,6 +3,8 @@
 //! This is the main entry point for the Morph L2 execution layer client.
 //! It extends reth with Morph-specific functionality.
 
+mod proofs;
+
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
 
@@ -21,6 +23,10 @@ use morph_chainspec::{MORPH_DEFAULT_PRIORITY_FEE, MorphChainSpec, MorphChainSpec
 use morph_consensus::MorphConsensus;
 use morph_evm::{MorphEvmConfig, evm::MorphEvmFactory};
 use morph_node::{MorphAddOns, MorphArgs, MorphNode};
+use morph_proofs::{MdbxProofsStorage, MorphProofsStorage, MorphProofsStore, ProofDbIdentity};
+use morph_proofs_exex::MorphProofsExEx;
+use proofs::MorphSubcommand;
+use reth_chainspec::EthChainSpec;
 use reth_cli_util::sigsegv_handler;
 use reth_ethereum_cli::{Cli, Commands};
 use reth_node_builder::Node;
@@ -33,7 +39,7 @@ fn morph_default_suggested_fee() -> U256 {
 }
 
 fn apply_morph_cli_defaults(
-    cli: &mut Cli<MorphChainSpecParser, MorphArgs, DefaultRpcModuleValidator>,
+    cli: &mut Cli<MorphChainSpecParser, MorphArgs, DefaultRpcModuleValidator, MorphSubcommand>,
 ) {
     if let Commands::Node(command) = &mut cli.command {
         command
@@ -67,7 +73,8 @@ fn main() {
         )
     };
 
-    let mut cli = Cli::<MorphChainSpecParser, MorphArgs, DefaultRpcModuleValidator>::parse();
+    let mut cli =
+        Cli::<MorphChainSpecParser, MorphArgs, DefaultRpcModuleValidator, MorphSubcommand>::parse();
     apply_morph_cli_defaults(&mut cli);
 
     // Run the node
@@ -75,14 +82,76 @@ fn main() {
         cli.run_with_components::<MorphNode>(components, async move |builder, morph_args| {
             info!(target: "morph::cli", "Starting Morph-Reth node");
 
+            let chain_spec = builder.config().chain.clone();
+            let datadir = builder.config().datadir();
+            let chain_id = chain_spec.chain().id();
+            let genesis_hash = chain_spec.genesis_hash();
+
+            let proof_history = if morph_args.proofs_history {
+                let path = morph_args
+                    .proofs_history_storage_path
+                    .clone()
+                    .unwrap_or_else(|| datadir.data_dir().join("historical-proofs"));
+                info!(
+                    target: "morph::proofs",
+                    path = %path.display(),
+                    chain_id,
+                    "opening Morph historical proof database"
+                );
+                let storage: MorphProofsStorage<Arc<MdbxProofsStorage>> = Arc::new(
+                    MdbxProofsStorage::open(
+                        &path,
+                        ProofDbIdentity::new(chain_id, genesis_hash),
+                    )
+                    .map_err(|error| {
+                        eyre::eyre!(
+                            "failed to open historical proof database at {}: {error}",
+                            path.display()
+                        )
+                    })?,
+                );
+                if storage.get_earliest_block_number()?.is_none()
+                    || storage.get_latest_block_number()?.is_none()
+                {
+                    return Err(eyre::eyre!(
+                        "proof history is enabled but {} is not initialized; run `morph-reth proofs init` first",
+                        path.display()
+                    ));
+                }
+                Some((
+                    storage,
+                    morph_args.proofs_history_window,
+                    morph_args.proofs_history_verification_interval,
+                ))
+            } else {
+                None
+            };
             let node = MorphNode::new(morph_args);
 
-            let handle = builder
+            let mut add_ons = MorphAddOns::new();
+            if let Some((storage, _, _)) = &proof_history {
+                add_ons = add_ons.with_proof_history(storage.clone());
+            }
+
+            let mut node_builder = builder
                 .with_types::<MorphNode>()
                 .with_components(node.components_builder())
-                .with_add_ons(MorphAddOns::new())
-                .launch_with_debug_capabilities()
-                .await?;
+                .with_add_ons(add_ons);
+
+            if let Some((storage, window, verification_interval)) = proof_history {
+                node_builder = node_builder.install_exex(
+                    "morph-proof-history",
+                    async move |ctx| {
+                        let exex = MorphProofsExEx::builder(ctx, storage)
+                            .with_proofs_history_window(window)
+                            .with_verification_interval(verification_interval)
+                            .build();
+                        Ok(async move { exex.run().await })
+                    },
+                );
+            }
+
+            let handle = node_builder.launch_with_debug_capabilities().await?;
 
             info!(target: "morph::cli", "Node started successfully");
 
@@ -92,5 +161,34 @@ fn main() {
     {
         eprintln!("Error: {err:?}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    type MorphCli =
+        Cli<MorphChainSpecParser, MorphArgs, DefaultRpcModuleValidator, MorphSubcommand>;
+
+    #[test]
+    fn parses_top_level_proofs_command() {
+        let cli = MorphCli::try_parse_from(["morph-reth", "proofs", "init", "--chain", "hoodi"])
+            .expect("top-level proofs command must parse");
+        assert!(matches!(
+            cli.command,
+            Commands::Ext(MorphSubcommand::Proofs(_))
+        ));
+    }
+
+    #[test]
+    fn disabled_mode_keeps_reth_historical_overlay_off() {
+        let cli = MorphCli::try_parse_from(["morph-reth", "node", "--chain", "hoodi"])
+            .expect("node command must parse");
+        let Commands::Node(command) = cli.command else {
+            panic!("expected node command")
+        };
+        assert!(!command.ext.proofs_history);
+        assert_eq!(command.rpc.rpc_eth_proof_window, 0);
     }
 }

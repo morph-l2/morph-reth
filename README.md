@@ -16,6 +16,7 @@ Morph Reth is the next-generation execution client for [Morph](https://www.morph
 - **Morph Hardforks**: Implements Morph hardfork logic through Jade, with bundled Mainnet and Hoodi chainspecs scheduled through Jade
 - **Custom Engine API**: L2-specific Engine API for sequencer block building and validation
 - **L1 Fee Validation**: Transaction pool with L1 data fee affordability checks
+- **Bounded Historical Proofs**: Optional forward-only EIP-1186 proof history in an independent MDBX database
 
 ### Supported Networks
 
@@ -42,6 +43,9 @@ morph-reth/
     │   ├── builder/      # Block building logic
     │   └── types/        # Engine API types (MorphExecutionData, etc.)
     ├── primitives/       # Core types (transactions, receipts)
+    ├── proofs/           # Versioned MPT history and proof state provider
+    ├── proofs-exex/      # Forward accumulation, reorg, unwind, and pruning
+    ├── reference-index/  # Independent transaction reference index
     ├── revm/             # L1 fee calculation, token fee logic
     ├── rpc/              # RPC implementation and type conversions
     └── txpool/           # Transaction pool with L1 fee validation
@@ -60,6 +64,9 @@ morph-reth/
 | `morph-payload-types` | Engine API payload types |
 | `morph-payload-builder` | Block building implementation |
 | `morph-primitives` | Transaction and receipt types |
+| `morph-proofs` | Bounded, versioned MPT history in MDBX |
+| `morph-proofs-exex` | Forward-only proof-history execution extension |
+| `morph-reference-index` | Independent Morph transaction reference index |
 | `morph-revm` | L1 fee and token fee calculations |
 | `morph-rpc` | RPC implementation and type conversions |
 | `morph-txpool` | Transaction pool with L1 fee and MorphTx validation |
@@ -114,7 +121,36 @@ openssl rand -hex 32 > jwt.hex
 |------|---------|-------------|
 | `--morph.max-tx-payload-bytes` | 122880 (120KB) | Maximum transaction payload bytes per block |
 | `--morph.max-tx-per-block` | None (unlimited) | Maximum number of transactions per block |
-| `--rpc.eth-proof-window` | 0 (disabled) | Max historical blocks for `eth_getProof` (up to 1209600) |
+| `--proofs-history` | false | Enable historical `eth_getProof` and proof-history accumulation |
+| `--proofs-history.storage-path` | `<chain-datadir>/historical-proofs` | Override the proof MDBX directory |
+| `--proofs-history.window` | 1296000 | Number of canonical blocks retained |
+| `--proofs-history.verification-interval` | 0 | Re-execute every Nth indexed block; 0 disables verification |
+| `--rpc.eth-proof-window` | 0 | Reth overlay limit used only while proof history is disabled |
+
+#### Initializing Historical Proofs
+
+Proof history starts at the current canonical tip and accumulates forward. Stop the node before
+initialization so the source state remains fixed:
+
+```bash
+./target/release/morph-reth proofs init --chain hoodi --datadir /path/to/reth-data
+
+./target/release/morph-reth node \
+  --chain hoodi \
+  --datadir /path/to/reth-data \
+  --proofs-history \
+  --http \
+  --authrpc.jwtsecret jwt.hex
+```
+
+The standard `eth_getProof` method is then served only for the inclusive range reported by
+`debug_proofsSyncStatus`; requests outside that range never fall back to Reth's historical overlay.
+The same `eth_getProof` override is installed on the authenticated RPC server. For manual
+maintenance use `morph-reth proofs prune` and `morph-reth proofs unwind --target <BLOCK>`.
+
+For cold copies, stop the source node and copy the complete chain data directory, including
+`historical-proofs`, as one consistent unit. Startup validates the proof database schema, chain ID,
+genesis hash, and latest canonical block hash before resuming.
 
 ### Running Tests
 

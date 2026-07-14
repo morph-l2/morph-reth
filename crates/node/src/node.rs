@@ -252,6 +252,7 @@ mod tests {
         let args = super::super::args::MorphArgs {
             max_tx_payload_bytes: 200_000,
             max_tx_per_block: Some(500),
+            ..Default::default()
         };
         let node = MorphNode::new(args);
         assert_eq!(node.args.max_tx_payload_bytes, 200_000);

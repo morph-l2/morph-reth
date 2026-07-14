@@ -8,9 +8,12 @@ use alloy_hardforks::ForkCondition;
 use morph_chainspec::{MorphHardfork, MorphHardforks};
 use morph_evm::MorphEvmConfig;
 use morph_primitives::{Block, MorphHeader, MorphReceipt};
+use morph_proofs::{MdbxProofsStorage, MorphProofsStorage};
 use morph_reference_index::{ReferenceIndexConfig, ReferenceIndexRuntime};
 use morph_rpc::{
-    MorphEthApiBuilder, MorphEthConfigApiServer, MorphEthConfigHandler,
+    MorphEthApiBuilder, MorphEthConfigApiServer, MorphEthConfigHandler, ProofStatusApiExt,
+    ProofStatusApiOverrideServer,
+    eth::proofs::{EthProofApiExt, EthProofApiOverrideServer},
     morph::{MorphRpc, MorphRpcHandler, MorphRpcServer},
 };
 use reth_chain_state::CanonStateSubscriptions;
@@ -29,6 +32,7 @@ use reth_provider::{
 use reth_rpc_builder::Identity;
 use reth_rpc_eth_api::RpcNodeCore;
 use reth_tracing::tracing;
+use std::sync::Arc;
 
 /// Morph node add-ons for RPC and Engine API.
 ///
@@ -47,6 +51,8 @@ pub struct MorphAddOns<
 > {
     /// Inner RPC add-ons from reth.
     inner: RpcAddOns<N, EthB, PVB, NoopEngineApiBuilder, EVB, RpcMiddleware, AuthHttpMiddleware>,
+    /// Optional proof-history storage used to replace `eth_getProof` on normal and auth RPC.
+    proof_history: Option<MorphProofsStorage<Arc<MdbxProofsStorage>>>,
 }
 
 impl<N> MorphAddOns<NodeAdapter<N>, MorphEthApiBuilder>
@@ -68,7 +74,17 @@ where
                 Identity::default(),
                 Identity::default(),
             ),
+            proof_history: None,
         }
+    }
+
+    /// Attach initialized proof-history storage to the RPC add-ons.
+    pub fn with_proof_history(
+        mut self,
+        storage: MorphProofsStorage<Arc<MdbxProofsStorage>>,
+    ) -> Self {
+        self.proof_history = Some(storage);
+        self
     }
 }
 
@@ -171,6 +187,7 @@ where
 
         let morph_rpc_ctx = MorphRpc::new(reference_index_handle, provider.clone());
         let reference_rpc_handler = MorphRpcHandler::new(morph_rpc_ctx);
+        let proof_history = self.proof_history;
 
         // Use launch_add_ons_with to register custom Engine API and eth_config
         self.inner
@@ -178,8 +195,33 @@ where
                 let reth_node_builder::rpc::RpcModuleContainer {
                     modules,
                     auth_module,
+                    registry,
                     ..
                 } = container;
+
+                if let Some(storage) = proof_history {
+                    let eth_api = registry.eth_api().clone();
+                    modules
+                        .replace_configured(
+                            EthProofApiExt::new(eth_api.clone(), storage.clone()).into_rpc(),
+                        )
+                        .map_err(|error| {
+                            eyre::eyre!("Failed to replace normal RPC eth_getProof: {error}")
+                        })?;
+                    auth_module
+                        .replace_auth_methods(
+                            EthProofApiExt::new(eth_api, storage.clone()).into_rpc(),
+                        )
+                        .map_err(|error| {
+                            eyre::eyre!("Failed to replace auth RPC eth_getProof: {error}")
+                        })?;
+                    modules
+                        .replace_configured(ProofStatusApiExt::new(storage).into_rpc())
+                        .map_err(|error| {
+                            eyre::eyre!("Failed to register debug_proofsSyncStatus: {error}")
+                        })?;
+                    tracing::info!(target: "morph::node", "Historical proof RPCs registered");
+                }
 
                 // Register Morph eth_config handler (EIP-7910 + morph extension)
                 // This provides eth_config on HTTP/WS/IPC for morphnode compatibility.

@@ -1,0 +1,37 @@
+[package]
+name = "morph-proofs-exex"
+description = "Forward-only proof-history execution extension for Morph"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+morph-proofs.workspace = true
+
+alloy-consensus.workspace = true
+alloy-eips.workspace = true
+eyre.workspace = true
+futures.workspace = true
+reth-execution-types.workspace = true
+reth-exex.workspace = true
+reth-node-api.workspace = true
+reth-provider.workspace = true
+reth-trie.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+alloy-primitives.workspace = true
+morph-proofs = { workspace = true, features = ["test-utils"] }
+reth-db = { workspace = true, features = ["test-utils"] }
+reth-ethereum-primitives = { workspace = true, features = ["test-utils"] }
+reth-exex-test-utils.workspace = true
+reth-primitives-traits = { workspace = true, features = ["test-utils"] }
+
+[features]
+default = []

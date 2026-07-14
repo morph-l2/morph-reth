@@ -18,6 +18,7 @@ morph-evm.workspace = true
 morph-payload-builder.workspace = true
 morph-payload-types.workspace = true
 morph-primitives = { workspace = true, features = ["reth-codec"] }
+morph-proofs.workspace = true
 morph-reference-index.workspace = true
 morph-rpc.workspace = true
 morph-txpool.workspace = true
@@ -84,6 +85,7 @@ reth-db = { workspace = true, features = ["test-utils"] }
 reth-e2e-test-utils.workspace = true
 reth-node-core.workspace = true
 reth-payload-primitives.workspace = true
+reth-rpc-server-types.workspace = true
 reth-tasks.workspace = true
 reth-tracing.workspace = true
 alloy-consensus.workspace = true
@@ -94,7 +96,9 @@ jsonrpsee.workspace = true
 morph-chainspec.workspace = true
 morph-payload-types.workspace = true
 morph-primitives.workspace = true
+morph-proofs-exex.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 
 [[test]]
 name = "it"

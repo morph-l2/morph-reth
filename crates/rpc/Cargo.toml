@@ -16,6 +16,7 @@ morph-chainspec.workspace = true
 morph-reference-index.workspace = true
 morph-revm = { workspace = true, features = ["rpc"] }
 morph-evm = { workspace = true, features = ["rpc"] }
+morph-proofs.workspace = true
 
 # Reth
 reth-chainspec.workspace = true
@@ -23,9 +24,13 @@ reth-node-api.workspace = true
 reth-node-builder.workspace = true
 reth-primitives-traits.workspace = true
 reth-rpc.workspace = true
+reth-rpc-api.workspace = true
 reth-rpc-convert.workspace = true
 reth-rpc-eth-api.workspace = true
 reth-rpc-eth-types.workspace = true
+reth-rpc-server-types.workspace = true
+reth-metrics.workspace = true
+metrics.workspace = true
 reth-evm.workspace = true
 reth-provider.workspace = true
 reth-revm.workspace = true
@@ -45,6 +50,7 @@ alloy-eips.workspace = true
 
 # JSON-RPC
 jsonrpsee.workspace = true
+async-trait.workspace = true
 
 # Serialization
 serde.workspace = true

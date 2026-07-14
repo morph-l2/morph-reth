@@ -13,6 +13,7 @@ mod evm;
 mod hardfork;
 mod l1_messages;
 mod morph_tx;
+mod proof_history;
 mod reference_index;
 mod rpc;
 mod sync;

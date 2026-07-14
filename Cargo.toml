@@ -19,6 +19,8 @@ members = [
     "crates/payload/builder",
     "crates/payload/types",
     "crates/primitives",
+    "crates/proofs",
+    "crates/proofs-exex",
     "crates/reference-index",
     "crates/revm",
     "crates/txpool",
@@ -94,6 +96,8 @@ morph-node = { path = "crates/node"}
 morph-payload-builder = { path = "crates/payload/builder", default-features = false }
 morph-payload-types = { path = "crates/payload/types", default-features = false }
 morph-primitives = { path = "crates/primitives", default-features = false }
+morph-proofs = { path = "crates/proofs", default-features = false }
+morph-proofs-exex = { path = "crates/proofs-exex", default-features = false }
 morph-reference-index = { path = "crates/reference-index", default-features = false }
 morph-rpc = { path = "crates/rpc" }
 morph-revm = { path = "crates/revm", default-features = false }
@@ -104,6 +108,7 @@ reth-chain-state = { git = "https://github.com/paradigmxyz/reth", rev = "f0a4179
 reth-chainspec = { git = "https://github.com/paradigmxyz/reth", rev = "f0a41795d72ae5bb0b6c3661ac42ffb7b78ef105" }
 reth-cli = { git = "https://github.com/paradigmxyz/reth", rev = "f0a41795d72ae5bb0b6c3661ac42ffb7b78ef105" }
 reth-cli-commands = { git = "https://github.com/paradigmxyz/reth", rev = "f0a41795d72ae5bb0b6c3661ac42ffb7b78ef105" }
+reth-cli-runner = { git = "https://github.com/paradigmxyz/reth", rev = "f0a41795d72ae5bb0b6c3661ac42ffb7b78ef105" }
 reth-cli-util = { git = "https://github.com/paradigmxyz/reth", rev = "f0a41795d72ae5bb0b6c3661ac42ffb7b78ef105" }
 reth-codecs = { version = "0.5.0", default-features = false }
 reth-codecs-derive = "0.5.0"
@@ -116,6 +121,9 @@ reth-engine-local = { git = "https://github.com/paradigmxyz/reth", rev = "f0a417
 reth-engine-primitives = { git = "https://github.com/paradigmxyz/reth", rev = "f0a41795d72ae5bb0b6c3661ac42ffb7b78ef105" }
 reth-engine-tree = { git = "https://github.com/paradigmxyz/reth", rev = "f0a41795d72ae5bb0b6c3661ac42ffb7b78ef105" }
 reth-errors = { git = "https://github.com/paradigmxyz/reth", rev = "f0a41795d72ae5bb0b6c3661ac42ffb7b78ef105" }
+reth-exex = { git = "https://github.com/paradigmxyz/reth", rev = "f0a41795d72ae5bb0b6c3661ac42ffb7b78ef105" }
+reth-exex-test-utils = { git = "https://github.com/paradigmxyz/reth", rev = "f0a41795d72ae5bb0b6c3661ac42ffb7b78ef105" }
+reth-execution-errors = { git = "https://github.com/paradigmxyz/reth", rev = "f0a41795d72ae5bb0b6c3661ac42ffb7b78ef105" }
 reth-eth-wire-types = { git = "https://github.com/paradigmxyz/reth", rev = "f0a41795d72ae5bb0b6c3661ac42ffb7b78ef105" }
 reth-ethereum = { git = "https://github.com/paradigmxyz/reth", rev = "f0a41795d72ae5bb0b6c3661ac42ffb7b78ef105" }
 reth-ethereum-cli = { git = "https://github.com/paradigmxyz/reth", rev = "f0a41795d72ae5bb0b6c3661ac42ffb7b78ef105" }
@@ -145,9 +153,11 @@ reth-rpc-eth-api = { git = "https://github.com/paradigmxyz/reth", rev = "f0a4179
 reth-rpc-eth-types = { git = "https://github.com/paradigmxyz/reth", rev = "f0a41795d72ae5bb0b6c3661ac42ffb7b78ef105" }
 reth-rpc-server-types = { git = "https://github.com/paradigmxyz/reth", rev = "f0a41795d72ae5bb0b6c3661ac42ffb7b78ef105" }
 reth-storage-api = { git = "https://github.com/paradigmxyz/reth", rev = "f0a41795d72ae5bb0b6c3661ac42ffb7b78ef105" }
+reth-storage-errors = { git = "https://github.com/paradigmxyz/reth", rev = "f0a41795d72ae5bb0b6c3661ac42ffb7b78ef105", default-features = false }
 reth-tasks = { git = "https://github.com/paradigmxyz/reth", rev = "f0a41795d72ae5bb0b6c3661ac42ffb7b78ef105" }
 reth-tracing = { git = "https://github.com/paradigmxyz/reth", rev = "f0a41795d72ae5bb0b6c3661ac42ffb7b78ef105" }
 reth-trie = { git = "https://github.com/paradigmxyz/reth", rev = "f0a41795d72ae5bb0b6c3661ac42ffb7b78ef105" }
+reth-trie-common = { git = "https://github.com/paradigmxyz/reth", rev = "f0a41795d72ae5bb0b6c3661ac42ffb7b78ef105" }
 reth-transaction-pool = { git = "https://github.com/paradigmxyz/reth", rev = "f0a41795d72ae5bb0b6c3661ac42ffb7b78ef105" }
 reth-zstd-compressors = { version = "0.5.0", default-features = false }
 reth-execution-cache = { git = "https://github.com/paradigmxyz/reth", rev = "f0a41795d72ae5bb0b6c3661ac42ffb7b78ef105" }
@@ -196,6 +206,7 @@ axum = "0.8.4"
 base64 = "0.22"
 blake3 = "1.8"
 bytes = "1.8"
+bincode = "2"
 clap = { version = "4.5.45", features = ["derive"] }
 const-hex = { version = "1.15.0" }
 dashmap = "6.0"
@@ -209,6 +220,7 @@ itertools = "0.14.0"
 jiff = { version = "0.2.15", default-features = false }
 jsonrpsee = { version = "0.26.0", features = ["server", "client", "macros"] }
 metrics = "0.24.0"
+mockall = "0.14"
 p256 = "0.13"
 parking_lot = "0.12.4"
 prometheus-client = "0.24.0"
@@ -219,6 +231,7 @@ rand_core = "0.6.4"
 rayon = "1.10"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.142"
+strum = { version = "0.27", default-features = false }
 sha2 = "0.10"
 tempfile = "3.20.0"
 test-fuzz = "7"
