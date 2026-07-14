@@ -29,11 +29,14 @@ pub trait MorphRpc {
     /// ordered by (block_number, tx_index) ascending, with offset-based
     /// pagination.
     ///
-    /// Returns `-32000 "reference index initializing"` while the startup
-    /// backfill/reconcile has not yet completed.
+    /// Returns `-32000 "reference index initializing"` while the runtime is
+    /// opening the index.
     ///
-    /// Returns `-32000 "reference index is behind"` when the index lags the
-    /// current chain tip by more than the configured threshold (default 16).
+    /// Returns `-32000 "reference index is behind"` unless the durable index
+    /// cursor exactly matches the canonical head number and hash.
+    ///
+    /// Returns `-32000 "reference index is unavailable"` while the runtime is
+    /// repairing the index or after a non-recoverable index error.
     ///
     /// Marked `blocking` because the handler runs synchronous MDBX reads.
     #[method(name = "getTransactionHashesByReference", blocking)]

@@ -117,9 +117,6 @@ reth-engine-primitives = { git = "https://github.com/paradigmxyz/reth", rev = "f
 reth-engine-tree = { git = "https://github.com/paradigmxyz/reth", rev = "f0a41795d72ae5bb0b6c3661ac42ffb7b78ef105" }
 reth-errors = { git = "https://github.com/paradigmxyz/reth", rev = "f0a41795d72ae5bb0b6c3661ac42ffb7b78ef105" }
 reth-eth-wire-types = { git = "https://github.com/paradigmxyz/reth", rev = "f0a41795d72ae5bb0b6c3661ac42ffb7b78ef105" }
-reth-exex = { git = "https://github.com/paradigmxyz/reth", rev = "f0a41795d72ae5bb0b6c3661ac42ffb7b78ef105" }
-reth-exex-test-utils = { git = "https://github.com/paradigmxyz/reth", rev = "f0a41795d72ae5bb0b6c3661ac42ffb7b78ef105" }
-reth-exex-types = { git = "https://github.com/paradigmxyz/reth", rev = "f0a41795d72ae5bb0b6c3661ac42ffb7b78ef105" }
 reth-ethereum = { git = "https://github.com/paradigmxyz/reth", rev = "f0a41795d72ae5bb0b6c3661ac42ffb7b78ef105" }
 reth-ethereum-cli = { git = "https://github.com/paradigmxyz/reth", rev = "f0a41795d72ae5bb0b6c3661ac42ffb7b78ef105" }
 reth-ethereum-consensus = { git = "https://github.com/paradigmxyz/reth", rev = "f0a41795d72ae5bb0b6c3661ac42ffb7b78ef105" }

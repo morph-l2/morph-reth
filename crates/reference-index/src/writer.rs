@@ -8,10 +8,9 @@ use crate::{
     db::{IndexMetaKey, encode_u64},
     tables::{
         BlockHashValue, BlockReferenceIndex, BlockReferenceKey, BlockTimestampValue, IndexMeta,
-        IndexedBlockKey, IndexedBlocks, MetaValue, ReferenceIndex, ReferenceIndexKey,
-        ReferenceValue,
+        IndexedBlockKey, IndexedBlocks, ReferenceIndex, ReferenceIndexKey, ReferenceValue,
     },
-    types::{BackfillState, ReferenceIndexError},
+    types::ReferenceIndexError,
 };
 use alloy_consensus::transaction::TxHashRef;
 use alloy_primitives::B256;
@@ -26,7 +25,7 @@ use reth_db_api::{cursor::DbCursorRO, transaction::DbTxMut};
 /// the same block number before re-writing to avoid leaving stale entries
 /// (keys contain `tx_hash`, so a re-write with a different tx set would leave
 /// old-tx ghost rows).  Reconcile and reorg paths follow this contract.
-pub fn write_block<Tx: DbTxMut>(
+pub(crate) fn write_block<Tx: DbTxMut>(
     tx: &Tx,
     block_number: u64,
     block_hash: B256,
@@ -69,7 +68,10 @@ pub fn write_block<Tx: DbTxMut>(
 /// Implements the reverse of [`write_block`]: reads every
 /// `BlockReferenceIndex` row for `block_number`, reconstructs each
 /// `ReferenceIndex` key, and removes entries from all three tables.
-pub fn delete_block<Tx: DbTxMut>(tx: &Tx, block_number: u64) -> Result<(), ReferenceIndexError> {
+pub(crate) fn delete_block<Tx: DbTxMut>(
+    tx: &Tx,
+    block_number: u64,
+) -> Result<(), ReferenceIndexError> {
     // 1. Collect all BlockReferenceIndex rows for this block.
     let mut entries = Vec::new();
     {
@@ -110,7 +112,7 @@ pub fn delete_block<Tx: DbTxMut>(tx: &Tx, block_number: u64) -> Result<(), Refer
 
 // ── metadata writes ──────────────────────────────────────────────────────────
 
-pub fn update_indexed_to<Tx: DbTxMut>(
+pub(crate) fn update_indexed_to<Tx: DbTxMut>(
     tx: &Tx,
     block_number: u64,
 ) -> Result<(), ReferenceIndexError> {
@@ -118,37 +120,12 @@ pub fn update_indexed_to<Tx: DbTxMut>(
     Ok(())
 }
 
-pub fn update_indexed_from<Tx: DbTxMut>(
-    tx: &Tx,
-    block_number: u64,
-) -> Result<(), ReferenceIndexError> {
-    tx.put::<IndexMeta>(IndexMetaKey::IndexedFrom.into(), encode_u64(block_number))?;
+pub(crate) fn clear_indexed_to<Tx: DbTxMut>(tx: &Tx) -> Result<(), ReferenceIndexError> {
+    tx.delete::<IndexMeta>(IndexMetaKey::IndexedTo.into(), None)?;
     Ok(())
 }
 
-pub fn update_backfill_current<Tx: DbTxMut>(
-    tx: &Tx,
-    block_number: u64,
-) -> Result<(), ReferenceIndexError> {
-    tx.put::<IndexMeta>(
-        IndexMetaKey::BackfillCurrent.into(),
-        encode_u64(block_number),
-    )?;
-    Ok(())
-}
-
-pub fn set_backfill_state<Tx: DbTxMut>(
-    tx: &Tx,
-    state: BackfillState,
-) -> Result<(), ReferenceIndexError> {
-    tx.put::<IndexMeta>(
-        IndexMetaKey::BackfillState.into(),
-        MetaValue(vec![state as u8]),
-    )?;
-    Ok(())
-}
-
-pub fn set_jade_first_block_number<Tx: DbTxMut>(
+pub(crate) fn set_jade_first_block_number<Tx: DbTxMut>(
     tx: &Tx,
     block_number: u64,
 ) -> Result<(), ReferenceIndexError> {
@@ -162,7 +139,7 @@ pub fn set_jade_first_block_number<Tx: DbTxMut>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ReferenceIndexDb;
+    use crate::db::ReferenceIndexDb;
     use alloy_consensus::transaction::TxEip1559;
     use alloy_primitives::{Address, Signature, TxKind, U256};
     use morph_primitives::MorphTxEnvelope;
@@ -209,7 +186,7 @@ mod tests {
         tx.commit().unwrap();
 
         assert_eq!(written, 0);
-        assert_eq!(db.indexed_to().unwrap(), 42);
+        assert_eq!(db.indexed_to().unwrap(), Some(42));
         assert_eq!(
             db.indexed_block_hash(42).unwrap(),
             Some(B256::repeat_byte(0xaa))
@@ -237,32 +214,32 @@ mod tests {
     }
 
     #[test]
-    fn metadata_updates_are_visible_after_commit() {
+    fn cursor_and_jade_activation_are_visible_after_commit() {
         let dir = TempDir::new().unwrap();
         let db = ReferenceIndexDb::open(dir.path(), 2818, B256::ZERO).unwrap();
 
         let tx = db.tx_mut().unwrap();
-        update_indexed_from(&tx, 100).unwrap();
         update_indexed_to(&tx, 200).unwrap();
-        update_backfill_current(&tx, 150).unwrap();
-        set_backfill_state(&tx, BackfillState::Complete).unwrap();
         set_jade_first_block_number(&tx, 100).unwrap();
         tx.commit().unwrap();
 
-        assert_eq!(db.indexed_from().unwrap(), Some(100));
-        assert_eq!(db.indexed_to().unwrap(), 200);
-        assert_eq!(db.backfill_state().unwrap(), BackfillState::Complete);
+        assert_eq!(db.indexed_to().unwrap(), Some(200));
         assert_eq!(db.jade_first_block_number().unwrap(), Some(100));
+    }
 
-        // Sanity: a fresh read transaction also sees the backfill_current we set.
-        let tx = db.tx().unwrap();
-        let raw = tx
-            .get::<IndexMeta>(IndexMetaKey::BackfillCurrent.into())
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            u64::from_be_bytes(raw.0.as_slice().try_into().unwrap()),
-            150
-        );
+    #[test]
+    fn clearing_cursor_restores_no_progress_state() {
+        let dir = TempDir::new().unwrap();
+        let db = ReferenceIndexDb::open(dir.path(), 2818, B256::ZERO).unwrap();
+
+        let tx = db.tx_mut().unwrap();
+        update_indexed_to(&tx, 7).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(db.indexed_to().unwrap(), Some(7));
+
+        let tx = db.tx_mut().unwrap();
+        clear_indexed_to(&tx).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(db.indexed_to().unwrap(), None);
     }
 }

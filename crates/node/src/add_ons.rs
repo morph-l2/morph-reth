@@ -2,16 +2,19 @@
 
 use crate::{
     MorphNode,
-    exex::ReferenceIndexControl,
     validator::{MorphEngineValidatorBuilder, MorphTreeEngineValidatorBuilder},
 };
+use alloy_hardforks::ForkCondition;
+use morph_chainspec::{MorphHardfork, MorphHardforks};
 use morph_evm::MorphEvmConfig;
 use morph_primitives::{Block, MorphHeader, MorphReceipt};
-use morph_reference_index::{DEFAULT_LAG_THRESHOLD, ReferenceIndexReader};
+use morph_reference_index::{ReferenceIndexConfig, ReferenceIndexRuntime};
 use morph_rpc::{
     MorphEthApiBuilder, MorphEthConfigApiServer, MorphEthConfigHandler,
     morph::{MorphRpc, MorphRpcHandler, MorphRpcServer},
 };
+use reth_chain_state::CanonStateSubscriptions;
+use reth_chainspec::EthChainSpec;
 use reth_node_api::{AddOnsContext, FullNodeComponents, FullNodeTypes, NodeAddOns, NodePrimitives};
 use reth_node_builder::{
     NodeAdapter,
@@ -44,10 +47,6 @@ pub struct MorphAddOns<
 > {
     /// Inner RPC add-ons from reth.
     inner: RpcAddOns<N, EthB, PVB, NoopEngineApiBuilder, EVB, RpcMiddleware, AuthHttpMiddleware>,
-    /// Optional reference-index control injected by `main.rs`.  When present
-    /// the add-on spawns startup indexing on launch and registers the
-    /// `morph_` RPC namespace.
-    reference_index: Option<ReferenceIndexControl>,
 }
 
 impl<N> MorphAddOns<NodeAdapter<N>, MorphEthApiBuilder>
@@ -69,16 +68,19 @@ where
                 Identity::default(),
                 Identity::default(),
             ),
-            reference_index: None,
         }
     }
+}
 
-    /// Attach a reference index control so the add-on can spawn startup
-    /// indexing and register the `morph_` RPC namespace on launch.
-    pub fn with_reference_index(mut self, control: ReferenceIndexControl) -> Self {
-        self.reference_index = Some(control);
-        self
+fn ensure_reference_index_pruning_compatible(
+    bodies_history_pruning_enabled: bool,
+) -> eyre::Result<()> {
+    if bodies_history_pruning_enabled {
+        eyre::bail!(
+            "Morph reference index requires canonical block bodies from Jade onward; disable bodies-history pruning"
+        )
     }
+    Ok(())
 }
 
 impl<N> Default for MorphAddOns<NodeAdapter<N>, MorphEthApiBuilder>
@@ -119,40 +121,56 @@ where
         let task_executor = ctx.node.task_executor().clone();
         let block_tag_tracker = std::sync::Arc::new(morph_engine_api::BlockTagTracker::default());
 
+        // The reference index backfills directly from canonical block bodies. Read the
+        // effective modes from the provider so both CLI arguments and reth.toml are covered.
+        let bodies_history_pruning_enabled = provider
+            .database_provider_ro()?
+            .prune_modes_ref()
+            .bodies_history
+            .is_some();
+        ensure_reference_index_pruning_compatible(bodies_history_pruning_enabled)?;
+
+        let canonical_notifications = provider.subscribe_to_canonical_state();
+        let jade_timestamp = match chain_spec.morph_fork_activation(MorphHardfork::Jade) {
+            ForkCondition::Timestamp(timestamp) => timestamp,
+            ForkCondition::Never => u64::MAX,
+            condition => eyre::bail!(
+                "Morph reference index requires timestamp-based Jade activation, got {condition:?}"
+            ),
+        };
+        let reference_index_path = ctx
+            .config
+            .datadir()
+            .data_dir()
+            .join("morph")
+            .join("reference_index");
+        let reference_index_config = ReferenceIndexConfig::new(
+            &reference_index_path,
+            chain_spec.chain().id(),
+            chain_spec.genesis_hash(),
+            jade_timestamp,
+        );
+        let (reference_index_runtime, reference_index_handle) =
+            ReferenceIndexRuntime::new(reference_index_config, provider.clone());
+        let runtime_executor = task_executor.clone();
+        task_executor.spawn_task(async move {
+            reference_index_runtime
+                .run(runtime_executor, canonical_notifications)
+                .await;
+        });
+
+        tracing::info!(
+            target: "morph::reference_index",
+            path = %reference_index_path.display(),
+            "Morph reference index background runtime started"
+        );
+
         // Create Morph eth_config handler (EIP-7910 + morph extension)
         let eth_config_handler =
             MorphEthConfigHandler::new(ctx.node.provider().clone(), ctx.node.evm_config().clone());
 
-        // Spawn reference index startup indexing (Task A) if configured.
-        let reference_rpc_handler = if let Some(control) = self.reference_index {
-            let startup_control = control.clone();
-            let startup_node = ctx.node.clone();
-            // spawn_critical_task causes node shutdown on panic/error, matching the spec
-            // requirement that reference index startup failures are fatal.
-            task_executor.spawn_critical_task("morph reference index startup", async move {
-                let result = tokio::task::spawn_blocking(move || {
-                    crate::exex::run_startup_indexing(&startup_node, &startup_control)
-                })
-                .await
-                .unwrap_or_else(|e| Err(eyre::eyre!("reference index startup panicked: {e}")));
-
-                match result {
-                    Ok(()) => {}
-                    Err(err) => {
-                        // Propagate to spawn_critical_task which will shut down the node.
-                        panic!("reference index startup failed: {err:?}");
-                    }
-                }
-            });
-
-            let morph_rpc_ctx = MorphRpc::new(
-                ReferenceIndexReader::new(control.db, DEFAULT_LAG_THRESHOLD),
-                provider.clone(),
-            );
-            Some(MorphRpcHandler::new(morph_rpc_ctx))
-        } else {
-            None
-        };
+        let morph_rpc_ctx = MorphRpc::new(reference_index_handle, provider.clone());
+        let reference_rpc_handler = MorphRpcHandler::new(morph_rpc_ctx);
 
         // Use launch_add_ons_with to register custom Engine API and eth_config
         self.inner
@@ -171,14 +189,13 @@ where
                     .map_err(|e| eyre::eyre!("Failed to register eth_config handler: {}", e))?;
                 tracing::info!(target: "morph::node", "Morph eth_config handler registered successfully");
 
-                // Register morph_ RPC namespace (if reference index was configured).
-                if let Some(handler) = reference_rpc_handler {
-                    tracing::debug!(target: "morph::node", "Registering morph_ RPC namespace");
-                    modules
-                        .merge_configured(handler.into_rpc())
-                        .map_err(|e| eyre::eyre!("Failed to register morph_ RPC: {}", e))?;
-                    tracing::info!(target: "morph::node", "morph_ RPC namespace registered");
-                }
+                // The namespace remains registered while the index catches up; handlers return
+                // a structured unavailable/behind error until the durable cursor is live.
+                tracing::debug!(target: "morph::node", "Registering morph_ RPC namespace");
+                modules
+                    .merge_configured(reference_rpc_handler.into_rpc())
+                    .map_err(|e| eyre::eyre!("Failed to register morph_ RPC: {}", e))?;
+                tracing::info!(target: "morph::node", "morph_ RPC namespace registered");
 
                 // Create and register Morph L2 Engine API
                 tracing::debug!(target: "morph::node", "Registering Morph L2 Engine API");
@@ -240,5 +257,21 @@ where
 
     fn engine_validator_builder(&self) -> Self::ValidatorBuilder {
         self.inner.engine_validator_builder()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_reference_index_pruning_compatible;
+
+    #[test]
+    fn reference_index_accepts_retained_block_bodies() {
+        assert!(ensure_reference_index_pruning_compatible(false).is_ok());
+    }
+
+    #[test]
+    fn reference_index_rejects_bodies_history_pruning() {
+        let error = ensure_reference_index_pruning_compatible(true).unwrap_err();
+        assert!(error.to_string().contains("bodies-history pruning"));
     }
 }
