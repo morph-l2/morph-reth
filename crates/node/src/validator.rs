@@ -314,9 +314,7 @@ where
         // `convert_payload_to_block` may already have registered a withdraw-root
         // expectation for this hash. Clear it on every early reject path so a
         // later re-import of the same hash does not observe a stale entry.
-        if let Err(err) =
-            self.validate_next_l1_msg_index_for_block(payload.block.as_ref(), &ctx)
-        {
+        if let Err(err) = self.validate_next_l1_msg_index_for_block(payload.block.as_ref(), &ctx) {
             self.post_execution_validator
                 .take_withdraw_trie_root_expectation(block_hash);
             return Err(err);
