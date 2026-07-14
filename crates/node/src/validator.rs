@@ -311,7 +311,16 @@ where
         ctx: TreeCtx<'_, MorphPrimitives>,
     ) -> reth_engine_tree::tree::ValidationOutcome<MorphPrimitives> {
         let block_hash = payload.block.hash();
-        self.validate_next_l1_msg_index_for_block(payload.block.as_ref(), &ctx)?;
+        // `convert_payload_to_block` may already have registered a withdraw-root
+        // expectation for this hash. Clear it on every early reject path so a
+        // later re-import of the same hash does not observe a stale entry.
+        if let Err(err) =
+            self.validate_next_l1_msg_index_for_block(payload.block.as_ref(), &ctx)
+        {
+            self.post_execution_validator
+                .take_withdraw_trie_root_expectation(block_hash);
+            return Err(err);
+        }
         match self.inner.validate_payload(payload, ctx) {
             Ok(output) => self.validate_withdraw_trie_root(output),
             Err(err) => {
