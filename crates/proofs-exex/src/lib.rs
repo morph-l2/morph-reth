@@ -12,7 +12,8 @@ use alloy_consensus::BlockHeader;
 use alloy_eips::eip1898::BlockWithParent;
 use futures::TryStreamExt;
 use morph_proofs::{
-    MorphProofStoragePrunerTask, MorphProofsBatchStore, MorphProofsStorage,
+    DEFAULT_PROOFS_HISTORY_WINDOW, MorphProofStoragePrunerTask, MorphProofsBatchStore,
+    MorphProofsStorage,
     live::{BatchBlock, LiveTrieCollector},
     metrics::ProofHistoryMetrics,
 };
@@ -34,9 +35,6 @@ const DEFAULT_MAX_PRUNE_BLOCKS_STARTUP: u64 = 1_000;
 
 /// How many blocks to process in a single sync turn before yielding.
 const SYNC_BLOCKS_PER_TURN: usize = 50;
-
-/// Default proofs history window: 1 month of blocks at 2s block time
-const DEFAULT_PROOFS_HISTORY_WINDOW: u64 = 1_296_000;
 
 /// Default interval between proof-storage prune runs. Default is 15 seconds.
 const DEFAULT_PRUNE_INTERVAL: Duration = Duration::from_secs(15);

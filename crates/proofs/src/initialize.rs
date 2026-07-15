@@ -14,7 +14,8 @@ use reth_db::{
 };
 use reth_primitives_traits::{Account, StorageEntry};
 use reth_trie_common::{
-    BranchNodeCompact, Nibbles, StorageTrieEntry, StoredNibbles, StoredNibblesSubKey,
+    BranchNodeCompact, Nibbles, PackedStorageTrieEntry, PackedStoredNibbles,
+    PackedStoredNibblesSubKey, StoredNibbles,
 };
 use tracing::{debug, info};
 
@@ -30,7 +31,7 @@ const INITIALIZE_STORAGE_THRESHOLD: usize = 100000;
 /// Threshold for logging progress during initialization
 const INITIALIZE_LOG_THRESHOLD: usize = 100000;
 
-/// Initialization job for external storage.
+/// Initialization job for external storage backed by Reth Storage V2 tables.
 #[derive(Debug, Constructor)]
 pub struct InitializationJob<Tx: DbTx, S: MorphProofsStore + Send> {
     storage: S,
@@ -91,7 +92,7 @@ macro_rules! define_dup_cursor_iter {
     };
 }
 
-// Generate iterators for all 4 table types
+// Generate iterators for the hashed-state and Storage V2 trie tables.
 define_simple_cursor_iter!(HashedAccountsInit, tables::HashedAccounts, B256, Account);
 define_dup_cursor_iter!(
     HashedStoragesInit,
@@ -100,16 +101,16 @@ define_dup_cursor_iter!(
     StorageEntry
 );
 define_simple_cursor_iter!(
-    AccountsTrieInit,
-    tables::AccountsTrie,
-    StoredNibbles,
+    PackedAccountsTrieInit,
+    tables::PackedAccountsTrie,
+    PackedStoredNibbles,
     BranchNodeCompact
 );
 define_dup_cursor_iter!(
-    StoragesTrieInit,
-    tables::StoragesTrie,
+    PackedStoragesTrieInit,
+    tables::PackedStoragesTrie,
     B256,
-    StorageTrieEntry
+    PackedStorageTrieEntry
 );
 
 /// Trait to estimate the progress of a initialization job based on the key.
@@ -130,19 +131,25 @@ impl CompletionEstimatable for B256 {
     }
 }
 
-impl CompletionEstimatable for StoredNibbles {
+impl CompletionEstimatable for Nibbles {
     fn estimate_progress(&self) -> f64 {
         // use the first 6 nibbles as a progress estimate
-        let progress_nibbles = if self.0.is_empty() {
-            Nibbles::new()
+        let progress_nibbles = if self.is_empty() {
+            Self::new()
         } else {
-            self.0.slice(0..(self.0.len().min(6)))
+            self.slice(0..(self.len().min(6)))
         };
         let mut val: u64 = 0;
         for nibble in progress_nibbles.iter() {
             val = (val << 4) | nibble as u64;
         }
         val as f64 / (16u64.pow(progress_nibbles.len() as u32)) as f64
+    }
+}
+
+impl CompletionEstimatable for PackedStoredNibbles {
+    fn estimate_progress(&self) -> f64 {
+        self.0.estimate_progress()
     }
 }
 
@@ -282,19 +289,19 @@ impl<Tx: DbTx + Sync, S: MorphProofsStore + MorphProofsInitialStateStore + Send>
         &self,
         start_key: Option<StoredNibbles>,
     ) -> Result<(), MorphProofsStorageError> {
-        let mut start_cursor = self.tx.cursor_read::<tables::AccountsTrie>()?;
+        let mut start_cursor = self.tx.cursor_read::<tables::PackedAccountsTrie>()?;
 
         if let Some(latest_key) = start_key {
+            let packed_key = PackedStoredNibbles::from(latest_key.0);
             start_cursor
-                .seek(latest_key.clone())?
-                .filter(|(k, _)| *k == latest_key)
+                .seek(packed_key.clone())?
+                .filter(|(key, _)| *key == packed_key)
                 .ok_or(MorphProofsStorageError::InitializeStorageInconsistentState)?;
         }
 
-        let source = AccountsTrieInit::new(start_cursor);
         self.initialize(
             "accounts trie",
-            source,
+            PackedAccountsTrieInit::new(start_cursor),
             INITIALIZE_STORAGE_THRESHOLD,
             INITIALIZE_LOG_THRESHOLD,
         )?;
@@ -307,22 +314,19 @@ impl<Tx: DbTx + Sync, S: MorphProofsStore + MorphProofsInitialStateStore + Send>
         &self,
         start_key: Option<StorageTrieKey>,
     ) -> Result<(), MorphProofsStorageError> {
-        let mut start_cursor = self.tx.cursor_dup_read::<tables::StoragesTrie>()?;
+        let mut start_cursor = self.tx.cursor_dup_read::<tables::PackedStoragesTrie>()?;
 
         if let Some(latest_key) = start_key {
+            let packed_subkey = PackedStoredNibblesSubKey::from(latest_key.path.0);
             start_cursor
-                .seek_by_key_subkey(
-                    latest_key.hashed_address,
-                    StoredNibblesSubKey::from(latest_key.path.0),
-                )?
-                .filter(|v| v.nibbles.0 == latest_key.path.0)
+                .seek_by_key_subkey(latest_key.hashed_address, packed_subkey)?
+                .filter(|value| value.nibbles.0 == latest_key.path.0)
                 .ok_or(MorphProofsStorageError::InitializeStorageInconsistentState)?;
         }
 
-        let source = StoragesTrieInit::new(start_cursor);
         self.initialize(
             "storage trie",
-            source,
+            PackedStoragesTrieInit::new(start_cursor),
             INITIALIZE_STORAGE_THRESHOLD,
             INITIALIZE_LOG_THRESHOLD,
         )?;
@@ -436,11 +440,10 @@ impl<C> InitTable for HashedStoragesInit<C> {
     }
 }
 
-impl<C> InitTable for AccountsTrieInit<C> {
-    type Key = StoredNibbles;
+impl<C> InitTable for PackedAccountsTrieInit<C> {
+    type Key = PackedStoredNibbles;
     type Value = BranchNodeCompact;
 
-    /// Save mapping of account trie paths to branch nodes to storage.
     fn store_entries(
         store: &impl MorphProofsInitialStateStore,
         entries: impl IntoIterator<Item = (Self::Key, Self::Value)>,
@@ -451,16 +454,14 @@ impl<C> InitTable for AccountsTrieInit<C> {
                 .map(|(path, branch)| (path.0, Some(branch)))
                 .collect(),
         )?;
-
         Ok(())
     }
 }
 
-impl<C> InitTable for StoragesTrieInit<C> {
+impl<C> InitTable for PackedStoragesTrieInit<C> {
     type Key = B256;
-    type Value = StorageTrieEntry;
+    type Value = PackedStorageTrieEntry;
 
-    /// Save mapping of hashed addresses to storage trie entries to storage.
     fn store_entries(
         store: &impl MorphProofsInitialStateStore,
         entries: impl IntoIterator<Item = (Self::Key, Self::Value)>,
@@ -476,7 +477,6 @@ impl<C> InitTable for StoragesTrieInit<C> {
                 .push((storage_entry.nibbles.0, Some(storage_entry.node)));
         }
         store.store_storage_branches_bulk(by_address.into_iter().collect())?;
-
         Ok(())
     }
 }
@@ -495,8 +495,9 @@ mod tests {
                 };
                 use reth_primitives_traits::Account;
                 use reth_trie::{
-                    BranchNodeCompact, StorageTrieEntry, StoredNibbles, StoredNibblesSubKey,
-                    TrieMask, hashed_cursor::HashedCursor, trie_cursor::TrieCursor,
+                    BranchNodeCompact, PackedStorageTrieEntry, PackedStoredNibbles,
+                    PackedStoredNibblesSubKey, TrieMask, hashed_cursor::HashedCursor,
+                    trie_cursor::TrieCursor,
                 };
                 use tempfile::TempDir;
 
@@ -673,20 +674,20 @@ mod tests {
 
                     // Insert test trie nodes into database
                     let tx = db.tx_mut().unwrap();
-                    let mut cursor = tx.cursor_write::<tables::AccountsTrie>().unwrap();
+                    let mut cursor = tx.cursor_write::<tables::PackedAccountsTrie>().unwrap();
 
                     let branch = create_test_branch_node();
                     let nodes = vec![
                         (
-                            StoredNibbles(Nibbles::from_nibbles_unchecked(vec![1])),
+                            PackedStoredNibbles::from(Nibbles::from_nibbles_unchecked(vec![1])),
                             branch.clone(),
                         ),
                         (
-                            StoredNibbles(Nibbles::from_nibbles_unchecked(vec![2])),
+                            PackedStoredNibbles::from(Nibbles::from_nibbles_unchecked(vec![2])),
                             branch.clone(),
                         ),
                         (
-                            StoredNibbles(Nibbles::from_nibbles_unchecked(vec![3])),
+                            PackedStoredNibbles::from(Nibbles::from_nibbles_unchecked(vec![3])),
                             branch,
                         ),
                     ];
@@ -720,7 +721,7 @@ mod tests {
 
                     // Insert test storage trie nodes into database
                     let tx = db.tx_mut().unwrap();
-                    let mut cursor = tx.cursor_dup_write::<tables::StoragesTrie>().unwrap();
+                    let mut cursor = tx.cursor_dup_write::<tables::PackedStoragesTrie>().unwrap();
 
                     let branch = create_test_branch_node();
                     let addr1 = keccak256(Address::repeat_byte(0x01));
@@ -729,28 +730,28 @@ mod tests {
                     let nodes = vec![
                         (
                             addr1,
-                            StorageTrieEntry {
-                                nibbles: StoredNibblesSubKey(Nibbles::from_nibbles_unchecked(
-                                    vec![1],
-                                )),
+                            PackedStorageTrieEntry {
+                                nibbles: PackedStoredNibblesSubKey::from(
+                                    Nibbles::from_nibbles_unchecked(vec![1]),
+                                ),
                                 node: branch.clone(),
                             },
                         ),
                         (
                             addr1,
-                            StorageTrieEntry {
-                                nibbles: StoredNibblesSubKey(Nibbles::from_nibbles_unchecked(
-                                    vec![2],
-                                )),
+                            PackedStorageTrieEntry {
+                                nibbles: PackedStoredNibblesSubKey::from(
+                                    Nibbles::from_nibbles_unchecked(vec![2]),
+                                ),
                                 node: branch.clone(),
                             },
                         ),
                         (
                             addr2,
-                            StorageTrieEntry {
-                                nibbles: StoredNibblesSubKey(Nibbles::from_nibbles_unchecked(
-                                    vec![3],
-                                )),
+                            PackedStorageTrieEntry {
+                                nibbles: PackedStoredNibblesSubKey::from(
+                                    Nibbles::from_nibbles_unchecked(vec![3]),
+                                ),
                                 node: branch,
                             },
                         ),
@@ -825,24 +826,24 @@ mod tests {
                     drop(cursor);
 
                     // Add account trie
-                    let mut cursor = tx.cursor_write::<tables::AccountsTrie>().unwrap();
+                    let mut cursor = tx.cursor_write::<tables::PackedAccountsTrie>().unwrap();
                     cursor
                         .append(
-                            StoredNibbles(Nibbles::from_nibbles_unchecked(vec![1])),
+                            PackedStoredNibbles::from(Nibbles::from_nibbles_unchecked(vec![1])),
                             &create_test_branch_node(),
                         )
                         .unwrap();
                     drop(cursor);
 
                     // Add storage trie
-                    let mut cursor = tx.cursor_dup_write::<tables::StoragesTrie>().unwrap();
+                    let mut cursor = tx.cursor_dup_write::<tables::PackedStoragesTrie>().unwrap();
                     cursor
                         .upsert(
                             addr,
-                            &StorageTrieEntry {
-                                nibbles: StoredNibblesSubKey(Nibbles::from_nibbles_unchecked(
-                                    vec![1],
-                                )),
+                            &PackedStorageTrieEntry {
+                                nibbles: PackedStoredNibblesSubKey::from(
+                                    Nibbles::from_nibbles_unchecked(vec![1]),
+                                ),
                                 node: create_test_branch_node(),
                             },
                         )
@@ -1175,9 +1176,17 @@ mod tests {
                     // Phase 1 source: p1,p2
                     {
                         let tx = db.tx_mut().unwrap();
-                        let mut cur = tx.cursor_write::<tables::AccountsTrie>().unwrap();
-                        cur.append(p1.clone(), &create_test_branch_node()).unwrap();
-                        cur.append(p2.clone(), &create_test_branch_node()).unwrap();
+                        let mut cur = tx.cursor_write::<tables::PackedAccountsTrie>().unwrap();
+                        cur.append(
+                            PackedStoredNibbles::from(p1.0.clone()),
+                            &create_test_branch_node(),
+                        )
+                        .unwrap();
+                        cur.append(
+                            PackedStoredNibbles::from(p2.0.clone()),
+                            &create_test_branch_node(),
+                        )
+                        .unwrap();
                         tx.commit().unwrap();
                     }
 
@@ -1199,9 +1208,17 @@ mod tests {
                     // Phase 2 source: p3,p4
                     {
                         let tx = db.tx_mut().unwrap();
-                        let mut cur = tx.cursor_write::<tables::AccountsTrie>().unwrap();
-                        cur.append(p3.clone(), &create_test_branch_node()).unwrap();
-                        cur.append(p4.clone(), &create_test_branch_node()).unwrap();
+                        let mut cur = tx.cursor_write::<tables::PackedAccountsTrie>().unwrap();
+                        cur.append(
+                            PackedStoredNibbles::from(p3.0.clone()),
+                            &create_test_branch_node(),
+                        )
+                        .unwrap();
+                        cur.append(
+                            PackedStoredNibbles::from(p4.0.clone()),
+                            &create_test_branch_node(),
+                        )
+                        .unwrap();
                         tx.commit().unwrap();
                     }
 
@@ -1246,26 +1263,26 @@ mod tests {
                     let a1 = k(0x10);
                     let a2 = k(0x20);
 
-                    let n1 = StoredNibblesSubKey(Nibbles::from_nibbles_unchecked(vec![1]));
-                    let n2 = StoredNibblesSubKey(Nibbles::from_nibbles_unchecked(vec![2]));
-                    let n3 = StoredNibblesSubKey(Nibbles::from_nibbles_unchecked(vec![3]));
+                    let n1 = Nibbles::from_nibbles_unchecked(vec![1]);
+                    let n2 = Nibbles::from_nibbles_unchecked(vec![2]);
+                    let n3 = Nibbles::from_nibbles_unchecked(vec![3]);
 
                     // Phase 1 source: (a1,n1), (a2,n2)
                     {
                         let tx = db.tx_mut().unwrap();
-                        let mut cur = tx.cursor_dup_write::<tables::StoragesTrie>().unwrap();
+                        let mut cur = tx.cursor_dup_write::<tables::PackedStoragesTrie>().unwrap();
                         cur.upsert(
                             a1,
-                            &StorageTrieEntry {
-                                nibbles: n1.clone(),
+                            &PackedStorageTrieEntry {
+                                nibbles: PackedStoredNibblesSubKey::from(n1.clone()),
                                 node: create_test_branch_node(),
                             },
                         )
                         .unwrap();
                         cur.upsert(
                             a2,
-                            &StorageTrieEntry {
-                                nibbles: n2.clone(),
+                            &PackedStorageTrieEntry {
+                                nibbles: PackedStoredNibblesSubKey::from(n2.clone()),
                                 node: create_test_branch_node(),
                             },
                         )
@@ -1287,16 +1304,16 @@ mod tests {
                         .latest_storage_trie_key
                         .expect("ok");
                     assert_eq!(last1.hashed_address, a2);
-                    assert_eq!(last1.path.0, n2.0);
+                    assert_eq!(last1.path.0, n2);
 
                     // Phase 2 source: add (a2,n3)
                     {
                         let tx = db.tx_mut().unwrap();
-                        let mut cur = tx.cursor_dup_write::<tables::StoragesTrie>().unwrap();
+                        let mut cur = tx.cursor_dup_write::<tables::PackedStoragesTrie>().unwrap();
                         cur.upsert(
                             a2,
-                            &StorageTrieEntry {
-                                nibbles: n3.clone(),
+                            &PackedStorageTrieEntry {
+                                nibbles: PackedStoredNibblesSubKey::from(n3.clone()),
                                 node: create_test_branch_node(),
                             },
                         )
@@ -1310,7 +1327,7 @@ mod tests {
                         let job = InitializationJob::new(Arc::clone(&store), tx);
                         job.initialize_storages_trie(Some(StorageTrieKey::new(
                             a2,
-                            StoredNibbles::from(n2.0),
+                            StoredNibbles::from(n2.clone()),
                         )))
                         .unwrap();
                     }
@@ -1322,7 +1339,7 @@ mod tests {
                         .latest_storage_trie_key
                         .expect("ok");
                     assert_eq!(last2.hashed_address, a2);
-                    assert_eq!(last2.path.0, n3.0);
+                    assert_eq!(last2.path.0, n3);
 
                     // Verify per-address no dupes and stable ordering
                     {
@@ -1335,7 +1352,7 @@ mod tests {
                             got.push(path);
                         }
 
-                        assert_eq!(got, vec![n1.0]);
+                        assert_eq!(got, vec![n1]);
                     }
                     {
                         let mut c = store.storage_trie_cursor(a2, 0).unwrap();
@@ -1346,7 +1363,7 @@ mod tests {
                         while let Some((path, _node)) = c.next().unwrap() {
                             got.push(path);
                         }
-                        assert_eq!(got, vec![n2.0, n3.0]);
+                        assert_eq!(got, vec![n2, n3]);
                     }
                 }
             }

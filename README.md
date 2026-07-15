@@ -123,7 +123,7 @@ openssl rand -hex 32 > jwt.hex
 | `--morph.max-tx-per-block` | None (unlimited) | Maximum number of transactions per block |
 | `--proofs-history` | false | Enable historical `eth_getProof` and proof-history accumulation |
 | `--proofs-history.storage-path` | `<chain-datadir>/historical-proofs` | Override the proof MDBX directory |
-| `--proofs-history.window` | 1296000 | Number of canonical blocks retained |
+| `--proofs-history.window` | 604800 | Number of canonical blocks retained (7 days at 1s/block) |
 | `--proofs-history.verification-interval` | 0 | Re-execute every Nth indexed block; 0 disables verification |
 | `--rpc.eth-proof-window` | 0 | Reth overlay limit used only while proof history is disabled |
 

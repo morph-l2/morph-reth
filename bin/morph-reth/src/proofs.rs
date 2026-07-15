@@ -5,10 +5,10 @@ use std::{path::PathBuf, sync::Arc};
 use alloy_consensus::BlockHeader;
 use clap::{Parser, Subcommand};
 use morph_chainspec::{MorphChainSpec, MorphChainSpecParser};
-use morph_node::{MorphNode, args::DEFAULT_PROOFS_HISTORY_WINDOW};
+use morph_node::MorphNode;
 use morph_proofs::{
-    InitializationJob, MdbxProofsStorage, MorphProofStoragePruner, MorphProofsStorage,
-    MorphProofsStore, ProofDbIdentity,
+    DEFAULT_PROOFS_HISTORY_WINDOW, InitializationJob, MdbxProofsStorage, MorphProofStoragePruner,
+    MorphProofsStorage, MorphProofsStore, ProofDbIdentity,
 };
 use reth_chainspec::EthChainSpec;
 use reth_cli_commands::common::{AccessRights, Environment, EnvironmentArgs};

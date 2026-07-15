@@ -16,6 +16,9 @@ pub use api::{
 pub mod initialize;
 pub use initialize::InitializationJob;
 
+/// Default proof-history retention window: 7 days at a one-second block time.
+pub const DEFAULT_PROOFS_HISTORY_WINDOW: u64 = 604_800;
+
 #[cfg(any(test, feature = "test-utils"))]
 pub mod in_memory;
 #[cfg(any(test, feature = "test-utils"))]

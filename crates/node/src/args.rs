@@ -3,14 +3,12 @@
 use std::path::PathBuf;
 
 use clap::Args;
+use morph_proofs::DEFAULT_PROOFS_HISTORY_WINDOW;
 
 /// Default maximum transaction payload bytes per block (120KB).
 ///
 /// This matches Morph's go-ethereum configuration.
 pub const MORPH_DEFAULT_MAX_TX_PAYLOAD_BYTES: u64 = 122_880;
-
-/// Default proof-history retention window: 30 days at a two-second block time.
-pub const DEFAULT_PROOFS_HISTORY_WINDOW: u64 = 1_296_000;
 
 /// Morph-specific CLI arguments.
 ///
@@ -101,7 +99,7 @@ mod tests {
         assert_eq!(args.max_tx_per_block, None);
         assert!(!args.proofs_history);
         assert_eq!(args.proofs_history_storage_path, None);
-        assert_eq!(args.proofs_history_window, 1_296_000);
+        assert_eq!(args.proofs_history_window, DEFAULT_PROOFS_HISTORY_WINDOW);
         assert_eq!(args.proofs_history_verification_interval, 0);
     }
 
