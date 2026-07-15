@@ -136,6 +136,7 @@ reth-payload-builder = { git = "https://github.com/paradigmxyz/reth", rev = "f0a
 reth-payload-primitives = { git = "https://github.com/paradigmxyz/reth", rev = "f0a41795d72ae5bb0b6c3661ac42ffb7b78ef105" }
 reth-payload-util = { git = "https://github.com/paradigmxyz/reth", rev = "f0a41795d72ae5bb0b6c3661ac42ffb7b78ef105" }
 reth-primitives-traits = { version = "0.5.0", default-features = false }
+reth-prune-types = { git = "https://github.com/paradigmxyz/reth", rev = "f0a41795d72ae5bb0b6c3661ac42ffb7b78ef105" }
 reth-provider = { git = "https://github.com/paradigmxyz/reth", rev = "f0a41795d72ae5bb0b6c3661ac42ffb7b78ef105" }
 reth-rpc = { git = "https://github.com/paradigmxyz/reth", rev = "f0a41795d72ae5bb0b6c3661ac42ffb7b78ef105" }
 reth-rpc-api = { git = "https://github.com/paradigmxyz/reth", rev = "f0a41795d72ae5bb0b6c3661ac42ffb7b78ef105" }

@@ -4980,6 +4980,7 @@ dependencies = [
  "reth-payload-primitives",
  "reth-primitives-traits",
  "reth-provider",
+ "reth-prune-types",
  "reth-rpc-builder",
  "reth-rpc-eth-api",
  "reth-tasks",
