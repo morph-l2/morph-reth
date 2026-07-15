@@ -12,7 +12,6 @@ use morph_primitives::MorphPrimitives;
 use reth_chain_state::{CanonStateNotification, CanonStateNotifications};
 use reth_tasks::TaskExecutor;
 use std::{
-    collections::VecDeque,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -25,51 +24,44 @@ use tracing::{debug, info, warn};
 
 const RAPID_SYNC_BLOCK_THRESHOLD: u64 = 64;
 const RAPID_SYNC_WINDOW: Duration = Duration::from_secs(2);
-const RAPID_SYNC_QUIET_PERIOD: Duration = Duration::from_secs(5);
 const RECONCILE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_RETRY_BACKOFF: Duration = Duration::from_secs(30);
 const TARGET: &str = "morph::reference_index";
 
 #[derive(Debug)]
 struct RapidSyncDetector {
-    observations: VecDeque<(Instant, u64)>,
+    window_started: Instant,
     blocks_in_window: u64,
-    defer_until: Option<Instant>,
 }
 
 impl RapidSyncDetector {
-    fn new() -> Self {
+    fn new(now: Instant) -> Self {
         Self {
-            observations: VecDeque::new(),
+            window_started: now,
             blocks_in_window: 0,
-            defer_until: None,
+        }
+    }
+
+    fn reset_expired_window(&mut self, now: Instant) {
+        if now.saturating_duration_since(self.window_started) >= RAPID_SYNC_WINDOW {
+            self.window_started = now;
+            self.blocks_in_window = 0;
         }
     }
 
     fn record_blocks(&mut self, now: Instant, blocks: usize) {
-        if blocks == 0 {
-            return;
-        }
-        while self.observations.front().is_some_and(|(observed_at, _)| {
-            now.saturating_duration_since(*observed_at) > RAPID_SYNC_WINDOW
-        }) {
-            let (_, expired_blocks) = self.observations.pop_front().expect("front was present");
-            self.blocks_in_window = self.blocks_in_window.saturating_sub(expired_blocks);
-        }
-        let already_deferred = self.should_defer(now);
-        self.observations.push_back((now, blocks as u64));
+        self.reset_expired_window(now);
         self.blocks_in_window = self.blocks_in_window.saturating_add(blocks as u64);
-        if already_deferred || self.blocks_in_window > RAPID_SYNC_BLOCK_THRESHOLD {
-            self.defer_until = Some(now + RAPID_SYNC_QUIET_PERIOD);
-        }
     }
 
     fn record_lagged(&mut self, now: Instant) {
-        self.defer_until = Some(now + RAPID_SYNC_QUIET_PERIOD);
+        self.reset_expired_window(now);
+        self.blocks_in_window = RAPID_SYNC_BLOCK_THRESHOLD + 1;
     }
 
-    fn should_defer(&self, now: Instant) -> bool {
-        self.defer_until.is_some_and(|until| now < until)
+    fn should_defer(&mut self, now: Instant) -> bool {
+        self.reset_expired_window(now);
+        self.blocks_in_window > RAPID_SYNC_BLOCK_THRESHOLD
     }
 }
 
@@ -344,7 +336,7 @@ impl<C: CanonicalChain> ReferenceIndexRuntime<C> {
         // Consume tokio's immediate first tick so a queued canonical
         // notification can classify rapid sync before the first DB batch.
         poll.tick().await;
-        let mut detector = RapidSyncDetector::new();
+        let mut detector = RapidSyncDetector::new(Instant::now());
         let mut notifications_open = true;
         let mut sync_requested = false;
         let mut retry_backoff = Duration::from_secs(1);
@@ -371,9 +363,8 @@ impl<C: CanonicalChain> ReferenceIndexRuntime<C> {
                 && detector.should_defer(Instant::now())
                 && handle.phase() == ReferenceIndexPhase::Deferred
             {
-                // Stay completely off the index DB while rapid historical
-                // sync is still active. Notifications continue to extend the
-                // quiet-period deadline; polling resumes catch-up afterwards.
+                // Stay completely off the index DB for the current rapid-sync
+                // window. Polling resumes catch-up as soon as the window resets.
                 sync_requested = false;
             }
             if sync_requested {
@@ -464,50 +455,51 @@ mod tests {
     };
 
     #[test]
-    fn rapid_sync_detector_defers_after_more_than_64_blocks_and_recovers_after_quiet_period() {
+    fn rapid_sync_detector_defers_after_more_than_64_blocks_in_one_window() {
         let start = Instant::now();
-        let mut detector = RapidSyncDetector::new();
+        let mut detector = RapidSyncDetector::new(start);
 
         detector.record_blocks(start + Duration::from_secs(1), 64);
         assert!(!detector.should_defer(start + Duration::from_secs(1)));
 
         detector.record_blocks(start + Duration::from_millis(1500), 1);
-        assert!(detector.should_defer(start + Duration::from_secs(4)));
-        assert!(!detector.should_defer(start + Duration::from_millis(6501)));
+        assert!(detector.should_defer(start + Duration::from_millis(1999)));
+        assert!(!detector.should_defer(start + Duration::from_millis(2001)));
     }
 
     #[test]
-    fn rapid_sync_detector_uses_a_sliding_two_second_window() {
+    fn rapid_sync_detector_does_not_mix_adjacent_windows() {
         let start = Instant::now();
-        let mut detector = RapidSyncDetector::new();
+        let mut detector = RapidSyncDetector::new(start);
 
         detector.record_blocks(start + Duration::from_millis(1900), 32);
         detector.record_blocks(start + Duration::from_millis(2100), 33);
 
-        assert!(detector.should_defer(start + Duration::from_secs(3)));
+        assert!(!detector.should_defer(start + Duration::from_millis(2100)));
     }
 
     #[test]
-    fn deferred_sync_waits_five_seconds_after_low_rate_tail_activity() {
+    fn normal_block_activity_does_not_extend_rapid_sync_deferral() {
         let start = Instant::now();
-        let mut detector = RapidSyncDetector::new();
+        let mut detector = RapidSyncDetector::new(start);
 
         detector.record_blocks(start, 65);
-        detector.record_blocks(start + Duration::from_secs(3), 1);
+        assert!(detector.should_defer(start + Duration::from_secs(1)));
 
-        assert!(detector.should_defer(start + Duration::from_millis(7999)));
-        assert!(!detector.should_defer(start + Duration::from_millis(8001)));
+        detector.record_blocks(start + Duration::from_secs(1), 1);
+
+        assert!(!detector.should_defer(start + Duration::from_millis(2001)));
     }
 
     #[test]
-    fn lagged_notifications_enter_the_same_quiet_period() {
+    fn lagged_notifications_defer_only_for_the_current_window() {
         let start = Instant::now();
-        let mut detector = RapidSyncDetector::new();
+        let mut detector = RapidSyncDetector::new(start);
 
         detector.record_lagged(start);
 
-        assert!(detector.should_defer(start + Duration::from_secs(4)));
-        assert!(!detector.should_defer(start + Duration::from_millis(5001)));
+        assert!(detector.should_defer(start + Duration::from_secs(1)));
+        assert!(!detector.should_defer(start + Duration::from_millis(2001)));
     }
 
     #[test]
@@ -517,7 +509,7 @@ mod tests {
             sender.send(1usize).unwrap();
         }
         let now = Instant::now();
-        let mut detector = RapidSyncDetector::new();
+        let mut detector = RapidSyncDetector::new(now);
         let mut received = 0usize;
 
         let remains_open = drain_ready_broadcast(&mut receiver, |event| match event {
