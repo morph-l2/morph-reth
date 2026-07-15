@@ -1,5 +1,5 @@
 use clap::Args;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::tx_factory::receiver_address;
 
@@ -29,6 +29,14 @@ struct VerifyResult {
     balances_checked: u64,
     balances_matched: u64,
     mismatches: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LatestBlock {
+    number: String,
+    state_root: String,
+    receipts_root: String,
 }
 
 /// Send a JSON-RPC request and return the `result` field.
@@ -64,36 +72,28 @@ async fn rpc_call(
         .ok_or_else(|| eyre::eyre!("RPC response from {url} missing 'result' field"))
 }
 
+async fn latest_block(client: &reqwest::Client, url: &str) -> eyre::Result<LatestBlock> {
+    let value = rpc_call(
+        client,
+        url,
+        "eth_getBlockByNumber",
+        serde_json::json!(["latest", false]),
+    )
+    .await?;
+
+    serde_json::from_value(value)
+        .map_err(|e| eyre::eyre!("invalid latest block response from {url}: {e}"))
+}
+
 pub(crate) async fn run(args: VerifyStateArgs) -> eyre::Result<()> {
     let client = reqwest::Client::new();
 
     // 1. Fetch latest block from both nodes.
-    let block_a = rpc_call(
-        &client,
-        &args.rpc_a,
-        "eth_getBlockByNumber",
-        serde_json::json!(["latest", false]),
-    )
-    .await?;
+    let block_a = latest_block(&client, &args.rpc_a).await?;
+    let block_b = latest_block(&client, &args.rpc_b).await?;
 
-    let block_b = rpc_call(
-        &client,
-        &args.rpc_b,
-        "eth_getBlockByNumber",
-        serde_json::json!(["latest", false]),
-    )
-    .await?;
-
-    let number_a = block_a
-        .get("number")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown")
-        .to_string();
-    let number_b = block_b
-        .get("number")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown")
-        .to_string();
+    let number_a = block_a.number;
+    let number_b = block_b.number;
 
     let mut mismatches: Vec<String> = Vec::new();
 
@@ -103,14 +103,8 @@ pub(crate) async fn run(args: VerifyStateArgs) -> eyre::Result<()> {
     }
 
     // 3. Compare state roots.
-    let state_root_a = block_a
-        .get("stateRoot")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
-    let state_root_b = block_b
-        .get("stateRoot")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
+    let state_root_a = block_a.state_root;
+    let state_root_b = block_b.state_root;
     let state_root_match = state_root_a == state_root_b;
     if !state_root_match {
         mismatches.push(format!(
@@ -119,14 +113,8 @@ pub(crate) async fn run(args: VerifyStateArgs) -> eyre::Result<()> {
     }
 
     // 4. Compare receipts roots.
-    let receipts_root_a = block_a
-        .get("receiptsRoot")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
-    let receipts_root_b = block_b
-        .get("receiptsRoot")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
+    let receipts_root_a = block_a.receipts_root;
+    let receipts_root_b = block_b.receipts_root;
     let receipts_root_match = receipts_root_a == receipts_root_b;
     if !receipts_root_match {
         mismatches.push(format!(
@@ -217,4 +205,30 @@ pub(crate) async fn run(args: VerifyStateArgs) -> eyre::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LatestBlock;
+
+    #[test]
+    fn latest_block_requires_comparison_roots() {
+        let missing_receipts_root = serde_json::json!({
+            "number": "0x1",
+            "stateRoot": "0xstate"
+        });
+
+        assert!(serde_json::from_value::<LatestBlock>(missing_receipts_root).is_err());
+    }
+
+    #[test]
+    fn latest_block_rejects_null_comparison_roots() {
+        let null_state_root = serde_json::json!({
+            "number": "0x1",
+            "stateRoot": null,
+            "receiptsRoot": "0xreceipts"
+        });
+
+        assert!(serde_json::from_value::<LatestBlock>(null_state_root).is_err());
+    }
 }

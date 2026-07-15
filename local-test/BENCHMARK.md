@@ -6,6 +6,8 @@ morph-reth node per run; geth and cross-binary comparisons are intentionally out
 The April 2026 reth/geth comparison and its charts remain under `bench-results/report/`. The
 original design and implementation plan remain under `docs/superpowers/` as historical context;
 they describe the earlier runner and should not be treated as the current command reference.
+Its report generator is preserved at `local-test/legacy/generate_report.py` and only understands
+the archived runner's filename layout.
 
 ## What it measures
 

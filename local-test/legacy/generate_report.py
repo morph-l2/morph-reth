@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Generate comprehensive benchmark report with charts."""
+"""Regenerate the archived April 2026 reth/geth report from its legacy result layout.
+
+This is intentionally not used by ``run_full_benchmark.sh``. The current runner writes a
+different, reth-only file layout and produces ``summary.tsv`` directly.
+"""
 
 import json
 import statistics
