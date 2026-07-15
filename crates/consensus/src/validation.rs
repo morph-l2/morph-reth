@@ -43,7 +43,7 @@ use morph_primitives::{
     Block, BlockBody, MorphHeader, MorphReceipt, MorphTxEnvelope,
     transaction::morph_transaction::MORPH_TX_VERSION_1,
 };
-use reth_consensus::{Consensus, ConsensusError, FullConsensus, HeaderValidator};
+use reth_consensus::{Consensus, ConsensusError, FullConsensus, HeaderValidator, ReceiptRootBloom};
 use reth_consensus_common::validation::{
     validate_against_parent_hash_number, validate_body_against_header,
 };
@@ -89,13 +89,15 @@ const GAS_LIMIT_BOUND_DIVISOR: u64 = 1024;
 ///    start, have sequential queue indices, and are consistent with `header.next_l1_msg_index`.
 /// 2. **Cross-block monotonicity** (`validate_header_against_parent`): `header.next_l1_msg_index`
 ///    is monotonically non-decreasing relative to the parent.
+/// 3. **Parent-aware exactness** (`MorphTreeEngineValidator`): once the engine tree has
+///    both parent header and block body, Jade blocks must exactly match the value derived
+///    from `parent.next_l1_msg_index` and the block's leading L1 messages.
 ///
-/// These two methods have no ordering dependency and share no mutable state. The strict
+/// The consensus trait methods have no ordering dependency and share no mutable state. The strict
 /// cross-block equality check (`header.next == parent.next + l1_count`) requires simultaneous
 /// access to both parent header and block body, which reth's trait API does not provide in
-/// any single method. In Morph's single-sequencer model, the remaining gap (queue index
-/// skipping) is prevented by the trusted sequencer and verified by the L1 message queue
-/// contract.
+/// any single method, so Morph performs that final check in the engine tree payload validator
+/// before a block is accepted.
 #[derive(Debug, Clone)]
 pub struct MorphConsensus {
     /// Chain specification containing hardfork information and chain config.
@@ -159,9 +161,9 @@ impl HeaderValidator<MorphHeader> for MorphConsensus {
         if self.chain_spec.is_fee_vault_enabled()
             && header.beneficiary() != alloy_primitives::Address::ZERO
         {
-            return Err(ConsensusError::Other(
-                MorphConsensusError::InvalidCoinbase(header.beneficiary()).to_string(),
-            ));
+            return Err(ConsensusError::other(MorphConsensusError::InvalidCoinbase(
+                header.beneficiary(),
+            )));
         }
 
         // Check timestamp is not in the future
@@ -197,8 +199,8 @@ impl HeaderValidator<MorphHeader> for MorphConsensus {
             .base_fee_per_gas()
             .ok_or(ConsensusError::BaseFeeMissing)?;
         if base_fee > MORPH_MAXIMUM_BASE_FEE {
-            return Err(ConsensusError::Other(
-                MorphConsensusError::BaseFeeOverLimit(base_fee).to_string(),
+            return Err(ConsensusError::other(
+                MorphConsensusError::BaseFeeOverLimit(base_fee),
             ));
         }
         Ok(())
@@ -233,12 +235,11 @@ impl HeaderValidator<MorphHeader> for MorphConsensus {
         // decrease across blocks. This is the header-only half of L1 message
         // validation; the body-level half is in validate_block_pre_execution.
         if header.next_l1_msg_index < parent.next_l1_msg_index {
-            return Err(ConsensusError::Other(
+            return Err(ConsensusError::other(
                 MorphConsensusError::InvalidNextL1MessageIndex {
                     expected: parent.next_l1_msg_index,
                     actual: header.next_l1_msg_index,
-                }
-                .to_string(),
+                },
             ));
         }
 
@@ -278,7 +279,7 @@ impl Consensus<Block> for MorphConsensus {
         // Check no uncles allowed (Morph L2 has no uncle blocks)
         let ommers_len = block.body().ommers().map(|o| o.len()).unwrap_or_default();
         if ommers_len > 0 {
-            return Err(ConsensusError::Other("uncles not allowed".to_string()));
+            return Err(ConsensusError::msg("uncles not allowed"));
         }
 
         // Check ommers hash must be empty root hash
@@ -299,17 +300,20 @@ impl Consensus<Block> for MorphConsensus {
 
         // Check withdrawals are empty
         if block.body().withdrawals().is_some() {
-            return Err(ConsensusError::Other(
-                MorphConsensusError::WithdrawalsNonEmpty.to_string(),
+            return Err(ConsensusError::other(
+                MorphConsensusError::WithdrawalsNonEmpty,
             ));
         }
 
-        // Validate MorphTx version and field constraints.
+        // Validate MorphTx activation, version and field constraints.
         // Matches go-ethereum's BlockValidator.ValidateBody() → ValidateMorphTxVersion().
+        let is_emerald = self
+            .chain_spec
+            .is_emerald_active_at_timestamp(block.header().timestamp());
         let is_jade = self
             .chain_spec
             .is_jade_active_at_timestamp(block.header().timestamp());
-        validate_morph_txs(&block.body().transactions, is_jade)?;
+        validate_morph_txs(&block.body().transactions, is_emerald, is_jade)?;
 
         // Validate L1 messages ordering and internal consistency with header.
         // This is the body-level half of L1 validation; it verifies that the L1
@@ -319,9 +323,14 @@ impl Consensus<Block> for MorphConsensus {
         validate_l1_messages_in_block(
             &block.body().transactions,
             block.header().next_l1_msg_index,
+            is_jade,
         )?;
 
         Ok(())
+    }
+
+    fn is_transient_error(&self, error: &ConsensusError) -> bool {
+        matches!(error, ConsensusError::TimestampIsInFuture { .. })
     }
 }
 
@@ -346,6 +355,8 @@ impl FullConsensus<morph_primitives::MorphPrimitives> for MorphConsensus {
         &self,
         block: &RecoveredBlock<Block>,
         result: &BlockExecutionResult<MorphReceipt>,
+        receipt_root_bloom: Option<ReceiptRootBloom>,
+        _block_access_list_hash: Option<B256>,
     ) -> Result<(), ConsensusError> {
         // Verify the block gas used
         let cumulative_gas_used = result
@@ -366,8 +377,19 @@ impl FullConsensus<morph_primitives::MorphPrimitives> for MorphConsensus {
             });
         }
 
-        // Verify the receipts logs bloom and root
-        verify_receipts(block.receipts_root(), block.logs_bloom(), &result.receipts)?;
+        // Verify the receipts logs bloom and root.
+        // Use pre-computed (root, bloom) from the executor when available to avoid
+        // redundant hashing; fall back to computing from receipts otherwise.
+        if let Some((receipts_root, logs_bloom)) = receipt_root_bloom {
+            verify_receipts_precomputed(
+                block.receipts_root(),
+                block.logs_bloom(),
+                receipts_root,
+                logs_bloom,
+            )?;
+        } else {
+            verify_receipts(block.receipts_root(), block.logs_bloom(), &result.receipts)?;
+        }
 
         Ok(())
     }
@@ -462,10 +484,13 @@ fn validate_against_parent_gas_limit<H: BlockHeader>(
 /// 2. **Sequential Queue Index**: L1 messages must have strictly sequential
 ///    `queue_index` values (each = previous + 1).
 ///
-/// 3. **Header Consistency**: If L1 messages are present,
-///    `header.next_l1_msg_index` must be >= `last_queue_index + 1`. It may be
-///    strictly greater because Morph allows L1 messages to be "skipped" — the
-///    sequencer can advance past queue indices not included in the block body.
+/// 3. **Header Consistency**: If L1 messages are present, `header.next_l1_msg_index`
+///    is checked against `last_queue_index + 1`. The strictness depends on the fork:
+///    - **Jade onward** (`is_jade == true`): must equal `last_queue_index + 1` exactly,
+///      matching go-ethereum's `writeBlockStateWithoutHead` hard-fail (PR #331).
+///    - **Pre-Jade**: must be `>= last_queue_index + 1`; it may be strictly greater
+///      because the sequencer was permitted to "skip" queue indices not included in
+///      the block body ("early L1 msg skip").
 ///
 /// # Cross-Block Validation
 ///
@@ -477,8 +502,9 @@ fn validate_against_parent_gas_limit<H: BlockHeader>(
 ///
 /// ```text
 /// [L1Msg(queue=5), L1Msg(queue=6), L1Msg(queue=7), RegularTx]
-/// // header.next_l1_msg_index = 8  ✓ (exact match)
-/// // header.next_l1_msg_index = 10 ✓ (skipped queue indices 8, 9)
+/// // header.next_l1_msg_index = 8  ✓ (exact match, required from Jade onward)
+/// // header.next_l1_msg_index = 10 ✓ pre-Jade only (skipped queue indices 8, 9);
+/// //                              ❌ rejected from Jade onward
 /// ```
 ///
 /// # Example (Invalid - L1 after L2)
@@ -490,6 +516,7 @@ fn validate_against_parent_gas_limit<H: BlockHeader>(
 fn validate_l1_messages_in_block(
     txs: &[MorphTxEnvelope],
     header_next_l1_msg_index: u64,
+    is_jade: bool,
 ) -> Result<(), ConsensusError> {
     let mut l1_msg_count = 0u64;
     let mut saw_l2_transaction = false;
@@ -499,34 +526,30 @@ fn validate_l1_messages_in_block(
         if tx.is_l1_msg() {
             // Check L1 messages are only at the start of the block (before any L2 tx)
             if saw_l2_transaction {
-                return Err(ConsensusError::Other(
-                    MorphConsensusError::InvalidL1MessageOrder.to_string(),
+                return Err(ConsensusError::other(
+                    MorphConsensusError::InvalidL1MessageOrder,
                 ));
             }
 
-            let tx_queue_index = tx.queue_index().ok_or_else(|| {
-                ConsensusError::Other(MorphConsensusError::MalformedL1Message.to_string())
-            })?;
+            let tx_queue_index = tx
+                .queue_index()
+                .ok_or_else(|| ConsensusError::other(MorphConsensusError::MalformedL1Message))?;
 
             // Check queue indices are strictly sequential (each = previous + 1).
             // Use checked_add to prevent overflow at u64::MAX.
             if let Some(prev) = prev_queue_index {
                 let expected = prev.checked_add(1).ok_or_else(|| {
-                    ConsensusError::Other(
-                        MorphConsensusError::L1MessagesNotInOrder {
-                            expected: u64::MAX,
-                            actual: tx_queue_index,
-                        }
-                        .to_string(),
-                    )
+                    ConsensusError::other(MorphConsensusError::L1MessagesNotInOrder {
+                        expected: u64::MAX,
+                        actual: tx_queue_index,
+                    })
                 })?;
                 if tx_queue_index != expected {
-                    return Err(ConsensusError::Other(
+                    return Err(ConsensusError::other(
                         MorphConsensusError::L1MessagesNotInOrder {
                             expected,
                             actual: tx_queue_index,
-                        }
-                        .to_string(),
+                        },
                     ));
                 }
             }
@@ -538,37 +561,39 @@ fn validate_l1_messages_in_block(
         }
     }
 
-    // Validate header consistency: header.next_l1_msg_index must be at least
-    // last_queue_index + 1 (cannot go backwards relative to included messages).
-    // It may be strictly greater because Morph allows L1 messages to be
-    // "skipped" — the sequencer can advance past queue indices that are not
-    // included in the block body (e.g., messages that failed on L1 relay).
-    // go-eth's NumL1MessagesProcessed() comment: "This count includes both
-    // skipped and included messages."
-    // For blocks with no L1 messages, this check is skipped — the cross-block
-    // monotonicity check in validate_header_against_parent handles that case.
+    // Validate header consistency against the L1 messages included in this block.
+    //
+    // Jade onward: if this block contains L1 messages, `header.next_l1_msg_index`
+    // must EXACTLY equal `last_queue_index + 1`.
+    //
+    // Pre-Jade keeps the lenient lower bound (`>= last_queue_index + 1`): the sequencer
+    // was permitted to advance past queue indices not included in the block body
+    // ("early L1 msg skip"), so the value may be strictly greater.
+    //
+    // For blocks with no L1 messages this stateless check is skipped. The engine
+    // tree payload validator performs the parent-aware exact check (`parent.next + 0`)
+    // once both parent header and block body are available.
     if l1_msg_count > 0 {
         let last_queue_index = prev_queue_index.ok_or_else(|| {
-            ConsensusError::Other(
-                "internal error: l1_msg_count > 0 but prev_queue_index is None".to_string(),
-            )
+            ConsensusError::msg("internal error: l1_msg_count > 0 but prev_queue_index is None")
         })?;
-        let min_expected = last_queue_index.checked_add(1).ok_or_else(|| {
-            ConsensusError::Other(
-                MorphConsensusError::InvalidNextL1MessageIndex {
-                    expected: u64::MAX,
-                    actual: header_next_l1_msg_index,
-                }
-                .to_string(),
-            )
+        let expected = last_queue_index.checked_add(1).ok_or_else(|| {
+            ConsensusError::other(MorphConsensusError::InvalidNextL1MessageIndex {
+                expected: u64::MAX,
+                actual: header_next_l1_msg_index,
+            })
         })?;
-        if header_next_l1_msg_index < min_expected {
-            return Err(ConsensusError::Other(
+        let inconsistent = if is_jade {
+            header_next_l1_msg_index != expected
+        } else {
+            header_next_l1_msg_index < expected
+        };
+        if inconsistent {
+            return Err(ConsensusError::other(
                 MorphConsensusError::InvalidNextL1MessageIndex {
-                    expected: min_expected,
+                    expected,
                     actual: header_next_l1_msg_index,
-                }
-                .to_string(),
+                },
             ));
         }
     }
@@ -578,35 +603,44 @@ fn validate_l1_messages_in_block(
 
 /// Validates all MorphTx (0x7F) transactions in a block.
 ///
-/// Performs two checks per MorphTx:
-/// 1. **Hardfork gate**: rejects V1 transactions before the Jade fork is active
-/// 2. **Field validation**: delegates to [`TxMorph::validate()`] for version-specific
+/// Performs three checks per MorphTx:
+/// 1. **Type hardfork gate**: rejects MorphTx before the Emerald fork is active
+/// 2. **Version hardfork gate**: rejects V1 transactions before the Jade fork is active
+/// 3. **Field validation**: delegates to [`TxMorph::validate()`] for version-specific
 ///    field constraints, memo length, and gas price ordering
 ///
 /// See [`TxMorph::validate()`] for the detailed per-version rules.
-fn validate_morph_txs(txs: &[MorphTxEnvelope], is_jade: bool) -> Result<(), ConsensusError> {
+fn validate_morph_txs(
+    txs: &[MorphTxEnvelope],
+    is_emerald: bool,
+    is_jade: bool,
+) -> Result<(), ConsensusError> {
     for tx in txs {
         let morph_tx = match tx {
             MorphTxEnvelope::Morph(signed) => signed.tx(),
             _ => continue,
         };
 
+        // Match geth's signer gate: MorphTx type is not supported before Emerald.
+        if !is_emerald {
+            return Err(ConsensusError::other(MorphConsensusError::InvalidBody(
+                "MorphTx type is not yet active (emerald fork not reached)".into(),
+            )));
+        }
+
         // Reject MorphTx V1 before Jade fork (hardfork-gated, consensus-only check).
         if !is_jade && morph_tx.version == MORPH_TX_VERSION_1 {
-            return Err(ConsensusError::Other(
-                MorphConsensusError::InvalidBody(
-                    "MorphTx version 1 is not yet active (jade fork not reached)".into(),
-                )
-                .to_string(),
-            ));
+            return Err(ConsensusError::other(MorphConsensusError::InvalidBody(
+                "MorphTx version 1 is not yet active (jade fork not reached)".into(),
+            )));
         }
 
         // Reuse primitive-layer validation (version, fee_token_id, reference,
         // memo length, fee_limit constraints, gas price ordering).
         if let Err(reason) = morph_tx.validate() {
-            return Err(ConsensusError::Other(
-                MorphConsensusError::InvalidBody(reason.to_string()).to_string(),
-            ));
+            return Err(ConsensusError::other(MorphConsensusError::InvalidBody(
+                reason.to_string(),
+            )));
         }
     }
 
@@ -624,6 +658,33 @@ fn validate_morph_txs(txs: &[MorphTxEnvelope], is_jade: bool) -> Result<(), Cons
 /// 2. Calculates the logs bloom by combining all receipt blooms
 /// 3. Compares both against the expected values from the block header
 #[inline]
+fn verify_receipts_precomputed(
+    expected_receipts_root: B256,
+    expected_logs_bloom: Bloom,
+    receipts_root: B256,
+    logs_bloom: Bloom,
+) -> Result<(), ConsensusError> {
+    if receipts_root != expected_receipts_root {
+        return Err(ConsensusError::BodyReceiptRootDiff(
+            GotExpected {
+                got: receipts_root,
+                expected: expected_receipts_root,
+            }
+            .into(),
+        ));
+    }
+    if logs_bloom != expected_logs_bloom {
+        return Err(ConsensusError::BodyBloomLogDiff(
+            GotExpected {
+                got: logs_bloom,
+                expected: expected_logs_bloom,
+            }
+            .into(),
+        ));
+    }
+    Ok(())
+}
+
 fn verify_receipts(
     expected_receipts_root: B256,
     expected_logs_bloom: Bloom,
@@ -694,6 +755,7 @@ mod tests {
                 "morph203Time": 0,
                 "viridianTime": 0,
                 "emeraldTime": 0,
+                "jadeForkTime": 0,
                 "morph": {}
             },
             "alloc": {}
@@ -724,6 +786,31 @@ mod tests {
         MorphTxEnvelope::Legacy(Signed::new_unchecked(tx, sig, B256::ZERO))
     }
 
+    fn create_sealed_block(
+        timestamp: u64,
+        transactions: Vec<MorphTxEnvelope>,
+    ) -> SealedBlock<Block> {
+        use alloy_consensus::proofs::calculate_transaction_root;
+        use reth_primitives_traits::Block as _;
+
+        let transactions_root = calculate_transaction_root(&transactions);
+        let header = create_morph_header(Header {
+            timestamp,
+            transactions_root,
+            ommers_hash: EMPTY_OMMER_ROOT_HASH,
+            ..Default::default()
+        });
+        Block::new(
+            header,
+            BlockBody {
+                transactions,
+                ommers: Default::default(),
+                withdrawals: None,
+            },
+        )
+        .seal_slow()
+    }
+
     /// Create a MorphHeader from a standard Header
     fn create_morph_header(inner: Header) -> MorphHeader {
         inner.into()
@@ -745,7 +832,7 @@ mod tests {
         ];
 
         // L1 msgs: 0, 1 → last+1=2==header_next
-        assert!(validate_l1_messages_in_block(&txs, 2).is_ok());
+        assert!(validate_l1_messages_in_block(&txs, 2, true).is_ok());
     }
 
     #[test]
@@ -756,7 +843,7 @@ mod tests {
             create_l1_msg_tx(1),
         ];
 
-        assert!(validate_l1_messages_in_block(&txs, 2).is_err());
+        assert!(validate_l1_messages_in_block(&txs, 2, true).is_err());
     }
 
     #[test]
@@ -882,9 +969,9 @@ mod tests {
         // Empty block: no L1 messages → internal check always passes.
         // Any header_next value is accepted because the cross-block
         // monotonicity check is in validate_header_against_parent.
-        assert!(validate_l1_messages_in_block(&txs, 0).is_ok());
-        assert!(validate_l1_messages_in_block(&txs, 5).is_ok());
-        assert!(validate_l1_messages_in_block(&txs, 100).is_ok());
+        assert!(validate_l1_messages_in_block(&txs, 0, true).is_ok());
+        assert!(validate_l1_messages_in_block(&txs, 5, true).is_ok());
+        assert!(validate_l1_messages_in_block(&txs, 100, true).is_ok());
     }
 
     #[test]
@@ -896,7 +983,7 @@ mod tests {
         ];
 
         // last=2, 2+1=3==header_next
-        assert!(validate_l1_messages_in_block(&txs, 3).is_ok());
+        assert!(validate_l1_messages_in_block(&txs, 3, true).is_ok());
     }
 
     #[test]
@@ -908,7 +995,7 @@ mod tests {
         ];
 
         // No L1 messages → internal check passes (header_next not checked)
-        assert!(validate_l1_messages_in_block(&txs, 0).is_ok());
+        assert!(validate_l1_messages_in_block(&txs, 0, true).is_ok());
     }
 
     #[test]
@@ -916,7 +1003,7 @@ mod tests {
         // Block has 0 then 2 (skipping 1) — caught by sequential check
         let txs = [create_l1_msg_tx(0), create_l1_msg_tx(2)];
 
-        let result = validate_l1_messages_in_block(&txs, 3);
+        let result = validate_l1_messages_in_block(&txs, 3, true);
         assert!(result.is_err());
         let err_str = result.unwrap_err().to_string();
         assert!(err_str.contains("expected 1"));
@@ -933,7 +1020,38 @@ mod tests {
         ];
 
         // last=101, 101+1=102==header_next
-        assert!(validate_l1_messages_in_block(&txs, 102).is_ok());
+        assert!(validate_l1_messages_in_block(&txs, 102, true).is_ok());
+    }
+
+    #[test]
+    fn test_validate_l1_messages_jade_rejects_skipped_forward_index() {
+        // Jade onward: header.next_l1_msg_index must equal last_queue_index + 1 exactly.
+        // Here last=1, so the only valid value is 2; a "skipped forward" 5 is rejected,
+        // matching go-ethereum's writeBlockStateWithoutHead hard-fail (PR #331).
+        let txs = [create_l1_msg_tx(0), create_l1_msg_tx(1)];
+        let result = validate_l1_messages_in_block(&txs, 5, true);
+        assert!(
+            result.is_err(),
+            "Jade must reject next_l1_msg_index > last_queue_index + 1"
+        );
+    }
+
+    #[test]
+    fn test_validate_l1_messages_pre_jade_allows_skipped_forward_index() {
+        // Pre-Jade keeps the lenient lower bound: the sequencer was permitted to advance
+        // past queue indices not included in the block body ("early L1 msg skip").
+        let txs = [create_l1_msg_tx(0), create_l1_msg_tx(1)];
+        assert!(
+            validate_l1_messages_in_block(&txs, 5, false).is_ok(),
+            "pre-Jade must allow next_l1_msg_index > last_queue_index + 1"
+        );
+    }
+
+    #[test]
+    fn test_validate_l1_messages_jade_accepts_exact_index() {
+        // The exact value (last_queue_index + 1) is accepted under Jade.
+        let txs = [create_l1_msg_tx(0), create_l1_msg_tx(1)];
+        assert!(validate_l1_messages_in_block(&txs, 2, true).is_ok());
     }
 
     #[test]
@@ -941,7 +1059,7 @@ mod tests {
         // Duplicate index: 0, 0 — caught by sequential check (prev=0, expected 1, got 0)
         let txs = [create_l1_msg_tx(0), create_l1_msg_tx(0)];
 
-        let result = validate_l1_messages_in_block(&txs, 1);
+        let result = validate_l1_messages_in_block(&txs, 1, true);
         assert!(result.is_err());
         let err_str = result.unwrap_err().to_string();
         assert!(err_str.contains("expected 1"));
@@ -953,7 +1071,7 @@ mod tests {
         // Block has 1 then 0 — caught by sequential check (prev=1, expected 2, got 0)
         let txs = [create_l1_msg_tx(1), create_l1_msg_tx(0)];
 
-        let result = validate_l1_messages_in_block(&txs, 2);
+        let result = validate_l1_messages_in_block(&txs, 2, true);
         assert!(result.is_err());
     }
 
@@ -968,7 +1086,7 @@ mod tests {
         ];
 
         // Header says 2 but should be 3 (last=2, 2+1=3). Value < min_expected triggers error.
-        let result = validate_l1_messages_in_block(&txs, 2);
+        let result = validate_l1_messages_in_block(&txs, 2, true);
         assert!(result.is_err());
         let err_str = result.unwrap_err().to_string();
         assert!(err_str.contains("expected 3"));
@@ -985,7 +1103,7 @@ mod tests {
             create_l1_msg_tx(2),
         ];
 
-        assert!(validate_l1_messages_in_block(&txs, 3).is_err());
+        assert!(validate_l1_messages_in_block(&txs, 3, true).is_err());
     }
 
     // ========================================================================
@@ -1016,6 +1134,18 @@ mod tests {
             result,
             Err(ConsensusError::TimestampIsInFuture { .. })
         ));
+    }
+
+    #[test]
+    fn test_timestamp_in_future_is_transient_error() {
+        let chain_spec = create_test_chainspec();
+        let consensus = MorphConsensus::new(chain_spec);
+        let error = ConsensusError::TimestampIsInFuture {
+            timestamp: 2,
+            present_timestamp: 1,
+        };
+
+        assert!(Consensus::<Block>::is_transient_error(&consensus, &error));
     }
 
     #[test]
@@ -1607,7 +1737,7 @@ mod tests {
     fn test_validate_morph_tx_v0_valid() {
         // V0 with fee_token_id > 0 and no reference/memo
         let txs = [create_morph_tx_v0(1)];
-        let result = validate_morph_txs(&txs, false);
+        let result = validate_morph_txs(&txs, true, false);
         assert!(result.is_ok());
     }
 
@@ -1615,7 +1745,7 @@ mod tests {
     fn test_validate_morph_tx_v0_zero_fee_token_rejected() {
         // V0 with fee_token_id == 0 should be rejected
         let txs = [create_morph_tx_v0(0)];
-        let result = validate_morph_txs(&txs, false);
+        let result = validate_morph_txs(&txs, true, false);
         assert!(result.is_err());
         assert!(
             result
@@ -1653,7 +1783,7 @@ mod tests {
         ));
 
         let txs = [envelope];
-        let result = validate_morph_txs(&txs, false);
+        let result = validate_morph_txs(&txs, true, false);
         assert!(result.is_err());
         assert!(
             result
@@ -1667,7 +1797,7 @@ mod tests {
     fn test_validate_morph_tx_v1_before_jade_rejected() {
         // V1 before jade fork should be rejected
         let txs = [create_morph_tx_v1(1)];
-        let result = validate_morph_txs(&txs, false);
+        let result = validate_morph_txs(&txs, true, false);
         assert!(result.is_err());
         assert!(
             result
@@ -1681,8 +1811,58 @@ mod tests {
     fn test_validate_morph_tx_v1_after_jade_valid() {
         // V1 after jade fork should pass
         let txs = [create_morph_tx_v1(1)];
-        let result = validate_morph_txs(&txs, true);
+        let result = validate_morph_txs(&txs, true, true);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_block_pre_execution_uses_chainspec_jade_activation() {
+        let consensus = MorphConsensus::new(create_test_chainspec());
+        let block = create_sealed_block(0, vec![create_morph_tx_v1(1)]);
+
+        let result = consensus.validate_block_pre_execution(&block);
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_block_pre_execution_rejects_morph_tx_before_emerald() {
+        let genesis_json = serde_json::json!({
+            "config": {
+                "chainId": 1337,
+                "homesteadBlock": 0,
+                "eip150Block": 0,
+                "eip155Block": 0,
+                "eip158Block": 0,
+                "byzantiumBlock": 0,
+                "constantinopleBlock": 0,
+                "petersburgBlock": 0,
+                "istanbulBlock": 0,
+                "berlinBlock": 0,
+                "londonBlock": 0,
+                "bernoulliBlock": 0,
+                "curieBlock": 0,
+                "morph203Time": 0,
+                "viridianTime": 0,
+                "emeraldTime": 1000,
+                "jadeForkTime": 2000,
+                "morph": {}
+            },
+            "alloc": {}
+        });
+        let genesis: Genesis = serde_json::from_value(genesis_json).unwrap();
+        let consensus = MorphConsensus::new(Arc::new(MorphChainSpec::from(genesis)));
+        let block = create_sealed_block(999, vec![create_morph_tx_v0(1)]);
+
+        let result = consensus.validate_block_pre_execution(&block);
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("emerald fork not reached")
+        );
     }
 
     #[test]
@@ -1714,7 +1894,7 @@ mod tests {
         ));
 
         let txs = [envelope];
-        let result = validate_morph_txs(&txs, true);
+        let result = validate_morph_txs(&txs, true, true);
         assert!(result.is_err());
         assert!(
             result
@@ -1752,7 +1932,7 @@ mod tests {
         ));
 
         let txs = [envelope];
-        let result = validate_morph_txs(&txs, true);
+        let result = validate_morph_txs(&txs, true, true);
         assert!(result.is_err());
         assert!(
             result
@@ -1790,7 +1970,7 @@ mod tests {
         ));
 
         let txs = [envelope];
-        let result = validate_morph_txs(&txs, true);
+        let result = validate_morph_txs(&txs, true, true);
         assert!(result.is_err());
         assert!(
             result
@@ -1804,7 +1984,7 @@ mod tests {
     fn test_validate_morph_txs_skips_non_morph_tx() {
         // Regular transactions should be skipped entirely
         let txs = [create_regular_tx(), create_l1_msg_tx(0)];
-        let result = validate_morph_txs(&txs, false);
+        let result = validate_morph_txs(&txs, false, false);
         assert!(result.is_ok());
     }
 
@@ -1816,7 +1996,7 @@ mod tests {
             create_regular_tx(),
             create_morph_tx_v0(1),
         ];
-        let result = validate_morph_txs(&txs, false);
+        let result = validate_morph_txs(&txs, true, false);
         assert!(result.is_ok());
     }
 
@@ -1830,7 +2010,7 @@ mod tests {
         let txs = [create_l1_msg_tx(u64::MAX - 1), create_l1_msg_tx(u64::MAX)];
 
         // last=MAX, MAX+1 overflows
-        let result = validate_l1_messages_in_block(&txs, 0);
+        let result = validate_l1_messages_in_block(&txs, 0, true);
         assert!(result.is_err());
     }
 
@@ -1838,9 +2018,9 @@ mod tests {
     fn test_validate_l1_messages_in_block_single_l1() {
         let txs = [create_l1_msg_tx(42)];
         // last=42, 42+1=43==header_next
-        assert!(validate_l1_messages_in_block(&txs, 43).is_ok());
+        assert!(validate_l1_messages_in_block(&txs, 43, true).is_ok());
         // Wrong header_next
-        assert!(validate_l1_messages_in_block(&txs, 42).is_err());
+        assert!(validate_l1_messages_in_block(&txs, 42, true).is_err());
     }
 
     // ========================================================================
@@ -1891,7 +2071,7 @@ mod tests {
         let recovered =
             reth_primitives_traits::RecoveredBlock::new_unhashed(block, vec![Address::ZERO]);
 
-        let post_result = consensus.validate_block_post_execution(&recovered, &result);
+        let post_result = consensus.validate_block_post_execution(&recovered, &result, None, None);
         assert!(matches!(
             post_result,
             Err(ConsensusError::BlockGasUsed { .. })

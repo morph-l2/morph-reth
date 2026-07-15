@@ -3,7 +3,10 @@ use alloy_evm::{
     precompiles::PrecompilesMap,
     revm::{
         Context, ExecuteEvm, InspectEvm, Inspector, SystemCallEvm,
-        context::result::{EVMError, ResultAndState},
+        context::{
+            CfgEnv, DBErrorMarker,
+            result::{EVMError, ResultAndState},
+        },
         inspector::NoOpInspector,
     },
 };
@@ -23,8 +26,7 @@ impl EvmFactory for MorphEvmFactory {
     type Evm<DB: Database, I: Inspector<Self::Context<DB>>> = MorphEvm<DB, I>;
     type Context<DB: Database> = MorphContext<DB>;
     type Tx = MorphTxEnv;
-    type Error<DBError: std::error::Error + Send + Sync + 'static> =
-        EVMError<DBError, MorphInvalidTransaction>;
+    type Error<DBError: DBErrorMarker> = EVMError<DBError, MorphInvalidTransaction>;
     type HaltReason = MorphHaltReason;
     type Spec = MorphHardfork;
     type BlockEnv = MorphBlockEnv;
@@ -176,6 +178,10 @@ where
 
     fn block(&self) -> &Self::BlockEnv {
         &self.block
+    }
+
+    fn cfg_env(&self) -> &CfgEnv<Self::Spec> {
+        &self.inner.inner.ctx.cfg
     }
 
     fn chain_id(&self) -> u64 {

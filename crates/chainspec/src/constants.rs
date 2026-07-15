@@ -12,6 +12,17 @@ pub const MORPH_HOODI_CHAIN_ID: u64 = 2910;
 /// The sequencer has the right to set any base fee below `MORPH_MAX_BASE_FEE`.
 pub const MORPH_BASE_FEE: u64 = 1_000_000;
 
+/// Default priority fee returned by `eth_maxPriorityFeePerGas` when the gas
+/// price oracle has no usable block samples (cold start or empty/zero-tip
+/// blocks, the common case on Morph L2).
+///
+/// Matches morph-geth, which inherits this value from upstream go-ethereum's
+/// `miner.DefaultConfig.GasPrice = params.GWei / 1000 = 1_000_000 wei`
+/// (see `eth/backend.go`: `gpoParams.Default = config.Miner.GasPrice`).
+/// Without this default, reth would fall back to its own 1 gwei default,
+/// causing `eth_maxPriorityFeePerGas` to diverge from geth by 1000x.
+pub const MORPH_DEFAULT_PRIORITY_FEE: u64 = 1_000_000;
+
 /// Morph Mainnet genesis hash (computed with ZK-trie state root).
 ///
 /// Source: go-ethereum/params/config.go

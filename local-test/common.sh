@@ -25,6 +25,9 @@ export MORPH_NETWORK
 
 if [[ "${MORPH_NETWORK}" == "mainnet" ]]; then
   : "${MORPH_NODE_L1_RPC:=${MORPH_NODE_L1_ETH_RPC:-https://ethereum.publicnode.com}}"
+  # L1 Beacon (CL) endpoint — a fullnode (no sequencer signer) derives L2 blocks
+  # from batches posted to L1 as EIP-4844 blobs, so the beacon blob API is required.
+  : "${MORPH_NODE_L1_BEACON_RPC:=${MORPH_NODE_L1_ETH_BEACON_RPC:-https://ethereum-beacon-api.publicnode.com}}"
   : "${MORPH_NODE_DEPOSIT_CONTRACT:=${MORPH_NODE_SYNC_DEPOSIT_CONTRACT_ADDRESS:-0x3931ade842f5bb8763164bdd81e5361dce6cc1ef}}"
   : "${MORPH_NODE_ROLLUP_CONTRACT:=}"
   : "${MORPH_NODE_EXTRA_FLAGS:=--mainnet}"
@@ -33,9 +36,11 @@ if [[ "${MORPH_NETWORK}" == "mainnet" ]]; then
   : "${MORPH_CHAIN:=mainnet}"
 else
   : "${MORPH_NODE_L1_RPC:=${MORPH_NODE_L1_ETH_RPC:-https://ethereum-hoodi-rpc.publicnode.com}}"
+  # L1 Beacon (CL) endpoint — see mainnet branch above for why this is required.
+  : "${MORPH_NODE_L1_BEACON_RPC:=${MORPH_NODE_L1_ETH_BEACON_RPC:-https://ethereum-hoodi-beacon-api.publicnode.com}}"
   : "${MORPH_NODE_DEPOSIT_CONTRACT:=${MORPH_NODE_SYNC_DEPOSIT_CONTRACT_ADDRESS:-0xd7f39d837f4790b215ba67e0ab63665912648dbe}}"
   : "${MORPH_NODE_ROLLUP_CONTRACT:=0x57e0e6dde89dc52c01fe785774271504b1e04664}"
-  : "${MORPH_NODE_EXTRA_FLAGS:=}"
+  : "${MORPH_NODE_EXTRA_FLAGS:=--hoodi}"
   : "${CONFIG_ZIP_URL:=https://raw.githubusercontent.com/morph-l2/run-morph-node/main/hoodi/data.zip}"
   : "${CONFIG_ZIP_PATH:=./local-test/hoodi-data.zip}"
   : "${MORPH_CHAIN:=hoodi}"
@@ -56,11 +61,8 @@ fi
 : "${RETH_LOG_FILE:=./local-test/${MORPH_NETWORK}/reth.log}"
 : "${RETH_HTTP_ADDR:=0.0.0.0}"
 : "${RETH_HTTP_PORT:=8545}"
-: "${RETH_AUTHRPC_ADDR:=127.0.0.1}"
+: "${RETH_AUTHRPC_ADDR:=0.0.0.0}"
 : "${RETH_AUTHRPC_PORT:=8551}"
-: "${RETH_BOOTNODES:=}"
-: "${MORPH_MAX_TX_PAYLOAD_BYTES:=122880}"
-: "${MORPH_MAX_TX_PER_BLOCK:=}"
 
 # ─── Helper functions ─────────────────────────────────────────────────────────
 

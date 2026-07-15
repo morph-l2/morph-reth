@@ -37,7 +37,7 @@ pub enum MorphConsensusError {
     BaseFeeOverLimit(u64),
 
     /// Invalid next L1 message index in header.
-    #[error("Invalid next L1 message index: expected {expected}, got {actual}")]
+    #[error("invalid block.NextL1MsgIndex: expected {expected}, got {actual}")]
     InvalidNextL1MessageIndex {
         /// Expected next L1 message index.
         expected: u64,
@@ -69,5 +69,24 @@ pub enum MorphConsensusError {
 impl From<alloy_rlp::Error> for MorphConsensusError {
     fn from(err: alloy_rlp::Error) -> Self {
         Self::TransactionDecodeError(err.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_next_l1_message_index_error_matches_node_retry_classifier() {
+        let error = MorphConsensusError::InvalidNextL1MessageIndex {
+            expected: 2,
+            actual: 3,
+        }
+        .to_string();
+
+        assert!(
+            error.contains("invalid block.NextL1MsgIndex"),
+            "node treats this substring as a non-retryable error: {error}"
+        );
     }
 }

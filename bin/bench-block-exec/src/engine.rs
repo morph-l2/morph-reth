@@ -21,11 +21,11 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 mod quantity {
     use serde::{self, Deserialize, Deserializer, Serializer};
 
-    pub fn serialize<S: Serializer>(val: &u64, s: S) -> Result<S::Ok, S::Error> {
+    pub(super) fn serialize<S: Serializer>(val: &u64, s: S) -> Result<S::Ok, S::Error> {
         s.serialize_str(&format!("{val:#x}"))
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
         let s = String::deserialize(d)?;
         let s = s
             .strip_prefix("0x")
@@ -39,14 +39,14 @@ mod quantity {
 mod quantity_opt {
     use serde::{self, Deserialize, Deserializer, Serializer};
 
-    pub fn serialize<S: Serializer>(val: &Option<u64>, s: S) -> Result<S::Ok, S::Error> {
+    pub(super) fn serialize<S: Serializer>(val: &Option<u64>, s: S) -> Result<S::Ok, S::Error> {
         match val {
             Some(v) => s.serialize_str(&format!("{v:#x}")),
             None => s.serialize_none(),
         }
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
         let opt: Option<String> = Option::deserialize(d)?;
         match opt {
             None => Ok(None),
@@ -65,20 +65,19 @@ mod quantity_opt {
 
 /// Accepts both hex quantity strings (`"0x0"`) and bare JSON numbers (`0`).
 ///
-/// morph-reth returns hex strings for `nextL1MessageIndex`; morph-geth may
-/// return bare numbers. This module handles both transparently.
+/// Saved Morph responses may contain either representation across RPC revisions.
 mod quantity_or_number {
     use serde::{self, Deserialize, Deserializer, Serializer};
 
-    pub fn serialize<S>(val: &u64, serializer: S) -> Result<S::Ok, S::Error>
+    pub(super) fn serialize<S>(val: &u64, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        // Serialize as bare number: geth expects u64, reth accepts both.
+        // Keep the request form accepted by the sequential Morph Engine method.
         serializer.serialize_u64(*val)
     }
 
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<u64, D::Error>
+    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<u64, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -108,7 +107,7 @@ mod quantity_or_number {
 /// Parameters for `engine_assembleL2Block`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AssembleL2BlockParams {
+pub(crate) struct AssembleL2BlockParams {
     /// Block number to assemble.
     #[serde(with = "quantity")]
     pub number: u64,
@@ -134,7 +133,7 @@ pub struct AssembleL2BlockParams {
 /// so they pass through to `engine_newL2Block` unchanged.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ExecutableL2Data {
+pub(crate) struct ExecutableL2Data {
     /// Parent block hash.
     pub parent_hash: B256,
 
@@ -169,9 +168,8 @@ pub struct ExecutableL2Data {
 
     /// Next L1 message queue index.
     ///
-    /// morph-reth serializes this as a hex quantity string (like all other numeric
-    /// fields). morph-geth may use a bare JSON number. Use `quantity_or_number` to
-    /// accept both formats.
+    /// Morph serializes this as a hex quantity today; older saved responses may use a
+    /// bare JSON number. Use `quantity_or_number` to accept both formats.
     #[serde(with = "quantity_or_number")]
     pub next_l1_message_index: u64,
 
@@ -186,7 +184,7 @@ pub struct ExecutableL2Data {
 
 /// Timing data for a single block's assemble + import cycle.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BlockTiming {
+pub(crate) struct BlockTiming {
     pub block_number: u64,
     pub tx_count: u64,
     pub assemble_ms: f64,
@@ -198,10 +196,13 @@ pub struct BlockTiming {
 
 /// Extended timing record for new benchmark modes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BlockTimingV2 {
+pub(crate) struct BlockTimingV2 {
     pub block_number: u64,
     pub tx_count: u64,
     pub expected_tx_count: u64,
+    /// Requested transaction rate for open-loop runs. This is not a per-block count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_tps: Option<u64>,
     pub engine: String,
     pub mode: String,
     pub workload: String,
@@ -236,7 +237,7 @@ pub struct BlockTimingV2 {
 
 impl BlockTimingV2 {
     /// Compute derived fields after timing is recorded.
-    pub fn finalize(&mut self) {
+    pub(crate) fn finalize(&mut self) {
         self.total_ms = self.submit_ms + self.pool_wait_ms + self.assemble_ms + self.import_ms;
         if self.total_ms > 0.0 {
             let secs = self.total_ms / 1000.0;
@@ -303,7 +304,7 @@ fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
 ///
 /// The secret must be a 64-character hex string representing 32 bytes.
 /// The token carries `{"iat":<unix_timestamp>}` and uses HS256.
-pub fn create_jwt_token(secret_hex: &str) -> eyre::Result<String> {
+pub(crate) fn create_jwt_token(secret_hex: &str) -> eyre::Result<String> {
     let secret_hex = secret_hex.strip_prefix("0x").unwrap_or(secret_hex);
     ensure!(
         secret_hex.len() == 64,
@@ -343,7 +344,7 @@ fn hex_decode(hex: &str) -> eyre::Result<Vec<u8>> {
 /// endpoint reuse the TCP connection pool and avoid re-generating JWT tokens
 /// on every request.  The JWT is refreshed every 30 seconds (well within the
 /// typical 60-second validity window).
-pub struct EngineClient {
+pub(crate) struct EngineClient {
     jwt_secret_hex: String,
     /// Cached (url, client, created_at).
     cached: std::sync::Mutex<Option<(String, HttpClient, Instant)>>,
@@ -354,7 +355,7 @@ impl EngineClient {
     ///
     /// `engine_rpc_url` is stored for documentation / logging purposes;
     /// the actual URL is passed per-call so callers can target different nodes.
-    pub fn new(_engine_rpc_url: &str, jwt_secret_hex: String) -> eyre::Result<Self> {
+    pub(crate) fn new(_engine_rpc_url: &str, jwt_secret_hex: String) -> eyre::Result<Self> {
         // Validate the secret eagerly.
         let stripped = jwt_secret_hex.strip_prefix("0x").unwrap_or(&jwt_secret_hex);
         ensure!(
@@ -398,7 +399,7 @@ impl EngineClient {
 
     /// Call `engine_assembleL2Block` and return the response along with elapsed
     /// milliseconds.
-    pub async fn assemble_l2_block(
+    pub(crate) async fn assemble_l2_block(
         &self,
         url: &str,
         params: AssembleL2BlockParams,
@@ -411,7 +412,11 @@ impl EngineClient {
     }
 
     /// Call `engine_newL2Block` and return the elapsed milliseconds.
-    pub async fn new_l2_block(&self, url: &str, data: ExecutableL2Data) -> eyre::Result<f64> {
+    pub(crate) async fn new_l2_block(
+        &self,
+        url: &str,
+        data: ExecutableL2Data,
+    ) -> eyre::Result<f64> {
         let client = self.authed_client(url)?;
         let start = Instant::now();
         let _: () = client.request("engine_newL2Block", (data,)).await?;

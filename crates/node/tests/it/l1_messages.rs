@@ -17,7 +17,7 @@ use super::helpers::advance_block_with_l1_messages;
 async fn single_l1_message_included() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, _wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     let l1_msg = L1MessageBuilder::new(0)
@@ -43,7 +43,7 @@ async fn single_l1_message_included() -> eyre::Result<()> {
 async fn three_sequential_l1_messages_in_one_block() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, _wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     let l1_msgs = L1MessageBuilder::build_sequential(0, 3);
@@ -76,7 +76,7 @@ async fn three_sequential_l1_messages_in_one_block() -> eyre::Result<()> {
 async fn l1_messages_across_blocks_continuous() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, _wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     // Block 1: queue indices 0, 1
@@ -102,7 +102,7 @@ async fn l1_messages_across_blocks_continuous() -> eyre::Result<()> {
 async fn l1_messages_resume_after_empty_block() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, _wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     // Block 1: queue indices 0, 1
@@ -134,7 +134,7 @@ async fn l1_messages_resume_after_empty_block() -> eyre::Result<()> {
 async fn l1_message_gas_is_tracked() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, _wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     let gas_limit = 50_000u64;

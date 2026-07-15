@@ -67,15 +67,16 @@ All defaults can be overridden via environment variables. Common ones:
 | `MORPHNODE_BIN` | `../morph/node/build/bin/morphnode` | Path to morphnode binary |
 | `RETH_HTTP_PORT` | `8545` | HTTP RPC port |
 | `RETH_AUTHRPC_PORT` | `8551` | Engine API auth RPC port |
-| `RETH_BOOTNODES` | *(empty)* | Comma-separated enode URLs |
-| `MORPH_NODE_L1_RPC` | *(per-network default)* | L1 Ethereum RPC endpoint |
-| `MORPH_MAX_TX_PAYLOAD_BYTES` | `122880` | Max transaction payload size |
+| `MORPH_NODE_L1_RPC` | *(per-network default)* | L1 Ethereum execution RPC endpoint |
+| `MORPH_NODE_L1_BEACON_RPC` | *(per-network default)* | L1 Ethereum beacon (blob) RPC endpoint — required for L1 derivation |
 
 Example with overrides:
 
 ```bash
-RETH_HTTP_PORT=9545 RETH_BOOTNODES="enode://abc@1.2.3.4:30303" ./local-test/start-all.sh hoodi
+RETH_HTTP_PORT=9545 ./local-test/start-all.sh hoodi
 ```
+
+> **Note**: Morph bootnodes are hardcoded in the chainspec — no need to pass `--bootnodes` manually.
 
 ## Monitoring
 
@@ -97,4 +98,13 @@ To wipe chain data and start syncing from scratch:
 ./local-test/reset.sh hoodi --yes    # Reset hoodi (no confirmation)
 ```
 
-This removes `reth-data/db`, `reth-data/static_files`, and `node-data/data/` for the specified network. Config files (genesis, keys) are preserved.
+This removes reth's canonical DB, RocksDB history indices, static files, ExEx state, Morph reference index state, and `node-data/data/` for the specified network. Config files (genesis, keys), `reth.toml`, discovery secrets, and logs are preserved.
+
+## Storage & engine tuning
+
+- **Storage V2 is reth's default from v2.0.0.** Hot/cold layout: MDBX for state/trie, RocksDB for history indices, static files for changesets. V1 and V2 databases are **not interchangeable** — upgrading from a V1 data directory requires a full re-sync via `reset.sh`.
+
+- `reth-start.sh` passes `--engine.persistence-threshold 256` / `--engine.memory-block-buffer-target 16` / `--engine.persistence-backpressure-threshold 512` (upstream defaults are 8 / 4 / 16). These batch MDBX writes so they do not compete with the morphnode Tendermint LevelDB fsyncs when both run on the same host.
+
+  - **Backpressure semantics**: the engine stops executing new payloads once `canonical_tip - last_persisted_block` exceeds the backpressure threshold. We raised it to 512 to absorb fsync spikes; reth enforces that it must be `>` `--engine.persistence-threshold`.
+  - **When to revert**: if morphnode is moved to a separate host (or its fsyncs no longer contend with reth), these flags can be dropped back to defaults.

@@ -2,27 +2,28 @@
 //!
 //! This module provides the concrete Morph L2 Engine API implementation and supporting helpers.
 
-use crate::{EngineApiResult, MorphEngineApiError, MorphL2EngineApi};
+use crate::{
+    EngineApiResult, MorphEngineApiError, MorphL2EngineApi, metrics::MorphEngineApiMetrics,
+};
 use alloy_consensus::{
     BlockHeader, EMPTY_OMMER_ROOT_HASH, Header, proofs::calculate_transaction_root,
 };
 use alloy_eips::eip2718::Decodable2718;
 use alloy_primitives::{Address, B64, B256, Sealable};
-use alloy_rpc_types_engine::PayloadAttributes;
+use alloy_rpc_types_engine::{PayloadAttributes, PayloadStatus, PayloadStatusEnum};
 use morph_chainspec::MorphChainSpec;
 use morph_payload_types::{
-    AssembleL2BlockParams, ExecutableL2Data, GenericResponse, MorphBuiltPayload,
-    MorphExecutionData, MorphPayloadBuilderAttributes, MorphPayloadTypes, SafeL2Data,
+    AssembleL2BlockParams, AssembleL2BlockV2Params, ExecutableL2Data, GenericResponse,
+    MorphBuiltPayload, MorphExecutionData, MorphPayloadTypes, SafeL2Data,
 };
-use morph_primitives::{Block, BlockBody, MorphHeader, MorphPrimitives, MorphTxEnvelope};
+use morph_primitives::{Block, BlockBody, MorphHeader, MorphTxEnvelope};
 use parking_lot::RwLock;
-use reth_payload_builder::PayloadBuilderHandle;
-use reth_payload_primitives::{EngineApiMessageVersion, PayloadBuilderAttributes};
+use reth_payload_builder::{BuildNewPayload, PayloadBuilderHandle};
 #[cfg(test)]
 use reth_primitives_traits::RecoveredBlock;
-use reth_primitives_traits::{SealedBlock, SealedHeader};
-use reth_provider::{BlockIdReader, BlockNumReader, CanonChainTracker, HeaderProvider};
-use std::{sync::Arc, time::Instant};
+use reth_primitives_traits::{FastInstant as Instant, SealedBlock, SealedHeader};
+use reth_provider::{BlockNumReader, BlockReaderIdExt, CanonChainTracker, HeaderProvider};
+use std::sync::Arc;
 
 // =============================================================================
 // Real Implementation
@@ -46,93 +47,45 @@ pub struct RealMorphL2EngineApi<Provider> {
     /// Handle to the running reth engine tree pipeline.
     engine_handle: reth_node_api::ConsensusEngineHandle<MorphPayloadTypes>,
 
-    /// Engine-state tracker updated from consensus engine events (authoritative) and local FCU
-    /// success hints (fast path).
-    engine_state_tracker: Arc<EngineStateTracker>,
+    /// Tracks L1-derived finalized block tags for FCU updates.
+    block_tag_tracker: Arc<BlockTagTracker>,
+
+    /// Prometheus metrics for custom Morph L2 Engine API endpoints and chain head health.
+    metrics: MorphEngineApiMetrics,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct InMemoryHead {
+struct CanonicalHead {
     number: u64,
     hash: B256,
     timestamp: u64,
 }
 
-/// Allow FCU tag fallback to head only while the imported block is clearly historical.
+/// Tracks the L1-derived finalized block hash from `set_block_tags` so that FCU
+/// calls can forward it to the engine tree.
 ///
-/// Once imported blocks are close to wall-clock time, we stop synthesizing safe/finalized and
-/// wait for Morph node's real `set_block_tags` updates instead.
-const FCU_TAG_FALLBACK_MAX_AGE_SECS: u64 = 60;
-
-/// Tracks engine-visible canonical head for the custom Morph engine API.
-///
-/// Updated from `CanonicalChainCommitted` consensus engine events and optimistically
-/// on successful local FCU calls to reduce latency before event delivery.
-///
-/// Also caches L1-based safe/finalized block hashes from `set_block_tags` so that
-/// the FCU can pass them to the engine tree, keeping both memory cleanup and
-/// RPC-visible tags consistent.
+/// Only finalized is cached. FCU safe is passed by the import caller, not cached or
+/// derived from the head, so reorg-capable imports never reuse a stale safe tag.
 #[derive(Debug, Default)]
-pub struct EngineStateTracker {
-    head: RwLock<Option<InMemoryHead>>,
-    /// Last L1-based safe/finalized hashes from `set_block_tags`.
-    /// `None` means `set_block_tags` has not yet provided a value (e.g. during
-    /// historical sync when all batches are already finalized on L1).
-    block_tags: RwLock<BlockTagCache>,
+pub struct BlockTagTracker {
+    /// Last L1-derived finalized hash from `set_block_tags`. `None` means
+    /// `set_block_tags` has not yet provided a value (e.g. a validator not running
+    /// BlockTagService, or before the first L1-finalized batch).
+    finalized_hash: RwLock<Option<B256>>,
 }
 
-/// Cached L1-based block tag hashes from `set_block_tags`.
-#[derive(Debug, Default, Clone, Copy)]
-struct BlockTagCache {
-    safe_hash: Option<B256>,
-    finalized_hash: Option<B256>,
-}
-
-impl EngineStateTracker {
-    /// Records a canonical head hint from a locally successful FCU call.
-    pub fn record_local_head(&self, number: u64, hash: B256, timestamp: u64) {
-        *self.head.write() = Some(InMemoryHead {
-            number,
-            hash,
-            timestamp,
-        });
-    }
-
-    /// Updates the tracker from a consensus engine event stream item.
-    pub fn on_consensus_engine_event(
-        &self,
-        event: &reth_node_api::ConsensusEngineEvent<MorphPrimitives>,
-    ) {
-        use reth_node_api::ConsensusEngineEvent;
-
-        if let ConsensusEngineEvent::CanonicalChainCommitted(header, _) = event {
-            self.record_local_head(header.number(), header.hash(), header.timestamp());
-        }
-    }
-
-    fn current_head(&self) -> Option<InMemoryHead> {
-        *self.head.read()
-    }
-
-    /// Caches L1-based block tag hashes from a successful `set_block_tags` call.
-    pub fn record_block_tags(&self, safe_hash: Option<B256>, finalized_hash: Option<B256>) {
-        let mut tags = self.block_tags.write();
-        if let Some(h) = safe_hash {
-            tags.safe_hash = Some(h);
-        }
+impl BlockTagTracker {
+    /// Caches the L1-derived finalized hash from a successful `set_block_tags` call.
+    /// `None` is ignored, so a previously-supplied finalized is preserved.
+    pub fn record_finalized_hash(&self, finalized_hash: Option<B256>) {
         if let Some(h) = finalized_hash {
-            tags.finalized_hash = Some(h);
+            *self.finalized_hash.write() = Some(h);
         }
     }
 
-    /// Returns the last L1-based finalized hash, or `None` if not yet set.
+    /// Returns the last L1-derived finalized hash, or `None` if not yet set.
     fn l1_finalized_hash(&self) -> Option<B256> {
-        self.block_tags.read().finalized_hash
-    }
-
-    /// Returns the last L1-based safe hash, or `None` if not yet set.
-    fn l1_safe_hash(&self) -> Option<B256> {
-        self.block_tags.read().safe_hash
+        *self.finalized_hash.read()
     }
 }
 
@@ -143,15 +96,27 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
         payload_builder: PayloadBuilderHandle<MorphPayloadTypes>,
         chain_spec: Arc<MorphChainSpec>,
         engine_handle: reth_node_api::ConsensusEngineHandle<MorphPayloadTypes>,
-        engine_state_tracker: Arc<EngineStateTracker>,
+        block_tag_tracker: Arc<BlockTagTracker>,
     ) -> Self {
         Self {
             provider,
             payload_builder,
             chain_spec,
             engine_handle,
-            engine_state_tracker,
+            block_tag_tracker,
+            metrics: MorphEngineApiMetrics::default(),
         }
+    }
+
+    /// Updates `head_block_timegap_seconds` gauge after a successful block import.
+    fn record_head_metrics(&self, block_timestamp: u64) {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.metrics
+            .head_block_timegap_seconds
+            .set(now_secs.saturating_sub(block_timestamp) as f64);
     }
 
     /// Returns a reference to the provider.
@@ -174,8 +139,8 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
 impl<Provider> MorphL2EngineApi for RealMorphL2EngineApi<Provider>
 where
     Provider: HeaderProvider<Header = MorphHeader>
-        + BlockIdReader
         + BlockNumReader
+        + BlockReaderIdExt<Header = MorphHeader>
         + CanonChainTracker<Header = MorphHeader>
         + Clone
         + Send
@@ -186,7 +151,15 @@ where
         &self,
         params: AssembleL2BlockParams,
     ) -> EngineApiResult<ExecutableL2Data> {
-        let built_payload = self.build_l2_payload(params, None, None).await?;
+        let started = Instant::now();
+        let result = self.build_l2_payload(params, None, None, None).await;
+        self.metrics
+            .assemble_l2_block_duration_seconds
+            .record(started.elapsed());
+
+        let built_payload = result.inspect_err(|_| {
+            self.metrics.assemble_l2_block_failures_total.increment(1);
+        })?;
         let executable_data = built_payload.executable_data;
 
         tracing::debug!(
@@ -195,6 +168,54 @@ where
             gas_used = executable_data.gas_used,
             tx_count = executable_data.transactions.len(),
             "L2 block assembled successfully"
+        );
+
+        Ok(executable_data)
+    }
+
+    async fn assemble_l2_block_v2(
+        &self,
+        params: AssembleL2BlockV2Params,
+    ) -> EngineApiResult<ExecutableL2Data> {
+        let started = Instant::now();
+        let parent_hash = params.parent_hash;
+
+        // Derive the block number from the pinned parent (parent + 1). The parent is
+        // looked up by hash and need not be the canonical head — that is the point of V2
+        // (the sequencer can build on a parent that diverges from its current head).
+        let parent = self
+            .provider
+            .sealed_header_by_hash(parent_hash)
+            .map_err(|e| MorphEngineApiError::Database(e.to_string()))?
+            .ok_or_else(|| {
+                MorphEngineApiError::Internal(format!("parent block not found: {parent_hash}"))
+            })?;
+
+        let assemble_params = AssembleL2BlockParams {
+            number: parent.number() + 1,
+            transactions: params.transactions,
+            timestamp: params.timestamp,
+        };
+
+        let result = self
+            .build_l2_payload(assemble_params, None, None, Some(parent_hash))
+            .await;
+        self.metrics
+            .assemble_l2_block_duration_seconds
+            .record(started.elapsed());
+
+        let built_payload = result.inspect_err(|_| {
+            self.metrics.assemble_l2_block_failures_total.increment(1);
+        })?;
+        let executable_data = built_payload.executable_data;
+
+        tracing::debug!(
+            target: "morph::engine",
+            block_hash = %executable_data.hash,
+            parent_hash = %parent_hash,
+            gas_used = executable_data.gas_used,
+            tx_count = executable_data.transactions.len(),
+            "L2 block assembled successfully (v2)"
         );
 
         Ok(executable_data)
@@ -220,6 +241,10 @@ where
                 actual = data.number,
                 "cannot validate block with discontinuous block number"
             );
+            self.metrics.validate_l2_block_failures_total.increment(1);
+            self.metrics
+                .validate_l2_block_duration_seconds
+                .record(validate_started.elapsed());
             return Err(MorphEngineApiError::DiscontinuousBlockNumber {
                 expected: current_head.number + 1,
                 actual: data.number,
@@ -233,6 +258,10 @@ where
                 actual = %data.parent_hash,
                 "parent hash mismatch"
             );
+            self.metrics.validate_l2_block_failures_total.increment(1);
+            self.metrics
+                .validate_l2_block_duration_seconds
+                .record(validate_started.elapsed());
             return Err(MorphEngineApiError::WrongParentHash {
                 expected: current_head.hash,
                 actual: data.parent_hash,
@@ -240,7 +269,6 @@ where
         }
 
         // 2. Convert and forward to reth engine tree (`newPayload` path).
-        let convert_started = Instant::now();
         let (payload, _) = match self.execution_payload_from_executable_data(&data) {
             Ok(v) => v,
             Err(err) => {
@@ -250,12 +278,14 @@ where
                     error = %err,
                     "failed to convert executable data for validation"
                 );
+                self.metrics.validate_l2_block_failures_total.increment(1);
+                self.metrics
+                    .validate_l2_block_duration_seconds
+                    .record(validate_started.elapsed());
                 return Ok(GenericResponse { success: false });
             }
         };
-        let convert_elapsed = convert_started.elapsed();
 
-        let new_payload_started = Instant::now();
         let status = match self.engine_handle.new_payload(payload).await {
             Ok(status) => status,
             Err(err) => {
@@ -265,10 +295,13 @@ where
                     error = %err,
                     "engine new_payload failed during validate_l2_block"
                 );
+                self.metrics.validate_l2_block_failures_total.increment(1);
+                self.metrics
+                    .validate_l2_block_duration_seconds
+                    .record(validate_started.elapsed());
                 return Ok(GenericResponse { success: false });
             }
         };
-        let new_payload_elapsed = new_payload_started.elapsed();
 
         tracing::debug!(
             target: "morph::engine",
@@ -277,27 +310,19 @@ where
             "validate_l2_block returned engine payload status"
         );
 
-        let success = matches!(
-            status.status,
-            alloy_rpc_types_engine::PayloadStatusEnum::Valid
-                | alloy_rpc_types_engine::PayloadStatusEnum::Accepted
-        );
-        tracing::info!(
-            target: "morph::engine",
-            block_number = data.number,
-            block_hash = %data.hash,
-            convert_elapsed = ?convert_elapsed,
-            new_payload_elapsed = ?new_payload_elapsed,
-            total_elapsed = ?validate_started.elapsed(),
-            status = ?status.status,
-            success,
-            "validate_l2_block timing"
-        );
+        let success = payload_status_is_validated(&status);
+        self.metrics
+            .validate_l2_block_duration_seconds
+            .record(validate_started.elapsed());
+        if !success {
+            self.metrics.validate_l2_block_failures_total.increment(1);
+        }
 
         Ok(GenericResponse { success })
     }
 
     async fn new_l2_block(&self, data: ExecutableL2Data) -> EngineApiResult<()> {
+        let started = Instant::now();
         tracing::debug!(
             target: "morph::engine",
             block_number = data.number,
@@ -321,6 +346,9 @@ where
                     current_number = current_number,
                     "ignoring past block number"
                 );
+                self.metrics
+                    .new_l2_block_duration_seconds
+                    .record(started.elapsed());
                 return Ok(());
             }
             // Discontinuous block number
@@ -330,6 +358,10 @@ where
                 actual_number = data.number,
                 "cannot new block with discontinuous block number"
             );
+            self.metrics.new_l2_block_failures_total.increment(1);
+            self.metrics
+                .new_l2_block_duration_seconds
+                .record(started.elapsed());
             return Err(MorphEngineApiError::DiscontinuousBlockNumber {
                 expected: expected_number,
                 actual: data.number,
@@ -344,6 +376,10 @@ where
                 actual = %data.parent_hash,
                 "wrong parent hash"
             );
+            self.metrics.new_l2_block_failures_total.increment(1);
+            self.metrics
+                .new_l2_block_duration_seconds
+                .record(started.elapsed());
             return Err(MorphEngineApiError::WrongParentHash {
                 expected: current_head.hash,
                 actual: data.parent_hash,
@@ -352,7 +388,20 @@ where
 
         let block_hash = data.hash;
         let block_number = data.number;
-        self.import_l2_block_via_engine(data).await?;
+        let block_timestamp = data.timestamp;
+        self.import_l2_block_via_engine(data, B256::ZERO)
+            .await
+            .inspect_err(|_| {
+                self.metrics.new_l2_block_failures_total.increment(1);
+                self.metrics
+                    .new_l2_block_duration_seconds
+                    .record(started.elapsed());
+            })?;
+
+        self.metrics
+            .new_l2_block_duration_seconds
+            .record(started.elapsed());
+        self.record_head_metrics(block_timestamp);
 
         tracing::debug!(
             target: "morph::engine",
@@ -364,24 +413,85 @@ where
         Ok(())
     }
 
-    async fn new_safe_l2_block(&self, mut data: SafeL2Data) -> EngineApiResult<MorphHeader> {
+    async fn new_l2_block_v2(&self, data: ExecutableL2Data) -> EngineApiResult<MorphHeader> {
+        let started = Instant::now();
         tracing::debug!(
             target: "morph::engine",
             block_number = data.number,
-            "importing safe L2 block from L1 derivation"
+            block_hash = %data.hash,
+            parent_hash = %data.parent_hash,
+            "importing new L2 block (v2, reorg-capable)"
         );
 
-        // 1. Get latest block number
-        let latest_number = self.current_head()?.number;
+        // 1. Parent selection by hash. Relaxed from V1's "parent must be the current
+        //    head" to "parent must exist": when the parent is not the canonical head,
+        //    the forkchoice update inside import_l2_block_via_engine reorganizes the
+        //    chain onto this block. This is the centralized-sequencer import path,
+        //    where the sequencer may rebuild and replace recent blocks.
+        let parent = self
+            .provider
+            .sealed_header_by_hash(data.parent_hash)
+            .map_err(|e| MorphEngineApiError::Database(e.to_string()))?
+            .ok_or_else(|| {
+                MorphEngineApiError::Internal(format!(
+                    "parent block not found: {}",
+                    data.parent_hash
+                ))
+            })?;
 
-        if data.number != latest_number + 1 {
+        // 2. Block number must be exactly parent + 1.
+        let expected_number = parent.number() + 1;
+        if data.number != expected_number {
+            self.metrics.new_l2_block_failures_total.increment(1);
+            self.metrics
+                .new_l2_block_duration_seconds
+                .record(started.elapsed());
             return Err(MorphEngineApiError::DiscontinuousBlockNumber {
-                expected: latest_number + 1,
+                expected: expected_number,
                 actual: data.number,
             });
         }
 
-        // 2. Assemble the block from SafeL2Data inputs.
+        // 3. Import via the engine tree (newPayload + forkchoiceUpdated). The hash check
+        //    against data.hash happens inside execution_payload_from_executable_data; the
+        //    FCU advances or reorgs the canonical head onto data.hash.
+        let block_timestamp = data.timestamp;
+        let header = self
+            .import_l2_block_via_engine(data, B256::ZERO)
+            .await
+            .inspect_err(|_| {
+                self.metrics.new_l2_block_failures_total.increment(1);
+                self.metrics
+                    .new_l2_block_duration_seconds
+                    .record(started.elapsed());
+            })?;
+
+        self.metrics
+            .new_l2_block_duration_seconds
+            .record(started.elapsed());
+        self.record_head_metrics(block_timestamp);
+
+        Ok(header)
+    }
+
+    async fn new_safe_l2_block(&self, mut data: SafeL2Data) -> EngineApiResult<MorphHeader> {
+        let started = Instant::now();
+        tracing::debug!(
+            target: "morph::engine",
+            block_number = data.number,
+            parent_hash = ?data.parent_hash,
+            "importing safe L2 block from L1 derivation"
+        );
+
+        let block_timestamp = data.timestamp;
+
+        // Parent selection: caller-pinned (derivation reorg path, deriveForce) or the
+        // current head (legacy sequential path). The block-number invariant
+        // (`number == parent + 1`) is validated inside build_l2_payload against the
+        // resolved parent, so callers that pin a non-head parent reorg correctly.
+        let parent_override = data.parent_hash;
+
+        // Assemble the block from SafeL2Data inputs.
         let assemble_params = AssembleL2BlockParams {
             number: data.number,
             // Move transactions out of data to avoid cloning the full Vec<Bytes>.
@@ -390,38 +500,42 @@ where
         };
 
         let built_payload = self
-            .build_l2_payload(assemble_params, Some(data.gas_limit), data.base_fee_per_gas)
-            .await?;
+            .build_l2_payload(
+                assemble_params,
+                Some(data.gas_limit),
+                data.base_fee_per_gas,
+                parent_override,
+            )
+            .await
+            .inspect_err(|_| {
+                self.metrics.new_safe_l2_block_failures_total.increment(1);
+                self.metrics
+                    .new_safe_l2_block_duration_seconds
+                    .record(started.elapsed());
+            })?;
         let executable_data = built_payload.executable_data;
         // Save hash before moving executable_data into the import call.
         let block_hash = executable_data.hash;
 
-        // 3. Import the block through reth engine tree and return the in-path header
-        // (do not rely on immediate DB visibility after FCU).
-        let header = self.import_l2_block_via_engine(executable_data).await?;
+        // 3. Import the block through reth engine tree, marking the imported block safe
+        // in the same FCU. Do not mark it finalized: L1 derivation can still reorg this
+        // block, and finalized is only authoritative when supplied by BlockTagService via
+        // set_block_tags. Return the in-path header (do not rely on immediate DB
+        // visibility after FCU).
+        let header = self
+            .import_l2_block_via_engine(executable_data, block_hash)
+            .await
+            .inspect_err(|_| {
+                self.metrics.new_safe_l2_block_failures_total.increment(1);
+                self.metrics
+                    .new_safe_l2_block_duration_seconds
+                    .record(started.elapsed());
+            })?;
 
-        // Update safe block tag and seed finalized for memory cleanup.
-        //
-        // Validator / derivation mode does not run BlockTagService, so
-        // set_block_tags is never called externally.  Without a cached
-        // finalized hash the FCU falls back to B256::ZERO once blocks are
-        // near wall-clock time, disabling changeset-cache eviction.
-        //
-        // Passing block_hash as finalized here seeds the tracker so the
-        // engine tree can keep evicting.  Once validators adopt
-        // BlockTagService the L1-derived finalized value will naturally
-        // supersede this hint.
-        //
-        // Best-effort: block import already succeeded, so don't fail the
-        // whole call if only the tag update encounters an issue.
-        if let Err(e) = self.set_block_tags(block_hash, block_hash).await {
-            tracing::warn!(
-                target: "morph::engine",
-                block_hash = %block_hash,
-                error = %e,
-                "failed to update safe tag after block import; tag can be set later via setBlockTags"
-            );
-        }
+        self.metrics
+            .new_safe_l2_block_duration_seconds
+            .record(started.elapsed());
+        self.record_head_metrics(block_timestamp);
 
         tracing::debug!(
             target: "morph::engine",
@@ -441,65 +555,86 @@ where
         // set_safe on the provider directly, skipping zero hashes. This avoids a full
         // FCU round-trip through the async engine pipeline for what is purely a tag
         // update, and correctly skips the update when the caller passes B256::ZERO.
-        if finalized_block_hash != B256::ZERO {
-            self.update_block_tag(finalized_block_hash, "finalized", |sealed| {
-                self.provider.set_finalized(sealed);
-            })?;
+        //
+        // Order matters: set safe FIRST, then finalized. The Ethereum invariant
+        // `finalized.number <= safe.number` must hold at every observable point
+        // for an RPC reader. Updating finalized first and then safe leaves a
+        // window between the two writes where `eth_getBlockByNumber("finalized")`
+        // returns the new value but `eth_getBlockByNumber("safe")` returns the
+        // stale older value — a transient `finalized > safe` violation. Updating
+        // safe first keeps the invariant satisfied throughout (finalized stays
+        // at its older, smaller value while safe advances).
+        let safe = if safe_block_hash != B256::ZERO {
+            Some(self.resolve_block_tag(safe_block_hash, "safe")?)
+        } else {
+            None
+        };
+        let finalized = if finalized_block_hash != B256::ZERO {
+            Some(self.resolve_block_tag(finalized_block_hash, "finalized")?)
+        } else {
+            None
+        };
+        if safe.is_none() && finalized.is_none() {
+            return Ok(());
         }
 
-        if safe_block_hash != B256::ZERO {
-            self.update_block_tag(safe_block_hash, "safe", |sealed| {
-                self.provider.set_safe(sealed);
-            })?;
+        let canonical_head = self.current_head()?;
+        validate_resolved_block_tags(
+            safe.as_ref().map(|header| header.number()),
+            finalized.as_ref().map(|header| header.number()),
+            canonical_head.number,
+        )?;
+
+        if let Some(sealed) = safe {
+            self.provider.set_safe(sealed);
+            tracing::info!(
+                target: "morph::engine",
+                hash = %safe_block_hash,
+                "safe block tag updated"
+            );
         }
 
-        // Cache the L1-based hashes so subsequent FCU calls use them instead of
-        // falling back to head.  This keeps engine-tree finalization and
-        // RPC-visible tags aligned with the actual L1 finalization status.
-        self.engine_state_tracker.record_block_tags(
-            if safe_block_hash != B256::ZERO {
-                Some(safe_block_hash)
-            } else {
-                None
-            },
-            if finalized_block_hash != B256::ZERO {
+        if let Some(sealed) = finalized {
+            self.provider.set_finalized(sealed);
+            tracing::info!(
+                target: "morph::engine",
+                hash = %finalized_block_hash,
+                "finalized block tag updated"
+            );
+        }
+
+        // Cache the L1-derived finalized hash so subsequent FCU calls can forward it.
+        // Safe is not cached: FCU safe is supplied by each import caller, and the
+        // RPC-visible safe tag can also be advanced by set_block_tags.
+        self.block_tag_tracker
+            .record_finalized_hash(if finalized_block_hash != B256::ZERO {
                 Some(finalized_block_hash)
             } else {
                 None
-            },
-        );
+            });
 
         Ok(())
     }
 }
 
 impl<Provider> RealMorphL2EngineApi<Provider> {
-    /// Looks up a sealed header by hash, calls `setter` on it, and logs the tag update.
+    /// Looks up a sealed header by hash.
     ///
-    /// Used by `set_block_tags` to deduplicate the finalized/safe update paths.
-    fn update_block_tag(
+    /// Used by `set_block_tags` to validate both tag updates before mutating provider state.
+    fn resolve_block_tag(
         &self,
         hash: B256,
         tag_name: &str,
-        setter: impl FnOnce(SealedHeader<MorphHeader>),
-    ) -> EngineApiResult<()>
+    ) -> EngineApiResult<SealedHeader<MorphHeader>>
     where
         Provider: HeaderProvider<Header = MorphHeader>,
     {
-        let sealed = self
-            .provider
+        self.provider
             .sealed_header_by_hash(hash)
             .map_err(|e| MorphEngineApiError::Internal(e.to_string()))?
             .ok_or_else(|| {
                 MorphEngineApiError::Internal(format!("{tag_name} block {hash} not found"))
-            })?;
-        setter(sealed);
-        tracing::info!(
-            target: "morph::engine",
-            %hash,
-            "{tag_name} block tag updated"
-        );
-        Ok(())
+            })
     }
 
     async fn build_l2_payload(
@@ -507,10 +642,16 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
         params: AssembleL2BlockParams,
         gas_limit_override: Option<u64>,
         base_fee_override: Option<u128>,
+        parent_override: Option<B256>,
     ) -> EngineApiResult<MorphBuiltPayload>
     where
-        Provider:
-            HeaderProvider<Header = MorphHeader> + BlockNumReader + Clone + Send + Sync + 'static,
+        Provider: HeaderProvider<Header = MorphHeader>
+            + BlockNumReader
+            + BlockReaderIdExt<Header = MorphHeader>
+            + Clone
+            + Send
+            + Sync
+            + 'static,
     {
         tracing::debug!(
             target: "morph::engine",
@@ -519,20 +660,45 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
             "assembling L2 block"
         );
 
-        // 1. Validate block number (must be current_head + 1).
-        let current_head = self.current_head()?;
-        if params.number != current_head.number + 1 {
+        // 1. Resolve the parent: caller-pinned (reorg path, e.g. derivation deriveForce
+        //    or assembleL2BlockV2) or the current canonical head (sequential path). When
+        //    pinned, the parent need not be the head — building on it lets the subsequent
+        //    forkchoice update reorganize the chain onto the new block.
+        let (parent_number, parent_hash, parent_timestamp) = match parent_override {
+            Some(parent_hash) => {
+                let parent = self
+                    .provider
+                    .sealed_header_by_hash(parent_hash)
+                    .map_err(|e| MorphEngineApiError::Database(e.to_string()))?
+                    .ok_or_else(|| {
+                        MorphEngineApiError::Internal(format!(
+                            "parent block not found: {parent_hash}"
+                        ))
+                    })?;
+                (parent.number(), parent_hash, parent.timestamp())
+            }
+            None => {
+                let current_head = self.current_head()?;
+                (
+                    current_head.number,
+                    current_head.hash,
+                    current_head.timestamp,
+                )
+            }
+        };
+
+        // 2. Validate block number (must be parent + 1).
+        if params.number != parent_number + 1 {
             return Err(MorphEngineApiError::DiscontinuousBlockNumber {
-                expected: current_head.number + 1,
+                expected: parent_number + 1,
                 actual: params.number,
             });
         }
 
-        // 2. Build payload attributes.
-        let parent_hash = current_head.hash;
+        // 3. Build payload attributes.
         let timestamp = params.timestamp.unwrap_or_else(|| {
             std::cmp::max(
-                current_head.timestamp + 1,
+                parent_timestamp + 1,
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -557,23 +723,26 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
                 suggested_fee_recipient: Address::ZERO,
                 withdrawals: Some(Vec::new()),
                 parent_beacon_block_root: None,
+                // Morph L2 has no PoS slot semantics; introduced in alloy 2.0.
+                slot_number: None,
+                target_gas_limit: None,
             },
             transactions: Some(params.transactions),
             gas_limit: gas_limit_override,
             base_fee_per_gas: base_fee_override,
         };
 
-        let builder_attrs = MorphPayloadBuilderAttributes::try_new(parent_hash, rpc_attributes, 1)
-            .map_err(|e| {
-                MorphEngineApiError::BlockBuildError(format!(
-                    "failed to create builder attributes: {e}",
-                ))
-            })?;
-        let payload_id = builder_attrs.payload_id();
+        let payload_id = rpc_attributes.morph_payload_id(&parent_hash);
 
+        let build_input = BuildNewPayload {
+            attributes: rpc_attributes,
+            parent_hash,
+            cache: None,
+            state_root_handle: None,
+        };
         let _ = self
             .payload_builder
-            .send_new_payload(builder_attrs)
+            .send_new_payload(build_input)
             .await
             .map_err(|_| {
                 MorphEngineApiError::BlockBuildError("failed to send build request".to_string())
@@ -584,9 +753,9 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
                 ))
             })?;
 
-        // Use resolve_kind to wait for the payload builder to complete,
-        // ensuring pool transactions are included. best_payload may return
-        // before pool transactions are picked up.
+        // Morph builds blocks synchronously (no external CL timeout), so we
+        // use WaitForPending to wait for the payload builder to finish rather
+        // than racing an empty payload via Earliest.
         self.payload_builder
             .resolve_kind(payload_id, reth_node_api::PayloadKind::WaitForPending)
             .await
@@ -601,100 +770,44 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
     async fn import_l2_block_via_engine(
         &self,
         data: ExecutableL2Data,
+        safe_block_hash: B256,
     ) -> EngineApiResult<MorphHeader>
     where
         Provider: HeaderProvider<Header = MorphHeader>
-            + BlockIdReader
             + BlockNumReader
             + CanonChainTracker<Header = MorphHeader>,
     {
-        let import_started = Instant::now();
-        let convert_started = Instant::now();
         let (payload, header) = self.execution_payload_from_executable_data(&data)?;
-        let convert_elapsed = convert_started.elapsed();
 
-        let new_payload_started = Instant::now();
         let payload_status = self
             .engine_handle
             .new_payload(payload)
             .await
             .map_err(|e| MorphEngineApiError::ExecutionFailed(e.to_string()))?;
-        let new_payload_elapsed = new_payload_started.elapsed();
-        self.ensure_payload_status_acceptable(&payload_status, "newPayload")?;
+        ensure_payload_status_valid(&payload_status, "newPayload")?;
 
-        // Morph uses Tendermint consensus with instant finality — every committed
-        // block is final and no reorgs are possible.
-        //
-        // The safe/finalized hashes passed here serve two purposes in reth's engine
-        // tree: (1) driving changeset-cache eviction and sidechain pruning (memory
-        // management), and (2) setting the RPC-visible "safe"/"finalized" block tags.
-        //
-        // When BlockTagService has provided L1-based tags via set_block_tags, we
-        // forward those so the engine tree and RPC layer stay consistent with the
-        // actual L1 finalization status.
-        //
-        // During deep historical sync, BlockTagService may be unable to provide
-        // tags for already-finalized batches. In that case we temporarily fall back
-        // to head so the engine tree can continue evicting old changesets.
-        //
-        // Once imported blocks are close to wall-clock time, we stop synthesizing
-        // safe/finalized and wait for real L1-derived tags to avoid falsely
-        // advertising live blocks as finalized in the catch-up window.
-        let now_timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let finalized_hash = resolve_fcu_block_tag_hash(
-            self.engine_state_tracker.l1_finalized_hash(),
-            data.hash,
-            data.timestamp,
-            now_timestamp,
-        );
-        let safe_hash = resolve_fcu_block_tag_hash(
-            self.engine_state_tracker.l1_safe_hash(),
-            data.hash,
-            data.timestamp,
-            now_timestamp,
-        );
+        // FCU safe/finalized must be canonical ancestors. Unsafe imports pass safe zero;
+        // new_safe_l2_block passes the imported block itself, never a cached old safe.
+        // Forward only the L1-derived finalized tag; zero is a no-op when it is absent,
+        // and pinned reth v2.2.0 still cleans changesets/canonical memory without
+        // finalized.
         let forkchoice = alloy_rpc_types_engine::ForkchoiceState {
             head_block_hash: data.hash,
-            safe_block_hash: safe_hash,
-            finalized_block_hash: finalized_hash,
+            safe_block_hash,
+            finalized_block_hash: self
+                .block_tag_tracker
+                .l1_finalized_hash()
+                .unwrap_or_default(),
         };
 
         self.provider.on_forkchoice_update_received(&forkchoice);
 
-        let fcu_started = Instant::now();
         let fcu_result = self
             .engine_handle
-            .fork_choice_updated(forkchoice, None, Self::engine_api_version())
+            .fork_choice_updated(forkchoice, None)
             .await
             .map_err(|e| MorphEngineApiError::ExecutionFailed(e.to_string()))?;
-        let fcu_elapsed = fcu_started.elapsed();
-        self.ensure_payload_status_acceptable(&fcu_result.payload_status, "forkchoiceUpdated")?;
-
-        // Synchronously update the canonical head so that eth_blockNumber immediately
-        // reflects the new block. The background write pipeline updates
-        // canonical_in_memory_state asynchronously; without this call, morph-node
-        // would see eth_blockNumber return the old block number and reject the next
-        // block as ErrWrongBlockNumber.
-        self.engine_state_tracker
-            .record_local_head(data.number, data.hash, data.timestamp);
-        self.provider
-            .set_canonical_head(SealedHeader::new(header.clone(), data.hash));
-
-        tracing::info!(
-            target: "morph::engine",
-            block_number = data.number,
-            block_hash = %data.hash,
-            convert_elapsed = ?convert_elapsed,
-            new_payload_elapsed = ?new_payload_elapsed,
-            fcu_elapsed = ?fcu_elapsed,
-            total_elapsed = ?import_started.elapsed(),
-            new_payload_status = ?payload_status.status,
-            fcu_status = ?fcu_result.payload_status.status,
-            "new_l2_block engine timing"
-        );
+        ensure_payload_status_valid(&fcu_result.payload_status, "forkchoiceUpdated")?;
 
         Ok(header)
     }
@@ -774,6 +887,10 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
                 blob_gas_used: None,
                 excess_blob_gas: None,
                 requests_hash: None,
+                // Pre-Amsterdam Morph blocks do not carry a block-access-list hash,
+                // and there is no PoS slot number.
+                block_access_list_hash: None,
+                slot_number: None,
             },
         };
         let body = BlockBody {
@@ -814,57 +931,79 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
         ))
     }
 
-    fn ensure_payload_status_acceptable(
-        &self,
-        status: &alloy_rpc_types_engine::PayloadStatus,
-        context: &'static str,
-    ) -> EngineApiResult<()> {
-        match &status.status {
-            alloy_rpc_types_engine::PayloadStatusEnum::Valid
-            | alloy_rpc_types_engine::PayloadStatusEnum::Accepted => Ok(()),
-            alloy_rpc_types_engine::PayloadStatusEnum::Syncing => {
-                Err(MorphEngineApiError::ExecutionFailed(format!(
-                    "{context} returned SYNCING for payload"
-                )))
-            }
-            alloy_rpc_types_engine::PayloadStatusEnum::Invalid { validation_error } => {
-                Err(MorphEngineApiError::ValidationFailed(format!(
-                    "{context} returned INVALID: {validation_error}"
-                )))
-            }
-        }
-    }
-
-    const fn engine_api_version() -> EngineApiMessageVersion {
-        EngineApiMessageVersion::V1
-    }
-
-    fn current_head(&self) -> EngineApiResult<InMemoryHead>
+    fn current_head(&self) -> EngineApiResult<CanonicalHead>
     where
-        Provider: HeaderProvider + BlockNumReader,
+        Provider: BlockReaderIdExt<Header = MorphHeader>,
     {
-        if let Some(head) = self.engine_state_tracker.current_head() {
-            return Ok(head);
-        }
-
-        let number = self
-            .provider
-            .last_block_number()
-            .map_err(|e| MorphEngineApiError::Database(e.to_string()))?;
         let header = self
             .provider
-            .sealed_header(number)
+            .latest_header()
             .map_err(|e| MorphEngineApiError::Database(e.to_string()))?
-            .ok_or_else(|| MorphEngineApiError::Internal(format!("header {number} not found")))?;
+            .ok_or_else(|| {
+                MorphEngineApiError::Internal("canonical head header not found".to_string())
+            })?;
 
-        let head = InMemoryHead {
-            number,
+        Ok(CanonicalHead {
+            number: header.number(),
             hash: header.hash(),
             timestamp: header.timestamp(),
-        };
-        self.engine_state_tracker
-            .record_local_head(head.number, head.hash, head.timestamp);
-        Ok(head)
+        })
+    }
+}
+
+fn validate_resolved_block_tags(
+    safe_number: Option<u64>,
+    finalized_number: Option<u64>,
+    canonical_head_number: u64,
+) -> EngineApiResult<()> {
+    if let Some(safe_number) = safe_number
+        && safe_number > canonical_head_number
+    {
+        return Err(MorphEngineApiError::ValidationFailed(format!(
+            "safe block number {safe_number} exceeds canonical head number {canonical_head_number}"
+        )));
+    }
+
+    if let Some(finalized_number) = finalized_number
+        && finalized_number > canonical_head_number
+    {
+        return Err(MorphEngineApiError::ValidationFailed(format!(
+            "finalized block number {finalized_number} exceeds canonical head number {canonical_head_number}"
+        )));
+    }
+
+    if let (Some(safe_number), Some(finalized_number)) = (safe_number, finalized_number)
+        && finalized_number > safe_number
+    {
+        return Err(MorphEngineApiError::ValidationFailed(format!(
+            "finalized block number {finalized_number} exceeds safe block number {safe_number}"
+        )));
+    }
+
+    Ok(())
+}
+
+fn payload_status_is_validated(status: &PayloadStatus) -> bool {
+    matches!(status.status, PayloadStatusEnum::Valid)
+}
+
+fn ensure_payload_status_valid(
+    status: &PayloadStatus,
+    context: &'static str,
+) -> EngineApiResult<()> {
+    match &status.status {
+        PayloadStatusEnum::Valid => Ok(()),
+        PayloadStatusEnum::Accepted => Err(MorphEngineApiError::ExecutionFailed(format!(
+            "{context} returned ACCEPTED before payload was validated"
+        ))),
+        PayloadStatusEnum::Syncing => Err(MorphEngineApiError::ExecutionFailed(format!(
+            "{context} returned SYNCING for payload"
+        ))),
+        PayloadStatusEnum::Invalid { validation_error } => {
+            Err(MorphEngineApiError::ValidationFailed(format!(
+                "{context} returned INVALID: {validation_error}"
+            )))
+        }
     }
 }
 
@@ -912,87 +1051,53 @@ fn apply_executable_data_overrides(
     Ok(RecoveredBlock::new_unhashed(block, senders))
 }
 
-fn resolve_fcu_block_tag_hash(
-    l1_tag_hash: Option<B256>,
-    head_hash: B256,
-    block_timestamp: u64,
-    now_timestamp: u64,
-) -> B256 {
-    match l1_tag_hash {
-        Some(hash) => hash,
-        None if now_timestamp.saturating_sub(block_timestamp) > FCU_TAG_FALLBACK_MAX_AGE_SECS => {
-            head_hash
-        }
-        None => B256::ZERO,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloy_consensus::Header;
     use alloy_primitives::{Address, Bloom, Bytes};
+    use alloy_rpc_types_engine::{PayloadStatus, PayloadStatusEnum};
     use morph_primitives::BlockBody;
-    use reth_node_api::ConsensusEngineEvent;
-    use reth_primitives_traits::SealedHeader;
-    use std::time::Duration;
 
     fn recovered_with_header(header: MorphHeader) -> RecoveredBlock<Block> {
         let block = Block::new(header, BlockBody::default());
         RecoveredBlock::new_unhashed(block, Vec::new())
     }
 
-    #[test]
-    fn test_engine_state_tracker_updates_head_on_canonical_chain_commit() {
-        let tracker = EngineStateTracker::default();
-        assert!(tracker.current_head().is_none());
-
-        let header = MorphHeader {
-            inner: Header {
-                number: 42,
-                timestamp: 1_700_000_042,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let sealed_header = SealedHeader::seal_slow(header);
-        tracker.on_consensus_engine_event(&ConsensusEngineEvent::CanonicalChainCommitted(
-            Box::new(sealed_header.clone()),
-            Duration::ZERO,
-        ));
-
-        let current_head = tracker.current_head().expect("head should be updated");
-        assert_eq!(current_head.number, sealed_header.number());
-        assert_eq!(current_head.hash, sealed_header.hash());
-        assert_eq!(current_head.timestamp, sealed_header.timestamp());
+    fn payload_status(status: PayloadStatusEnum) -> PayloadStatus {
+        PayloadStatus::from_status(status)
     }
 
     #[test]
-    fn test_resolve_fcu_block_tag_hash_uses_l1_tag_when_available() {
-        let l1_tag = B256::from([0x11; 32]);
-        let head = B256::from([0x22; 32]);
-
-        let resolved = resolve_fcu_block_tag_hash(Some(l1_tag), head, 1_700_000_000, 1_700_000_030);
-
-        assert_eq!(resolved, l1_tag);
+    fn test_validation_success_requires_valid_payload_status() {
+        assert!(payload_status_is_validated(&payload_status(
+            PayloadStatusEnum::Valid
+        )));
+        assert!(!payload_status_is_validated(&payload_status(
+            PayloadStatusEnum::Accepted
+        )));
+        assert!(!payload_status_is_validated(&payload_status(
+            PayloadStatusEnum::Syncing
+        )));
+        assert!(!payload_status_is_validated(&payload_status(
+            PayloadStatusEnum::Invalid {
+                validation_error: "bad payload".to_string(),
+            }
+        )));
     }
 
     #[test]
-    fn test_resolve_fcu_block_tag_hash_falls_back_to_head_for_historical_blocks() {
-        let head = B256::from([0x33; 32]);
+    fn test_ensure_payload_status_valid_rejects_accepted() {
+        let err =
+            ensure_payload_status_valid(&payload_status(PayloadStatusEnum::Accepted), "newPayload")
+                .unwrap_err();
 
-        let resolved = resolve_fcu_block_tag_hash(None, head, 1_700_000_000, 1_700_000_000 + 300);
-
-        assert_eq!(resolved, head);
-    }
-
-    #[test]
-    fn test_resolve_fcu_block_tag_hash_returns_zero_near_live_without_l1_tag() {
-        let head = B256::from([0x44; 32]);
-
-        let resolved = resolve_fcu_block_tag_hash(None, head, 1_700_000_000, 1_700_000_000 + 5);
-
-        assert_eq!(resolved, B256::ZERO);
+        match err {
+            MorphEngineApiError::ExecutionFailed(msg) => {
+                assert!(msg.contains("newPayload returned ACCEPTED"));
+            }
+            other => panic!("unexpected error: {other}"),
+        }
     }
 
     #[test]
@@ -1154,82 +1259,39 @@ mod tests {
         );
     }
 
-    // =========================================================================
-    // EngineStateTracker tests
-    // =========================================================================
-
     #[test]
-    fn test_engine_state_tracker_default_is_none() {
-        let tracker = EngineStateTracker::default();
-        assert!(tracker.current_head().is_none());
+    fn test_block_tag_tracker_records_finalized_hash() {
+        let tracker = BlockTagTracker::default();
+        let finalized_hash = B256::from([0x22; 32]);
+
+        tracker.record_finalized_hash(Some(finalized_hash));
+        assert_eq!(tracker.l1_finalized_hash(), Some(finalized_hash));
+
+        // `None` is ignored: a previously-supplied finalized is preserved.
+        tracker.record_finalized_hash(None);
+        assert_eq!(tracker.l1_finalized_hash(), Some(finalized_hash));
     }
 
     #[test]
-    fn test_engine_state_tracker_record_local_head() {
-        let tracker = EngineStateTracker::default();
-        let hash = B256::from([0x42; 32]);
-        tracker.record_local_head(10, hash, 1_700_000_010);
-
-        let head = tracker.current_head().expect("head should be set");
-        assert_eq!(head.number, 10);
-        assert_eq!(head.hash, hash);
-        assert_eq!(head.timestamp, 1_700_000_010);
+    fn test_validate_resolved_block_tags_rejects_finalized_after_safe() {
+        let err = validate_resolved_block_tags(Some(10), Some(11), 11).unwrap_err();
+        match err {
+            MorphEngineApiError::ValidationFailed(msg) => {
+                assert!(msg.contains("finalized block number 11 exceeds safe block number 10"));
+            }
+            other => panic!("unexpected error: {other}"),
+        }
     }
 
     #[test]
-    fn test_engine_state_tracker_overwrites_on_update() {
-        let tracker = EngineStateTracker::default();
-        tracker.record_local_head(10, B256::from([0x01; 32]), 100);
-        tracker.record_local_head(20, B256::from([0x02; 32]), 200);
-
-        let head = tracker.current_head().expect("head should be set");
-        assert_eq!(head.number, 20);
-        assert_eq!(head.hash, B256::from([0x02; 32]));
-        assert_eq!(head.timestamp, 200);
-    }
-
-    #[test]
-    fn test_engine_state_tracker_ignores_non_canonical_events() {
-        let tracker = EngineStateTracker::default();
-
-        // LiveSyncProgress events should not update the head
-        // (only CanonicalChainCommitted updates it)
-        // We can only test CanonicalChainCommitted since other variants
-        // require complex types. Verify the tracker remains None when no
-        // CanonicalChainCommitted event is sent.
-        assert!(tracker.current_head().is_none());
-
-        // Now send a CanonicalChainCommitted event
-        let header = MorphHeader {
-            inner: Header {
-                number: 5,
-                timestamp: 500,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let sealed_header = SealedHeader::seal_slow(header);
-        tracker.on_consensus_engine_event(&ConsensusEngineEvent::CanonicalChainCommitted(
-            Box::new(sealed_header),
-            Duration::ZERO,
-        ));
-
-        let head = tracker
-            .current_head()
-            .expect("head should be set after event");
-        assert_eq!(head.number, 5);
-    }
-
-    #[test]
-    fn test_engine_state_tracker_concurrent_reads() {
-        // Verify parking_lot::RwLock allows concurrent reads without panic
-        let tracker = EngineStateTracker::default();
-        tracker.record_local_head(1, B256::ZERO, 100);
-
-        // Multiple reads should not block or panic
-        let head1 = tracker.current_head();
-        let head2 = tracker.current_head();
-        assert_eq!(head1, head2);
+    fn test_validate_resolved_block_tags_rejects_safe_after_canonical_head() {
+        let err = validate_resolved_block_tags(Some(12), Some(11), 11).unwrap_err();
+        match err {
+            MorphEngineApiError::ValidationFailed(msg) => {
+                assert!(msg.contains("safe block number 12 exceeds canonical head number 11"));
+            }
+            other => panic!("unexpected error: {other}"),
+        }
     }
 
     // =========================================================================

@@ -13,13 +13,12 @@ workspace = true
 
 [dependencies]
 # Morph
-morph-primitives = { workspace = true, features = ["serde-bincode-compat"] }
+morph-primitives = { workspace = true, features = ["serde-bincode-compat", "reth-codec"] }
 
 # Reth
-reth-payload-builder.workspace = true
 reth-payload-primitives.workspace = true
 reth-primitives-traits.workspace = true
-reth-ethereum-primitives = { workspace = true, features = ["serde", "serde-bincode-compat"] }
+reth-ethereum-primitives = { workspace = true, features = ["serde"] }
 
 # Alloy
 alloy-consensus.workspace = true

@@ -8,7 +8,6 @@ mod report;
 pub mod sweep;
 pub mod tx_factory;
 mod verify;
-mod workload;
 
 use clap::{Parser, Subcommand};
 
@@ -23,8 +22,6 @@ struct Cli {
 enum Command {
     /// Generate a benchmark genesis file.
     WriteGenesis(genesis::WriteGenesisArgs),
-    /// Run the legacy workload benchmark (backward compat).
-    RunWorkload(workload::RunWorkloadArgs),
     /// Run a benchmark in the specified mode.
     Run {
         #[command(subcommand)]
@@ -55,7 +52,6 @@ async fn main() -> eyre::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::WriteGenesis(args) => genesis::run(args),
-        Command::RunWorkload(args) => workload::run(args).await,
         Command::Run { mode } => match mode {
             RunMode::Exec(args) => mode_exec::run(args).await,
             RunMode::E2e(args) => mode_e2e::run(args).await,
@@ -109,15 +105,10 @@ mod tests {
             "100",
             "--output",
             "bench-results/openloop.jsonl",
-            "--engine-name",
-            "reth",
             "--chain-id",
             "99999",
         ]);
 
-        assert!(
-            parsed.is_ok(),
-            "expected openloop mode to parse"
-        );
+        assert!(parsed.is_ok(), "expected openloop mode to parse");
     }
 }

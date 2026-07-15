@@ -2,11 +2,16 @@
 
 use crate::{
     MorphNode,
+    exex::ReferenceIndexControl,
     validator::{MorphEngineValidatorBuilder, MorphTreeEngineValidatorBuilder},
 };
 use morph_evm::MorphEvmConfig;
 use morph_primitives::{Block, MorphHeader, MorphReceipt};
-use morph_rpc::{MorphEthApiBuilder, MorphEthConfigApiServer, MorphEthConfigHandler};
+use morph_reference_index::{DEFAULT_LAG_THRESHOLD, ReferenceIndexReader};
+use morph_rpc::{
+    MorphEthApiBuilder, MorphEthConfigApiServer, MorphEthConfigHandler,
+    morph::{MorphRpc, MorphRpcHandler, MorphRpcServer},
+};
 use reth_node_api::{AddOnsContext, FullNodeComponents, FullNodeTypes, NodeAddOns, NodePrimitives};
 use reth_node_builder::{
     NodeAdapter,
@@ -21,7 +26,6 @@ use reth_provider::{
 use reth_rpc_builder::Identity;
 use reth_rpc_eth_api::RpcNodeCore;
 use reth_tracing::tracing;
-use tokio_stream::StreamExt;
 
 /// Morph node add-ons for RPC and Engine API.
 ///
@@ -36,9 +40,14 @@ pub struct MorphAddOns<
     PVB = MorphEngineValidatorBuilder,
     EVB = MorphTreeEngineValidatorBuilder<PVB>,
     RpcMiddleware = Identity,
+    AuthHttpMiddleware = Identity,
 > {
     /// Inner RPC add-ons from reth.
-    inner: RpcAddOns<N, EthB, PVB, NoopEngineApiBuilder, EVB, RpcMiddleware>,
+    inner: RpcAddOns<N, EthB, PVB, NoopEngineApiBuilder, EVB, RpcMiddleware, AuthHttpMiddleware>,
+    /// Optional reference-index control injected by `main.rs`.  When present
+    /// the add-on spawns startup indexing on launch and registers the
+    /// `morph_` RPC namespace.
+    reference_index: Option<ReferenceIndexControl>,
 }
 
 impl<N> MorphAddOns<NodeAdapter<N>, MorphEthApiBuilder>
@@ -58,8 +67,17 @@ where
                 NoopEngineApiBuilder::default(),
                 MorphTreeEngineValidatorBuilder::new(pvb),
                 Identity::default(),
+                Identity::default(),
             ),
+            reference_index: None,
         }
+    }
+
+    /// Attach a reference index control so the add-on can spawn startup
+    /// indexing and register the `morph_` RPC namespace on launch.
+    pub fn with_reference_index(mut self, control: ReferenceIndexControl) -> Self {
+        self.reference_index = Some(control);
+        self
     }
 }
 
@@ -98,23 +116,43 @@ where
         let payload_builder = ctx.node.payload_builder_handle().clone();
         let chain_spec = ctx.node.provider().chain_spec();
         let beacon_engine_handle = ctx.beacon_engine_handle.clone();
-        let engine_events = ctx.engine_events.clone();
         let task_executor = ctx.node.task_executor().clone();
-        let engine_state_tracker =
-            std::sync::Arc::new(morph_engine_api::EngineStateTracker::default());
+        let block_tag_tracker = std::sync::Arc::new(morph_engine_api::BlockTagTracker::default());
 
         // Create Morph eth_config handler (EIP-7910 + morph extension)
         let eth_config_handler =
             MorphEthConfigHandler::new(ctx.node.provider().clone(), ctx.node.evm_config().clone());
 
-        // Keep a local view of canonical head/forkchoice from reth engine events.
-        let tracker_for_events = engine_state_tracker.clone();
-        task_executor.spawn_critical("morph engine state tracker", async move {
-            let mut listener = engine_events.new_listener();
-            while let Some(event) = listener.next().await {
-                tracker_for_events.on_consensus_engine_event(&event);
-            }
-        });
+        // Spawn reference index startup indexing (Task A) if configured.
+        let reference_rpc_handler = if let Some(control) = self.reference_index {
+            let startup_control = control.clone();
+            let startup_node = ctx.node.clone();
+            // spawn_critical_task causes node shutdown on panic/error, matching the spec
+            // requirement that reference index startup failures are fatal.
+            task_executor.spawn_critical_task("morph reference index startup", async move {
+                let result = tokio::task::spawn_blocking(move || {
+                    crate::exex::run_startup_indexing(&startup_node, &startup_control)
+                })
+                .await
+                .unwrap_or_else(|e| Err(eyre::eyre!("reference index startup panicked: {e}")));
+
+                match result {
+                    Ok(()) => {}
+                    Err(err) => {
+                        // Propagate to spawn_critical_task which will shut down the node.
+                        panic!("reference index startup failed: {err:?}");
+                    }
+                }
+            });
+
+            let morph_rpc_ctx = MorphRpc::new(
+                ReferenceIndexReader::new(control.db, DEFAULT_LAG_THRESHOLD),
+                provider.clone(),
+            );
+            Some(MorphRpcHandler::new(morph_rpc_ctx))
+        } else {
+            None
+        };
 
         // Use launch_add_ons_with to register custom Engine API and eth_config
         self.inner
@@ -133,6 +171,15 @@ where
                     .map_err(|e| eyre::eyre!("Failed to register eth_config handler: {}", e))?;
                 tracing::info!(target: "morph::node", "Morph eth_config handler registered successfully");
 
+                // Register morph_ RPC namespace (if reference index was configured).
+                if let Some(handler) = reference_rpc_handler {
+                    tracing::debug!(target: "morph::node", "Registering morph_ RPC namespace");
+                    modules
+                        .merge_configured(handler.into_rpc())
+                        .map_err(|e| eyre::eyre!("Failed to register morph_ RPC: {}", e))?;
+                    tracing::info!(target: "morph::node", "morph_ RPC namespace registered");
+                }
+
                 // Create and register Morph L2 Engine API
                 tracing::debug!(target: "morph::node", "Registering Morph L2 Engine API");
 
@@ -143,7 +190,7 @@ where
                         payload_builder,
                         chain_spec,
                         beacon_engine_handle,
-                        engine_state_tracker,
+                        block_tag_tracker,
                     );
 
                 // Create the RPC handler

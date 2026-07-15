@@ -38,6 +38,23 @@ install: ## Build and install the morph-reth binary under `$(CARGO_HOME)/bin`.
 		--profile "$(PROFILE)" \
 		$(CARGO_INSTALL_EXTRA_FLAGS)
 
+##@ Cross Build (requires Docker + cross: cargo install cross --git https://github.com/cross-rs/cross)
+
+# x86_64 release artifacts target the x86-64-v3 baseline (Haswell+ /
+# Excavator+), matching upstream reth. `+pclmulqdq` enables carry-less
+# multiply (used by keccak/GHASH) which v3 does not auto-imply. Pre-2013
+# Intel and pre-2015 AMD CPUs will SIGILL on these binaries.
+build-x86_64-unknown-linux-gnu: RUSTFLAGS_ARCH = -C target-cpu=x86-64-v3 -C target-feature=+pclmulqdq
+
+# aarch64 needs larger jemalloc page size (64KB pages on some ARM systems)
+build-aarch64-unknown-linux-gnu: export JEMALLOC_SYS_WITH_LG_PAGE=16
+
+# Pattern rule: cross-build for any target, e.g. `make build-x86_64-unknown-linux-gnu`
+# See: https://github.com/cross-rs/cross/wiki/FAQ#undefined-reference-with-build-std
+build-%: ## Cross-build morph-reth for a specific target (e.g. build-x86_64-unknown-linux-gnu).
+	RUSTFLAGS="-C link-arg=-lgcc -Clink-arg=-static-libgcc $(RUSTFLAGS_ARCH)" \
+		cross build --locked --bin morph-reth --target $* --profile "$(PROFILE)"
+
 # Create a `.tar.gz` containing the morph-reth binary for a specific target.
 define tarball_release_binary
 	cp $(CARGO_TARGET_DIR)/$(PROFILE)/morph-reth $(BIN_DIR)/morph-reth
@@ -114,9 +131,19 @@ docker-build-push-latest: ## Build and push a Docker image tagged with the lates
 docker-build-push-git-sha: ## Build and push a Docker image tagged with the latest git sha.
 	$(call docker_build_push,$(GIT_SHA),$(GIT_SHA))
 
+# Cross-compile binaries for both platforms, then build a multi-arch image
+# using Dockerfile.cross (no QEMU needed).
 define docker_build_push
-	docker buildx build --file ./Dockerfile . \
-		--platform linux/amd64 \
+	$(MAKE) build-x86_64-unknown-linux-gnu
+	mkdir -p $(BIN_DIR)/amd64
+	cp $(CARGO_TARGET_DIR)/x86_64-unknown-linux-gnu/$(PROFILE)/morph-reth $(BIN_DIR)/amd64/morph-reth
+
+	$(MAKE) build-aarch64-unknown-linux-gnu
+	mkdir -p $(BIN_DIR)/arm64
+	cp $(CARGO_TARGET_DIR)/aarch64-unknown-linux-gnu/$(PROFILE)/morph-reth $(BIN_DIR)/arm64/morph-reth
+
+	docker buildx build --file ./Dockerfile.cross . \
+		--platform linux/amd64,linux/arm64 \
 		--tag $(DOCKER_IMAGE_NAME):$(1) \
 		--tag $(DOCKER_IMAGE_NAME):$(2) \
 		--provenance=false \

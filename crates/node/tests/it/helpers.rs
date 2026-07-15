@@ -4,12 +4,11 @@ use alloy_consensus::BlockHeader;
 use alloy_primitives::{Address, B256, Bytes};
 use alloy_rpc_types_engine::PayloadAttributes;
 use morph_node::test_utils::MorphTestNode;
-use morph_payload_types::{
-    MorphBuiltPayload, MorphPayloadAttributes, MorphPayloadBuilderAttributes, MorphPayloadTypes,
-};
+use morph_payload_types::{MorphBuiltPayload, MorphPayloadAttributes, MorphPayloadTypes};
 use reth_e2e_test_utils::wallet::Wallet;
 use reth_node_api::PayloadTypes;
-use reth_payload_primitives::{BuiltPayload, PayloadBuilderAttributes};
+use reth_payload_builder::BuildNewPayload;
+use reth_payload_primitives::BuiltPayload;
 use reth_provider::BlockReaderIdExt;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -48,19 +47,23 @@ pub(crate) async fn advance_block_with_l1_messages(
             suggested_fee_recipient: Address::ZERO,
             withdrawals: Some(vec![]),
             parent_beacon_block_root: Some(B256::ZERO),
+            slot_number: None,
+            target_gas_limit: None,
         },
         transactions: Some(l1_messages),
         gas_limit: None,
         base_fee_per_gas: None,
     };
 
-    let attrs = MorphPayloadBuilderAttributes::try_new(head_hash, rpc_attrs, 3)
-        .map_err(|e| eyre::eyre!("failed to build payload attributes: {e}"))?;
-
     let payload_id = node
         .inner
         .payload_builder_handle
-        .send_new_payload(attrs)
+        .send_new_payload(BuildNewPayload {
+            attributes: rpc_attrs,
+            parent_hash: head_hash,
+            cache: None,
+            state_root_handle: None,
+        })
         .await?
         .map_err(|e| eyre::eyre!("payload build failed: {e}"))?;
 
@@ -119,19 +122,23 @@ pub(crate) async fn build_block_no_submit(
             suggested_fee_recipient: Address::ZERO,
             withdrawals: Some(vec![]),
             parent_beacon_block_root: Some(B256::ZERO),
+            slot_number: None,
+            target_gas_limit: None,
         },
         transactions: Some(l1_messages),
         gas_limit: None,
         base_fee_per_gas: None,
     };
 
-    let attrs = MorphPayloadBuilderAttributes::try_new(head_hash, rpc_attrs, 3)
-        .map_err(|e| eyre::eyre!("failed to build payload attributes: {e}"))?;
-
     let payload_id = node
         .inner
         .payload_builder_handle
-        .send_new_payload(attrs)
+        .send_new_payload(BuildNewPayload {
+            attributes: rpc_attrs,
+            parent_hash: head_hash,
+            cache: None,
+            state_root_handle: None,
+        })
         .await?
         .map_err(|e| eyre::eyre!("payload build failed: {e}"))?;
 
@@ -187,7 +194,7 @@ pub(crate) async fn craft_and_try_import_block(
     let modified_sealed = SealedBlock::seal_slow(block);
 
     // Convert to execution payload and try to import
-    let execution_data = MorphPayloadTypes::block_to_payload(modified_sealed);
+    let execution_data = MorphPayloadTypes::block_to_payload(modified_sealed, None);
     let status = node
         .inner
         .add_ons_handle
@@ -224,19 +231,23 @@ pub(crate) async fn expect_payload_build_failure(
             suggested_fee_recipient: Address::ZERO,
             withdrawals: Some(vec![]),
             parent_beacon_block_root: Some(B256::ZERO),
+            slot_number: None,
+            target_gas_limit: None,
         },
         transactions: Some(l1_messages),
         gas_limit: None,
         base_fee_per_gas: None,
     };
 
-    let attrs = MorphPayloadBuilderAttributes::try_new(head_hash, rpc_attrs, 3)
-        .map_err(|e| eyre::eyre!("failed to build payload attributes: {e}"))?;
-
     let payload_id = match node
         .inner
         .payload_builder_handle
-        .send_new_payload(attrs)
+        .send_new_payload(BuildNewPayload {
+            attributes: rpc_attrs,
+            parent_hash: head_hash,
+            cache: None,
+            state_root_handle: None,
+        })
         .await?
     {
         Ok(id) => id,

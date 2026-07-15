@@ -31,28 +31,21 @@ args=(
   --http
   --http.addr "${RETH_HTTP_ADDR}"
   --http.port "${RETH_HTTP_PORT}"
-  --http.api "web3,debug,eth,txpool,net,trace"
+  --http.api "web3,debug,eth,txpool,net,trace,admin,reth"
   --authrpc.addr "${RETH_AUTHRPC_ADDR}"
   --authrpc.port "${RETH_AUTHRPC_PORT}"
   --authrpc.jwtsecret "${JWT_SECRET}"
   --log.file.directory "$(dirname "${RETH_LOG_FILE}")"
   --log.file.filter info
-  --morph.max-tx-payload-bytes "${MORPH_MAX_TX_PAYLOAD_BYTES}"
+  --rpc.eth-proof-window 1209600
+  # Local testing: explicitly avoid external IP probes such as icanhazip.com.
   --nat none
-  --engine.legacy-state-root
+  # Batch MDBX writes so they don't compete with Tendermint's LevelDB fsyncs
+  # (v2.0.0 added persistence-backpressure-threshold, which must be > persistence-threshold)
   --engine.persistence-threshold 256
   --engine.memory-block-buffer-target 16
+  --engine.persistence-backpressure-threshold 512
 )
-
-# Add optional max-tx-per-block if configured
-if [[ -n "${MORPH_MAX_TX_PER_BLOCK}" ]]; then
-  args+=(--morph.max-tx-per-block "${MORPH_MAX_TX_PER_BLOCK}")
-fi
-
-# Add bootnodes if configured
-if [[ -n "${RETH_BOOTNODES}" ]]; then
-  args+=(--bootnodes "${RETH_BOOTNODES}")
-fi
 
 # Start morph-reth with pm2
 pm2 start "${RETH_BIN}" --name morph-reth -- "${args[@]}"

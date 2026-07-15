@@ -1,5 +1,6 @@
 //! Morph payload builder implementation.
 
+use crate::metrics::MorphPayloadBuilderMetrics;
 use crate::{MorphBuilderConfig, MorphPayloadBuilderError, config::PayloadBuildingBreaker};
 use alloy_consensus::{BlockHeader, Transaction, Typed2718};
 use alloy_eips::eip2718::Encodable2718;
@@ -8,7 +9,9 @@ use alloy_rlp::Encodable;
 use morph_chainspec::MorphChainSpec;
 use morph_chainspec::{L2_MESSAGE_QUEUE_ADDRESS, L2_MESSAGE_QUEUE_WITHDRAW_TRIE_ROOT_SLOT};
 use morph_evm::{MorphEvmConfig, MorphNextBlockEnvAttributes};
-use morph_payload_types::{ExecutableL2Data, MorphBuiltPayload, MorphPayloadBuilderAttributes};
+use morph_payload_types::{
+    ExecutableL2Data, MorphBuiltPayload, MorphPayloadAttributes, MorphPayloadBuilderAttributes,
+};
 use morph_primitives::{MorphHeader, MorphTxEnvelope};
 use reth_basic_payload_builder::{
     BuildArguments, BuildOutcome, BuildOutcomeKind, MissingPayloadBehaviour, PayloadBuilder,
@@ -20,13 +23,12 @@ use reth_evm::{
     block::{BlockExecutionError, BlockValidationError},
     execute::{BlockBuilder, BlockBuilderOutcome},
 };
-use reth_execution_types::ExecutionOutcome;
+use reth_execution_cache::{CachedStateMetrics, CachedStateMetricsSource, CachedStateProvider};
+use reth_execution_types::BlockExecutionOutput;
 use reth_payload_builder::PayloadId;
-use reth_payload_primitives::{
-    BuiltPayloadExecutedBlock, PayloadBuilderAttributes, PayloadBuilderError,
-};
+use reth_payload_primitives::{BuiltPayloadExecutedBlock, PayloadBuilderError};
 use reth_payload_util::{BestPayloadTransactions, NoopPayloadTransactions, PayloadTransactions};
-use reth_primitives_traits::{RecoveredBlock, SealedHeader};
+use reth_primitives_traits::{FastInstant as Instant, RecoveredBlock, SealedHeader};
 use reth_revm::{database::StateProviderDatabase, db::State};
 use reth_storage_api::{StateProvider, StateProviderFactory};
 use reth_transaction_pool::{BestTransactionsAttributes, PoolTransaction, TransactionPool};
@@ -157,7 +159,7 @@ where
     /// Constructs a Morph payload from the transactions sent via the payload attributes.
     fn build_payload<'a, BestTxs>(
         &self,
-        args: BuildArguments<MorphPayloadBuilderAttributes, MorphBuiltPayload>,
+        args: BuildArguments<MorphPayloadAttributes, MorphBuiltPayload>,
         best: impl FnOnce(BestTransactionsAttributes) -> BestTxs + Send + Sync + 'a,
     ) -> Result<BuildOutcome<MorphBuiltPayload>, PayloadBuilderError>
     where
@@ -166,25 +168,71 @@ where
     {
         let BuildArguments {
             mut cached_reads,
+            execution_cache,
+            state_root_handle,
             config,
             cancel,
             best_payload,
         } = args;
 
+        // Convert RPC-level MorphPayloadAttributes to builder-level MorphPayloadBuilderAttributes
+        let parent_hash = config.parent_header.hash();
+        let payload_id = config.payload_id;
+        let parent_header = config.parent_header.clone();
+        let parent_block_info = config.parent_block_info;
+        let builder_attrs = MorphPayloadBuilderAttributes::try_new(
+            parent_hash,
+            config.attributes,
+            morph_payload_types::MORPH_PAYLOAD_BUILDER_VERSION,
+        )
+        .map_err(|e| PayloadBuilderError::Other(e.into()))?;
+        let builder_config = PayloadConfig {
+            parent_header,
+            parent_block_info,
+            attributes: builder_attrs,
+            payload_id,
+        };
+
         let ctx = MorphPayloadBuilderCtx {
             evm_config: self.evm_config.clone(),
-            config,
+            config: builder_config,
             cancel,
             best_payload,
             builder_config: self.config.clone(),
+            metrics: MorphPayloadBuilderMetrics::default(),
         };
 
-        let state_provider = self.client.state_by_block_hash(ctx.parent().hash())?;
-        let state = StateProviderDatabase::new(&state_provider);
+        // When `--engine.share-execution-cache-with-payload-builder` is set,
+        // reth's engine provides a SavedCache snapshot associated with the parent
+        // block. Wrap the state provider so account/storage/code reads consult
+        // the cache before hitting the DB — amortizes cross-block cost when the
+        // payload builder and engine both touch overlapping state.
+        let mut state_provider: Box<dyn StateProvider> =
+            self.client.state_by_block_hash(ctx.parent().hash())?;
+        if let Some(execution_cache) = execution_cache {
+            // reth v2.2.0 dropped `SavedCache::metrics`; the canonical pattern
+            // (see `reth-ethereum-payload`) is to materialize a fresh zeroed
+            // metrics handle on every payload build — cheap because morph-reth
+            // builds payloads on demand rather than every 12s like upstream.
+            state_provider = Box::new(CachedStateProvider::new(
+                state_provider,
+                execution_cache.cache().clone(),
+                Some(CachedStateMetrics::zeroed(
+                    CachedStateMetricsSource::Builder,
+                )),
+            ));
+        }
+        let state = StateProviderDatabase::new(state_provider.as_ref());
 
         // Reuse cached reads from previous runs for incremental payload building
-        build_payload_inner(cached_reads.as_db_mut(state), &state_provider, ctx, best)
-            .map(|out| out.with_cached_reads(cached_reads))
+        build_payload_inner(
+            cached_reads.as_db_mut(state),
+            state_provider.as_ref(),
+            ctx,
+            best,
+            state_root_handle,
+        )
+        .map(|out| out.with_cached_reads(cached_reads))
     }
 }
 
@@ -195,7 +243,7 @@ where
     Client: StateProviderFactory + ChainSpecProvider<ChainSpec = MorphChainSpec> + Clone,
     Txs: MorphPayloadTransactions<Pool::Transaction>,
 {
-    type Attributes = MorphPayloadBuilderAttributes;
+    type Attributes = MorphPayloadAttributes;
     type BuiltPayload = MorphBuiltPayload;
 
     fn try_build(
@@ -223,6 +271,8 @@ where
         let args = BuildArguments {
             config,
             cached_reads: Default::default(),
+            execution_cache: None,
+            state_root_handle: None,
             cancel: Default::default(),
             best_payload: None,
         };
@@ -247,6 +297,8 @@ struct MorphPayloadBuilderCtx {
     best_payload: Option<MorphBuiltPayload>,
     /// Builder configuration with limits.
     builder_config: MorphBuilderConfig,
+    /// Prometheus metrics for this payload build job.
+    metrics: MorphPayloadBuilderMetrics,
 }
 
 impl MorphPayloadBuilderCtx {
@@ -311,6 +363,14 @@ impl MorphPayloadBuilderCtx {
 
             // Check if adding this transaction would exceed block gas limit
             if info.cumulative_gas_used + tx_gas > block_gas_limit {
+                tracing::warn!(
+                    target: "payload_builder",
+                    tx_index = tx_idx,
+                    tx_gas,
+                    cumulative_gas_used = info.cumulative_gas_used,
+                    block_gas_limit,
+                    "L1 message transaction would exceed block gas limit; aborting build"
+                );
                 gas_spent_by_transactions.push(tx_gas);
                 return Err(PayloadBuilderError::other(
                     MorphPayloadBuilderError::BlockGasLimitExceededBySequencerTransactions {
@@ -320,9 +380,13 @@ impl MorphPayloadBuilderCtx {
                 ));
             }
 
-            // Execute the transaction
+            // Execute the transaction and record EVM execution time.
+            let apply_started = Instant::now();
+            // `BlockBuilder::execute_transaction` returns `GasOutput` from
+            // alloy-evm 0.34; pre-Amsterdam morph treats regular and state gas
+            // as a single number, so collapse to `tx_gas_used()` immediately.
             let gas_used = match builder.execute_transaction(recovered_tx.clone()) {
-                Ok(gas_used) => gas_used,
+                Ok(gas_output) => gas_output.tx_gas_used(),
                 Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
                     error,
                     ..
@@ -356,9 +420,19 @@ impl MorphPayloadBuilderCtx {
                 }
                 Err(err) => {
                     // Fatal error - this is a bug or misconfiguration
+                    tracing::error!(
+                        target: "payload_builder",
+                        tx_index = tx_idx,
+                        %err,
+                        ?recovered_tx,
+                        "fatal EVM execution error on L1 message transaction"
+                    );
                     return Err(PayloadBuilderError::EvmExecutionError(Box::new(err)));
                 }
             };
+            self.metrics
+                .commit_tx_apply_duration_seconds
+                .record(apply_started.elapsed());
 
             // For L1 messages, track the next L1 message index.
             // L1 gas is prepaid on L1, so no fees are collected here.
@@ -444,33 +518,62 @@ impl MorphPayloadBuilderCtx {
 
             let tx = tx.into_consensus();
 
-            // Skip blob transactions and L1 messages from pool
+            // Skip blob transactions and L1 messages from pool. These should
+            // never reach the pool under normal operation (pool filters them
+            // out at admission), so their presence here indicates either a
+            // bug in the admission path or a node configuration mismatch —
+            // warn loudly.
             if tx.is_eip4844() || tx.is_l1_msg() {
+                tracing::warn!(
+                    target: "payload_builder",
+                    signer = %tx.signer(),
+                    nonce = tx.nonce(),
+                    is_blob = tx.is_eip4844(),
+                    is_l1_msg = tx.is_l1_msg(),
+                    "unexpected blob or L1-message transaction in the pool; skipping"
+                );
                 best_txs.mark_invalid(tx.signer(), tx.nonce());
                 continue;
             }
 
-            // Check if the transaction exceeds block limits
+            // Check if the transaction exceeds block limits (gas or DA size).
+            // Rare in practice; logged at debug to avoid pool-skip noise.
             if info.is_tx_over_limits(
                 tx.gas_limit(),
                 tx.length() as u64,
                 block_gas_limit,
                 self.builder_config.max_da_block_size,
             ) {
+                tracing::debug!(
+                    target: "payload_builder",
+                    signer = %tx.signer(),
+                    nonce = tx.nonce(),
+                    tx_gas_limit = tx.gas_limit(),
+                    tx_size = tx.length(),
+                    block_gas_limit,
+                    max_da_block_size = self.builder_config.max_da_block_size,
+                    "pool transaction exceeds block limits; skipping"
+                );
                 best_txs.mark_invalid(tx.signer(), tx.nonce());
                 continue;
             }
 
-            // Execute the transaction
+            let apply_started = Instant::now();
+            // Same reasoning as the L1-message branch above: collapse `GasOutput`
+            // into a single u64 since we are still pre-Amsterdam.
             let gas_used = match builder.execute_transaction(tx.clone()) {
-                Ok(gas_used) => gas_used,
+                Ok(gas_output) => gas_output.tx_gas_used(),
                 Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
                     error,
                     ..
                 })) => {
+                    // These three variants fire on the fast path of every
+                    // pool sweep and can be extremely noisy under load. Keep
+                    // them at `trace` so default operation stays quiet; turn
+                    // on `RUST_LOG=morph_payload_builder=trace` to diagnose
+                    // pool-skip rates.
                     if error.is_nonce_too_low() {
-                        // If the nonce is too low, we can skip this transaction
-                        // but don't mark as invalid - the sender may have other valid txs
+                        // Nonce too low: sender may have other valid txs.
                         tracing::trace!(
                             target: "payload_builder",
                             %error,
@@ -478,8 +581,7 @@ impl MorphPayloadBuilderCtx {
                             "skipping nonce too low transaction"
                         );
                     } else {
-                        // If the transaction is invalid for other reasons,
-                        // skip it and all of its descendants from this sender
+                        // Other invalid: skip this tx AND its descendants.
                         tracing::trace!(
                             target: "payload_builder",
                             %error,
@@ -491,7 +593,7 @@ impl MorphPayloadBuilderCtx {
                     continue;
                 }
                 Err(BlockExecutionError::Validation(err)) => {
-                    // Other validation errors - skip transaction and descendants
+                    // Other validation errors - skip transaction and descendants.
                     tracing::trace!(
                         target: "payload_builder",
                         %err,
@@ -502,10 +604,20 @@ impl MorphPayloadBuilderCtx {
                     continue;
                 }
                 Err(err) => {
-                    // Fatal error - should not continue
+                    // Fatal error - should not continue.
+                    tracing::error!(
+                        target: "payload_builder",
+                        signer = %tx.signer(),
+                        nonce = tx.nonce(),
+                        %err,
+                        "fatal EVM execution error on pool transaction; aborting build"
+                    );
                     return Err(PayloadBuilderError::EvmExecutionError(Box::new(err)));
                 }
             };
+            self.metrics
+                .commit_tx_apply_duration_seconds
+                .record(apply_started.elapsed());
 
             // Update execution info
             info.cumulative_gas_used += gas_used;
@@ -575,14 +687,16 @@ impl ExecutionInfo {
 /// Builds the payload on top of the state.
 fn build_payload_inner<'a, DB, BestTxs>(
     db: DB,
-    state_provider: &impl StateProvider,
+    state_provider: &(impl StateProvider + ?Sized),
     ctx: MorphPayloadBuilderCtx,
     best: impl FnOnce(BestTransactionsAttributes) -> BestTxs + Send + Sync + 'a,
+    mut state_root_handle: Option<reth_trie_parallel::state_root_task::PayloadStateRootHandle>,
 ) -> Result<BuildOutcomeKind<MorphBuiltPayload>, PayloadBuilderError>
 where
     DB: Database<Error = reth_evm::execute::ProviderError>,
     BestTxs: PayloadTransactions<Transaction: PoolTransaction<Consensus = MorphTxEnvelope>> + 'a,
 {
+    let build_started = Instant::now();
     let attributes = ctx.attributes();
 
     tracing::debug!(
@@ -601,13 +715,15 @@ where
     // Build next block env attributes
     let next_block_attrs = MorphNextBlockEnvAttributes {
         inner: NextBlockEnvAttributes {
-            timestamp: attributes.inner.timestamp,
-            suggested_fee_recipient: attributes.inner.suggested_fee_recipient,
-            prev_randao: attributes.inner.prev_randao,
+            timestamp: attributes.timestamp,
+            suggested_fee_recipient: attributes.suggested_fee_recipient,
+            prev_randao: attributes.prev_randao,
             gas_limit: attributes.gas_limit.unwrap_or(ctx.parent().gas_limit()),
-            withdrawals: Some(attributes.inner.withdrawals.clone()),
-            parent_beacon_block_root: attributes.inner.parent_beacon_block_root,
+            withdrawals: Some(attributes.withdrawals.clone()),
+            parent_beacon_block_root: attributes.parent_beacon_block_root,
             extra_data: Default::default(),
+            // Morph L2 has no PoS slot semantics; field added in alloy 2.0.
+            slot_number: None,
         },
         base_fee_per_gas: attributes.base_fee_per_gas,
     };
@@ -617,6 +733,17 @@ where
         .evm_config
         .builder_for_next_block(&mut db, ctx.parent(), next_block_attrs)
         .map_err(PayloadBuilderError::other)?;
+
+    // If the engine tree provided a sparse-trie state root handle, wire the
+    // state hook so per-tx state diffs stream to the background trie task
+    // during execution. The final `state_root()` recv() at finish time will
+    // return quickly since most work is done concurrently.
+    if let Some(handle) = state_root_handle.as_mut() {
+        builder
+            .evm_mut()
+            .db_mut()
+            .set_state_hook(Some(Box::new(handle.take_state_hook())));
+    }
 
     // 1. Apply pre-execution changes (system contracts, etc.)
     builder.apply_pre_execution_changes().map_err(|err| {
@@ -633,6 +760,7 @@ where
     let breaker = ctx.builder_config.breaker(block_gas_limit);
 
     // Execute L1 message transactions (must be first, with sequential queue indices)
+    let txs_all_started = Instant::now();
     let mut executed_txs = ctx.execute_l1_messages(&mut builder, &mut info)?;
 
     // Always execute pool transactions (L2 transactions from mempool)
@@ -663,6 +791,11 @@ where
         );
     }
 
+    // Record total transaction execution time.
+    ctx.metrics
+        .commit_txs_all_duration_seconds
+        .record(txs_all_started.elapsed());
+
     // Check if this payload is better than the previous one
     if !ctx.is_better_payload(info.total_fees) {
         return Ok(BuildOutcomeKind::Aborted {
@@ -672,16 +805,45 @@ where
 
     // Read withdraw_trie_root from L2MessageQueue contract storage
     // This must be done before finish() consumes the builder
-    let withdraw_trie_root = read_withdraw_trie_root(builder.evm_mut().db_mut())
-        .map_err(|err| PayloadBuilderError::other(MorphPayloadBuilderError::Database(err)))?;
+    let withdraw_trie_root =
+        read_withdraw_trie_root(builder.evm_mut().db_mut()).map_err(|err| {
+            PayloadBuilderError::other(MorphPayloadBuilderError::Storage(err.to_string()))
+        })?;
 
-    // 6. Finish building the block
+    // 6. Finish building the block.
+    //
+    // When `trie_handle` is provided, drop the state hook to signal FinishedStateUpdates
+    // to the background sparse trie task (via StateHookSender's Drop impl), then wait for
+    // the final root. Fall back to synchronous state root if the task fails.
     let BlockBuilderOutcome {
         execution_result,
         hashed_state,
         trie_updates,
         mut block,
-    } = builder.finish(state_provider)?;
+        block_access_list: _,
+    } = if let Some(mut handle) = state_root_handle {
+        builder.evm_mut().db_mut().set_state_hook(None);
+        match handle.state_root() {
+            Ok(outcome) => builder.finish(
+                state_provider,
+                Some((
+                    outcome.state_root,
+                    Arc::unwrap_or_clone(outcome.trie_updates),
+                )),
+            )?,
+            Err(err) => {
+                tracing::warn!(
+                    target: "payload_builder",
+                    id = %ctx.payload_id(),
+                    %err,
+                    "sparse trie task failed, falling back to sync state root",
+                );
+                builder.finish(state_provider, None)?
+            }
+        }
+    } else {
+        builder.finish(state_provider, None)?
+    };
 
     // Update MorphHeader with next_l1_msg_index.
     // Since hash_slow() only hashes the inner header, we can update the
@@ -725,19 +887,18 @@ where
         hash: sealed_block.hash(),
     };
 
-    let execution_output = ExecutionOutcome::new(
-        db.take_bundle(),
-        vec![execution_result.receipts],
-        header.number(),
-        vec![execution_result.requests],
-    );
+    let execution_output = BlockExecutionOutput {
+        result: execution_result,
+        state: db.take_bundle(),
+    };
 
     let executed = BuiltPayloadExecutedBlock {
         recovered_block: Arc::new(block),
         execution_output: Arc::new(execution_output),
         // Keep unsorted; conversion to sorted is deferred until required.
-        hashed_state: Err(Arc::new(hashed_state)).into(),
-        trie_updates: Err(Arc::new(trie_updates)).into(),
+        hashed_state: Arc::new(hashed_state),
+        trie_updates: Arc::new(trie_updates),
+        changed_paths: None,
     };
 
     let payload = MorphBuiltPayload::new(
@@ -747,6 +908,14 @@ where
         executable_data,
         Some(executed),
     );
+
+    // Only record block_transactions for successfully built payloads (not Aborted or Cancelled).
+    ctx.metrics
+        .block_transactions
+        .set(info.transaction_count as f64);
+    ctx.metrics
+        .payload_build_duration_seconds
+        .record(build_started.elapsed());
 
     Ok(BuildOutcomeKind::Better { payload })
 }
@@ -943,20 +1112,24 @@ mod tests {
     // =========================================================================
 
     fn test_ctx(best_payload: Option<MorphBuiltPayload>) -> MorphPayloadBuilderCtx {
+        let attrs = MorphPayloadBuilderAttributes::try_new(
+            B256::ZERO,
+            morph_payload_types::MorphPayloadAttributes::default(),
+            morph_payload_types::MORPH_PAYLOAD_BUILDER_VERSION,
+        )
+        .unwrap();
+        let payload_id = attrs.payload_id();
         MorphPayloadBuilderCtx {
             evm_config: test_evm_config(),
             config: PayloadConfig::new(
                 Arc::new(SealedHeader::seal_slow(MorphHeader::default())),
-                MorphPayloadBuilderAttributes::try_new(
-                    B256::ZERO,
-                    morph_payload_types::MorphPayloadAttributes::default(),
-                    1,
-                )
-                .unwrap(),
+                attrs,
+                payload_id,
             ),
             cancel: Default::default(),
             best_payload,
             builder_config: MorphBuilderConfig::default(),
+            metrics: MorphPayloadBuilderMetrics::default(),
         }
     }
 

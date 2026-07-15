@@ -4,8 +4,7 @@ use crate::{
     evm::{MorphContext, MorphEvm},
     handler::MorphEvmHandler,
 };
-use alloy_evm::Database;
-use reth_evm::TransactionEnv;
+use alloy_evm::{Database, TransactionEnvMut as _};
 use revm::{
     DatabaseCommit, ExecuteCommitEvm, ExecuteEvm,
     context::{ContextSetters, TxEnv, result::ExecResultAndState},

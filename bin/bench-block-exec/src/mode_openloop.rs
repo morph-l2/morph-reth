@@ -8,7 +8,6 @@ use crate::engine::{AssembleL2BlockParams, BlockTimingV2, EngineClient};
 use crate::mode_e2e::{
     DEFAULT_SUBMIT_BATCH_SIZE, DEFAULT_SUBMIT_CONCURRENCY, SubmitOptions, build_http_client,
     build_submit_bodies, ensure_submit_batch_success,
-    submit_prebuilt_bodies_with_target_cursor,
 };
 use crate::tx_factory::{self, BenchSender, Workload};
 
@@ -55,9 +54,6 @@ pub struct OpenLoopArgs {
 
     #[arg(long)]
     pub output: String,
-
-    #[arg(long, default_value = "unknown")]
-    pub engine_name: String,
 
     #[arg(long, default_value = "99999")]
     pub chain_id: u64,
@@ -124,7 +120,11 @@ pub async fn run(args: OpenLoopArgs) -> eyre::Result<()> {
     // cadence is limited only by HTTP throughput, not by signing speed.
     println!(
         "Mode D (openloop): target={} TPS, duration={}s, {} senders, {} workload, {} submit target(s)",
-        args.target_tps, args.duration_secs, args.senders, workload, submit_targets.len(),
+        args.target_tps,
+        args.duration_secs,
+        args.senders,
+        workload,
+        submit_targets.len(),
     );
     println!("  Pre-generating {total_txs} txs across {num_ticks} ticks...");
 
@@ -139,8 +139,14 @@ pub async fn run(args: OpenLoopArgs) -> eyre::Result<()> {
         let mut ticks = Vec::with_capacity(num_ticks);
 
         for total in tick_plan {
-            let txs = build_tick_txs(&mut senders, workload, total, chain_id, &mut next_sender_idx)
-                .expect("tx generation should not fail");
+            let txs = build_tick_txs(
+                &mut senders,
+                workload,
+                total,
+                chain_id,
+                &mut next_sender_idx,
+            )
+            .expect("tx generation should not fail");
             let bodies = build_submit_bodies(&txs, batch_size);
             ticks.push(PrebuiltSubmitBatch {
                 tx_count: txs.len() as u64,
@@ -190,7 +196,6 @@ pub async fn run(args: OpenLoopArgs) -> eyre::Result<()> {
         pool_client,
         workload,
         args.target_tps,
-        args.engine_name.clone(),
         args.senders,
         args.producer_idle_ms,
         args.drain_secs,
@@ -331,7 +336,6 @@ async fn drive_producer_loop(
     pool_client: reqwest::Client,
     workload: Workload,
     target_tps: u64,
-    engine_name: String,
     senders: u64,
     producer_idle_ms: u64,
     drain_secs: u64,
@@ -364,19 +368,21 @@ async fn drive_producer_loop(
             timestamp: Some(next_block_number),
         };
 
-        let (assembled, assemble_ms) = match client.assemble_l2_block(&engine_rpc, assemble_params).await
-        {
-            Ok(result) => result,
-            Err(e) => {
-                consecutive_errors += 1;
-                eprintln!("openloop block {next_block_number}: assemble error: {e}");
-                if consecutive_errors >= 5 {
-                    return Err(eyre::eyre!("openloop aborted after 5 consecutive assemble/import errors"));
+        let (assembled, assemble_ms) =
+            match client.assemble_l2_block(&engine_rpc, assemble_params).await {
+                Ok(result) => result,
+                Err(e) => {
+                    consecutive_errors += 1;
+                    eprintln!("openloop block {next_block_number}: assemble error: {e}");
+                    if consecutive_errors >= 5 {
+                        return Err(eyre::eyre!(
+                            "openloop aborted after 5 consecutive assemble/import errors"
+                        ));
+                    }
+                    tokio::time::sleep(idle).await;
+                    continue;
                 }
-                tokio::time::sleep(idle).await;
-                continue;
-            }
-        };
+            };
 
         let actual_tx_count = assembled.transactions.len() as u64;
         let gas_used = assembled.gas_used;
@@ -386,7 +392,9 @@ async fn drive_producer_loop(
                 consecutive_errors += 1;
                 eprintln!("openloop block {next_block_number}: import error: {e}");
                 if consecutive_errors >= 5 {
-                    return Err(eyre::eyre!("openloop aborted after 5 consecutive assemble/import errors"));
+                    return Err(eyre::eyre!(
+                        "openloop aborted after 5 consecutive assemble/import errors"
+                    ));
                 }
                 tokio::time::sleep(idle).await;
                 continue;
@@ -398,14 +406,16 @@ async fn drive_producer_loop(
         cumulative_txs += actual_tx_count;
 
         let completed_at = Instant::now();
-        let observed_interval_ms = completed_at.duration_since(last_completed_at).as_secs_f64() * 1000.0;
+        let observed_interval_ms =
+            completed_at.duration_since(last_completed_at).as_secs_f64() * 1000.0;
         last_completed_at = completed_at;
 
         let mut timing = BlockTimingV2 {
             block_number: next_block_number,
             tx_count: actual_tx_count,
-            expected_tx_count: target_tps,
-            engine: engine_name.clone(),
+            expected_tx_count: 0,
+            target_tps: Some(target_tps),
+            engine: "reth".to_string(),
             mode: "openloop".to_string(),
             workload: workload.to_string(),
             senders,
@@ -433,7 +443,10 @@ async fn drive_producer_loop(
             error: false,
         };
         timing.finalize();
-        apply_observed_interval(&mut timing, observed_interval_ms.max(assemble_ms + import_ms));
+        apply_observed_interval(
+            &mut timing,
+            observed_interval_ms.max(assemble_ms + import_ms),
+        );
 
         rolling_tps.push_back(timing.tps);
         if rolling_tps.len() > 100 {
@@ -450,11 +463,7 @@ async fn drive_producer_loop(
         if imported_blocks % 10 == 0 {
             println!(
                 "openloop block {imported_blocks}: total={:.1}ms assemble={:.1}ms import={:.1}ms tps={:.0} txs={}",
-                timing.total_ms,
-                timing.assemble_ms,
-                timing.import_ms,
-                timing.tps,
-                timing.tx_count,
+                timing.total_ms, timing.assemble_ms, timing.import_ms, timing.tps, timing.tx_count,
             );
         }
 
@@ -509,88 +518,6 @@ fn build_tick_plan(target_tps: u64, duration_secs: u64, submit_tick_ms: u64) -> 
     }
 
     plan
-}
-
-fn spawn_tick_tx_generator(
-    mut senders: Vec<BenchSender>,
-    workload: Workload,
-    tick_plan: Vec<u64>,
-    chain_id: u64,
-    submit_buffer_ticks: usize,
-    abort: Arc<AtomicBool>,
-) -> mpsc::Receiver<eyre::Result<Vec<Bytes>>> {
-    let (tx, rx) = mpsc::channel(submit_buffer_ticks.max(1));
-
-    tokio::task::spawn_blocking(move || {
-        let mut next_sender_idx = 0usize;
-        let mut slow_ticks = 0u64;
-        for (tick_idx, total_txs) in tick_plan.iter().enumerate() {
-            if abort.load(Ordering::SeqCst) {
-                break;
-            }
-
-            let start = Instant::now();
-            let batch = build_tick_txs(
-                &mut senders,
-                workload,
-                *total_txs,
-                chain_id,
-                &mut next_sender_idx,
-            );
-            let gen_ms = start.elapsed().as_secs_f64() * 1000.0;
-
-            if gen_ms > 20.0 {
-                slow_ticks += 1;
-                if slow_ticks <= 5 || slow_ticks % 50 == 0 {
-                    eprintln!(
-                        "  [tx-gen] tick {tick_idx}: {total_txs} txs took {gen_ms:.1}ms (slow #{slow_ticks})"
-                    );
-                }
-            }
-
-            if tx.blocking_send(batch).is_err() {
-                break;
-            }
-        }
-        if slow_ticks > 0 {
-            eprintln!("  [tx-gen] total slow ticks (>20ms): {slow_ticks}");
-        }
-    });
-
-    rx
-}
-
-fn spawn_tick_submit_batch_serializer(
-    mut tx_batches: mpsc::Receiver<eyre::Result<Vec<Bytes>>>,
-    submit_batch_size: usize,
-    submit_buffer_ticks: usize,
-    abort: Arc<AtomicBool>,
-) -> mpsc::Receiver<eyre::Result<PrebuiltSubmitBatch>> {
-    let (tx, rx) = mpsc::channel(submit_buffer_ticks.max(1));
-
-    tokio::task::spawn_blocking(move || {
-        loop {
-            if abort.load(Ordering::SeqCst) {
-                break;
-            }
-
-            let txs = match tx_batches.blocking_recv() {
-                Some(result) => result,
-                None => break,
-            };
-
-            let batch = txs.map(|txs| PrebuiltSubmitBatch {
-                tx_count: txs.len() as u64,
-                bodies: build_submit_bodies(&txs, submit_batch_size),
-            });
-
-            if tx.blocking_send(batch).is_err() {
-                break;
-            }
-        }
-    });
-
-    rx
 }
 
 fn resolve_submit_targets(http_rpc: &str, submit_http_rpcs: &[String]) -> Vec<String> {
@@ -680,20 +607,25 @@ fn parse_hex_quantity(value: Option<&serde_json::Value>) -> Option<u64> {
         .and_then(|raw| u64::from_str_radix(raw.trim_start_matches("0x"), 16).ok())
 }
 
-fn drain_complete(submitted_txs: u64, imported_txs: u64, pending_txs: u64, queued_txs: u64) -> bool {
+fn drain_complete(
+    submitted_txs: u64,
+    imported_txs: u64,
+    pending_txs: u64,
+    queued_txs: u64,
+) -> bool {
     imported_txs >= submitted_txs && pending_txs == 0 && queued_txs == 0
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::time::{Duration as TokioDuration, timeout};
 
     fn sample_timing() -> BlockTimingV2 {
         BlockTimingV2 {
             block_number: 1,
             tx_count: 100,
-            expected_tx_count: 20_000,
+            expected_tx_count: 0,
+            target_tps: Some(20_000),
             engine: "reth".to_string(),
             mode: "openloop".to_string(),
             workload: "eth-transfer".to_string(),
@@ -791,7 +723,9 @@ mod tests {
     fn resolve_submit_targets_accepts_csv_and_trims() {
         let targets = resolve_submit_targets(
             "http://127.0.0.1:8545",
-            &[String::from(" http://a:8545, http://b:8545 ,,http://c:8545 ")],
+            &[String::from(
+                " http://a:8545, http://b:8545 ,,http://c:8545 ",
+            )],
         );
         assert_eq!(
             targets,
@@ -801,70 +735,5 @@ mod tests {
                 "http://c:8545".to_string(),
             ]
         );
-    }
-
-    #[tokio::test]
-    async fn tick_tx_generator_prefills_batches_ahead_of_submit() {
-        let receiver = spawn_tick_tx_generator(
-            tx_factory::generate_senders(8),
-            Workload::EthTransfer,
-            vec![4, 4, 4],
-            99999,
-            2,
-            Arc::new(AtomicBool::new(false)),
-        );
-        let mut receiver = receiver;
-
-        let first = timeout(TokioDuration::from_millis(100), receiver.recv())
-            .await
-            .expect("first prebuilt batch should be ready")
-            .expect("channel should stay open")
-            .expect("generation should succeed");
-        let second = timeout(TokioDuration::from_millis(100), receiver.recv())
-            .await
-            .expect("second prebuilt batch should already be queued")
-            .expect("channel should stay open")
-            .expect("generation should succeed");
-
-        assert_eq!(first.len(), 4);
-        assert_eq!(second.len(), 4);
-    }
-
-    #[tokio::test]
-    async fn tick_submit_batch_serializer_prefills_serialized_batches() {
-        let tx_batches = spawn_tick_tx_generator(
-            tx_factory::generate_senders(8),
-            Workload::EthTransfer,
-            vec![5, 5],
-            99999,
-            2,
-            Arc::new(AtomicBool::new(false)),
-        );
-        let receiver = spawn_tick_submit_batch_serializer(tx_batches, 2, 2, Arc::new(AtomicBool::new(false)));
-        let mut receiver = receiver;
-
-        let first = timeout(TokioDuration::from_millis(100), receiver.recv())
-            .await
-            .expect("first prebuilt submit batch should be ready")
-            .expect("channel should stay open")
-            .expect("generation should succeed");
-        let second = timeout(TokioDuration::from_millis(100), receiver.recv())
-            .await
-            .expect("second prebuilt submit batch should already be queued")
-            .expect("channel should stay open")
-            .expect("generation should succeed");
-
-        assert_eq!(first.tx_count, 5);
-        assert_eq!(first.bodies.len(), 3);
-        assert_eq!(second.tx_count, 5);
-        assert_eq!(second.bodies.len(), 3);
-
-        let first_body: serde_json::Value =
-            serde_json::from_slice(&first.bodies[0]).expect("serialized JSON-RPC batch");
-        let entries = first_body
-            .as_array()
-            .expect("first batch should be a JSON array");
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0]["method"], "eth_sendRawTransaction");
     }
 }

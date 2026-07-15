@@ -13,6 +13,7 @@ workspace = true
 # Morph crates
 morph-primitives = { workspace = true, features = ["serde-bincode-compat", "reth-codec"] }
 morph-chainspec.workspace = true
+morph-reference-index.workspace = true
 morph-revm = { workspace = true, features = ["rpc"] }
 morph-evm = { workspace = true, features = ["rpc"] }
 
@@ -35,6 +36,7 @@ reth-transaction-pool.workspace = true
 
 # Alloy
 alloy-consensus.workspace = true
+alloy-evm.workspace = true
 alloy-primitives.workspace = true
 alloy-rpc-types-eth.workspace = true
 alloy-serde.workspace = true

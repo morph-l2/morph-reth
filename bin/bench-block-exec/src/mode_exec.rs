@@ -39,9 +39,6 @@ pub struct ExecArgs {
     #[arg(long)]
     pub output: String,
 
-    #[arg(long, default_value = "unknown")]
-    pub engine_name: String,
-
     #[arg(long, default_value = "99999")]
     pub chain_id: u64,
 
@@ -65,6 +62,7 @@ pub struct ExecArgs {
 pub(crate) struct ExecRunState {
     senders: Vec<BenchSender>,
     next_block_number: u64,
+    cumulative_txs: u64,
 }
 
 impl ExecRunState {
@@ -72,6 +70,7 @@ impl ExecRunState {
         Self {
             senders: tx_factory::generate_senders(sender_count.max(1)),
             next_block_number: 1,
+            cumulative_txs: 0,
         }
     }
 
@@ -89,6 +88,10 @@ impl ExecRunState {
 
     pub(crate) fn advance_block_number(&mut self) {
         self.next_block_number += 1;
+    }
+
+    pub(crate) fn record_transactions(&mut self, count: u64) {
+        self.cumulative_txs += count;
     }
 }
 
@@ -213,7 +216,8 @@ pub(crate) async fn run_with_state(args: &ExecArgs, state: &mut ExecRunState) ->
             block_number: display_block_number,
             tx_count: actual_tx_count,
             expected_tx_count,
-            engine: args.engine_name.clone(),
+            target_tps: None,
+            engine: "reth".to_string(),
             mode: "exec".to_string(),
             workload: workload.to_string(),
             senders: args.senders.max(1),
@@ -229,7 +233,7 @@ pub(crate) async fn run_with_state(args: &ExecArgs, state: &mut ExecRunState) ->
             mgas_per_sec: 0.0,
             inclusion_rate: 0.0,
             cumulative_blocks: display_block_number,
-            cumulative_txs: 0,
+            cumulative_txs: state.cumulative_txs + actual_tx_count,
             rolling_avg_tps_100: None,
             error,
         };
@@ -260,6 +264,7 @@ pub(crate) async fn run_with_state(args: &ExecArgs, state: &mut ExecRunState) ->
             break;
         }
 
+        state.record_transactions(actual_tx_count);
         state.advance_block_number();
     }
 
@@ -276,13 +281,9 @@ mod tests {
         let mut state = ExecRunState::new(1);
 
         assert_eq!(state.current_block_number(), 1);
-        let txs = tx_factory::build_block_txs(
-            state.senders_mut(),
-            Workload::EthTransfer,
-            1_000,
-            99_999,
-        )
-        .unwrap();
+        let txs =
+            tx_factory::build_block_txs(state.senders_mut(), Workload::EthTransfer, 1_000, 99_999)
+                .unwrap();
         assert_eq!(txs.len(), 1_000);
         assert_eq!(state.current_block_number(), 1);
 
@@ -295,24 +296,16 @@ mod tests {
         let mut state = ExecRunState::new(1);
 
         assert_eq!(state.current_block_number(), 1);
-        let txs = tx_factory::build_block_txs(
-            state.senders_mut(),
-            Workload::EthTransfer,
-            1_000,
-            99_999,
-        )
-        .unwrap();
+        let txs =
+            tx_factory::build_block_txs(state.senders_mut(), Workload::EthTransfer, 1_000, 99_999)
+                .unwrap();
         assert_eq!(txs.len(), 1_000);
         state.advance_block_number();
         assert_eq!(state.current_block_number(), 2);
 
-        let txs = tx_factory::build_block_txs(
-            state.senders_mut(),
-            Workload::EthTransfer,
-            2_000,
-            99_999,
-        )
-        .unwrap();
+        let txs =
+            tx_factory::build_block_txs(state.senders_mut(), Workload::EthTransfer, 2_000, 99_999)
+                .unwrap();
         assert_eq!(txs.len(), 2_000);
         state.advance_block_number();
 

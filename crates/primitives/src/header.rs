@@ -137,6 +137,16 @@ impl BlockHeader for MorphHeader {
     fn extra_data(&self) -> &Bytes {
         self.inner.extra_data()
     }
+
+    fn block_access_list_hash(&self) -> Option<B256> {
+        // EIP-7928 / Amsterdam fork field. Pre-Amsterdam Morph blocks do not carry it.
+        None
+    }
+
+    fn slot_number(&self) -> Option<u64> {
+        // PoS slot number, not part of Morph's L2 header model.
+        None
+    }
 }
 
 /// Sealable implementation for MorphHeader.
@@ -151,9 +161,6 @@ impl Sealable for MorphHeader {
         self.inner.hash_slow()
     }
 }
-
-#[cfg(feature = "serde-bincode-compat")]
-impl reth_primitives_traits::serde_bincode_compat::RlpBincode for MorphHeader {}
 
 impl reth_primitives_traits::InMemorySize for MorphHeader {
     fn size(&self) -> usize {
@@ -183,6 +190,19 @@ impl reth_primitives_traits::header::HeaderMut for MorphHeader {
     fn set_difficulty(&mut self, difficulty: U256) {
         self.inner.set_difficulty(difficulty);
     }
+
+    fn set_mix_hash(&mut self, mix_hash: B256) {
+        self.inner.set_mix_hash(mix_hash);
+    }
+
+    fn set_extra_data(&mut self, extra_data: Bytes) {
+        self.inner.set_extra_data(extra_data);
+    }
+
+    fn set_parent_beacon_block_root(&mut self, parent_beacon_block_root: Option<B256>) {
+        self.inner
+            .set_parent_beacon_block_root(parent_beacon_block_root);
+    }
 }
 
 #[cfg(feature = "reth-codec")]
@@ -196,7 +216,7 @@ impl reth_db_api::table::Compress for MorphHeader {
 
 #[cfg(feature = "reth-codec")]
 impl reth_db_api::table::Decompress for MorphHeader {
-    fn decompress(value: &[u8]) -> Result<Self, reth_db_api::DatabaseError> {
+    fn decompress(value: &[u8]) -> Result<Self, reth_codecs::DecompressError> {
         let (obj, _) = reth_codecs::Compact::from_compact(value, value.len());
         Ok(obj)
     }
@@ -234,6 +254,11 @@ mod tests {
             excess_blob_gas: None,
             parent_beacon_block_root: None,
             requests_hash: None,
+            // Pre-Amsterdam morph headers carry no block-access-list hash and
+            // no PoS slot number. Both fields were introduced upstream in
+            // alloy 2.0 / EIP-7928.
+            block_access_list_hash: None,
+            slot_number: None,
         }
     }
 

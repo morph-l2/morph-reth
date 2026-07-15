@@ -8,7 +8,7 @@ use std::{
 };
 
 #[derive(Args)]
-pub struct SummarizeArgs {
+pub(crate) struct SummarizeArgs {
     /// Directory containing per-round result files.
     #[arg(long)]
     pub results_dir: String,
@@ -24,7 +24,7 @@ pub struct SummarizeArgs {
 /// linear interpolation between adjacent values.
 ///
 /// Returns `0.0` for an empty slice.
-pub fn percentile(sorted: &[f64], p: f64) -> f64 {
+pub(crate) fn percentile(sorted: &[f64], p: f64) -> f64 {
     if sorted.is_empty() {
         return 0.0;
     }
@@ -148,7 +148,7 @@ fn tps_window_stats(data: &[&BlockTimingV2]) -> (f64, f64, f64, f64) {
     (early_tps, mid_tps, late_tps, late_vs_early_pct)
 }
 
-pub fn summarize(args: SummarizeArgs) -> eyre::Result<()> {
+pub(crate) fn summarize(args: SummarizeArgs) -> eyre::Result<()> {
     if args.v2 {
         return summarize_v2(&args.results_dir, args.output.as_deref());
     }
@@ -256,8 +256,8 @@ pub fn summarize(args: SummarizeArgs) -> eyre::Result<()> {
 
 /// Summarize `.jsonl` files containing [`BlockTimingV2`] records.
 ///
-/// Groups entries by `(engine, mode, workload, senders, warmup_blocks)`, skips
-/// the first 10 entries per group as warmup, then computes aggregate stats.
+/// Groups entries by benchmark configuration and computes aggregate stats.
+/// Warmup samples are excluded by the benchmark modes themselves.
 fn summarize_v2(results_dir: &str, output: Option<&str>) -> eyre::Result<()> {
     let dir = Path::new(results_dir);
 
@@ -288,8 +288,8 @@ fn summarize_v2(results_dir: &str, output: Option<&str>) -> eyre::Result<()> {
         }
     }
 
-    // 3. Group by (engine, mode, workload, senders, warmup_blocks, txs_per_block).
-    type GroupKey = (String, String, String, u64, u64, u64);
+    // 3. Keep fixed-block load and open-loop target as separate dimensions.
+    type GroupKey = (String, String, String, u64, u64, u64, Option<u64>);
     let mut groups: BTreeMap<GroupKey, Vec<BlockTimingV2>> = BTreeMap::new();
     for t in all_timings {
         groups
@@ -300,19 +300,19 @@ fn summarize_v2(results_dir: &str, output: Option<&str>) -> eyre::Result<()> {
                 t.senders,
                 t.warmup_blocks,
                 t.expected_tx_count,
+                t.target_tps,
             ))
             .or_default()
             .push(t);
     }
 
     // 4. Build TSV output.
-    let header = "engine\tmode\tworkload\tsenders\twarmup\ttxs_per_block\tblocks\tavg_txs\tinclusion%\tavg_asm_ms\tavg_imp_ms\tavg_tot_ms\tp50_ms\tp95_ms\tp99_ms\tpeak_tps\tavg_tps\trealized_tps\tavg_mgas_s\tearly_tps\tmid_tps\tlate_tps\tlate_vs_early%\tactive_blocks\tactive_avg_tps\tactive_realized_tps\tdrain_blocks\tdrain_avg_tps\tdrain_realized_tps\tdegradation%\terrors";
+    let header = "engine\tmode\tworkload\tsenders\twarmup\ttxs_per_block\ttarget_tps\tblocks\tavg_txs\tinclusion%\tavg_asm_ms\tavg_imp_ms\tavg_tot_ms\tp50_ms\tp95_ms\tp99_ms\tpeak_tps\tavg_tps\trealized_tps\tavg_mgas_s\tearly_tps\tmid_tps\tlate_tps\tlate_vs_early%\tactive_blocks\tactive_avg_tps\tactive_realized_tps\tdrain_blocks\tdrain_avg_tps\tdrain_realized_tps\tdegradation%\terrors";
 
     let mut rows: Vec<String> = vec![header.to_string()];
 
-    for ((engine, mode, workload, senders, warmup, txs_per_block), entries) in &groups {
-        // Skip first 10 entries as warmup.
-        let data: Vec<&BlockTimingV2> = entries.iter().skip(10).collect();
+    for ((engine, mode, workload, senders, warmup, txs_per_block, target_tps), entries) in &groups {
+        let data: Vec<&BlockTimingV2> = entries.iter().collect();
         if data.is_empty() {
             continue;
         }
@@ -351,8 +351,7 @@ fn summarize_v2(results_dir: &str, output: Option<&str>) -> eyre::Result<()> {
             drain_blocks,
             drain_avg_tps,
             drain_realized_tps,
-        ) =
-            openloop_phase_split_stats(mode, &data);
+        ) = openloop_phase_split_stats(mode, &data);
 
         // Degradation: for runs with 200+ entries, compare first 100 vs last 100
         let degradation_pct = if data.len() >= 200 {
@@ -378,13 +377,14 @@ fn summarize_v2(results_dir: &str, output: Option<&str>) -> eyre::Result<()> {
         };
 
         rows.push(format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.1}\t{:.1}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.1}\t{:.1}\t{:.1}\t{:.2}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{}\t{:.1}\t{:.1}\t{}\t{:.1}\t{:.1}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.1}\t{:.1}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.1}\t{:.1}\t{:.1}\t{:.2}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{}\t{:.1}\t{:.1}\t{}\t{:.1}\t{:.1}\t{}\t{}",
             engine,
             mode,
             workload,
             senders,
             warmup,
             txs_per_block,
+            target_tps.map_or_else(|| "N/A".to_string(), |value| value.to_string()),
             blocks,
             avg_txs,
             avg_inclusion,
@@ -489,6 +489,7 @@ mod tests {
                     block_number: idx as u64 + 1,
                     tx_count: txs_per_block,
                     expected_tx_count: txs_per_block,
+                    target_tps: None,
                     engine: "reth".to_string(),
                     mode: "exec".to_string(),
                     workload: "eth-transfer".to_string(),
@@ -581,7 +582,7 @@ mod tests {
         let summary = fs::read_to_string(&output).unwrap();
         let row = summary.lines().nth(1).unwrap();
         assert!(
-            row.contains("\t900.0\t"),
+            row.contains("\t1000.0\t"),
             "expected early window avg TPS in row: {row}"
         );
         assert!(
@@ -589,7 +590,7 @@ mod tests {
             "expected late window avg TPS in row: {row}"
         );
         assert!(
-            row.contains("\t-22.2"),
+            row.contains("\t-30.0"),
             "expected late-vs-early drop in row: {row}"
         );
 
@@ -729,12 +730,12 @@ mod tests {
             .position(|field| *field == "drain_realized_tps")
             .expect("missing drain_realized_tps column");
 
-        assert_eq!(row[active_blocks_idx], "3");
-        assert_eq!(row[active_avg_tps_idx], "1200.0");
+        assert_eq!(row[active_blocks_idx], "13");
+        assert_eq!(row[active_avg_tps_idx], "1046.2");
         assert_eq!(row[drain_blocks_idx], "3");
         assert_eq!(row[drain_avg_tps_idx], "0.0");
-        assert_eq!(row[realized_tps_idx], "1090.9");
-        assert_eq!(row[active_realized_tps_idx], "1200.0");
+        assert_eq!(row[realized_tps_idx], "1022.6");
+        assert_eq!(row[active_realized_tps_idx], "1046.2");
         assert_eq!(row[drain_realized_tps_idx], "0.0");
 
         fs::remove_dir_all(dir).unwrap();

@@ -76,9 +76,6 @@ pub struct E2eArgs {
     #[arg(long)]
     pub output: String,
 
-    #[arg(long, default_value = "unknown")]
-    pub engine_name: String,
-
     #[arg(long, default_value = "99999")]
     pub chain_id: u64,
 
@@ -189,15 +186,6 @@ pub async fn submit_to_txpool(
     submit_to_txpool_with_client(&client, http_rpc, txs, options).await
 }
 
-pub(crate) async fn submit_to_txpool_with_options(
-    http_rpc: &str,
-    txs: &[Bytes],
-    options: SubmitOptions,
-) -> eyre::Result<f64> {
-    let client = build_http_client(options.concurrency)?;
-    submit_to_txpool_with_client(&client, http_rpc, txs, options).await
-}
-
 pub(crate) async fn submit_to_txpool_with_client(
     client: &reqwest::Client,
     http_rpc: &str,
@@ -223,14 +211,18 @@ pub(crate) async fn submit_to_txpool_with_target_cursor(
     next_target_idx: &mut usize,
 ) -> eyre::Result<f64> {
     let options = options.sanitized();
-    eyre::ensure!(!http_rpcs.is_empty(), "submit target list must not be empty");
+    eyre::ensure!(
+        !http_rpcs.is_empty(),
+        "submit target list must not be empty"
+    );
 
     let bodies = build_submit_bodies(txs, options.batch_size);
     if bodies.is_empty() {
         return Ok(0.0);
     }
 
-    submit_prebuilt_bodies_with_target_cursor(client, http_rpcs, bodies, options, next_target_idx).await
+    submit_prebuilt_bodies_with_target_cursor(client, http_rpcs, bodies, options, next_target_idx)
+        .await
 }
 
 pub(crate) async fn submit_prebuilt_bodies_with_target_cursor(
@@ -241,7 +233,10 @@ pub(crate) async fn submit_prebuilt_bodies_with_target_cursor(
     next_target_idx: &mut usize,
 ) -> eyre::Result<f64> {
     let options = options.sanitized();
-    eyre::ensure!(!http_rpcs.is_empty(), "submit target list must not be empty");
+    eyre::ensure!(
+        !http_rpcs.is_empty(),
+        "submit target list must not be empty"
+    );
     if bodies.is_empty() {
         return Ok(0.0);
     }
@@ -376,16 +371,6 @@ async fn pending_nonce_batches_ready(
     Ok(all_ready)
 }
 
-pub(crate) async fn wait_for_pool_with_options(
-    http_rpc: &str,
-    senders: &[BenchSender],
-    timeout_secs: u64,
-    options: PoolWaitOptions,
-) -> eyre::Result<f64> {
-    let client = build_http_client(options.batch_size)?;
-    wait_for_pool_with_client(&client, http_rpc, senders, timeout_secs, options).await
-}
-
 pub(crate) async fn wait_for_pool_with_client(
     client: &reqwest::Client,
     http_rpc: &str,
@@ -486,7 +471,7 @@ pub async fn run(args: E2eArgs) -> eyre::Result<()> {
                         &mut out_file,
                         block_number,
                         expected_tx_count,
-                        &args.engine_name,
+                        "reth",
                         &workload,
                         args.senders,
                     )?;
@@ -516,7 +501,7 @@ pub async fn run(args: E2eArgs) -> eyre::Result<()> {
                     &mut out_file,
                     block_number,
                     expected_tx_count,
-                    &args.engine_name,
+                    "reth",
                     &workload,
                     args.senders,
                 )?;
@@ -571,7 +556,8 @@ pub async fn run(args: E2eArgs) -> eyre::Result<()> {
             block_number,
             tx_count: actual_tx_count,
             expected_tx_count,
-            engine: args.engine_name.clone(),
+            target_tps: None,
+            engine: "reth".to_string(),
             mode: "e2e".to_string(),
             workload: workload.to_string(),
             senders: args.senders,
@@ -1111,6 +1097,7 @@ fn write_error_timing(
         block_number,
         tx_count: 0,
         expected_tx_count,
+        target_tps: None,
         engine: engine.to_string(),
         mode: "e2e".to_string(),
         workload: workload.to_string(),

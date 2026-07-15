@@ -5,10 +5,12 @@ use alloy_eips::eip4895::{Withdrawal, Withdrawals};
 use alloy_primitives::{Address, B256, Bytes};
 use alloy_rpc_types_engine::{PayloadAttributes, PayloadId};
 use morph_primitives::MorphTxEnvelope;
-use reth_payload_builder::EthPayloadBuilderAttributes;
-use reth_payload_primitives::PayloadBuilderAttributes;
 use reth_primitives_traits::{Recovered, SignerRecoverable, WithEncoded};
 use sha2::{Digest, Sha256};
+
+/// Version byte mixed into Morph payload IDs. Bumped only when the payload-attribute
+/// hashing scheme materially changes; serves as a domain separator across versions.
+pub const MORPH_PAYLOAD_BUILDER_VERSION: u8 = 1;
 
 /// Morph-specific payload attributes for Engine API.
 ///
@@ -52,6 +54,10 @@ pub struct MorphPayloadAttributes {
 }
 
 impl reth_payload_primitives::PayloadAttributes for MorphPayloadAttributes {
+    fn payload_id(&self, parent_hash: &B256) -> PayloadId {
+        self.morph_payload_id(parent_hash)
+    }
+
     fn timestamp(&self) -> u64 {
         self.inner.timestamp
     }
@@ -63,16 +69,61 @@ impl reth_payload_primitives::PayloadAttributes for MorphPayloadAttributes {
     fn parent_beacon_block_root(&self) -> Option<B256> {
         self.inner.parent_beacon_block_root
     }
+
+    fn slot_number(&self) -> Option<u64> {
+        // Morph L2 has no PoS slot semantics.
+        None
+    }
+}
+
+impl MorphPayloadAttributes {
+    /// Computes the Morph payload ID without decoding or recovering transaction bytes.
+    pub fn morph_payload_id(&self, parent_hash: &B256) -> PayloadId {
+        payload_id_morph(parent_hash, self, MORPH_PAYLOAD_BUILDER_VERSION)
+    }
+}
+
+impl From<PayloadAttributes> for MorphPayloadAttributes {
+    fn from(inner: PayloadAttributes) -> Self {
+        Self {
+            inner,
+            transactions: None,
+            gas_limit: None,
+            base_fee_per_gas: None,
+        }
+    }
 }
 
 /// Internal payload builder attributes.
 ///
 /// This is the internal representation used by the payload builder,
 /// with decoded L1 messages and computed payload ID.
-#[derive(Debug, Clone)]
+///
+/// Implements `reth_payload_primitives::PayloadAttributes` so it can serve as the
+/// `type Attributes` in `PayloadBuilder` (v2.0.0 requires the builder attributes to
+/// implement PayloadAttributes). The serde impls are required by the trait bound.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MorphPayloadBuilderAttributes {
-    /// Inner Ethereum payload builder attributes.
-    pub inner: EthPayloadBuilderAttributes,
+    /// Computed payload ID.
+    pub id: PayloadId,
+
+    /// Parent block hash.
+    pub parent: B256,
+
+    /// Block timestamp.
+    pub timestamp: u64,
+
+    /// Suggested fee recipient.
+    pub suggested_fee_recipient: Address,
+
+    /// Previous RANDAO value.
+    pub prev_randao: B256,
+
+    /// Withdrawals.
+    pub withdrawals: Withdrawals,
+
+    /// Parent beacon block root.
+    pub parent_beacon_block_root: Option<B256>,
 
     /// Decoded L1 message transactions with original encoded bytes.
     ///
@@ -81,6 +132,11 @@ pub struct MorphPayloadBuilderAttributes {
     ///
     /// L1 messages are decoded and recovered during construction to avoid
     /// repeated decoding in the payload builder.
+    ///
+    /// Skipped for serde: this is purely an internal runtime field derived from
+    /// `MorphPayloadAttributes::transactions` during `try_new`. It is never
+    /// serialised/deserialised as part of the PayloadAttributes trait contract.
+    #[serde(skip)]
     pub transactions: Vec<WithEncoded<Recovered<MorphTxEnvelope>>>,
 
     /// Optional gas limit override propagated to EVM env construction.
@@ -90,15 +146,13 @@ pub struct MorphPayloadBuilderAttributes {
     pub base_fee_per_gas: Option<u64>,
 }
 
-impl PayloadBuilderAttributes for MorphPayloadBuilderAttributes {
-    type RpcPayloadAttributes = MorphPayloadAttributes;
-    type Error = alloy_rlp::Error;
-
-    fn try_new(
+impl MorphPayloadBuilderAttributes {
+    /// Build from parent hash + RPC attributes + version byte, decoding L1 messages.
+    pub fn try_new(
         parent: B256,
         attributes: MorphPayloadAttributes,
         version: u8,
-    ) -> Result<Self, Self::Error> {
+    ) -> Result<Self, alloy_rlp::Error> {
         let id = payload_id_morph(&parent, &attributes, version);
 
         // Decode and recover L1 message transactions
@@ -119,8 +173,7 @@ impl PayloadBuilderAttributes for MorphPayloadBuilderAttributes {
             })
             .collect::<Result<Vec<_>, alloy_rlp::Error>>()?;
 
-        // Build inner Ethereum attributes
-        let inner = EthPayloadBuilderAttributes {
+        Ok(Self {
             id,
             parent,
             timestamp: attributes.inner.timestamp,
@@ -128,60 +181,75 @@ impl PayloadBuilderAttributes for MorphPayloadBuilderAttributes {
             prev_randao: attributes.inner.prev_randao,
             withdrawals: attributes.inner.withdrawals.unwrap_or_default().into(),
             parent_beacon_block_root: attributes.inner.parent_beacon_block_root,
-        };
-
-        Ok(Self {
-            inner,
             transactions,
             gas_limit: attributes.gas_limit,
             base_fee_per_gas: attributes.base_fee_per_gas,
         })
     }
 
-    fn payload_id(&self) -> PayloadId {
-        self.inner.id
+    /// Returns the payload ID.
+    pub fn payload_id(&self) -> PayloadId {
+        self.id
     }
 
-    fn parent(&self) -> B256 {
-        self.inner.parent
+    /// Returns the parent block hash.
+    pub fn parent(&self) -> B256 {
+        self.parent
     }
 
-    fn timestamp(&self) -> u64 {
-        self.inner.timestamp
+    /// Returns the block timestamp.
+    pub fn timestamp(&self) -> u64 {
+        self.timestamp
     }
 
-    fn parent_beacon_block_root(&self) -> Option<B256> {
-        self.inner.parent_beacon_block_root
+    /// Returns the optional parent beacon block root.
+    pub fn parent_beacon_block_root(&self) -> Option<B256> {
+        self.parent_beacon_block_root
     }
 
-    fn suggested_fee_recipient(&self) -> Address {
-        self.inner.suggested_fee_recipient
+    /// Returns the suggested fee recipient.
+    pub fn suggested_fee_recipient(&self) -> Address {
+        self.suggested_fee_recipient
     }
 
-    fn prev_randao(&self) -> B256 {
-        self.inner.prev_randao
+    /// Returns the previous RANDAO value.
+    pub fn prev_randao(&self) -> B256 {
+        self.prev_randao
     }
 
-    fn withdrawals(&self) -> &Withdrawals {
-        &self.inner.withdrawals
+    /// Returns the withdrawals.
+    pub fn withdrawals(&self) -> &Withdrawals {
+        &self.withdrawals
     }
-}
 
-impl MorphPayloadBuilderAttributes {
     /// Returns true if there are L1 messages to execute.
     pub fn has_l1_messages(&self) -> bool {
         !self.transactions.is_empty()
     }
 }
 
-impl From<EthPayloadBuilderAttributes> for MorphPayloadBuilderAttributes {
-    fn from(inner: EthPayloadBuilderAttributes) -> Self {
-        Self {
-            inner,
-            transactions: vec![],
-            gas_limit: None,
-            base_fee_per_gas: None,
-        }
+/// `payload_id()` ignores the `parent_hash` arg and returns the pre-computed `self.id`
+/// (already derived from parent + rpc-attrs during `try_new`).
+impl reth_payload_primitives::PayloadAttributes for MorphPayloadBuilderAttributes {
+    fn payload_id(&self, _parent_hash: &B256) -> PayloadId {
+        self.id
+    }
+
+    fn timestamp(&self) -> u64 {
+        self.timestamp
+    }
+
+    fn withdrawals(&self) -> Option<&Vec<Withdrawal>> {
+        Some(self.withdrawals.as_ref())
+    }
+
+    fn parent_beacon_block_root(&self) -> Option<B256> {
+        self.parent_beacon_block_root
+    }
+
+    fn slot_number(&self) -> Option<u64> {
+        // Morph L2 has no PoS slot semantics.
+        None
     }
 }
 
@@ -264,6 +332,9 @@ mod tests {
                 suggested_fee_recipient: Address::random(),
                 withdrawals: None,
                 parent_beacon_block_root: None,
+                // Morph L2 has no PoS slot semantics; field added in alloy 2.0.
+                slot_number: None,
+                target_gas_limit: None,
             },
             transactions: None,
             gas_limit: None,
@@ -490,9 +561,27 @@ mod tests {
     }
 
     #[test]
+    fn test_morph_payload_id_does_not_decode_transactions() {
+        let parent = B256::from([0x01; 32]);
+        let mut attrs = create_test_attributes();
+        attrs.transactions = Some(vec![Bytes::from_static(b"not a valid encoded transaction")]);
+
+        let id = attrs.morph_payload_id(&parent);
+
+        assert_eq!(
+            id,
+            payload_id_morph(&parent, &attrs, MORPH_PAYLOAD_BUILDER_VERSION)
+        );
+    }
+
+    #[test]
     fn test_builder_attributes_has_l1_messages_empty() {
-        let attrs = MorphPayloadBuilderAttributes::try_new(B256::ZERO, create_test_attributes(), 1)
-            .unwrap();
+        let attrs = MorphPayloadBuilderAttributes::try_new(
+            B256::ZERO,
+            create_test_attributes(),
+            MORPH_PAYLOAD_BUILDER_VERSION,
+        )
+        .unwrap();
         assert!(!attrs.has_l1_messages());
     }
 
@@ -506,7 +595,12 @@ mod tests {
         rpc_attrs.gas_limit = Some(30_000_000);
         rpc_attrs.base_fee_per_gas = Some(1_000_000_000);
 
-        let attrs = MorphPayloadBuilderAttributes::try_new(parent, rpc_attrs, 1).unwrap();
+        let attrs = MorphPayloadBuilderAttributes::try_new(
+            parent,
+            rpc_attrs,
+            MORPH_PAYLOAD_BUILDER_VERSION,
+        )
+        .unwrap();
 
         assert_eq!(attrs.parent(), parent);
         assert_eq!(attrs.timestamp(), 999);

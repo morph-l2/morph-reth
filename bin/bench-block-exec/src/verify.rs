@@ -1,10 +1,10 @@
 use clap::Args;
 use serde::Serialize;
 
-use crate::workload::receiver_address;
+use crate::tx_factory::receiver_address;
 
 #[derive(Args)]
-pub struct VerifyStateArgs {
+pub(crate) struct VerifyStateArgs {
     /// RPC URL for node A.
     #[arg(long)]
     pub rpc_a: String,
@@ -64,7 +64,7 @@ async fn rpc_call(
         .ok_or_else(|| eyre::eyre!("RPC response from {url} missing 'result' field"))
 }
 
-pub async fn run(args: VerifyStateArgs) -> eyre::Result<()> {
+pub(crate) async fn run(args: VerifyStateArgs) -> eyre::Result<()> {
     let client = reqwest::Client::new();
 
     // 1. Fetch latest block from both nodes.

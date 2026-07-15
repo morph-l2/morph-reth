@@ -27,15 +27,17 @@ use reth_primitives_traits::{NodePrimitives, SealedBlock};
 use std::sync::Arc;
 
 // Feature unification: Ensure reth-ethereum-primitives' serde features are enabled
-// for transitive dependencies (via reth-payload-builder → reth-chain-state).
+// for transitive dependencies (via reth-payload-primitives → reth-chain-state).
 // This is required to satisfy trait bounds on EthereumReceipt in test builds.
 use reth_ethereum_primitives as _;
 
 // Re-export main types
-pub use attributes::{MorphPayloadAttributes, MorphPayloadBuilderAttributes};
+pub use attributes::{
+    MORPH_PAYLOAD_BUILDER_VERSION, MorphPayloadAttributes, MorphPayloadBuilderAttributes,
+};
 pub use built::MorphBuiltPayload;
 pub use executable_l2_data::ExecutableL2Data;
-pub use params::{AssembleL2BlockParams, GenericResponse};
+pub use params::{AssembleL2BlockParams, AssembleL2BlockV2Params, GenericResponse};
 pub use safe_l2_data::SafeL2Data;
 
 // =============================================================================
@@ -81,6 +83,12 @@ impl MorphExecutionData {
     }
 }
 
+impl From<MorphBuiltPayload> for MorphExecutionData {
+    fn from(value: MorphBuiltPayload) -> Self {
+        Self::new(value.block)
+    }
+}
+
 impl ExecutionPayload for MorphExecutionData {
     fn parent_hash(&self) -> B256 {
         self.block.parent_hash()
@@ -118,18 +126,27 @@ impl ExecutionPayload for MorphExecutionData {
     fn transaction_count(&self) -> usize {
         self.block.body().transactions().count()
     }
+
+    fn gas_limit(&self) -> u64 {
+        self.block.gas_limit()
+    }
+
+    fn slot_number(&self) -> Option<u64> {
+        // Morph L2 has no PoS slot semantics.
+        None
+    }
 }
 
 impl PayloadTypes for MorphPayloadTypes {
     type ExecutionData = MorphExecutionData;
     type BuiltPayload = MorphBuiltPayload;
     type PayloadAttributes = MorphPayloadAttributes;
-    type PayloadBuilderAttributes = MorphPayloadBuilderAttributes;
 
     fn block_to_payload(
         block: SealedBlock<
             <<Self::BuiltPayload as BuiltPayload>::Primitives as NodePrimitives>::Block,
         >,
+        _bal: Option<Bytes>,
     ) -> Self::ExecutionData {
         MorphExecutionData::new(Arc::new(block))
     }
@@ -227,7 +244,7 @@ mod tests {
     fn test_block_to_payload() {
         let block = create_test_block();
         let hash = block.hash();
-        let data = MorphPayloadTypes::block_to_payload(block);
+        let data = MorphPayloadTypes::block_to_payload(block, None);
         assert_eq!(data.block_hash(), hash);
         assert!(data.expected_withdraw_trie_root.is_none());
     }

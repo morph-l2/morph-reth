@@ -22,6 +22,7 @@ morph-primitives = { workspace = true, features = ["serde-bincode-compat", "reth
 reth-basic-payload-builder.workspace = true
 reth-chainspec.workspace = true
 reth-evm.workspace = true
+reth-execution-cache.workspace = true
 reth-execution-types.workspace = true
 reth-payload-builder.workspace = true
 reth-payload-primitives.workspace = true
@@ -29,6 +30,7 @@ reth-payload-util.workspace = true
 reth-primitives-traits.workspace = true
 reth-revm.workspace = true
 reth-storage-api.workspace = true
+reth-trie-parallel.workspace = true
 reth-transaction-pool.workspace = true
 
 # Alloy
@@ -39,6 +41,10 @@ alloy-rlp.workspace = true
 
 # Revm
 revm.workspace = true
+
+# Metrics
+metrics.workspace = true
+reth-metrics.workspace = true
 
 # Utils
 tracing.workspace = true

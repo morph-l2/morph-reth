@@ -12,6 +12,14 @@ on:
         description: "Dry run (skip release creation)"
         type: boolean
         default: true
+      profile:
+        description: "Cargo profile for release binaries"
+        type: choice
+        default: "profiling"
+        options:
+          - profiling
+          - maxperf
+          - release
 
 permissions:
   contents: read
@@ -52,7 +60,7 @@ jobs:
     needs: extract-version
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.extract-version.outputs.ref }}
           persist-credentials: false
@@ -83,7 +91,7 @@ jobs:
             archive: morph-reth-${{ needs.extract-version.outputs.version }}-aarch64-linux
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.extract-version.outputs.ref }}
           persist-credentials: false
@@ -99,25 +107,45 @@ jobs:
           cache-on-failure: true
           key: ${{ matrix.target }}
 
-      - name: Install cross
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cross
+      - name: Install cross main
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Resolve build profile
+        id: profile
+        run: |
+          # Tag push -> profiling (matches Dockerfile + EC2 deploy defaults;
+          # see PR rationale: maxperf regresses ERC20 long tail).
+          # workflow_dispatch -> user-selected profile (defaults to profiling,
+          # `maxperf` available for eth-heavy reference builds).
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            PROFILE="${{ inputs.profile }}"
+          else
+            PROFILE="profiling"
+          fi
+          # Cargo's target dir is "debug" for dev, otherwise the profile name.
+          if [[ "$PROFILE" == "dev" ]]; then
+            PROFILE_DIR="debug"
+          else
+            PROFILE_DIR="$PROFILE"
+          fi
+          echo "profile=$PROFILE" >> "$GITHUB_OUTPUT"
+          echo "profile_dir=$PROFILE_DIR" >> "$GITHUB_OUTPUT"
+          echo "Resolved profile: $PROFILE (target dir: $PROFILE_DIR)"
 
       - name: Build binary
-        run: cross build --release --locked --target ${{ matrix.target }} --bin morph-reth
+        run: make build-${{ matrix.target }} PROFILE=${{ steps.profile.outputs.profile }}
 
       - name: Package binary
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/morph-reth dist/
+          cp target/${{ matrix.target }}/${{ steps.profile.outputs.profile_dir }}/morph-reth dist/
           cd dist
           tar czf ../${{ matrix.archive }}.tar.gz morph-reth
           cd ..
           sha256sum ${{ matrix.archive }}.tar.gz > ${{ matrix.archive }}.tar.gz.sha256
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.archive }}
           path: |
@@ -133,13 +161,13 @@ jobs:
       contents: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.extract-version.outputs.ref }}
           fetch-depth: 0
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           merge-multiple: true
           path: artifacts
@@ -153,22 +181,43 @@ jobs:
           else
             CHANGELOG=$(git log -n 20 --pretty=format:"- %s")
           fi
-          # Write to file to avoid escaping issues
-          echo "$CHANGELOG" > changelog.md
+          echo "CHANGELOG<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGELOG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Create draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.extract-version.outputs.version }}
+          REPO_NAME: ${{ github.repository }}
         run: |
-          VERSION="${{ needs.extract-version.outputs.version }}"
           PRERELEASE=""
           if [[ "$VERSION" == *"alpha"* ]] || [[ "$VERSION" == *"beta"* ]] || [[ "$VERSION" == *"rc"* ]]; then
             PRERELEASE="--prerelease"
           fi
+
+          cat <<ENDBODY > release_notes.md
+          ## Summary
+
+          <!-- Add a summary of the release, including critical bug fixes, new features, and breaking changes. -->
+
+          ## All Changes
+
+          ${{ steps.changelog.outputs.CHANGELOG }}
+
+          ## Binaries
+
+          | System | Architecture | Binary |
+          |:---:|:---:|:---:|
+          | <img src="https://www.svgrepo.com/download/473700/linux.svg" width="32"/> | x86_64 | [morph-reth-${VERSION}-x86_64-linux.tar.gz](https://github.com/${REPO_NAME}/releases/download/v${VERSION}/morph-reth-${VERSION}-x86_64-linux.tar.gz) |
+          | <img src="https://www.svgrepo.com/download/473700/linux.svg" width="32"/> | aarch64 | [morph-reth-${VERSION}-aarch64-linux.tar.gz](https://github.com/${REPO_NAME}/releases/download/v${VERSION}/morph-reth-${VERSION}-aarch64-linux.tar.gz) |
+          | <img src="https://www.svgrepo.com/download/473589/docker.svg" width="32"/> | Docker | [ghcr.io/morph-l2/morph-reth:v${VERSION}](https://ghcr.io/morph-l2/morph-reth) |
+          ENDBODY
+
           gh release create "v${VERSION}" \
             --verify-tag \
             --draft \
             --title "v${VERSION}" \
-            --notes-file changelog.md \
+            --notes-file release_notes.md \
             $PRERELEASE \
             artifacts/*

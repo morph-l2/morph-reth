@@ -1,12 +1,30 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "forge-std/Test.sol";
 import "../src/BenchSwap.sol";
 
-contract BenchSwapTest is Test {
+interface Vm {
+    function store(address target, bytes32 slot, bytes32 value) external;
+    function prank(address sender) external;
+    function expectRevert(bytes calldata reason) external;
+}
+
+contract BenchSwapTest {
+    Vm private constant vm = Vm(address(uint160(uint256(keccak256("hevm cheat code")))));
     BenchSwap swap;
     address alice = address(0xA11CE);
+
+    function assertEq(uint256 actual, uint256 expected) private pure {
+        require(actual == expected, "values are not equal");
+    }
+
+    function assertGt(uint256 actual, uint256 expected) private pure {
+        require(actual > expected, "value is not greater");
+    }
+
+    function assertLt(uint256 actual, uint256 expected) private pure {
+        require(actual < expected, "value is not less");
+    }
 
     function setUp() public {
         swap = new BenchSwap();
@@ -23,8 +41,8 @@ contract BenchSwapTest is Test {
         uint256 gasBefore = gasleft();
         swap.swap0For1(1000);
         uint256 gasUsed = gasBefore - gasleft();
-        assertGt(gasUsed, 30_000, "gas too low");
-        assertLt(gasUsed, 200_000, "gas too high");
+        assertGt(gasUsed, 30_000);
+        assertLt(gasUsed, 200_000);
     }
 
     function test_swap_updates_state() public {

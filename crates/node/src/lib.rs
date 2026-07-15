@@ -22,10 +22,12 @@
 pub mod add_ons;
 pub mod args;
 pub mod components;
+pub mod exex;
 pub mod node;
 #[cfg(feature = "test-utils")]
 pub mod test_utils;
 pub mod validator;
+pub mod version;
 
 // Re-export main node types
 pub use add_ons::MorphAddOns;

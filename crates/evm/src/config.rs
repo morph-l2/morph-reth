@@ -35,8 +35,13 @@ impl ConfigureEvm for MorphEvmConfig {
 
         let mut cfg_env = CfgEnv::<MorphHardfork>::default()
             .with_chain_id(self.chain_spec().chain().id())
-            .with_spec(spec);
+            .with_spec_and_mainnet_gas_params(spec);
         cfg_env.disable_eip7623 = true;
+        // Morph does not enforce EIP-7825 transaction gas limit cap. Historical mainnet
+        // transactions (e.g. block 20459477, gas_limit=21,165,068) exceed the EIP-7825
+        // cap of 2^24 (16,777,216). Cap at block gas limit instead so all valid
+        // transactions can execute regardless of which SpecId is active.
+        cfg_env.tx_gas_limit_cap = Some(header.gas_limit());
 
         let fee_recipient = self
             .chain_spec()
@@ -60,6 +65,7 @@ impl ConfigureEvm for MorphEvmConfig {
                 excess_blob_gas: 0,
                 blob_gasprice: 1, // minimum blob gas price
             }),
+            slot_num: 0,
         };
 
         Ok(EvmEnv {
@@ -80,8 +86,10 @@ impl ConfigureEvm for MorphEvmConfig {
 
         let mut cfg_env = CfgEnv::<MorphHardfork>::default()
             .with_chain_id(self.chain_spec().chain().id())
-            .with_spec(spec);
+            .with_spec_and_mainnet_gas_params(spec);
         cfg_env.disable_eip7623 = true;
+        // Morph does not enforce EIP-7825 transaction gas limit cap — see evm_env() above.
+        cfg_env.tx_gas_limit_cap = Some(attributes.gas_limit);
 
         let fee_recipient = self
             .chain_spec()
@@ -108,6 +116,7 @@ impl ConfigureEvm for MorphEvmConfig {
                 excess_blob_gas: 0,
                 blob_gasprice: 1, // minimum blob gas price
             }),
+            slot_num: 0,
         };
 
         Ok(EvmEnv {
@@ -124,8 +133,15 @@ impl ConfigureEvm for MorphEvmConfig {
             parent_hash: block.header().parent_hash(),
             parent_beacon_block_root: block.header().parent_beacon_block_root(),
             ommers: &[],
-            withdrawals: block.body().withdrawals.as_ref().map(Cow::Borrowed),
+            withdrawals: block
+                .body()
+                .withdrawals
+                .as_ref()
+                .map(|w| Cow::Borrowed(w.0.as_slice())),
             extra_data: block.extra_data().clone(),
+            tx_count_hint: Some(block.body().transactions.len()),
+            // Morph L2 has no PoS slot semantics; introduced upstream in alloy 2.0.
+            slot_number: None,
         })
     }
 
@@ -138,8 +154,11 @@ impl ConfigureEvm for MorphEvmConfig {
             parent_hash: parent.hash(),
             parent_beacon_block_root: attributes.parent_beacon_block_root,
             ommers: &[],
-            withdrawals: attributes.inner.withdrawals.map(Cow::Owned),
+            withdrawals: attributes.inner.withdrawals.map(|w| Cow::Owned(w.0)),
             extra_data: attributes.inner.extra_data,
+            tx_count_hint: None,
+            // Morph L2 has no PoS slot semantics; introduced upstream in alloy 2.0.
+            slot_number: None,
         })
     }
 }
@@ -262,6 +281,7 @@ mod tests {
                 parent_beacon_block_root: None,
                 withdrawals: None,
                 extra_data: Bytes::new(),
+                slot_number: None,
             },
             base_fee_per_gas: Some(500_000),
         };
@@ -311,6 +331,7 @@ mod tests {
                 parent_beacon_block_root: None,
                 withdrawals: None,
                 extra_data: Bytes::new(),
+                slot_number: None,
             },
             base_fee_per_gas: None,
         };

@@ -1,6 +1,4 @@
 use reth_evm::NextBlockEnvAttributes;
-#[cfg(feature = "rpc")]
-use reth_primitives_traits::SealedHeader;
 
 /// Context required for next block environment.
 #[derive(Debug, Clone, derive_more::Deref)]
@@ -17,9 +15,12 @@ pub struct MorphNextBlockEnvAttributes {
 impl reth_rpc_eth_api::helpers::pending_block::BuildPendingEnv<morph_primitives::MorphHeader>
     for MorphNextBlockEnvAttributes
 {
-    fn build_pending_env(parent: &SealedHeader<morph_primitives::MorphHeader>) -> Self {
+    fn build_pending_env(
+        parent: &reth_primitives_traits::SealedHeader<morph_primitives::MorphHeader>,
+        block_overrides: Option<&alloy_rpc_types_eth::BlockOverrides>,
+    ) -> Self {
         Self {
-            inner: NextBlockEnvAttributes::build_pending_env(parent),
+            inner: NextBlockEnvAttributes::build_pending_env(parent, block_overrides),
             base_fee_per_gas: None,
         }
     }

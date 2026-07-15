@@ -40,10 +40,11 @@ use revm::{
     context_interface::ContextTr,
     handler::{EthPrecompiles, PrecompileProvider},
     interpreter::{CallInputs, InterpreterResult},
-    precompile::{Precompile, PrecompileError, PrecompileId, PrecompileResult, Precompiles},
-    primitives::{OnceLock, hardfork::SpecId},
+    precompile::{
+        Precompile, PrecompileHalt, PrecompileId, PrecompileOutput, PrecompileResult, Precompiles,
+    },
+    primitives::{AddressSet, OnceLock, hardfork::SpecId},
 };
-use std::boxed::Box;
 use std::string::String;
 
 /// Standard precompile addresses
@@ -114,8 +115,9 @@ impl MorphPrecompiles {
             MorphHardfork::Bernoulli | MorphHardfork::Curie => bernoulli(),
             // Morph203 and Viridian share the same precompile set
             MorphHardfork::Morph203 | MorphHardfork::Viridian => morph203(),
-            // Emerald: adds Osaka precompiles (P256verify, BLS12-381, etc)
-            MorphHardfork::Emerald | _ => emerald(),
+            // Emerald and Jade share the same precompile set.
+            MorphHardfork::Emerald | MorphHardfork::Jade => emerald(),
+            hardfork => unreachable!("unsupported Morph hardfork: {hardfork:?}"),
         };
 
         Self {
@@ -148,21 +150,25 @@ impl Default for MorphPrecompiles {
 
 /// Disabled stub for ripemd160 (0x03) in Bernoulli/Curie hardfork.
 ///
-/// Returns `PrecompileError` to consume all forwarded gas, matching go-ethereum's behavior
-/// where a disabled precompile error causes the CALL handler to burn all remaining gas.
-fn ripemd160_disabled(_input: &[u8], _gas_limit: u64) -> PrecompileResult {
-    Err(PrecompileError::Other(
-        "ripemd160 precompile disabled in Bernoulli/Curie hardfork".into(),
+/// Returns a `PrecompileHalt` so the CALL handler treats the call as failure and
+/// burns all forwarded gas, matching go-ethereum's behavior where a disabled
+/// precompile error causes the CALL handler to consume all remaining gas.
+fn ripemd160_disabled(_input: &[u8], _gas_limit: u64, reservoir: u64) -> PrecompileResult {
+    Ok(PrecompileOutput::halt(
+        PrecompileHalt::other("ripemd160 precompile disabled in Bernoulli/Curie hardfork"),
+        reservoir,
     ))
 }
 
 /// Disabled stub for blake2f (0x09) in Bernoulli/Curie hardfork.
 ///
-/// Returns `PrecompileError` to consume all forwarded gas, matching go-ethereum's behavior
-/// where a disabled precompile error causes the CALL handler to burn all remaining gas.
-fn blake2f_disabled(_input: &[u8], _gas_limit: u64) -> PrecompileResult {
-    Err(PrecompileError::Other(
-        "blake2f precompile disabled in Bernoulli/Curie hardfork".into(),
+/// Returns a `PrecompileHalt` so the CALL handler treats the call as failure and
+/// burns all forwarded gas, matching go-ethereum's behavior where a disabled
+/// precompile error causes the CALL handler to consume all remaining gas.
+fn blake2f_disabled(_input: &[u8], _gas_limit: u64, reservoir: u64) -> PrecompileResult {
+    Ok(PrecompileOutput::halt(
+        PrecompileHalt::other("blake2f precompile disabled in Bernoulli/Curie hardfork"),
+        reservoir,
     ))
 }
 
@@ -191,23 +197,25 @@ fn modexp_len_exceeds_32(data: &[u8], offset: usize) -> bool {
 /// that go-ethereum rejects, causing a consensus split.
 ///
 /// Ref: <https://github.com/morph-l2/go-ethereum/blob/main/core/vm/contracts.go#L643-L648>
-fn modexp_with_32byte_limit(input: &[u8], gas_limit: u64) -> PrecompileResult {
+fn modexp_with_32byte_limit(input: &[u8], gas_limit: u64, reservoir: u64) -> PrecompileResult {
     // The first 96 bytes of modexp input are three 32-byte big-endian length fields:
     // [0..32] = base_len, [32..64] = exp_len, [64..96] = mod_len
     if modexp_len_exceeds_32(input, 0)
         || modexp_len_exceeds_32(input, 32)
         || modexp_len_exceeds_32(input, 64)
     {
-        return Err(PrecompileError::Other(
-            "modexp temporarily only accepts inputs of 32 bytes (256 bits) or less".into(),
+        return Ok(PrecompileOutput::halt(
+            PrecompileHalt::other(
+                "modexp temporarily only accepts inputs of 32 bytes (256 bits) or less",
+            ),
+            reservoir,
         ));
     }
 
-    // Delegate to Berlin modexp (EIP-2565 gas pricing, standard computation)
     Precompiles::berlin()
         .get(&addresses::MODEXP)
         .expect("Berlin precompiles must include modexp")
-        .execute(input, gas_limit)
+        .execute(input, gas_limit, reservoir)
 }
 
 /// Wraps BN256 pairing with go-ethereum's 4-pair input length limit.
@@ -219,18 +227,22 @@ fn modexp_with_32byte_limit(input: &[u8], gas_limit: u64) -> PrecompileResult {
 /// limits and metering become inconsistent).
 ///
 /// Ref: <https://github.com/morph-l2/go-ethereum/blob/main/core/vm/contracts.go#L860-L865>
-fn bn256_pairing_with_4pair_limit(input: &[u8], gas_limit: u64) -> PrecompileResult {
+fn bn256_pairing_with_4pair_limit(
+    input: &[u8],
+    gas_limit: u64,
+    reservoir: u64,
+) -> PrecompileResult {
     if input.len() > 4 * 192 {
-        return Err(PrecompileError::Other(
-            "bad elliptic curve pairing size".into(),
+        return Ok(PrecompileOutput::halt(
+            PrecompileHalt::other("bad elliptic curve pairing size"),
+            reservoir,
         ));
     }
 
-    // Delegate to Berlin/Istanbul BN256 pairing
     Precompiles::berlin()
         .get(&addresses::BN256_PAIRING)
         .expect("Berlin precompiles must include BN256 pairing")
-        .execute(input, gas_limit)
+        .execute(input, gas_limit, reservoir)
 }
 
 /// Returns precompiles for Bernoulli hardfork.
@@ -239,7 +251,7 @@ fn bn256_pairing_with_4pair_limit(input: &[u8], gas_limit: u64) -> PrecompileRes
 /// All 9 Berlin addresses are present (so they get warmed via EIP-2929), but 0x03/0x09
 /// consume all forwarded gas and return failure when called.
 ///
-/// Matches: <https://github.com/morph-l2/go-ethereum/blob/main/core/vm/contracts.go#L136-L148>
+/// Matches: <https://github.com/morph-l2/go-ethereum/blob/main/core/vm/contracts.go#L124-L134>
 pub fn bernoulli() -> &'static Precompiles {
     static INSTANCE: OnceLock<Precompiles> = OnceLock::new();
     INSTANCE.get_or_init(|| {
@@ -382,7 +394,7 @@ where
     }
 
     #[inline]
-    fn warm_addresses(&self) -> Box<impl Iterator<Item = Address>> {
+    fn warm_addresses(&self) -> &AddressSet {
         self.inner.warm_addresses()
     }
 
@@ -395,6 +407,28 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use revm::precompile::PrecompileStatus;
+
+    /// Returns true if the precompile execution result should be considered a failed
+    /// CALL (halt status or fatal error). Mirrors the old `result.is_err()` semantics
+    /// from revm 36 where rejection variants like `PrecompileError::Other` were errors.
+    fn is_call_failure(result: &PrecompileResult) -> bool {
+        match result {
+            Ok(output) => matches!(output.status, PrecompileStatus::Halt(_)),
+            Err(_) => true,
+        }
+    }
+
+    /// Extracts a `PrecompileHalt` from a result that is expected to be a halt-on-Ok.
+    fn halt_reason(result: PrecompileResult) -> PrecompileHalt {
+        match result {
+            Ok(output) => match output.status {
+                PrecompileStatus::Halt(reason) => reason,
+                other => panic!("expected halt status, got: {other:?}"),
+            },
+            Err(err) => panic!("expected halt-on-Ok, got fatal error: {err:?}"),
+        }
+    }
 
     #[test]
     fn test_bernoulli_precompiles() {
@@ -428,16 +462,19 @@ mod tests {
         input[31] = 33; // base_len = 33
         input[63] = 32; // exp_len = 32
         input[95] = 32; // mod_len = 32
-        let result = modexp.execute(&input, 100_000);
+        let result = modexp.execute(&input, 100_000, 0);
         assert!(
-            result.is_err(),
+            is_call_failure(&result),
             "modexp with base_len=33 should be rejected"
         );
 
         // base_len=32, exp_len=32, mod_len=32 — should succeed
         input[31] = 32;
-        let result = modexp.execute(&input, 100_000);
-        assert!(result.is_ok(), "modexp with all lens=32 should succeed");
+        let result = modexp.execute(&input, 100_000, 0);
+        assert!(
+            !is_call_failure(&result),
+            "modexp with all lens=32 should succeed"
+        );
     }
 
     #[test]
@@ -476,16 +513,19 @@ mod tests {
 
         // 5 pairs (960 bytes) — exceeds 4-pair limit, should be rejected
         let input = vec![0u8; 5 * 192];
-        let result = pairing.execute(&input, 1_000_000);
-        assert!(result.is_err(), "pairing with 5 pairs should be rejected");
+        let result = pairing.execute(&input, 1_000_000, 0);
+        assert!(
+            is_call_failure(&result),
+            "pairing with 5 pairs should be rejected"
+        );
 
         // 4 pairs (768 bytes) — within limit, should not be rejected for size
         // (may still fail due to invalid curve points, but not for size)
         let input = vec![0u8; 4 * 192];
-        let result = pairing.execute(&input, 1_000_000);
+        let result = pairing.execute(&input, 1_000_000, 0);
         // Zero-input pairing is valid and returns true
         assert!(
-            result.is_ok(),
+            !is_call_failure(&result),
             "pairing with 4 pairs should not be rejected for size"
         );
     }
@@ -538,8 +578,11 @@ mod tests {
         input[31] = 64; // base_len = 64
         input[63] = 32; // exp_len = 32
         input[95] = 64; // mod_len = 64
-        let result = modexp.execute(&input, 1_000_000);
-        assert!(result.is_ok(), "Emerald modexp should accept base_len=64");
+        let result = modexp.execute(&input, 1_000_000, 0);
+        assert!(
+            !is_call_failure(&result),
+            "Emerald modexp should accept base_len=64"
+        );
     }
 
     #[test]
@@ -582,18 +625,21 @@ mod tests {
         let precompiles = bernoulli();
         let ripemd = precompiles.get(&addresses::RIPEMD160).unwrap();
 
-        // Calling the disabled stub should return an error (consuming all forwarded gas)
-        let result = ripemd.execute(b"hello", 100_000);
-        assert!(result.is_err(), "disabled ripemd160 should return error");
-        let err = result.unwrap_err();
-        match err {
-            PrecompileError::Other(msg) => {
+        // Calling the disabled stub should halt (consuming all forwarded gas at the
+        // caller, since the CALL frame treats `Halt` as failure).
+        let result = ripemd.execute(b"hello", 100_000, 0);
+        assert!(
+            is_call_failure(&result),
+            "disabled ripemd160 should halt the call"
+        );
+        match halt_reason(result) {
+            PrecompileHalt::Other(msg) => {
                 assert!(
                     msg.contains("ripemd160"),
                     "error message should mention ripemd160"
                 );
             }
-            _ => panic!("expected PrecompileError::Other, got: {err:?}"),
+            other => panic!("expected PrecompileHalt::Other, got: {other:?}"),
         }
     }
 
@@ -602,18 +648,21 @@ mod tests {
         let precompiles = bernoulli();
         let blake2f = precompiles.get(&addresses::BLAKE2F).unwrap();
 
-        // Calling the disabled stub should return an error (consuming all forwarded gas)
-        let result = blake2f.execute(b"hello", 100_000);
-        assert!(result.is_err(), "disabled blake2f should return error");
-        let err = result.unwrap_err();
-        match err {
-            PrecompileError::Other(msg) => {
+        // Calling the disabled stub should halt (consuming all forwarded gas at the
+        // caller, since the CALL frame treats `Halt` as failure).
+        let result = blake2f.execute(b"hello", 100_000, 0);
+        assert!(
+            is_call_failure(&result),
+            "disabled blake2f should halt the call"
+        );
+        match halt_reason(result) {
+            PrecompileHalt::Other(msg) => {
                 assert!(
                     msg.contains("blake2f"),
                     "error message should mention blake2f"
                 );
             }
-            _ => panic!("expected PrecompileError::Other, got: {err:?}"),
+            other => panic!("expected PrecompileHalt::Other, got: {other:?}"),
         }
     }
 
@@ -622,10 +671,10 @@ mod tests {
         let precompiles = morph203();
         let ripemd = precompiles.get(&addresses::RIPEMD160).unwrap();
 
-        // In Morph203, ripemd160 is re-enabled and should work (not return disabled error)
-        let result = ripemd.execute(b"hello", 100_000);
+        // In Morph203, ripemd160 is re-enabled and should work (not return disabled halt)
+        let result = ripemd.execute(b"hello", 100_000, 0);
         assert!(
-            result.is_ok(),
+            !is_call_failure(&result),
             "morph203 ripemd160 should be functional: {result:?}"
         );
     }
@@ -636,10 +685,11 @@ mod tests {
         let blake2f = precompiles.get(&addresses::BLAKE2F).unwrap();
 
         // blake2f requires specific input format (213 bytes), but the point is it should
-        // NOT return the "disabled" error. An invalid-input error is acceptable.
-        let result = blake2f.execute(b"hello", 100_000);
-        // Either Ok (valid input) or Err (invalid input format, NOT disabled error)
-        if let Err(PrecompileError::Other(msg)) = &result {
+        // NOT return the "disabled" halt. An invalid-input halt is acceptable.
+        let result = blake2f.execute(b"hello", 100_000, 0);
+        if let Ok(output) = &result
+            && let PrecompileStatus::Halt(PrecompileHalt::Other(msg)) = &output.status
+        {
             assert!(
                 !msg.contains("disabled"),
                 "morph203 blake2f should NOT be disabled: {msg}"
@@ -654,10 +704,10 @@ mod tests {
 
         // 5 pairs (960 bytes) — Bernoulli uses Berlin pairing with no 4-pair limit
         let input = vec![0u8; 5 * 192];
-        let result = pairing.execute(&input, 1_000_000);
+        let result = pairing.execute(&input, 1_000_000, 0);
         // Should succeed (zero-padded valid points), NOT rejected for size
         assert!(
-            result.is_ok(),
+            !is_call_failure(&result),
             "Bernoulli pairing should accept 5 pairs (no limit)"
         );
     }
@@ -669,15 +719,17 @@ mod tests {
 
         // Exactly 4 pairs (768 bytes) — should succeed
         let input = vec![0u8; 4 * 192];
+        let result = pairing.execute(&input, 1_000_000, 0);
         assert!(
-            pairing.execute(&input, 1_000_000).is_ok(),
+            !is_call_failure(&result),
             "pairing with exactly 4 pairs should succeed"
         );
 
         // 4 pairs + 1 byte (769 bytes) — should be rejected
         let input = vec![0u8; 4 * 192 + 1];
+        let result = pairing.execute(&input, 1_000_000, 0);
         assert!(
-            pairing.execute(&input, 1_000_000).is_err(),
+            is_call_failure(&result),
             "pairing with 769 bytes should be rejected"
         );
     }
@@ -741,8 +793,11 @@ mod tests {
             0x5a, 0x9c, 0x45, 0x49,
         ]);
 
-        let result = ecrecover.execute(&input, 10_000);
-        assert!(result.is_ok(), "valid ecrecover should succeed: {result:?}");
+        let result = ecrecover.execute(&input, 10_000, 0);
+        assert!(
+            !is_call_failure(&result),
+            "valid ecrecover should succeed: {result:?}"
+        );
 
         let output = result.unwrap().bytes;
         assert_eq!(output.len(), 32, "ecrecover output must be 32 bytes");
@@ -766,8 +821,11 @@ mod tests {
         let precompiles = bernoulli();
         let sha256 = precompiles.get(&addresses::SHA256).unwrap();
 
-        let result = sha256.execute(&[], 100_000);
-        assert!(result.is_ok(), "sha256 of empty input should succeed");
+        let result = sha256.execute(&[], 100_000, 0);
+        assert!(
+            !is_call_failure(&result),
+            "sha256 of empty input should succeed"
+        );
 
         // SHA256("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
         let expected: [u8; 32] = [
@@ -789,8 +847,8 @@ mod tests {
         let identity = precompiles.get(&addresses::IDENTITY).unwrap();
 
         let input: &[u8] = &[0x12, 0x34, 0xab, 0xcd];
-        let result = identity.execute(input, 100_000);
-        assert!(result.is_ok(), "identity should succeed");
+        let result = identity.execute(input, 100_000, 0);
+        assert!(!is_call_failure(&result), "identity should succeed");
         assert_eq!(
             &result.unwrap().bytes[..],
             input,

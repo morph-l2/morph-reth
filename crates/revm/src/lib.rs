@@ -58,7 +58,6 @@ pub use block::MorphBlockEnv;
 pub use error::{MorphHaltReason, MorphInvalidTransaction};
 pub use evm::MorphEvm;
 pub use l1block::{
-    CURIE_L1_GAS_PRICE_ORACLE_STORAGE,
     GPO_BLOB_SCALAR_SLOT,
     GPO_COMMIT_SCALAR_SLOT,
     GPO_IS_CURIE_SLOT,
@@ -69,11 +68,6 @@ pub use l1block::{
     GPO_OWNER_SLOT,
     GPO_SCALAR_SLOT,
     GPO_WHITELIST_SLOT,
-    INITIAL_BLOB_SCALAR,
-    INITIAL_COMMIT_SCALAR,
-    // Curie initial values
-    INITIAL_L1_BLOB_BASE_FEE,
-    IS_CURIE,
     L1_GAS_PRICE_ORACLE_ADDRESS,
     L1BlockInfo,
 };

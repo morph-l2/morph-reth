@@ -211,6 +211,9 @@ impl PayloadAttributesBuilder<MorphPayloadAttributes, MorphHeader>
                     .chain_spec
                     .is_cancun_active_at_timestamp(timestamp)
                     .then(B256::random),
+                // Morph L2 has no PoS slot semantics; field added in alloy 2.0.
+                slot_number: None,
+                target_gas_limit: None,
             },
             // No L1 transactions in local mining mode
             transactions: None,

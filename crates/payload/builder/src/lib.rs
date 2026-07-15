@@ -29,6 +29,7 @@
 mod builder;
 mod config;
 mod error;
+mod metrics;
 
 pub use builder::{MorphPayloadBuilder, MorphPayloadTransactions};
 pub use config::{MorphBuilderConfig, PayloadBuildingBreaker};

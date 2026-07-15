@@ -63,6 +63,29 @@ pub enum MorphEthApiError {
     /// Provider error
     #[error("provider error: {0}")]
     Provider(String),
+
+    /// Insufficient funds for the transaction value.
+    ///
+    /// Raised by `eth_estimateGas` when the caller's balance is smaller than
+    /// `tx.value` before any gas / L1 fee accounting.
+    #[error("insufficient funds for transfer")]
+    InsufficientFundsForTransfer,
+
+    /// Insufficient funds to cover the L1 data fee.
+    ///
+    /// Raised by `eth_estimateGas` when the caller's remaining balance (after
+    /// subtracting `tx.value`) cannot cover the L1 data fee. Mirrors
+    /// go-ethereum's `"insufficient funds for l1 fee"` error.
+    #[error("insufficient funds for l1 fee")]
+    InsufficientFundsForL1Fee,
+
+    /// Invalid or inactive fee token.
+    ///
+    /// Raised by `eth_estimateGas` when a MorphTx specifies a `fee_token_id`
+    /// that is not registered in the L2 token registry, is inactive, or has
+    /// a misconfigured `price_ratio` / `scale`.
+    #[error("invalid fee token")]
+    InvalidFeeToken,
 }
 
 /// Converts [`MorphEthApiError`] to a JSON-RPC error object.
@@ -110,6 +133,19 @@ impl From<MorphEthApiError> for jsonrpsee::types::ErrorObject<'static> {
                 format!("Provider error: {msg}"),
                 None::<()>,
             ),
+            MorphEthApiError::InsufficientFundsForTransfer => jsonrpsee::types::ErrorObject::owned(
+                -32000,
+                "insufficient funds for transfer",
+                None::<()>,
+            ),
+            MorphEthApiError::InsufficientFundsForL1Fee => jsonrpsee::types::ErrorObject::owned(
+                -32000,
+                "insufficient funds for l1 fee",
+                None::<()>,
+            ),
+            MorphEthApiError::InvalidFeeToken => {
+                jsonrpsee::types::ErrorObject::owned(-32000, "invalid fee token", None::<()>)
+            }
         }
     }
 }

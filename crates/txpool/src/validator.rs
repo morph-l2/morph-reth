@@ -3,6 +3,7 @@
 //! This module provides Morph-specific transaction validation that extends the standard
 //! Ethereum transaction validation with L2 checks:
 //! - Rejection of EIP-4844 blob transactions
+//! - EIP-3860 max initcode size enforcement
 //! - Rejection of L1 message transactions from the pool
 //! - L1 data fee validation
 //! - MorphTx (0x7F) ERC20 token balance validation
@@ -16,8 +17,9 @@ use morph_primitives::MorphTxEnvelope;
 use morph_revm::L1BlockInfo;
 use parking_lot::RwLock;
 use reth_chainspec::ChainSpecProvider;
+use reth_evm::ConfigureEvm;
 use reth_primitives_traits::{
-    Block, GotExpected, SealedBlock, transaction::error::InvalidTransactionError,
+    Block, BlockTy, GotExpected, SealedBlock, transaction::error::InvalidTransactionError,
 };
 use reth_revm::database::StateProviderDatabase;
 use reth_storage_api::{BlockReaderIdExt, StateProviderFactory};
@@ -29,6 +31,15 @@ use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
+
+/// EIP-3860 max initcode size (`2 * MAX_CODE_SIZE = 2 * 24 576 = 49 152` bytes).
+///
+/// Reuses revm's canonical constant — the same `eip3860::MAX_INITCODE_SIZE` that
+/// reth's `EthTransactionValidator` uses — so it stays pinned to the EIP-170
+/// code-size base instead of a hand-copied literal. Enforced unconditionally at
+/// the txpool layer because Morph has been post-Shanghai since genesis; see
+/// `validate_one_with_state` for why we can't rely on reth's Shanghai-gated check.
+const MAX_INITCODE_SIZE: usize = reth_revm::revm::primitives::eip3860::MAX_INITCODE_SIZE;
 
 /// Tracks L1 block info for the current chain head.
 ///
@@ -108,14 +119,14 @@ impl MorphL1BlockInfo {
 /// checking disabled via `disable_balance_check()`, since MorphTx users may have
 /// zero ETH balance but sufficient ERC20 tokens for gas payment.
 #[derive(Debug)]
-pub struct MorphTransactionValidator<Client, Tx> {
+pub struct MorphTransactionValidator<Client, Tx, Evm = morph_evm::MorphEvmConfig> {
     /// The type that performs the actual validation.
-    inner: EthTransactionValidator<Client, Tx>,
+    inner: EthTransactionValidator<Client, Tx, Evm>,
     /// Additional block info required for validation.
     block_info: Arc<MorphL1BlockInfo>,
 }
 
-impl<Client, Tx> MorphTransactionValidator<Client, Tx> {
+impl<Client, Tx, Evm> MorphTransactionValidator<Client, Tx, Evm> {
     /// Returns the configured chain spec.
     pub fn chain_spec(&self) -> Arc<Client::ChainSpec>
     where
@@ -163,13 +174,14 @@ fn insufficient_funds_outcome<Tx: PoolTransaction>(
     )
 }
 
-impl<Client, Tx> MorphTransactionValidator<Client, Tx>
+impl<Client, Tx, Evm> MorphTransactionValidator<Client, Tx, Evm>
 where
     Client: ChainSpecProvider<ChainSpec: MorphHardforks> + StateProviderFactory + BlockReaderIdExt,
     Tx: EthPoolTransaction<Consensus = MorphTxEnvelope>,
+    Evm: ConfigureEvm,
 {
     /// Create a new [`MorphTransactionValidator`].
-    pub fn new(inner: EthTransactionValidator<Client, Tx>) -> Self {
+    pub fn new(inner: EthTransactionValidator<Client, Tx, Evm>) -> Self {
         let this = Self::with_block_info(inner, MorphL1BlockInfo::default());
         if let Ok(Some(block)) = this
             .inner
@@ -184,7 +196,7 @@ where
 
     /// Create a new [`MorphTransactionValidator`] with the given [`MorphL1BlockInfo`].
     pub fn with_block_info(
-        inner: EthTransactionValidator<Client, Tx>,
+        inner: EthTransactionValidator<Client, Tx, Evm>,
         block_info: MorphL1BlockInfo,
     ) -> Self {
         Self {
@@ -306,6 +318,29 @@ where
             );
         }
 
+        // EIP-3860: enforce max initcode size on contract-creation transactions.
+        //
+        // Morph has been post-Shanghai since genesis (morph-geth's
+        // `shanghaiBlock = 0` / `IsShanghai(num)`), so this check must always
+        // fire. We can't reuse reth's `EthTransactionValidator` Shanghai gating
+        // because morph-mainnet/hoodi genesis uses the non-standard
+        // `shanghaiBlock` field (inherited from scroll-tech), which alloy's
+        // `Genesis` parser ignores in favour of `shanghaiTime`. Force-activating
+        // Shanghai/Cancun in the chainspec would also flip
+        // `is_shanghai_active_at_timestamp` for `EthStorage::read_block_bodies`,
+        // making body.withdrawals leak into RPC responses and diverging from
+        // morph-geth, which has no withdrawals slot. Enforcing the bound here
+        // keeps the chainspec untouched and the RPC output bit-identical to
+        // morph-geth.
+        //
+        // Placed after the L1-message / EIP-7702 / MorphTx type gates so a
+        // transaction rejected purely on its type still surfaces that type error
+        // (matching morph-geth), and before the inner validator so we skip its
+        // state lookups for oversized payloads.
+        if let Err(err) = transaction.ensure_max_init_code_size(MAX_INITCODE_SIZE) {
+            return TransactionValidationOutcome::Invalid(transaction, err);
+        }
+
         let outcome = self
             .inner
             .validate_one_with_state(origin, transaction, state);
@@ -341,33 +376,17 @@ where
                 // the shared helper used by both admission and maintenance.
                 // Pass &MorphTxEnvelope directly to avoid a second clone_into_consensus().
                 let sender = valid_tx.transaction().sender();
-                let validation = match self.validate_morph_tx_balance(
+                if let Err(err) = self.validate_morph_tx_balance(
                     &consensus_tx,
                     sender,
                     balance,
                     l1_data_fee,
                     hardfork,
                 ) {
-                    Ok(v) => v,
-                    Err(err) => {
-                        return TransactionValidationOutcome::Invalid(
-                            valid_tx.into_transaction(),
-                            err.into(),
-                        );
-                    }
-                };
-
-                // MorphTx with fee_token_id = 0 uses ETH fee path and must pass
-                // the same ETH affordability check as regular txs.
-                if !validation.uses_token_fee {
-                    let cost = valid_tx.transaction().cost().saturating_add(l1_data_fee);
-                    if cost > balance {
-                        return insufficient_funds_outcome(
-                            valid_tx.into_transaction(),
-                            balance,
-                            cost,
-                        );
-                    }
+                    return TransactionValidationOutcome::Invalid(
+                        valid_tx.into_transaction(),
+                        err.into(),
+                    );
                 }
             } else {
                 // Regular transaction: validate ETH balance covers cost + L1 fee
@@ -426,7 +445,6 @@ where
             sender,
             eth_balance,
             l1_data_fee,
-            base_fee_per_gas: self.block_info.base_fee_per_gas(),
             hardfork,
         };
 
@@ -470,12 +488,14 @@ where
     }
 }
 
-impl<Client, Tx> TransactionValidator for MorphTransactionValidator<Client, Tx>
+impl<Client, Tx, Evm> TransactionValidator for MorphTransactionValidator<Client, Tx, Evm>
 where
     Client: ChainSpecProvider<ChainSpec: MorphHardforks> + StateProviderFactory + BlockReaderIdExt,
     Tx: EthPoolTransaction<Consensus = MorphTxEnvelope>,
+    Evm: ConfigureEvm,
 {
     type Transaction = Tx;
+    type Block = BlockTy<Evm::Primitives>;
 
     async fn validate_transaction(
         &self,
@@ -487,15 +507,13 @@ where
 
     async fn validate_transactions(
         &self,
-        transactions: Vec<(TransactionOrigin, Self::Transaction)>,
+        transactions: impl IntoIterator<Item = (TransactionOrigin, Self::Transaction), IntoIter: Send>
+        + Send,
     ) -> Vec<TransactionValidationOutcome<Self::Transaction>> {
-        self.validate_all(transactions)
+        self.validate_all(transactions.into_iter().collect())
     }
 
-    fn on_new_head_block<B>(&self, new_tip_block: &SealedBlock<B>)
-    where
-        B: Block,
-    {
+    fn on_new_head_block(&self, new_tip_block: &SealedBlock<Self::Block>) {
         self.inner.on_new_head_block(new_tip_block);
         self.update_l1_block_info(new_tip_block.header());
     }
@@ -514,11 +532,12 @@ fn is_morph_tx(tx: &impl Typed2718) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_consensus::{Block, Header, Signed, TxEip1559, TxLegacy};
+    use alloy_consensus::{Signed, TxEip1559, TxLegacy};
     use alloy_eips::eip2718::Encodable2718;
     use alloy_primitives::{B256, Signature, TxKind, address};
-    use morph_chainspec::MORPH_MAINNET;
-    use morph_primitives::{TxL1Msg, TxMorph};
+    use morph_chainspec::{MORPH_MAINNET, MorphChainSpec};
+    use morph_evm::MorphEvmConfig;
+    use morph_primitives::{MorphPrimitives, TxL1Msg, TxMorph};
     use morph_revm::{
         L2_TOKEN_REGISTRY_ADDRESS, compute_mapping_slot, compute_mapping_slot_for_address,
     };
@@ -527,6 +546,12 @@ mod tests {
     use reth_transaction_pool::{
         blobstore::InMemoryBlobStore, validate::EthTransactionValidatorBuilder,
     };
+
+    fn new_mock_provider() -> MockEthProvider<MorphPrimitives, MorphChainSpec> {
+        MockEthProvider::<MorphPrimitives, _>::new()
+            .with_chain_spec((**MORPH_MAINNET).clone())
+            .with_genesis_block()
+    }
 
     fn storage_key(slot: U256) -> B256 {
         B256::from(slot.to_be_bytes::<32>())
@@ -602,12 +627,16 @@ mod tests {
     #[test]
     fn validate_l1_message_rejected() {
         // Create validator with mock provider
-        let client = MockEthProvider::default().with_chain_spec(MORPH_MAINNET.clone());
-        let eth_validator: EthTransactionValidator<_, crate::MorphPooledTransaction> =
-            EthTransactionValidatorBuilder::new(client)
-                .no_shanghai()
-                .no_cancun()
-                .build::<crate::MorphPooledTransaction, _>(InMemoryBlobStore::default());
+        let client = new_mock_provider();
+        let morph_evm_config = MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone());
+        let eth_validator: EthTransactionValidator<
+            _,
+            crate::MorphPooledTransaction,
+            MorphEvmConfig,
+        > = EthTransactionValidatorBuilder::new(client, morph_evm_config)
+            .no_shanghai()
+            .no_cancun()
+            .build::<crate::MorphPooledTransaction, _>(InMemoryBlobStore::default());
         let validator = MorphTransactionValidator::new(eth_validator);
 
         let origin = TransactionOrigin::External;
@@ -643,15 +672,19 @@ mod tests {
     #[test]
     fn validate_valid_eip1559_transaction() {
         // Create validator with mock provider and disable balance check for simplicity
-        let client = MockEthProvider::default().with_chain_spec(MORPH_MAINNET.clone());
+        let client = new_mock_provider();
         let signer = address!("0000000000000000000000000000000000000001");
         client.add_account(signer, ExtendedAccount::new(0, U256::from(10u128.pow(18))));
-        let eth_validator: EthTransactionValidator<_, crate::MorphPooledTransaction> =
-            EthTransactionValidatorBuilder::new(client)
-                .no_shanghai()
-                .no_cancun()
-                .disable_balance_check()
-                .build::<crate::MorphPooledTransaction, _>(InMemoryBlobStore::default());
+        let morph_evm_config = MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone());
+        let eth_validator: EthTransactionValidator<
+            _,
+            crate::MorphPooledTransaction,
+            MorphEvmConfig,
+        > = EthTransactionValidatorBuilder::new(client, morph_evm_config)
+            .no_shanghai()
+            .no_cancun()
+            .disable_balance_check()
+            .build::<crate::MorphPooledTransaction, _>(InMemoryBlobStore::default());
         let validator = MorphTransactionValidator::new(eth_validator);
 
         let origin = TransactionOrigin::External;
@@ -694,15 +727,19 @@ mod tests {
     #[test]
     fn validate_valid_legacy_transaction() {
         // Create validator with mock provider and disable balance check for simplicity
-        let client = MockEthProvider::default().with_chain_spec(MORPH_MAINNET.clone());
+        let client = new_mock_provider();
         let signer = address!("0000000000000000000000000000000000000001");
         client.add_account(signer, ExtendedAccount::new(0, U256::from(10u128.pow(18))));
-        let eth_validator: EthTransactionValidator<_, crate::MorphPooledTransaction> =
-            EthTransactionValidatorBuilder::new(client)
-                .no_shanghai()
-                .no_cancun()
-                .disable_balance_check()
-                .build::<crate::MorphPooledTransaction, _>(InMemoryBlobStore::default());
+        let morph_evm_config = MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone());
+        let eth_validator: EthTransactionValidator<
+            _,
+            crate::MorphPooledTransaction,
+            MorphEvmConfig,
+        > = EthTransactionValidatorBuilder::new(client, morph_evm_config)
+            .no_shanghai()
+            .no_cancun()
+            .disable_balance_check()
+            .build::<crate::MorphPooledTransaction, _>(InMemoryBlobStore::default());
         let validator = MorphTransactionValidator::new(eth_validator);
 
         let origin = TransactionOrigin::External;
@@ -740,26 +777,119 @@ mod tests {
         }
     }
 
+    /// EIP-3860 mempool admission: contract creation transactions whose initcode
+    /// exceeds 49 152 bytes must be rejected. This used to slip through because
+    /// morph-mainnet/hoodi genesis use the non-standard `shanghaiBlock` field
+    /// (inherited from scroll-tech go-ethereum) that alloy's `Genesis` parser
+    /// ignores, leaving Shanghai un-registered in the hardforks table and
+    /// `is_shanghai_active_at_timestamp` permanently `false` — which means reth's
+    /// Shanghai-gated EIP-3860 check (`EthTransactionValidator`, `eth.rs:468`) is
+    /// always skipped. The rejection is therefore enforced unconditionally by
+    /// `MorphTransactionValidator` itself (see `validate_one_with_state`), not by
+    /// the chainspec or the inner reth validator.
     #[test]
-    fn validate_morph_tx_uses_effective_gas_price_for_token_fee_path() {
-        let client = MockEthProvider::default().with_chain_spec(MORPH_MAINNET.clone());
+    fn validate_rejects_oversized_initcode() {
+        let client = new_mock_provider();
+        let signer = address!("0000000000000000000000000000000000000001");
+        client.add_account(signer, ExtendedAccount::new(0, U256::from(10u128.pow(18))));
+        let morph_evm_config = MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone());
+
+        // Built from the real `MORPH_MAINNET` chainspec, under which Shanghai is
+        // never active, so the inner `EthTransactionValidator` does not enforce
+        // EIP-3860. This test verifies that `MorphTransactionValidator` rejects
+        // the oversized initcode on its own.
+        let eth_validator: EthTransactionValidator<
+            _,
+            crate::MorphPooledTransaction,
+            MorphEvmConfig,
+        > = EthTransactionValidatorBuilder::new(client, morph_evm_config)
+            .disable_balance_check()
+            .build::<crate::MorphPooledTransaction, _>(InMemoryBlobStore::default());
+        let validator = MorphTransactionValidator::new(eth_validator);
+
+        let oversize_initcode = vec![0u8; MAX_INITCODE_SIZE + 1];
+        let tx = TxLegacy {
+            chain_id: Some(2818),
+            nonce: 0,
+            gas_limit: 30_000_000,
+            to: TxKind::Create,
+            value: U256::ZERO,
+            input: oversize_initcode.into(),
+            gas_price: 2_000_000_000,
+        };
+        let signed_tx = Signed::new_unchecked(tx, Signature::test_signature(), B256::ZERO);
+        let envelope = MorphTxEnvelope::Legacy(signed_tx);
+        let recovered = Recovered::new_unchecked(envelope, signer);
+        let len = recovered.encode_2718_len();
+        let pooled_tx = crate::MorphPooledTransaction::new(recovered, len);
+
+        let outcome = validator.validate_one(TransactionOrigin::External, pooled_tx);
+
+        match outcome {
+            TransactionValidationOutcome::Invalid(_, err) => {
+                let msg = err.to_string();
+                assert!(
+                    msg.contains("max_init_code_size") || msg.contains("init code size"),
+                    "expected EIP-3860 rejection, got: {msg}"
+                );
+            }
+            other => panic!("expected oversized initcode to be rejected, got: {other:?}"),
+        }
+    }
+
+    /// Counterpart to `validate_rejects_oversized_initcode`: an initcode
+    /// exactly at the EIP-3860 limit (49 152 bytes) must still be admitted.
+    #[test]
+    fn validate_accepts_initcode_at_limit() {
+        let client = new_mock_provider();
+        let signer = address!("0000000000000000000000000000000000000001");
+        client.add_account(signer, ExtendedAccount::new(0, U256::from(10u128.pow(18))));
+        let morph_evm_config = MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone());
+        let eth_validator: EthTransactionValidator<
+            _,
+            crate::MorphPooledTransaction,
+            MorphEvmConfig,
+        > = EthTransactionValidatorBuilder::new(client, morph_evm_config)
+            .disable_balance_check()
+            .build::<crate::MorphPooledTransaction, _>(InMemoryBlobStore::default());
+        let validator = MorphTransactionValidator::new(eth_validator);
+
+        let initcode_at_limit = vec![0u8; MAX_INITCODE_SIZE];
+        let tx = TxLegacy {
+            chain_id: Some(2818),
+            nonce: 0,
+            gas_limit: 30_000_000,
+            to: TxKind::Create,
+            value: U256::ZERO,
+            input: initcode_at_limit.into(),
+            gas_price: 2_000_000_000,
+        };
+        let signed_tx = Signed::new_unchecked(tx, Signature::test_signature(), B256::ZERO);
+        let envelope = MorphTxEnvelope::Legacy(signed_tx);
+        let recovered = Recovered::new_unchecked(envelope, signer);
+        let len = recovered.encode_2718_len();
+        let pooled_tx = crate::MorphPooledTransaction::new(recovered, len);
+
+        let outcome = validator.validate_one(TransactionOrigin::External, pooled_tx);
+        // The validator may still reject this because of intrinsic gas or
+        // balance checks downstream; the only thing this test asserts is that
+        // EIP-3860 itself does NOT fire at exactly the limit.
+        if let TransactionValidationOutcome::Invalid(_, err) = &outcome {
+            let msg = err.to_string();
+            assert!(
+                !msg.contains("max_init_code_size") && !msg.contains("init code size"),
+                "EIP-3860 must not reject initcode of exactly the size limit; got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_morph_tx_uses_max_fee_for_token_fee_admission() {
+        let client = new_mock_provider();
         let signer = address!("0000000000000000000000000000000000000001");
         let token = address!("5300000000000000000000000000000000000042");
         let balance_slot = U256::from(7);
 
-        client.add_block(
-            B256::from([0x11; 32]),
-            Block::new(
-                Header {
-                    number: 1,
-                    timestamp: 1,
-                    gas_limit: 30_000_000,
-                    base_fee_per_gas: Some(10),
-                    ..Default::default()
-                },
-                Default::default(),
-            ),
-        );
         client.add_account(signer, ExtendedAccount::new(0, U256::ZERO));
         client.add_account(
             L2_TOKEN_REGISTRY_ADDRESS,
@@ -773,13 +903,23 @@ mod tests {
             )]),
         );
 
-        let eth_validator: EthTransactionValidator<_, crate::MorphPooledTransaction> =
-            EthTransactionValidatorBuilder::new(client)
-                .no_shanghai()
-                .no_cancun()
-                .disable_balance_check()
-                .build::<crate::MorphPooledTransaction, _>(InMemoryBlobStore::default());
+        let morph_evm_config = MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone());
+        let eth_validator: EthTransactionValidator<
+            _,
+            crate::MorphPooledTransaction,
+            MorphEvmConfig,
+        > = EthTransactionValidatorBuilder::new(client, morph_evm_config)
+            .no_shanghai()
+            .no_cancun()
+            .disable_balance_check()
+            .build::<crate::MorphPooledTransaction, _>(InMemoryBlobStore::default());
         let validator = MorphTransactionValidator::new(eth_validator);
+        // Simulate an active chain head with base_fee_per_gas = 10. Execution
+        // would use effective gas price = min(100, 10 + 1) = 11, but txpool
+        // admission follows geth's conservative max_fee_per_gas budget.
+        validator
+            .block_info
+            .update(L1BlockInfo::default(), 0, 0, Some(10));
 
         let tx = TxMorph {
             chain_id: 2818,
@@ -803,7 +943,7 @@ mod tests {
             B256::ZERO,
         ));
         let recovered = Recovered::new_unchecked(envelope, signer);
-        let validation = validator
+        let err = validator
             .validate_morph_tx_balance(
                 &recovered,
                 signer,
@@ -811,9 +951,15 @@ mod tests {
                 U256::ZERO,
                 morph_chainspec::hardfork::MorphHardfork::Viridian,
             )
-            .expect("MorphTx should be affordable when priced with the effective gas price");
+            .expect_err("MorphTx should require the max-fee token budget in txpool admission");
 
-        assert!(validation.uses_token_fee);
-        assert_eq!(validation.required_token_amount, U256::from(231_000u64));
+        assert!(matches!(
+            err,
+            crate::MorphTxError::InsufficientTokenBalance {
+                required,
+                balance,
+                ..
+            } if required == U256::from(2_100_000u64) && balance == U256::from(300_000u64)
+        ));
     }
 }

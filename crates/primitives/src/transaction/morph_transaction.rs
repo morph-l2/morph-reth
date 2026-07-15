@@ -31,6 +31,11 @@ pub const MORPH_TX_VERSION_1: u8 = 1;
 /// Maximum length of the memo field in bytes.
 pub const MAX_MEMO_LENGTH: usize = 64;
 
+#[cfg(feature = "serde")]
+fn is_morph_tx_version_0(version: &u8) -> bool {
+    *version == MORPH_TX_VERSION_0
+}
+
 /// Canonical MorphTx-specific fields shared across modules.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -38,7 +43,15 @@ pub const MAX_MEMO_LENGTH: usize = 64;
 pub struct MorphTxFields {
     #[cfg_attr(feature = "serde", serde(default, with = "alloy_serde::quantity"))]
     pub version: u8,
-    #[cfg_attr(feature = "serde", serde(default, with = "alloy_serde::quantity"))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(
+            default,
+            with = "alloy_serde::quantity",
+            rename = "feeTokenID",
+            alias = "feeTokenId"
+        )
+    )]
     pub fee_token_id: u16,
     #[cfg_attr(feature = "serde", serde(default))]
     pub fee_limit: U256,
@@ -78,7 +91,10 @@ pub struct TxMorph {
     /// in executing this transaction. This is paid up-front, before any
     /// computation is done and may not be increased later.
     /// Matches go-ethereum's `AltFeeTx.Gas` (uint64).
-    #[cfg_attr(feature = "serde", serde(with = "alloy_serde::quantity"))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(with = "alloy_serde::quantity", rename = "gas", alias = "gasLimit")
+    )]
     pub gas_limit: u64,
 
     /// A scalar value equal to the maximum amount of gas that should be used
@@ -113,13 +129,28 @@ pub struct TxMorph {
 
     /// Version of the Morph transaction format.
     /// Used for future extensibility.
-    #[cfg_attr(feature = "serde", serde(default, with = "alloy_serde::quantity"))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(
+            default,
+            with = "alloy_serde::quantity",
+            skip_serializing_if = "is_morph_tx_version_0"
+        )
+    )]
     pub version: u8,
 
     /// Token ID for alternative fee payment.
     /// This corresponds to the token registered in the L2 Token Registry.
     /// 0 means ETH payment, > 0 means ERC20 token payment.
-    #[cfg_attr(feature = "serde", serde(default, with = "alloy_serde::quantity"))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(
+            default,
+            with = "alloy_serde::quantity",
+            rename = "feeTokenID",
+            alias = "feeTokenId"
+        )
+    )]
     pub fee_token_id: u16,
 
     /// Maximum amount of tokens the sender is willing to pay as fee.
@@ -208,8 +239,12 @@ impl TxMorph {
                 if self.fee_token_id == 0 {
                     return Err("version 0 MorphTx requires FeeTokenID > 0");
                 }
-                // Version 0 does not support Reference field
-                if self.reference.is_some() {
+                // Version 0 treats an all-zero Reference as absent, matching geth's
+                // RPC normalization for backward-compatible V0 transactions.
+                if self
+                    .reference
+                    .is_some_and(|reference| reference != B256::ZERO)
+                {
                     return Err("version 0 MorphTx does not support Reference field");
                 }
                 // Version 0 does not support Memo field
@@ -353,9 +388,9 @@ impl TxMorph {
         let first_byte = buf[0];
 
         // Check first byte to determine version:
-        // - V0 format (legacy AltFeeTx): first byte is RLP list prefix (0xC0-0xFF), no version prefix
+        // - V0 format (legacy AltFeeTx): first byte is 0 or RLP list prefix (0xC0-0xFF), no version prefix
         // - V1+ format: first byte is version (0x01, 0x02, ...) followed by RLP
-        if first_byte >= 0xC0 {
+        if first_byte == 0 || first_byte >= 0xC0 {
             // V0 format: direct RLP decode (legacy compatible)
             Self::decode_fields_v0(buf)
         } else if first_byte == MORPH_TX_VERSION_1 {
@@ -721,11 +756,11 @@ impl RlpEcdsaDecodableTx for TxMorph {
 
         // Detect version:
         // - V1: first byte is version byte (0x01), skip it
-        // - V0: first byte is RLP list prefix (>= 0xC0), no version prefix
+        // - V0: first byte is 0 or RLP list prefix (>= 0xC0), no version prefix
         let version = if first_byte == MORPH_TX_VERSION_1 {
             *buf = &buf[1..]; // skip version byte
             MORPH_TX_VERSION_1
-        } else if first_byte >= 0xC0 {
+        } else if first_byte == MORPH_TX_VERSION_0 || first_byte >= 0xC0 {
             MORPH_TX_VERSION_0
         } else {
             return Err(alloy_rlp::Error::Custom("unsupported morph tx version"));
@@ -821,11 +856,11 @@ impl Decodable for TxMorph {
         if first_byte == MORPH_TX_VERSION_1 {
             // V1: skip version byte, then decode RLP
             *buf = &buf[1..];
-        } else if first_byte < 0xC0 {
+        } else if first_byte != MORPH_TX_VERSION_0 && first_byte < 0xC0 {
             // Invalid: not a version we support and not an RLP list
             return Err(alloy_rlp::Error::Custom("unsupported morph tx version"));
         }
-        // V0: first_byte is RLP list prefix (>= 0xC0)
+        // V0: first_byte is 0 or RLP list prefix (>= 0xC0)
 
         let header = Header::decode(buf)?;
         if !header.list {
@@ -1113,6 +1148,17 @@ mod tests {
             v0_with_ref.validate().unwrap_err(),
             "version 0 MorphTx does not support Reference field"
         );
+
+        // Valid: V0 with a zero Reference is treated as absent for geth compatibility.
+        let v0_with_zero_ref = TxMorph {
+            max_fee_per_gas: 100,
+            max_priority_fee_per_gas: 50,
+            version: MORPH_TX_VERSION_0,
+            fee_token_id: 1,
+            reference: Some(B256::ZERO),
+            ..Default::default()
+        };
+        assert!(v0_with_zero_ref.validate().is_ok());
 
         // Invalid: V0 with Memo
         let v0_with_memo = TxMorph {
@@ -1442,6 +1488,50 @@ mod tests {
         assert!(
             result.is_err(),
             "Decoding should fail when data is truncated"
+        );
+    }
+
+    /// Issue-1: V0 payload with leading zero byte must be routed to V0
+    /// decoding, matching go-ethereum's `decode()` which routes `firstByte == 0`
+    /// to V0. The resulting error should be about RLP (not "unsupported version").
+    #[test]
+    fn test_decode_fields_accepts_zero_byte_as_v0() {
+        // A single zero byte is not valid RLP, but the routing should go to V0
+        // (not produce "unsupported morph tx version").
+        let mut buf: &[u8] = &[0x00];
+        let result = TxMorph::decode_fields(&mut buf);
+        assert!(result.is_err());
+        // Must not be the "unsupported version" error.
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            !err_msg.contains("unsupported"),
+            "expected RLP-level error, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_signed_decode_accepts_zero_byte_as_v0() {
+        let mut buf: &[u8] = &[0x00];
+        let result = TxMorph::rlp_decode_with_signature(&mut buf);
+
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            !err_msg.contains("unsupported"),
+            "expected RLP-level error, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_decodable_accepts_zero_byte_as_v0() {
+        let mut buf: &[u8] = &[0x00];
+        let result = <TxMorph as Decodable>::decode(&mut buf);
+
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            !err_msg.contains("unsupported"),
+            "expected RLP-level error, got: {err_msg}"
         );
     }
 
@@ -2140,6 +2230,22 @@ mod tests {
         assert_eq!(fields.fee_limit, U256::ZERO);
         assert_eq!(fields.reference, None);
         assert_eq!(fields.memo, None);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_morph_tx_fields_serde_uses_canonical_fee_token_id_key() {
+        let fields = MorphTxFields {
+            version: 1,
+            fee_token_id: 7,
+            fee_limit: U256::from(999u64),
+            reference: None,
+            memo: None,
+        };
+
+        let json = serde_json::to_value(fields).unwrap();
+        assert_eq!(json.get("feeTokenID"), Some(&serde_json::json!("0x7")));
+        assert!(json.get("feeTokenId").is_none());
     }
 
     #[cfg(feature = "reth-codec")]

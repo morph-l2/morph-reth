@@ -6,7 +6,7 @@ use serde_json::{Map, json};
 use crate::tx_factory;
 
 #[derive(Args)]
-pub struct WriteGenesisArgs {
+pub(crate) struct WriteGenesisArgs {
     /// Output path for the genesis JSON file.
     #[arg(long)]
     pub output: String,
@@ -40,7 +40,7 @@ const FEE_VAULT_ADDR: &str = "530000000000000000000000000000000000000a";
 ///
 /// All Morph hardforks are activated at block 0 / timestamp 0.
 /// Uses MPT mode (`useZktrie: false`) since Jade is active at genesis.
-pub fn build_genesis(args: &WriteGenesisArgs) -> eyre::Result<serde_json::Value> {
+pub(crate) fn build_genesis(args: &WriteGenesisArgs) -> eyre::Result<serde_json::Value> {
     let hex_balance = {
         let balance = U256::from_str_radix(&args.sender_balance, 10)
             .map_err(|e| eyre::eyre!("invalid sender_balance decimal: {e}"))?;
@@ -216,7 +216,7 @@ fn normalize_hex_code(code: &str) -> String {
     }
 }
 
-pub fn run(args: WriteGenesisArgs) -> eyre::Result<()> {
+pub(crate) fn run(args: WriteGenesisArgs) -> eyre::Result<()> {
     let genesis = build_genesis(&args)?;
     let json_str = serde_json::to_string_pretty(&genesis)?;
     std::fs::write(&args.output, json_str)?;

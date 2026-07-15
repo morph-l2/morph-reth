@@ -74,14 +74,16 @@ pub mod evm;
 use std::sync::Arc;
 
 use alloy_evm::{
-    Database,
-    block::{BlockExecutorFactory, BlockExecutorFor},
+    block::{BlockExecutorFactory, StateDB},
     eth::EthBlockExecutionCtx,
-    revm::{Inspector, database::State},
+    revm::Inspector,
 };
 pub use evm::MorphEvmFactory;
 use morph_primitives::{MorphReceipt, MorphTxEnvelope};
 
+// Re-export types that surface in `BlockExecutorFactory` associated types so
+// downstream crates can name them. They are constructed via the factory.
+pub use crate::block::{MorphBlockExecutor, MorphTxResult};
 use crate::{block::MorphBlockExecutorFactory, evm::MorphEvm};
 use morph_chainspec::MorphChainSpec;
 use morph_revm::evm::MorphContext;
@@ -159,6 +161,8 @@ impl BlockExecutorFactory for MorphEvmConfig {
     type ExecutionCtx<'a> = EthBlockExecutionCtx<'a>;
     type Transaction = MorphTxEnvelope;
     type Receipt = MorphReceipt;
+    type TxExecutionResult = MorphTxResult;
+    type Executor<'a, DB: StateDB, I: Inspector<MorphContext<DB>>> = MorphBlockExecutor<DB, I>;
 
     fn evm_factory(&self) -> &Self::EvmFactory {
         self.executor_factory.evm_factory()
@@ -166,12 +170,12 @@ impl BlockExecutorFactory for MorphEvmConfig {
 
     fn create_executor<'a, DB, I>(
         &'a self,
-        evm: MorphEvm<&'a mut State<DB>, I>,
+        evm: MorphEvm<DB, I>,
         ctx: Self::ExecutionCtx<'a>,
-    ) -> impl BlockExecutorFor<'a, Self, DB, I>
+    ) -> Self::Executor<'a, DB, I>
     where
-        DB: Database + 'a,
-        I: Inspector<MorphContext<&'a mut State<DB>>> + 'a,
+        DB: StateDB,
+        I: Inspector<MorphContext<DB>>,
     {
         self.executor_factory.create_executor(evm, ctx)
     }

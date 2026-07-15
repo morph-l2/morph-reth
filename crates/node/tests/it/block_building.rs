@@ -17,7 +17,7 @@ use super::helpers::{advance_block_with_l1_messages, wallet_to_arc};
 async fn empty_block_has_no_transactions() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, _wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     let payload = advance_empty_block(&mut node).await?;
@@ -38,7 +38,7 @@ async fn empty_block_has_no_transactions() -> eyre::Result<()> {
 async fn block_with_single_transfer() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
     let wallet = wallet_to_arc(wallet);
 
@@ -60,7 +60,7 @@ async fn block_with_single_transfer() -> eyre::Result<()> {
 async fn sequential_blocks_with_transfers() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
     let wallet = wallet_to_arc(wallet);
 
@@ -81,7 +81,7 @@ async fn sequential_blocks_with_transfers() -> eyre::Result<()> {
 async fn block_with_l1_message_only() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, _wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     let l1_msg = L1MessageBuilder::new(0)
@@ -109,7 +109,7 @@ async fn block_with_l1_message_only() -> eyre::Result<()> {
 async fn l1_messages_precede_l2_transactions() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     // Inject L2 transaction into the pool first
@@ -153,7 +153,7 @@ async fn l1_messages_precede_l2_transactions() -> eyre::Result<()> {
 async fn multiple_l1_messages_sequential_queue_indices() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, _wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     let l1_msgs = L1MessageBuilder::build_sequential(0, 3);

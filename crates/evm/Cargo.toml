@@ -19,7 +19,7 @@ morph-payload-types.workspace = true
 
 reth-chainspec.workspace = true
 reth-evm.workspace = true
-reth-ethereum-primitives = { workspace = true, features = ["serde", "serde-bincode-compat"] }
+reth-ethereum-primitives = { workspace = true, features = ["serde"] }
 reth-revm.workspace = true
 reth-primitives-traits.workspace = true
 reth-rpc-eth-api = { workspace = true, optional = true }
@@ -27,6 +27,7 @@ reth-rpc-eth-api = { workspace = true, optional = true }
 alloy-evm.workspace = true
 alloy-consensus.workspace = true
 alloy-primitives.workspace = true
+alloy-rpc-types-eth.workspace = true
 
 derive_more.workspace = true
 thiserror.workspace = true

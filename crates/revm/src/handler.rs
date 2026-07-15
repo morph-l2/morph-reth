@@ -7,7 +7,7 @@ use revm::{
         Cfg, ContextTr, JournalTr, Transaction,
         result::{EVMError, ExecutionResult, InvalidTransaction},
     },
-    context_interface::Block,
+    context_interface::{Block, journaled_state::account::JournaledAccountTr, result::ResultGas},
     handler::{EvmTr, FrameTr, Handler, MainnetHandler, post_execution, pre_execution, validation},
     inspector::{Inspector, InspectorHandler},
     interpreter::{Gas, InitialAndFloorGas, interpreter::EthInterpreter},
@@ -74,21 +74,27 @@ where
         &mut self,
         evm: &mut Self::Evm,
         result: <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
+        result_gas: ResultGas,
     ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
         MainnetHandler::default()
-            .execution_result(evm, result)
+            .execution_result(evm, result, result_gas)
             .map(|result| result.map_haltreason(Into::into))
     }
 
     #[inline]
-    fn apply_eip7702_auth_list(&self, evm: &mut Self::Evm) -> Result<u64, Self::Error> {
-        pre_execution::apply_eip7702_auth_list(evm.ctx())
+    fn apply_eip7702_auth_list(
+        &self,
+        evm: &mut Self::Evm,
+        init_and_floor_gas: &mut InitialAndFloorGas,
+    ) -> Result<u64, Self::Error> {
+        pre_execution::apply_eip7702_auth_list(evm.ctx(), init_and_floor_gas)
     }
 
     #[inline]
     fn validate_against_state_and_deduct_caller(
         &self,
         evm: &mut Self::Evm,
+        _init_and_floor_gas: &mut InitialAndFloorGas,
     ) -> Result<(), Self::Error> {
         // Reset per-transaction caches from the previous iteration.
         evm.cached_l1_data_fee = U256::ZERO;
@@ -169,7 +175,7 @@ where
             exec_result.gas_mut().set_refund(0);
             return;
         }
-        let spec = evm.ctx().cfg().spec().into();
+        let spec = (*evm.ctx().cfg().spec()).into();
         post_execution::refund(spec, exec_result.gas_mut(), eip7702_refund);
     }
 
@@ -222,16 +228,10 @@ where
         // which skips gas-price checks entirely.
         validation::validate_env::<_, Self::Error>(evm.ctx())?;
 
-        // For MorphTx V1 with ETH fee (fee_token_id == 0), gas price must be validated
-        // against basefee — the same rule that applies to EIP-1559 transactions.
-        // Token-fee MorphTx (fee_token_id > 0) intentionally skips this check because
-        // fees are paid in ERC20 tokens.
-        // Skip for simulation contexts (eth_call / eth_estimateGas) where fee charge
-        // is disabled, matching go-ethereum's NoBaseFee behaviour.
-        if evm.ctx_ref().tx().is_morph_tx()
-            && !evm.ctx_ref().tx().uses_token_fee()
-            && !evm.ctx_ref().cfg().is_fee_charge_disabled()
-        {
+        // MorphTx maps to `TransactionType::Custom`, so revm's standard path
+        // does not enforce EIP-1559 fee-cap rules. Those rules are independent
+        // of which asset ultimately pays the fee, matching Morph geth's preCheck.
+        if evm.ctx_ref().tx().is_morph_tx() && !evm.ctx_ref().cfg().is_fee_charge_disabled() {
             let base_fee = Some(evm.ctx_ref().block().basefee() as u128);
             validation::validate_priority_fee_tx(
                 evm.ctx_ref().tx().max_fee_per_gas(),
@@ -248,30 +248,43 @@ where
     }
 
     #[inline]
-    fn validate_initial_tx_gas(&self, evm: &Self::Evm) -> Result<InitialAndFloorGas, Self::Error> {
+    fn validate_initial_tx_gas(
+        &self,
+        evm: &mut Self::Evm,
+    ) -> Result<InitialAndFloorGas, Self::Error> {
         let tx = evm.ctx_ref().tx();
-        let spec = evm.ctx_ref().cfg().spec().into();
-        let disable_eip7623 = evm.ctx_ref().cfg().is_eip7623_disabled();
+        let cfg = evm.ctx_ref().cfg();
+        let spec = (*cfg.spec()).into();
+        let disable_eip7623 = cfg.is_eip7623_disabled();
+        let is_amsterdam_eip8037 = cfg.is_amsterdam_eip8037_enabled();
+        let tx_gas_limit_cap = cfg.tx_gas_limit_cap();
 
         // For L1 message transactions, handle intrinsic gas specially
         if tx.is_l1_msg() {
-            // Calculate intrinsic gas (same as normal transactions)
-            let initial_and_floor = validation::validate_initial_tx_gas(tx, spec, disable_eip7623)
-                .unwrap_or_else(|_| {
-                    // If intrinsic gas > gas_limit, use gas_limit as intrinsic gas
-                    // This matches go-ethereum's behavior for L1 messages
-                    InitialAndFloorGas {
-                        initial_gas: tx.gas_limit(),
-                        floor_gas: 0,
-                    }
-                });
+            // Calculate intrinsic gas (same as normal transactions). If intrinsic gas
+            // > gas_limit, fall back to gas_limit (matching go-ethereum's behavior for
+            // L1 messages, which prepay gas on L1 and must always execute).
+            let initial_and_floor = validation::validate_initial_tx_gas(
+                tx,
+                spec,
+                disable_eip7623,
+                is_amsterdam_eip8037,
+                tx_gas_limit_cap,
+            )
+            .unwrap_or_else(|_| InitialAndFloorGas::new(tx.gas_limit(), 0));
 
             return Ok(initial_and_floor);
         }
 
         // Normal transaction validation
-        let initial_and_floor = validation::validate_initial_tx_gas(tx, spec, disable_eip7623)
-            .map_err(MorphInvalidTransaction::EthInvalidTransaction)?;
+        let initial_and_floor = validation::validate_initial_tx_gas(
+            tx,
+            spec,
+            disable_eip7623,
+            is_amsterdam_eip8037,
+            tx_gas_limit_cap,
+        )
+        .map_err(MorphInvalidTransaction::EthInvalidTransaction)?;
 
         Ok(initial_and_floor)
     }
@@ -316,7 +329,7 @@ where
         &self,
         evm: &mut MorphEvm<DB, I>,
     ) -> Result<(), EVMError<DB::Error, MorphInvalidTransaction>> {
-        let hardfork = evm.ctx_ref().cfg().spec();
+        let hardfork = *evm.ctx_ref().cfg().spec();
 
         // Fetch L1 block info from the L1 Gas Price Oracle contract per-tx.
         // Must NOT use a per-block cache because the oracle can be updated by a
@@ -341,7 +354,7 @@ where
         let mut caller = journal.load_account_with_code_mut(tx.caller())?.data;
 
         pre_execution::validate_account_nonce_and_code(
-            &caller.info,
+            &caller.account().info,
             tx.nonce(),
             cfg.is_eip3607_disabled(),
             cfg.is_nonce_check_disabled(),
@@ -467,7 +480,7 @@ where
             // matching the order used in validate_and_deduct_eth_fee.
             let caller = journal.load_account_with_code_mut(caller_addr)?.data;
             pre_execution::validate_account_nonce_and_code(
-                &caller.info,
+                &caller.account().info,
                 nonce,
                 cfg.is_eip3607_disabled(),
                 cfg.is_nonce_check_disabled(),
@@ -477,11 +490,8 @@ where
         let caller_addr = evm.ctx_ref().tx().caller();
         let is_call = evm.ctx_ref().tx().kind().is_call();
 
-        // eth_call (disable_fee_charge): skip token fee deduction entirely.
-        // Only nonce/code validation (above) and nonce bump are needed.
-        // This matches the ETH path's disable_fee_charge semantics and ensures
-        // eth_call is a pure simulation without token registry lookups, balance
-        // checks, or ERC20 transfers.
+        // Simulation paths must not touch token balance: skip the token
+        // fee deduction, keep only nonce/code validation and the nonce bump.
         if evm.ctx_ref().cfg().is_fee_charge_disabled() {
             if is_call {
                 let mut caller = evm
@@ -495,7 +505,7 @@ where
         }
 
         let beneficiary = evm.ctx_ref().block().beneficiary();
-        let hardfork = evm.ctx_ref().cfg().spec();
+        let hardfork = *evm.ctx_ref().cfg().spec();
         let tx_value = evm.ctx_ref().tx().value();
         let rlp_bytes = evm.ctx_ref().tx().rlp_bytes.clone().unwrap_or_default();
         let gas_limit = evm.ctx_ref().tx().gas_limit();
@@ -945,15 +955,19 @@ fn calculate_caller_fee_with_l1_cost(
     cfg: impl Cfg,
     l1_data_fee: U256,
 ) -> Result<U256, InvalidTransaction> {
+    // Simulation paths must not consume the caller balance.
+    if cfg.is_fee_charge_disabled() {
+        return Ok(balance);
+    }
+
     let basefee = block.basefee() as u128;
     let blob_price = block.blob_gasprice().unwrap_or_default();
     let is_balance_check_disabled = cfg.is_balance_check_disabled();
-    let is_fee_charge_disabled = cfg.is_fee_charge_disabled();
 
     // Validate balance against max possible spending using max_fee_per_gas (not effective_gas_price).
     // go-eth's buyGas() checks: balance >= gasFeeCap * gas + value + l1DataFee.
     // This ensures the sender can afford the worst-case gas cost before deducting the actual cost.
-    if !is_balance_check_disabled && !is_fee_charge_disabled {
+    if !is_balance_check_disabled {
         let max_gas_spending = U256::from(
             (tx.gas_limit() as u128)
                 .checked_mul(tx.max_fee_per_gas())
@@ -991,10 +1005,12 @@ fn calculate_caller_fee_with_l1_cost(
 mod tests {
     use super::*;
     use crate::MorphBlockEnv;
-    use alloy_primitives::{Bytes, address, keccak256};
+    use alloy_primitives::{Bytes, TxKind, address, keccak256};
     use morph_chainspec::hardfork::MorphHardfork;
+    use morph_primitives::MORPH_TX_TYPE_ID;
     use revm::{
-        context::BlockEnv,
+        context::{BlockEnv, TxEnv},
+        context_interface::result::InvalidTransaction,
         database::{CacheDB, EmptyDB},
         inspector::NoOpInspector,
         state::{AccountInfo, Bytecode},
@@ -1018,6 +1034,43 @@ mod tests {
             0x00, // PUSH1 offset 0
             0xf3, // RETURN
         ])
+    }
+
+    #[test]
+    fn validate_env_rejects_token_fee_morph_tx_below_base_fee() {
+        let mut evm = MorphEvm::new(
+            MorphContext::new(CacheDB::new(EmptyDB::default()), MorphHardfork::default()),
+            NoOpInspector,
+        );
+        evm.block = MorphBlockEnv {
+            inner: BlockEnv {
+                basefee: 100,
+                ..Default::default()
+            },
+        };
+        evm.tx = MorphTxEnv {
+            inner: TxEnv {
+                tx_type: MORPH_TX_TYPE_ID,
+                gas_limit: 21_000,
+                gas_price: 99,
+                gas_priority_fee: Some(1),
+                kind: TxKind::Call(Address::ZERO),
+                ..Default::default()
+            },
+            fee_token_id: Some(1),
+            ..Default::default()
+        };
+
+        let err =
+            <MorphEvmHandler<_, _> as Handler>::validate_env(&MorphEvmHandler::default(), &mut evm)
+                .unwrap_err();
+
+        assert!(matches!(
+            err,
+            EVMError::Transaction(MorphInvalidTransaction::EthInvalidTransaction(
+                InvalidTransaction::GasPriceLessThanBasefee
+            ))
+        ));
     }
 
     #[test]
@@ -1213,5 +1266,28 @@ mod tests {
             .and_then(|acct| acct.storage.get(&U256::ZERO))
             .unwrap();
         assert_eq!(slot_state.present_value, original_balance);
+    }
+
+    /// `disable_fee_charge` must leave the caller balance untouched.
+    #[test]
+    fn calculate_caller_fee_is_short_circuited_by_disable_fee_charge() {
+        use revm::context::{CfgEnv, TxEnv};
+
+        let balance = U256::from(1_000_000_000_000u128);
+        let mut cfg = CfgEnv::<MorphHardfork>::default();
+        cfg.disable_fee_charge = true;
+
+        let tx = TxEnv {
+            gas_limit: 21_000,
+            gas_price: 1_000_000_000,
+            value: U256::from(42u64),
+            ..Default::default()
+        };
+        let block = BlockEnv::default();
+        let l1_data_fee = U256::from(1_234u64);
+
+        let new_balance =
+            calculate_caller_fee_with_l1_cost(balance, tx, block, cfg, l1_data_fee).unwrap();
+        assert_eq!(new_balance, balance);
     }
 }

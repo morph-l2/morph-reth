@@ -25,7 +25,7 @@ pub const BENCH_SWAP_ADDR: Address = Address::new([
 ]);
 
 /// Max fee per gas used for all benchmark transactions (1 gwei).
-/// Must exceed the chain's baseFeePerGas for geth compatibility.
+/// Must exceed the benchmark chain's baseFeePerGas.
 pub const BENCH_MAX_FEE_PER_GAS: u128 = 1_000_000_000;
 const PARALLEL_SIGN_THRESHOLD: usize = 64;
 
@@ -168,7 +168,10 @@ fn sign_batch(
     chain_id: u64,
 ) -> eyre::Result<Vec<Bytes>> {
     if txs.len() < PARALLEL_SIGN_THRESHOLD {
-        return txs.into_iter().map(|tx| sign_and_encode(signer, tx, chain_id)).collect();
+        return txs
+            .into_iter()
+            .map(|tx| sign_and_encode(signer, tx, chain_id))
+            .collect();
     }
 
     txs.into_par_iter()
@@ -231,15 +234,15 @@ pub fn build_erc20_transfers(
             calldata.extend_from_slice(&U256::from(1).to_be_bytes::<32>());
 
             TxEip1559 {
-            chain_id,
-            nonce: start_nonce + i,
-            gas_limit: 60_000,
-            max_fee_per_gas: BENCH_MAX_FEE_PER_GAS,
-            max_priority_fee_per_gas: 0,
-            to: TxKind::Call(BENCH_TOKEN_ADDR),
-            value: U256::ZERO,
-            access_list: Default::default(),
-            input: Bytes::from(calldata),
+                chain_id,
+                nonce: start_nonce + i,
+                gas_limit: 60_000,
+                max_fee_per_gas: BENCH_MAX_FEE_PER_GAS,
+                max_priority_fee_per_gas: 0,
+                to: TxKind::Call(BENCH_TOKEN_ADDR),
+                value: U256::ZERO,
+                access_list: Default::default(),
+                input: Bytes::from(calldata),
             }
         })
         .collect();
@@ -265,15 +268,15 @@ pub fn build_swap_txs(
             calldata.extend_from_slice(&U256::from(1).to_be_bytes::<32>());
 
             TxEip1559 {
-            chain_id,
-            nonce: start_nonce,
-            gas_limit: 150_000,
-            max_fee_per_gas: BENCH_MAX_FEE_PER_GAS,
-            max_priority_fee_per_gas: 0,
-            to: TxKind::Call(BENCH_SWAP_ADDR),
-            value: U256::ZERO,
-            access_list: Default::default(),
-            input: Bytes::from(calldata),
+                chain_id,
+                nonce: start_nonce,
+                gas_limit: 150_000,
+                max_fee_per_gas: BENCH_MAX_FEE_PER_GAS,
+                max_priority_fee_per_gas: 0,
+                to: TxKind::Call(BENCH_SWAP_ADDR),
+                value: U256::ZERO,
+                access_list: Default::default(),
+                input: Bytes::from(calldata),
             }
         })
         .enumerate()
@@ -321,10 +324,8 @@ pub fn build_block_txs(
 
     // Interleave round-robin: take one tx from each sender in turn.
     // Convert each inner Vec into a drain iterator to avoid cloning Bytes.
-    let mut iters: Vec<std::vec::IntoIter<Bytes>> = per_sender_txs
-        .into_iter()
-        .map(|v| v.into_iter())
-        .collect();
+    let mut iters: Vec<std::vec::IntoIter<Bytes>> =
+        per_sender_txs.into_iter().map(|v| v.into_iter()).collect();
     let mut result = Vec::with_capacity(total_txs as usize);
     loop {
         let mut any = false;

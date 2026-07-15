@@ -17,7 +17,6 @@ use reth_provider::{
     AccountReader, BlockReader, BlockReaderIdExt, HeaderProvider, ReceiptProvider,
     StateProviderFactory, TransactionsProvider,
 };
-use reth_tasks::TaskManager;
 use serde_json::Value;
 
 use super::helpers::wallet_to_arc;
@@ -27,7 +26,7 @@ use super::helpers::wallet_to_arc;
 async fn block_number_advances_correctly() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
     let wallet = wallet_to_arc(wallet);
 
@@ -59,7 +58,7 @@ async fn block_number_advances_correctly() -> eyre::Result<()> {
 async fn block_hash_consistent_with_storage() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
     let wallet = wallet_to_arc(wallet);
 
@@ -91,7 +90,7 @@ async fn block_hash_consistent_with_storage() -> eyre::Result<()> {
 async fn block_transaction_count_correct() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
     let wallet = wallet_to_arc(wallet);
 
@@ -127,7 +126,7 @@ async fn block_transaction_count_correct() -> eyre::Result<()> {
 async fn transaction_retrievable_by_hash() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
     let wallet = wallet_to_arc(wallet);
 
@@ -158,7 +157,7 @@ async fn transaction_retrievable_by_hash() -> eyre::Result<()> {
 async fn block_gas_used_reflects_execution() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
     let wallet = wallet_to_arc(wallet);
 
@@ -184,7 +183,7 @@ async fn block_gas_used_reflects_execution() -> eyre::Result<()> {
 async fn morph_tx_receipt_contains_fee_fields() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     // Build and inject a MorphTx v0 with ERC20 fee payment
@@ -245,7 +244,7 @@ async fn morph_tx_receipt_contains_fee_fields() -> eyre::Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn balance_decreases_after_eth_transfer() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
     let wallet = wallet_to_arc(wallet);
 
@@ -276,7 +275,7 @@ async fn balance_decreases_after_eth_transfer() -> eyre::Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn nonce_increments_after_tx() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
     let wallet = wallet_to_arc(wallet);
 
@@ -304,7 +303,7 @@ async fn nonce_increments_after_tx() -> eyre::Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn l1_message_receipt_l1_fee_is_zero() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
-    let (mut nodes, _tasks, _wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     let l1_msg = L1MessageBuilder::new(0)
@@ -335,7 +334,7 @@ async fn l1_message_receipt_l1_fee_is_zero() -> eyre::Result<()> {
 async fn transaction_receipt_exposes_morph_fields_over_rpc() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     let reference = B256::with_last_byte(0x44);
@@ -368,7 +367,8 @@ async fn transaction_receipt_exposes_morph_fields_over_rpc() -> eyre::Result<()>
         .await?;
 
     assert_eq!(receipt["type"].as_str(), Some("0x7f"));
-    assert_eq!(receipt["version"].as_u64(), Some(1));
+    // version is JSON-RPC quantity-encoded (string "0x1"), not a number.
+    assert_eq!(receipt["version"].as_str(), Some("0x1"));
     assert_eq!(receipt["feeTokenID"].as_str(), Some("0x1"));
     assert_eq!(
         receipt["reference"].as_str(),
@@ -397,12 +397,84 @@ async fn transaction_receipt_exposes_morph_fields_over_rpc() -> eyre::Result<()>
     Ok(())
 }
 
+/// `eth_getBlockReceipts` uses the same Morph receipt converter as per-tx receipt RPCs.
+#[tokio::test(flavor = "multi_thread")]
+async fn block_receipts_expose_morph_fields_over_rpc() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+
+    let reference = B256::with_last_byte(0x66);
+    let memo = alloy_primitives::Bytes::from_static(b"block-receipts");
+    let expected_reference = reference.to_string();
+    let expected_memo = memo.to_string();
+
+    let raw_tx = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
+        .with_v1_token_fee(TEST_TOKEN_ID)
+        .with_reference(reference)
+        .with_memo(memo)
+        .with_data(vec![0xbb; 16])
+        .build_signed()?;
+    node.rpc.inject_tx(raw_tx).await?;
+
+    let payload = node.advance_block().await?;
+    let block_number = payload.block().number();
+    let block_number_param = format!("0x{block_number:x}");
+    let tx_hash = *payload
+        .block()
+        .body()
+        .transactions
+        .first()
+        .unwrap()
+        .tx_hash();
+    let client = node
+        .rpc_client()
+        .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
+
+    let tx_receipt: Value = client
+        .request("eth_getTransactionReceipt", (tx_hash,))
+        .await?;
+    let block_receipts: Value = client
+        .request("eth_getBlockReceipts", (block_number_param,))
+        .await?;
+    let block_receipt = block_receipts
+        .as_array()
+        .and_then(|receipts| receipts.first())
+        .ok_or_else(|| eyre::eyre!("expected a block receipt"))?;
+
+    for field in [
+        "type",
+        "version",
+        "feeTokenID",
+        "feeRate",
+        "tokenScale",
+        "feeLimit",
+        "reference",
+        "memo",
+        "l1Fee",
+    ] {
+        assert_eq!(
+            block_receipt[field], tx_receipt[field],
+            "block receipt field {field} must match eth_getTransactionReceipt"
+        );
+    }
+    assert_eq!(block_receipt["type"].as_str(), Some("0x7f"));
+    assert_eq!(
+        block_receipt["reference"].as_str(),
+        Some(expected_reference.as_str())
+    );
+    assert_eq!(block_receipt["memo"].as_str(), Some(expected_memo.as_str()));
+
+    Ok(())
+}
+
 /// `eth_getTransactionByHash` exposes MorphTx reference and memo over JSON-RPC.
 #[tokio::test(flavor = "multi_thread")]
 async fn transaction_by_hash_exposes_morph_fields_over_rpc() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     let reference = B256::with_last_byte(0x55);
@@ -435,7 +507,8 @@ async fn transaction_by_hash_exposes_morph_fields_over_rpc() -> eyre::Result<()>
 
     assert_eq!(tx["hash"].as_str(), Some(tx_hash.to_string().as_str()));
     assert_eq!(tx["type"].as_str(), Some("0x7f"));
-    assert_eq!(tx["version"].as_u64(), Some(1));
+    // version is JSON-RPC quantity-encoded (string "0x1"), not a number.
+    assert_eq!(tx["version"].as_str(), Some("0x1"));
     assert_eq!(tx["feeTokenID"].as_str(), Some("0x1"));
     assert!(tx["feeLimit"].as_str().is_some());
     assert_eq!(tx["reference"].as_str(), Some(expected_reference.as_str()));
@@ -445,10 +518,9 @@ async fn transaction_by_hash_exposes_morph_fields_over_rpc() -> eyre::Result<()>
 }
 
 /// Produces a simple one-transaction block on the standard Jade profile and returns the
-/// node, task manager, and identifiers needed by the replay-based debug / trace RPCs.
-async fn build_standard_jade_block_for_debug_trace()
--> eyre::Result<(MorphTestNode, TaskManager, B256, B256)> {
-    let (mut nodes, tasks, wallet) = TestNodeBuilder::new().build().await?;
+/// node and identifiers needed by the replay-based debug / trace RPCs.
+async fn build_standard_jade_block_for_debug_trace() -> eyre::Result<(MorphTestNode, B256, B256)> {
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
     let mut node = nodes.pop().unwrap();
 
     let tx = TxLegacy {
@@ -479,7 +551,7 @@ async fn build_standard_jade_block_for_debug_trace()
         .tx_hash();
     let block_hash = payload.block().hash();
 
-    Ok((node, tasks, tx_hash, block_hash))
+    Ok((node, tx_hash, block_hash))
 }
 
 /// Comprehensive test: debug + trace replay APIs on a standard Jade block with Cancun active.
@@ -494,7 +566,7 @@ async fn debug_trace_replay_apis_work_for_standard_jade_block() -> eyre::Result<
 
     reth_tracing::init_test_tracing();
 
-    let (node, _tasks, tx_hash, block_hash) = build_standard_jade_block_for_debug_trace().await?;
+    let (node, tx_hash, block_hash) = build_standard_jade_block_for_debug_trace().await?;
 
     // Verify parent_beacon_block_root is None (Morph L2 does not use beacon chain)
     let block = node
@@ -583,6 +655,230 @@ async fn debug_trace_replay_apis_work_for_standard_jade_block() -> eyre::Result<
         .debug_api()
         .debug_trace_call(call, Some(block_hash.into()), Default::default())
         .await?;
+
+    Ok(())
+}
+
+/// `eth_estimateGas` rejects a request whose sender cannot cover the L1 data fee.
+///
+/// Exercises the `MorphEthApi::caller_gas_allowance` override. In reth v2.0.0
+/// the upstream `estimate_gas_with` sets `cfg_env.disable_fee_charge = true`,
+/// so the EVM handler short-circuits and never checks balance — the L1 fee
+/// cap must instead be enforced in the gas-allowance pre-check.
+///
+/// Setup:
+/// - An unfunded random sender (`balance = 0`).
+/// - A zero-value transfer with a non-zero `gasPrice` so the request goes
+///   through the balance-based allowance cap.
+///
+/// Expected:
+/// - The RPC returns an error whose message contains
+///   `"insufficient funds for l1 fee"` (matches go-ethereum's error string
+///   for this case).
+#[tokio::test(flavor = "multi_thread")]
+async fn estimate_gas_reports_insufficient_funds_for_l1_fee() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+
+    // Produce a block so the L1 gas oracle state (genesis alloc) is live
+    // and `caller_gas_allowance` can read the Curie slots.
+    advance_chain(1, &mut node, wallet_to_arc(wallet)).await?;
+
+    let client = node
+        .rpc_client()
+        .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
+
+    // Unfunded random sender.
+    let poor_sender = Address::random();
+    let recipient = Address::random();
+
+    let params = (serde_json::json!({
+        "from": poor_sender,
+        "to": recipient,
+        "value": "0x0",
+        "gasPrice": "0x3b9aca00", // 1 Gwei — ensures the balance-based cap runs
+    }),);
+
+    let result: Result<Value, _> = client.request("eth_estimateGas", params).await;
+
+    let err =
+        result.expect_err("eth_estimateGas must fail for a sender that cannot cover the L1 fee");
+    let err_str = err.to_string();
+    assert!(
+        err_str.contains("insufficient funds for l1 fee"),
+        "expected 'insufficient funds for l1 fee', got: {err_str}"
+    );
+
+    Ok(())
+}
+
+/// `eth_call` does NOT reject an unfunded sender on L1-fee grounds.
+///
+/// This is the companion to `estimate_gas_reports_insufficient_funds_for_l1_fee`
+/// — same caller/scenario, but invoked via `eth_call` instead of
+/// `eth_estimateGas`. morph-geth's `DoCall` uses
+/// `ApplyMessage(..., Big0)`, so L1 fee is not deducted for this RPC
+/// path; our override must stay out of `eth_call`'s way.
+///
+/// Setup:
+/// - An unfunded random sender (`balance = 0`).
+/// - `eth_call` with non-zero `gasPrice`, without explicit `gas` — the
+///   path that routes through `Call::caller_gas_allowance`.
+///
+/// Expected:
+/// - The call succeeds (empty output is fine; we only check that no
+///   `"insufficient funds"` error is returned).
+#[tokio::test(flavor = "multi_thread")]
+async fn eth_call_does_not_reject_unfunded_sender_on_l1_fee() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+
+    advance_chain(1, &mut node, wallet_to_arc(wallet)).await?;
+
+    let client = node
+        .rpc_client()
+        .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
+
+    let poor_sender = Address::random();
+    let recipient = Address::random();
+
+    let params = (
+        serde_json::json!({
+            "from": poor_sender,
+            "to": recipient,
+            "value": "0x0",
+            "gasPrice": "0x3b9aca00",
+        }),
+        "latest",
+    );
+
+    let result: Result<Value, _> = client.request("eth_call", params).await;
+
+    // eth_call may surface a revert error for other reasons, but it must
+    // never bubble up our L1-fee / transfer affordability errors.
+    if let Err(err) = &result {
+        let err_str = err.to_string();
+        assert!(
+            !err_str.contains("insufficient funds"),
+            "eth_call must not reject on L1-fee grounds: {err_str}"
+        );
+    }
+
+    Ok(())
+}
+
+/// MorphTx token-fee `eth_call` does NOT reject a zero-ETH sender on
+/// `(ETH_balance − value) / gas_price` grounds.
+///
+/// Guards against a regression where the shared
+/// `Call::caller_gas_allowance` hook short-circuits to upstream's
+/// ETH-based allowance for `eth_call` / `createAccessList`. For a
+/// MorphTx paying fees in a token, the caller can legitimately hold
+/// zero ETH — gas and L1 fee come out of the fee token. Applying the
+/// upstream ETH cap would set the allowance to 0 (or reject outright)
+/// and break token-fee `eth_call` / `createAccessList`.
+///
+/// Setup:
+/// - An unfunded random sender (`balance = 0`).
+/// - `eth_call` with `feeTokenID = 1`, non-zero `gasPrice`, no explicit
+///   `gas` — the path that routes through `caller_gas_allowance`.
+///
+/// Expected:
+/// - The call must not surface our `insufficient funds for transfer`
+///   or `insufficient funds for l1 fee` errors (it may return a
+///   pass-through EVM/handler error such as "invalid fee token" if the
+///   test genesis doesn't have token 1 wired up, which is out of scope).
+#[tokio::test(flavor = "multi_thread")]
+async fn eth_call_token_fee_does_not_reject_zero_eth_sender() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+
+    advance_chain(1, &mut node, wallet_to_arc(wallet)).await?;
+
+    let client = node
+        .rpc_client()
+        .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
+
+    let poor_sender = Address::random();
+    let recipient = Address::random();
+
+    let params = (
+        serde_json::json!({
+            "from": poor_sender,
+            "to": recipient,
+            "value": "0x0",
+            "gasPrice": "0x3b9aca00",
+            "feeTokenID": "0x1",
+            "feeLimit": "0xde0b6b3a7640000",   // 1e18 token units
+        }),
+        "latest",
+    );
+
+    let result: Result<Value, _> = client.request("eth_call", params).await;
+
+    if let Err(err) = &result {
+        let err_str = err.to_string();
+        assert!(
+            !err_str.contains("insufficient funds for transfer")
+                && !err_str.contains("insufficient funds for l1 fee"),
+            "token-fee eth_call must not reject on ETH-balance grounds: {err_str}"
+        );
+    }
+
+    Ok(())
+}
+
+/// `eth_estimateGas` rejects a request whose sender cannot afford `tx.value`.
+///
+/// Exercises the first balance check in `MorphEthApi::caller_gas_allowance`
+/// — the one that fires before the L1 fee is even computed.
+///
+/// Setup:
+/// - An unfunded random sender (`balance = 0`).
+/// - A non-zero `value`, which makes `value > balance` trivially true.
+///
+/// Expected:
+/// - The RPC returns an error whose message contains
+///   `"insufficient funds for transfer"` (matches go-ethereum's error string
+///   for this case).
+#[tokio::test(flavor = "multi_thread")]
+async fn estimate_gas_reports_insufficient_funds_for_transfer() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+
+    advance_chain(1, &mut node, wallet_to_arc(wallet)).await?;
+
+    let client = node
+        .rpc_client()
+        .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
+
+    let poor_sender = Address::random();
+    let recipient = Address::random();
+
+    let params = (serde_json::json!({
+        "from": poor_sender,
+        "to": recipient,
+        "value": "0x64", // 100 wei > 0 balance
+        "gasPrice": "0x3b9aca00",
+    }),);
+
+    let result: Result<Value, _> = client.request("eth_estimateGas", params).await;
+
+    let err =
+        result.expect_err("eth_estimateGas must fail when value exceeds the sender's balance");
+    let err_str = err.to_string();
+    assert!(
+        err_str.contains("insufficient funds for transfer"),
+        "expected 'insufficient funds for transfer', got: {err_str}"
+    );
 
     Ok(())
 }

@@ -18,15 +18,22 @@ morph-evm.workspace = true
 morph-payload-builder.workspace = true
 morph-payload-types.workspace = true
 morph-primitives = { workspace = true, features = ["reth-codec"] }
+morph-reference-index.workspace = true
 morph-rpc.workspace = true
 morph-txpool.workspace = true
 
 # Reth dependencies
 reth-db.workspace = true
+reth-db-api.workspace = true
+reth-chain-state.workspace = true
+reth-node-core.workspace = true
 reth-chainspec.workspace = true
 reth-engine-local.workspace = true
 reth-engine-tree.workspace = true
 reth-errors.workspace = true
+reth-evm.workspace = true
+reth-execution-cache.workspace = true
+reth-exex.workspace = true
 reth-node-api.workspace = true
 reth-node-builder.workspace = true
 reth-node-ethereum.workspace = true
@@ -36,12 +43,16 @@ reth-primitives-traits.workspace = true
 reth-provider.workspace = true
 reth-rpc-builder.workspace = true
 reth-rpc-eth-api.workspace = true
+reth-storage-api.workspace = true
+reth-tasks.workspace = true
 reth-transaction-pool.workspace = true
 reth-tracing.workspace = true
 reth-trie.workspace = true
+reth-trie-db.workspace = true
 
 # Alloy
 alloy-consensus.workspace = true
+alloy-eips.workspace = true
 alloy-genesis.workspace = true
 alloy-hardforks.workspace = true
 alloy-primitives.workspace = true
@@ -52,20 +63,24 @@ alloy-rpc-types-eth.workspace = true
 eyre.workspace = true
 clap.workspace = true
 dashmap.workspace = true
+futures.workspace = true
 parking_lot.workspace = true
+tokio = { workspace = true, features = ["sync", "rt"] }
 tokio-stream.workspace = true
+tracing.workspace = true
 
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 
 # Optional: E2E testing framework
 reth-e2e-test-utils = { workspace = true, optional = true }
-reth-tasks = { workspace = true, optional = true }
-tokio = { workspace = true, features = ["sync"], optional = true }
-alloy-eips = { workspace = true, optional = true }
 alloy-rlp = { workspace = true, optional = true }
 alloy-signer = { workspace = true, optional = true }
 alloy-signer-local = { workspace = true, optional = true }
+
+[build-dependencies]
+vergen = { workspace = true, features = ["build", "cargo", "emit_and_set"] }
+vergen-git2.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
@@ -80,9 +95,11 @@ alloy-primitives.workspace = true
 alloy-rpc-types-engine.workspace = true
 alloy-rpc-types-eth.workspace = true
 jsonrpsee.workspace = true
+morph-chainspec.workspace = true
 morph-payload-types.workspace = true
 morph-primitives.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 
 [[test]]
 name = "it"
@@ -93,10 +110,7 @@ required-features = ["test-utils"]
 default = []
 test-utils = [
     "dep:reth-e2e-test-utils",
-    "dep:reth-tasks",
     "dep:alloy-signer",
-    "dep:tokio",
-    "dep:alloy-eips",
     "dep:alloy-rlp",
     "dep:alloy-signer-local",
 ]

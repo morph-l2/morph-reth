@@ -39,9 +39,6 @@ pub struct SweepArgs {
     #[arg(long)]
     pub output_dir: String,
 
-    #[arg(long, default_value = "unknown")]
-    pub engine_name: String,
-
     #[arg(long, default_value = "99999")]
     pub chain_id: u64,
 
@@ -181,10 +178,7 @@ pub async fn run(args: SweepArgs) -> eyre::Result<()> {
     let mut exec_state = mode_exec::ExecRunState::new(1);
 
     for &txs in coarse_points {
-        let output_path = format!(
-            "{}/{}-{}-{}.jsonl",
-            args.output_dir, args.engine_name, args.workload, txs
-        );
+        let output_path = format!("{}/{}-{}.jsonl", args.output_dir, args.workload, txs);
 
         println!(
             "\n=== Sweep: {} txs/block x {} blocks ===",
@@ -199,7 +193,6 @@ pub async fn run(args: SweepArgs) -> eyre::Result<()> {
             txs_per_block: txs,
             blocks: args.blocks_per_step,
             output: output_path.clone(),
-            engine_name: args.engine_name.clone(),
             chain_id: args.chain_id,
             senders: 1,
             submit_batch_size: args.submit_batch_size,
@@ -281,7 +274,7 @@ pub async fn run(args: SweepArgs) -> eyre::Result<()> {
         .unwrap_or((0.0, 0.0, 0));
 
     let result = SweepResult {
-        engine: args.engine_name.clone(),
+        engine: "reth".to_string(),
         workload: args.workload.clone(),
         peak_tps,
         peak_mgas_s,
@@ -290,10 +283,7 @@ pub async fn run(args: SweepArgs) -> eyre::Result<()> {
     };
 
     // Write summary JSON.
-    let summary_path = format!(
-        "{}/{}-{}-sweep-summary.json",
-        args.output_dir, args.engine_name, args.workload
-    );
+    let summary_path = format!("{}/{}-sweep-summary.json", args.output_dir, args.workload);
     let summary_json = serde_json::to_string_pretty(&result)?;
     std::fs::write(&summary_path, &summary_json)?;
 

@@ -49,9 +49,6 @@ pub struct SustainedArgs {
     #[arg(long)]
     pub output: String,
 
-    #[arg(long, default_value = "unknown")]
-    pub engine_name: String,
-
     #[arg(long, default_value = "99999")]
     pub chain_id: u64,
 
@@ -256,7 +253,8 @@ pub async fn run(args: SustainedArgs) -> eyre::Result<()> {
             block_number,
             tx_count: actual_tx_count,
             expected_tx_count,
-            engine: args.engine_name.clone(),
+            target_tps: None,
+            engine: "reth".to_string(),
             mode: "sustained".to_string(),
             workload: workload.to_string(),
             senders: args.senders,
