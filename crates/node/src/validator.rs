@@ -314,19 +314,15 @@ where
         // `convert_payload_to_block` may already have registered a withdraw-root
         // expectation for this hash. Clear it on every early reject path so a
         // later re-import of the same hash does not observe a stale entry.
-        if let Err(err) = self.validate_next_l1_msg_index_for_block(payload.block.as_ref(), &ctx) {
-            self.post_execution_validator
-                .take_withdraw_trie_root_expectation(block_hash);
-            return Err(err);
-        }
-        match self.inner.validate_payload(payload, ctx) {
-            Ok(output) => self.validate_withdraw_trie_root(output),
-            Err(err) => {
-                self.post_execution_validator
-                    .take_withdraw_trie_root_expectation(block_hash);
-                Err(err)
-            }
-        }
+        let l1_validation = self.validate_next_l1_msg_index_for_block(payload.block.as_ref(), &ctx);
+        self.post_execution_validator
+            .clear_withdraw_trie_root_expectation_on_error(block_hash, l1_validation)?;
+
+        let validation = self.inner.validate_payload(payload, ctx);
+        let output = self
+            .post_execution_validator
+            .clear_withdraw_trie_root_expectation_on_error(block_hash, validation)?;
+        self.validate_withdraw_trie_root(output)
     }
 
     fn validate_block(
@@ -334,8 +330,15 @@ where
         block: SealedBlock<morph_primitives::Block>,
         ctx: TreeCtx<'_, MorphPrimitives>,
     ) -> reth_engine_tree::tree::ValidationOutcome<MorphPrimitives> {
-        self.validate_next_l1_msg_index_for_block(&block, &ctx)?;
-        let output = self.inner.validate_block(block, ctx)?;
+        let block_hash = block.hash();
+        let l1_validation = self.validate_next_l1_msg_index_for_block(&block, &ctx);
+        self.post_execution_validator
+            .clear_withdraw_trie_root_expectation_on_error(block_hash, l1_validation)?;
+
+        let validation = self.inner.validate_block(block, ctx);
+        let output = self
+            .post_execution_validator
+            .clear_withdraw_trie_root_expectation_on_error(block_hash, validation)?;
         self.validate_withdraw_trie_root(output)
     }
 
@@ -522,6 +525,17 @@ impl MorphEngineValidator {
         }
 
         removed
+    }
+
+    fn clear_withdraw_trie_root_expectation_on_error<T, E>(
+        &self,
+        block_hash: B256,
+        result: Result<T, E>,
+    ) -> Result<T, E> {
+        if result.is_err() {
+            self.take_withdraw_trie_root_expectation(block_hash);
+        }
+        result
     }
 
     fn updated_withdraw_trie_root_from_sorted_hashed_state(
@@ -720,6 +734,43 @@ mod tests {
             validator
                 .take_withdraw_trie_root_expectation(hash)
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn validation_error_clears_withdraw_trie_root_expectation() {
+        let validator = MorphEngineValidator::new();
+        let hash = B256::from([0x43; 32]);
+        validator.record_withdraw_trie_root_expectation(
+            hash,
+            WithdrawTrieRootExpectation::Verify(B256::from([0xee; 32])),
+        );
+
+        let result = validator
+            .clear_withdraw_trie_root_expectation_on_error(hash, Err::<(), _>("validation failed"));
+
+        assert_eq!(result, Err("validation failed"));
+        assert!(
+            validator
+                .take_withdraw_trie_root_expectation(hash)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn validation_success_preserves_withdraw_trie_root_expectation() {
+        let validator = MorphEngineValidator::new();
+        let hash = B256::from([0x44; 32]);
+        let expectation = WithdrawTrieRootExpectation::Verify(B256::from([0xee; 32]));
+        validator.record_withdraw_trie_root_expectation(hash, expectation);
+
+        let result = validator
+            .clear_withdraw_trie_root_expectation_on_error(hash, Ok::<_, &str>("validated"));
+
+        assert_eq!(result, Ok("validated"));
+        assert_eq!(
+            validator.take_withdraw_trie_root_expectation(hash),
+            Some(expectation)
         );
     }
 
