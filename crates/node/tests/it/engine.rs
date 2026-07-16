@@ -10,9 +10,11 @@ use alloy_rpc_types_engine::PayloadAttributes;
 use jsonrpsee::core::client::ClientT;
 use morph_node::test_utils::{HardforkSchedule, TestNodeBuilder};
 use morph_payload_types::{
-    AssembleL2BlockParams, ExecutableL2Data, GenericResponse, MorphPayloadAttributes, SafeL2Data,
+    AssembleL2BlockParams, ExecutableL2Data, GenericResponse, MorphPayloadAttributes,
+    MorphPayloadTypes, SafeL2Data,
 };
 use morph_primitives::MorphHeader;
+use reth_node_api::PayloadTypes;
 use reth_payload_builder::BuildNewPayload;
 use reth_payload_primitives::BuiltPayload;
 use reth_provider::{BlockIdReader, BlockReaderIdExt};
@@ -52,6 +54,39 @@ async fn state_root_validation_skipped_pre_jade() -> eyre::Result<()> {
         "pre-Jade block with wrong state root must be accepted (state root validation skipped)"
     );
 
+    Ok(())
+}
+
+/// P2P-downloaded blocks enter through the block-input path, where no
+/// Engine-API withdraw-root expectation has been registered locally.
+#[tokio::test(flavor = "multi_thread")]
+async fn p2p_downloaded_block_imports_without_registered_expectation() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, _wallet) = TestNodeBuilder::new()
+        .with_schedule(HardforkSchedule::AllActive)
+        .with_num_nodes(2)
+        .build()
+        .await?;
+    let node1 = nodes.pop().expect("two nodes requested");
+    let mut node0 = nodes.pop().expect("two nodes requested");
+
+    let payload = build_block_no_submit(&mut node0, vec![]).await?;
+    let head_hash = payload.block().hash();
+    let execution_data = MorphPayloadTypes::block_to_payload(payload.block().clone(), None);
+    let status = node0
+        .inner
+        .add_ons_handle
+        .beacon_engine_handle
+        .new_payload(execution_data)
+        .await?;
+    assert!(
+        status.is_valid(),
+        "source node rejected its block: {status:?}"
+    );
+    node0.update_forkchoice(head_hash, head_hash).await?;
+
+    node1.sync_to(head_hash).await?;
     Ok(())
 }
 
@@ -580,6 +615,7 @@ async fn payload_builder_hash_matches_block_hash_with_nonzero_prev_randao() -> e
             withdrawals: Some(vec![]),
             parent_beacon_block_root: Some(B256::ZERO),
             slot_number: None,
+            target_gas_limit: None,
         },
         transactions: Some(vec![]),
         gas_limit: None,
@@ -593,7 +629,7 @@ async fn payload_builder_hash_matches_block_hash_with_nonzero_prev_randao() -> e
             attributes: rpc_attrs,
             parent_hash: head_hash,
             cache: None,
-            trie_handle: None,
+            state_root_handle: None,
         })
         .await?
         .map_err(|e| eyre::eyre!("payload build failed: {e}"))?;

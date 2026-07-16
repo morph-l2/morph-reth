@@ -21,7 +21,7 @@ use reth_chainspec::ChainSpecProvider;
 use reth_evm::{
     ConfigureEvm, Database, Evm, NextBlockEnvAttributes,
     block::{BlockExecutionError, BlockValidationError},
-    execute::{BlockBuilder, BlockBuilderOutcome, BlockExecutor},
+    execute::{BlockBuilder, BlockBuilderOutcome},
 };
 use reth_execution_cache::{CachedStateMetrics, CachedStateMetricsSource, CachedStateProvider};
 use reth_execution_types::BlockExecutionOutput;
@@ -169,7 +169,7 @@ where
         let BuildArguments {
             mut cached_reads,
             execution_cache,
-            trie_handle,
+            state_root_handle,
             config,
             cancel,
             best_payload,
@@ -179,6 +179,7 @@ where
         let parent_hash = config.parent_header.hash();
         let payload_id = config.payload_id;
         let parent_header = config.parent_header.clone();
+        let parent_block_info = config.parent_block_info;
         let builder_attrs = MorphPayloadBuilderAttributes::try_new(
             parent_hash,
             config.attributes,
@@ -187,6 +188,7 @@ where
         .map_err(|e| PayloadBuilderError::Other(e.into()))?;
         let builder_config = PayloadConfig {
             parent_header,
+            parent_block_info,
             attributes: builder_attrs,
             payload_id,
         };
@@ -215,7 +217,9 @@ where
             state_provider = Box::new(CachedStateProvider::new(
                 state_provider,
                 execution_cache.cache().clone(),
-                CachedStateMetrics::zeroed(CachedStateMetricsSource::Builder),
+                Some(CachedStateMetrics::zeroed(
+                    CachedStateMetricsSource::Builder,
+                )),
             ));
         }
         let state = StateProviderDatabase::new(state_provider.as_ref());
@@ -226,7 +230,7 @@ where
             state_provider.as_ref(),
             ctx,
             best,
-            trie_handle,
+            state_root_handle,
         )
         .map(|out| out.with_cached_reads(cached_reads))
     }
@@ -268,7 +272,7 @@ where
             config,
             cached_reads: Default::default(),
             execution_cache: None,
-            trie_handle: None,
+            state_root_handle: None,
             cancel: Default::default(),
             best_payload: None,
         };
@@ -686,7 +690,7 @@ fn build_payload_inner<'a, DB, BestTxs>(
     state_provider: &(impl StateProvider + ?Sized),
     ctx: MorphPayloadBuilderCtx,
     best: impl FnOnce(BestTransactionsAttributes) -> BestTxs + Send + Sync + 'a,
-    trie_handle: Option<reth_trie_parallel::state_root_task::StateRootHandle>,
+    mut state_root_handle: Option<reth_trie_parallel::state_root_task::PayloadStateRootHandle>,
 ) -> Result<BuildOutcomeKind<MorphBuiltPayload>, PayloadBuilderError>
 where
     DB: Database<Error = reth_evm::execute::ProviderError>,
@@ -734,10 +738,11 @@ where
     // state hook so per-tx state diffs stream to the background trie task
     // during execution. The final `state_root()` recv() at finish time will
     // return quickly since most work is done concurrently.
-    if let Some(ref handle) = trie_handle {
+    if let Some(handle) = state_root_handle.as_mut() {
         builder
-            .executor_mut()
-            .set_state_hook(Some(Box::new(handle.state_hook())));
+            .evm_mut()
+            .db_mut()
+            .set_state_hook(Some(Box::new(handle.take_state_hook())));
     }
 
     // 1. Apply pre-execution changes (system contracts, etc.)
@@ -815,8 +820,9 @@ where
         hashed_state,
         trie_updates,
         mut block,
-    } = if let Some(mut handle) = trie_handle {
-        builder.executor_mut().set_state_hook(None);
+        block_access_list: _,
+    } = if let Some(mut handle) = state_root_handle {
+        builder.evm_mut().db_mut().set_state_hook(None);
         match handle.state_root() {
             Ok(outcome) => builder.finish(
                 state_provider,
@@ -890,8 +896,9 @@ where
         recovered_block: Arc::new(block),
         execution_output: Arc::new(execution_output),
         // Keep unsorted; conversion to sorted is deferred until required.
-        hashed_state: Err(Arc::new(hashed_state)).into(),
-        trie_updates: Err(Arc::new(trie_updates)).into(),
+        hashed_state: Arc::new(hashed_state),
+        trie_updates: Arc::new(trie_updates),
+        changed_paths: None,
     };
 
     let payload = MorphBuiltPayload::new(

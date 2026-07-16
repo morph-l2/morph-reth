@@ -17,8 +17,8 @@ use reth_rpc_convert::{RpcConvert, RpcConverter, RpcTypes};
 use reth_rpc_eth_api::{
     EthApiTypes, RpcNodeCore, RpcNodeCoreExt,
     helpers::{
-        EthApiSpec, EthBlocks, EthFees, EthState, EthTransactions, LoadBlock, LoadFee,
-        LoadPendingBlock, LoadState, LoadTransaction, SpawnBlocking, Trace,
+        EthApiSpec, EthBlocks, EthFees, EthState, EthSubscriptions, EthTransactions, LoadBlock,
+        LoadFee, LoadPendingBlock, LoadState, LoadTransaction, SpawnBlocking, Trace,
         bal::GetBlockAccessList, pending_block::PendingEnvBuilder,
     },
 };
@@ -320,6 +320,20 @@ where
         self.inner.eth_api.send_raw_transaction_sync_timeout()
     }
 
+    async fn send_pool_transaction(
+        &self,
+        origin: reth_transaction_pool::TransactionOrigin,
+        tx: reth_primitives_traits::WithEncoded<reth_transaction_pool::PoolTx<Self::Pool>>,
+    ) -> Result<alloy_primitives::B256, Self::Error> {
+        reth_rpc_eth_api::helpers::EthTransactions::send_pool_transaction(
+            &self.inner.eth_api,
+            origin,
+            tx,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
     async fn send_transaction(
         &self,
         origin: reth_transaction_pool::TransactionOrigin,
@@ -335,6 +349,13 @@ where
         .await
         .map_err(Into::into)
     }
+}
+
+impl<N, Rpc> EthSubscriptions for MorphEthApi<N, Rpc>
+where
+    N: MorphNodeCore,
+    Rpc: RpcConvert<Primitives = N::Primitives, Error = EthApiError, Evm = N::Evm>,
+{
 }
 
 impl<N, Rpc> EthFees for MorphEthApi<N, Rpc>

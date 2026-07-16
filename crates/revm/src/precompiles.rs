@@ -43,9 +43,8 @@ use revm::{
     precompile::{
         Precompile, PrecompileHalt, PrecompileId, PrecompileOutput, PrecompileResult, Precompiles,
     },
-    primitives::{OnceLock, hardfork::SpecId},
+    primitives::{AddressSet, OnceLock, hardfork::SpecId},
 };
-use std::boxed::Box;
 use std::string::String;
 
 /// Standard precompile addresses
@@ -395,7 +394,7 @@ where
     }
 
     #[inline]
-    fn warm_addresses(&self) -> Box<impl Iterator<Item = Address>> {
+    fn warm_addresses(&self) -> &AddressSet {
         self.inner.warm_addresses()
     }
 

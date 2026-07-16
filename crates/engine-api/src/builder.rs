@@ -725,6 +725,7 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
                 parent_beacon_block_root: None,
                 // Morph L2 has no PoS slot semantics; introduced in alloy 2.0.
                 slot_number: None,
+                target_gas_limit: None,
             },
             transactions: Some(params.transactions),
             gas_limit: gas_limit_override,
@@ -737,7 +738,7 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
             attributes: rpc_attributes,
             parent_hash,
             cache: None,
-            trie_handle: None,
+            state_root_handle: None,
         };
         let _ = self
             .payload_builder

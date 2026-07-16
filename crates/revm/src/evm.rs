@@ -14,7 +14,7 @@ use revm::{
     },
     inspector::InspectorEvmTr,
     interpreter::{
-        Host, Instruction, InstructionContext, InstructionResult,
+        Host, Instruction, InstructionContext, InstructionExecResult, InstructionResult,
         gas::{BLOCKHASH, WARM_STORAGE_READ_COST},
         interpreter::EthInterpreter,
         interpreter_types::{RuntimeFlag, StackTr},
@@ -70,10 +70,9 @@ fn morph_blockhash_result(chain_id: u64, current_number: u64, requested_number: 
 /// for numbers within the 256-block lookup window.
 fn blockhash_morph<DB: Database>(
     context: InstructionContext<'_, MorphContext<DB>, EthInterpreter>,
-) {
+) -> InstructionExecResult {
     let Some(([], number)) = StackTr::popn_top::<0>(&mut context.interpreter.stack) else {
-        context.interpreter.halt_underflow();
-        return;
+        return Err(InstructionResult::StackUnderflow);
     };
 
     let requested_number_u64 = as_u64_saturated(*number);
@@ -81,6 +80,7 @@ fn blockhash_morph<DB: Database>(
     let chain_id_u64 = as_u64_saturated(context.host.chain_id());
 
     *number = morph_blockhash_result(chain_id_u64, current_number_u64, requested_number_u64);
+    Ok(())
 }
 
 /// Morph custom SLOAD opcode.
@@ -93,10 +93,11 @@ fn blockhash_morph<DB: Database>(
 /// instead of "dirty" (100 gas), causing a 2800 gas mismatch vs go-eth.
 ///
 /// The DB read hits the State cache (O(1)) and only triggers on cold SLOADs.
-fn sload_morph<DB: Database>(context: InstructionContext<'_, MorphContext<DB>, EthInterpreter>) {
+fn sload_morph<DB: Database>(
+    context: InstructionContext<'_, MorphContext<DB>, EthInterpreter>,
+) -> InstructionExecResult {
     let Some(([], index)) = StackTr::popn_top::<0>(&mut context.interpreter.stack) else {
-        context.interpreter.halt_underflow();
-        return;
+        return Err(InstructionResult::StackUnderflow);
     };
 
     let target = context.interpreter.input.target_address;
@@ -125,16 +126,16 @@ fn sload_morph<DB: Database>(context: InstructionContext<'_, MorphContext<DB>, E
                     .gas
                     .record_regular_cost(additional_cold_cost)
                 {
-                    context.interpreter.halt_oog();
-                    return;
+                    return Err(InstructionResult::OutOfGas);
                 }
             }
 
             *index = storage.data;
         }
-        Err(LoadError::ColdLoadSkipped) => context.interpreter.halt_oog(),
-        Err(LoadError::DBError) => context.interpreter.halt_fatal(),
+        Err(LoadError::ColdLoadSkipped) => return Err(InstructionResult::OutOfGas),
+        Err(LoadError::DBError) => return Err(InstructionResult::FatalExternalError),
     }
+    Ok(())
 }
 
 /// Morph custom SSTORE opcode.
@@ -150,17 +151,15 @@ fn sload_morph<DB: Database>(context: InstructionContext<'_, MorphContext<DB>, E
 /// same 2800-gas-per-write divergence vs go-eth that `sload_morph` fixes.
 ///
 /// Uses DB-direct lookup (no per-tx runtime map needed).
-fn sstore_morph<DB: Database>(context: InstructionContext<'_, MorphContext<DB>, EthInterpreter>) {
+fn sstore_morph<DB: Database>(
+    context: InstructionContext<'_, MorphContext<DB>, EthInterpreter>,
+) -> InstructionExecResult {
     if context.interpreter.runtime_flag.is_static() {
-        context
-            .interpreter
-            .halt(InstructionResult::StateChangeDuringStaticCall);
-        return;
+        return Err(InstructionResult::StateChangeDuringStaticCall);
     }
 
     let Some([index, value]) = StackTr::popn::<2>(&mut context.interpreter.stack) else {
-        context.interpreter.halt_underflow();
-        return;
+        return Err(InstructionResult::StackUnderflow);
     };
 
     let target = context.interpreter.input.target_address;
@@ -169,10 +168,7 @@ fn sstore_morph<DB: Database>(context: InstructionContext<'_, MorphContext<DB>, 
     if spec_id.is_enabled_in(ISTANBUL)
         && context.interpreter.gas.remaining() <= context.host.gas_params().call_stipend()
     {
-        context
-            .interpreter
-            .halt(InstructionResult::ReentrancySentryOOG);
-        return;
+        return Err(InstructionResult::ReentrancySentryOOG);
     }
 
     if !context
@@ -180,8 +176,7 @@ fn sstore_morph<DB: Database>(context: InstructionContext<'_, MorphContext<DB>, 
         .gas
         .record_regular_cost(context.host.gas_params().sstore_static_gas())
     {
-        context.interpreter.halt_oog();
-        return;
+        return Err(InstructionResult::OutOfGas);
     }
 
     let mut state_load = if spec_id.is_enabled_in(BERLIN) {
@@ -193,18 +188,15 @@ fn sstore_morph<DB: Database>(context: InstructionContext<'_, MorphContext<DB>, 
         {
             Ok(load) => load,
             Err(LoadError::ColdLoadSkipped) => {
-                context.interpreter.halt_oog();
-                return;
+                return Err(InstructionResult::OutOfGas);
             }
             Err(LoadError::DBError) => {
-                context.interpreter.halt_fatal();
-                return;
+                return Err(InstructionResult::FatalExternalError);
             }
         }
     } else {
         let Some(load) = context.host.sstore(target, index, value) else {
-            context.interpreter.halt_fatal();
-            return;
+            return Err(InstructionResult::FatalExternalError);
         };
         load
     };
@@ -232,8 +224,7 @@ fn sstore_morph<DB: Database>(context: InstructionContext<'_, MorphContext<DB>, 
         state_load.is_cold,
     );
     if !context.interpreter.gas.record_regular_cost(dynamic_gas) {
-        context.interpreter.halt_oog();
-        return;
+        return Err(InstructionResult::OutOfGas);
     }
 
     context.interpreter.gas.record_refund(
@@ -242,6 +233,7 @@ fn sstore_morph<DB: Database>(context: InstructionContext<'_, MorphContext<DB>, 
             .gas_params()
             .sstore_refund(is_istanbul, &state_load.data),
     );
+    Ok(())
 }
 
 /// MorphEvm extends the Evm with Morph specific types and logic.
@@ -291,22 +283,27 @@ impl<DB: Database, I> MorphEvm<DB, I> {
         let mut instructions = EthInstructions::new_mainnet_with_spec(spec.into());
 
         // Morph custom BLOCKHASH implementation (matches Morph geth).
-        instructions.insert_instruction(0x40, Instruction::new(blockhash_morph::<DB>, BLOCKHASH));
+        instructions.insert_instruction(
+            0x40,
+            Instruction::new(blockhash_morph::<DB>),
+            BLOCKHASH as u16,
+        );
         // Morph custom SLOAD: fixes original_value corruption from token fee deduction.
         instructions.insert_instruction(
             0x54,
-            Instruction::new(sload_morph::<DB>, WARM_STORAGE_READ_COST),
+            Instruction::new(sload_morph::<DB>),
+            WARM_STORAGE_READ_COST as u16,
         );
         // Morph custom SSTORE: same original_value fix on the SSTORE cold path.
         // Static gas = 0 because sstore_morph manages all gas accounting itself
         // (static + dynamic + refund).
-        instructions.insert_instruction(0x55, Instruction::new(sstore_morph::<DB>, 0));
+        instructions.insert_instruction(0x55, Instruction::new(sstore_morph::<DB>), 0);
         // SELFDESTRUCT is disabled in Morph
-        instructions.insert_instruction(0xff, Instruction::unknown());
+        instructions.insert_instruction(0xff, Instruction::unknown(), 0);
         // BLOBHASH is disabled in Morph
-        instructions.insert_instruction(0x49, Instruction::unknown());
+        instructions.insert_instruction(0x49, Instruction::unknown(), 0);
         // BLOBBASEFEE is disabled in Morph
-        instructions.insert_instruction(0x4a, Instruction::unknown());
+        instructions.insert_instruction(0x4a, Instruction::unknown(), 0);
         Self::new_inner(Evm {
             ctx,
             inspector,
