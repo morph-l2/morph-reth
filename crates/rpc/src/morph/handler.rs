@@ -20,7 +20,7 @@ const TARGET: &str = "morph::reference_index_rpc";
 /// catch up to the canonical tip before returning `IndexBehind`. The steady-state
 /// lag is a few milliseconds, so the vast majority of waits resolve well within
 /// this budget and return real data instead of forcing the client to retry.
-const INDEX_WAIT_TIMEOUT: Duration = Duration::from_millis(100);
+const INDEX_WAIT_TIMEOUT: Duration = Duration::from_millis(300);
 
 /// Poll cadence while waiting for the index cursor to reach the canonical tip.
 const INDEX_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(5);
@@ -798,6 +798,49 @@ mod tests {
         catch_up.join().unwrap();
 
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn live_lag_wait_covers_a_200ms_catch_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let indexed_hash = B256::repeat_byte(0x11);
+        let head_hash = B256::repeat_byte(0x22);
+        let chain = GrowingTestChain::new(CanonicalBlock {
+            number: 0,
+            hash: indexed_hash,
+            timestamp: 100,
+            transactions: Vec::new(),
+        });
+        let config = ReferenceIndexConfig::new(dir.path(), 2818, B256::ZERO, 0);
+        let (mut runtime, handle) = ReferenceIndexRuntime::new(config, chain.clone());
+        runtime.synchronize_once(false).unwrap();
+        chain.push(CanonicalBlock {
+            number: 1,
+            hash: head_hash,
+            timestamp: 101,
+            transactions: Vec::new(),
+        });
+
+        let provider = TestProvider::new(
+            [ChainInfo {
+                best_hash: head_hash,
+                best_number: 1,
+            }],
+            BTreeMap::from([(head_hash, header(1, 101))]),
+        );
+        let catch_up = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            runtime.synchronize_once(false).unwrap();
+        });
+        let handler = MorphRpcHandler::new(MorphRpc::new(handle, provider));
+
+        let result = handler.get_transaction_hashes_by_reference(args());
+        catch_up.join().unwrap();
+
+        assert!(
+            result.is_ok(),
+            "a live query should wait for a 200ms index catch-up: {result:?}"
+        );
     }
 
     #[test]
