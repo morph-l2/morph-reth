@@ -5,6 +5,7 @@
 //! single atomic commit.
 
 use crate::{
+    DEFAULT_BACKFILL_BATCH_BLOCKS,
     db::{IndexMetaKey, encode_u64},
     tables::{
         BlockHashValue, BlockReferenceIndex, BlockReferenceKey, BlockTimestampValue, IndexMeta,
@@ -142,7 +143,9 @@ pub(crate) fn set_jade_first_block_number<Tx: DbTxMut>(
 /// are removed; the `ReferenceIndex` / `BlockReferenceIndex` query data is never
 /// touched, so pruned history stays fully queryable. Callers pass a floor at or
 /// below both the durable cursor tip and the reorg rewind lower bound, so reads
-/// and reconciliation are unaffected.
+/// and reconciliation are unaffected. Each call deletes at most
+/// [`DEFAULT_BACKFILL_BATCH_BLOCKS`] rows; the first remaining key acts as the
+/// durable progress cursor for the next canonical commit.
 pub(crate) fn prune_indexed_blocks_before<Tx: DbTxMut>(
     tx: &Tx,
     floor: u64,
@@ -155,7 +158,10 @@ pub(crate) fn prune_indexed_blocks_before<Tx: DbTxMut>(
     {
         let mut cursor = tx.cursor_write::<IndexedBlocks>()?;
         let mut next = cursor.first()?;
-        while let Some((key, _)) = next {
+        while stale.len() < DEFAULT_BACKFILL_BATCH_BLOCKS as usize {
+            let Some((key, _)) = next else {
+                break;
+            };
             if key.block_number >= floor {
                 break;
             }

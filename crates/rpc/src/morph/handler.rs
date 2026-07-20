@@ -25,6 +25,11 @@ const INDEX_WAIT_TIMEOUT: Duration = Duration::from_millis(100);
 /// Poll cadence while waiting for the index cursor to reach the canonical tip.
 const INDEX_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(5);
 
+fn next_poll_delay(now: Instant, deadline: Instant) -> Option<Duration> {
+    let remaining = deadline.saturating_duration_since(now);
+    (!remaining.is_zero()).then(|| INDEX_WAIT_POLL_INTERVAL.min(remaining))
+}
+
 // ── Context ──────────────────────────────────────────────────────────────────
 
 /// `morph_` namespace context.  All dependencies are required; no `Option<>`.
@@ -49,14 +54,84 @@ impl<Provider> MorphRpc<Provider> {
 // ── Handler ───────────────────────────────────────────────────────────────────
 
 /// Handler that wraps [`MorphRpc`] and implements the jsonrpsee server trait.
+#[cfg(test)]
+#[derive(Clone)]
+struct WaitObserver(std::sync::Arc<dyn Fn(bool) + Send + Sync>);
+
+#[cfg(test)]
+impl std::fmt::Debug for WaitObserver {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("WaitObserver")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct MorphRpcHandler<Provider> {
     ctx: MorphRpc<Provider>,
+    #[cfg(test)]
+    wait_observer: Option<WaitObserver>,
 }
 
 impl<Provider> MorphRpcHandler<Provider> {
     pub const fn new(ctx: MorphRpc<Provider>) -> Self {
-        Self { ctx }
+        Self {
+            ctx,
+            #[cfg(test)]
+            wait_observer: None,
+        }
+    }
+
+    fn observe_rpc_wait(&self, waited: Duration, timed_out: bool) {
+        self.ctx.reference_index.observe_rpc_wait(waited, timed_out);
+        #[cfg(test)]
+        if let Some(observer) = &self.wait_observer {
+            (observer.0)(timed_out);
+        }
+    }
+
+    #[cfg(test)]
+    fn with_wait_observer(mut self, observer: impl Fn(bool) + Send + Sync + 'static) -> Self {
+        self.wait_observer = Some(WaitObserver(std::sync::Arc::new(observer)));
+        self
+    }
+}
+
+struct RpcWaitGuard<'a, Provider> {
+    handler: &'a MorphRpcHandler<Provider>,
+    started: Instant,
+    waited: bool,
+    timed_out: bool,
+}
+
+impl<'a, Provider> RpcWaitGuard<'a, Provider> {
+    fn new(handler: &'a MorphRpcHandler<Provider>) -> Self {
+        Self {
+            handler,
+            started: Instant::now(),
+            waited: false,
+            timed_out: false,
+        }
+    }
+
+    const fn has_waited(&self) -> bool {
+        self.waited
+    }
+
+    const fn begin_wait(&mut self) {
+        self.waited = true;
+    }
+
+    const fn mark_timed_out(&mut self) {
+        self.timed_out = true;
+    }
+}
+
+impl<Provider> Drop for RpcWaitGuard<'_, Provider> {
+    fn drop(&mut self) {
+        if self.waited {
+            self.handler
+                .observe_rpc_wait(self.started.elapsed(), self.timed_out);
+        }
     }
 }
 
@@ -80,10 +155,14 @@ where
         // thread (never the async reactor) and is strictly bounded by
         // `INDEX_WAIT_TIMEOUT`.
         let deadline = Instant::now() + INDEX_WAIT_TIMEOUT;
-        let wait_started = Instant::now();
-        let mut waited = false;
+        let mut wait = RpcWaitGuard::new(self);
 
         loop {
+            if wait.has_waited() && Instant::now() >= deadline {
+                wait.mark_timed_out();
+                return Err(to_rpc_error(ReferenceIndexError::IndexBehind));
+            }
+
             let before = self
                 .ctx
                 .provider
@@ -111,73 +190,63 @@ where
             // transaction can exist before Jade, so return `[]` without touching
             // the index. This must not be `IndexBehind` (which instructs clients
             // to retry) — before Jade there is nothing to wait for.
-            if self.ctx.reference_index.is_pre_jade(canonical_tip.timestamp) {
-                if waited {
-                    self.ctx
-                        .reference_index
-                        .observe_rpc_wait(wait_started.elapsed(), false);
+            if self
+                .ctx
+                .reference_index
+                .is_pre_jade(canonical_tip.timestamp)
+            {
+                let after = self
+                    .ctx
+                    .provider
+                    .chain_info()
+                    .map_err(ReferenceIndexError::from)
+                    .map_err(to_rpc_error)?;
+                if after == before {
+                    return Ok(Vec::new());
                 }
-                return Ok(Vec::new());
+                // The pre-Jade snapshot changed while it was bracketed. Do not
+                // query the index with the stale tip: wait once, then rebuild a
+                // fresh canonical snapshot on the next iteration.
+            } else {
+                match self.ctx.reference_index.query_at(query, canonical_tip) {
+                    Ok(result) => {
+                        let after = self
+                            .ctx
+                            .provider
+                            .chain_info()
+                            .map_err(ReferenceIndexError::from)
+                            .map_err(to_rpc_error)?;
+                        if after == before {
+                            return Ok(result);
+                        }
+                        // The tip advanced while we read; this snapshot no longer
+                        // matches a stable head. Retry against the new tip while the
+                        // wait budget allows, otherwise report behind.
+                    }
+                    Err(ReferenceIndexError::IndexBehind) => {
+                        // Waiting only pays off for the steady-state per-block lag
+                        // (phase oscillates Live<->Backfill for the newest block and
+                        // catches up in a few ms). Rapid-sync `Deferred` (indexing
+                        // intentionally paused) and the one-time `PreJade` activation
+                        // boundary catch up on a much coarser timescale, so fail fast
+                        // instead of burning the whole budget.
+                        if matches!(
+                            self.ctx.reference_index.phase(),
+                            ReferenceIndexPhase::Deferred | ReferenceIndexPhase::PreJade
+                        ) {
+                            return Err(to_rpc_error(ReferenceIndexError::IndexBehind));
+                        }
+                    }
+                    Err(other) => return Err(to_rpc_error(other)),
+                }
             }
 
-            match self.ctx.reference_index.query_at(query, canonical_tip) {
-                Ok(result) => {
-                    let after = self
-                        .ctx
-                        .provider
-                        .chain_info()
-                        .map_err(ReferenceIndexError::from)
-                        .map_err(to_rpc_error)?;
-                    if after == before {
-                        if waited {
-                            self.ctx
-                                .reference_index
-                                .observe_rpc_wait(wait_started.elapsed(), false);
-                        }
-                        return Ok(result);
-                    }
-                    // The tip advanced while we read; this snapshot no longer
-                    // matches a stable head. Retry against the new tip while the
-                    // wait budget allows, otherwise report behind.
-                    if Instant::now() >= deadline {
-                        if waited {
-                            self.ctx
-                                .reference_index
-                                .observe_rpc_wait(wait_started.elapsed(), true);
-                        }
-                        return Err(to_rpc_error(ReferenceIndexError::IndexBehind));
-                    }
-                }
-                Err(ReferenceIndexError::IndexBehind) => {
-                    // Waiting only pays off for the steady-state per-block lag
-                    // (phase oscillates Live<->Backfill for the newest block and
-                    // catches up in a few ms). Rapid-sync `Deferred` (indexing
-                    // intentionally paused) and the one-time `PreJade` activation
-                    // boundary catch up on a much coarser timescale, so fail fast
-                    // instead of burning the whole budget.
-                    if matches!(
-                        self.ctx.reference_index.phase(),
-                        ReferenceIndexPhase::Deferred | ReferenceIndexPhase::PreJade
-                    ) {
-                        if waited {
-                            self.ctx
-                                .reference_index
-                                .observe_rpc_wait(wait_started.elapsed(), true);
-                        }
-                        return Err(to_rpc_error(ReferenceIndexError::IndexBehind));
-                    }
-                    if Instant::now() >= deadline {
-                        self.ctx
-                            .reference_index
-                            .observe_rpc_wait(wait_started.elapsed(), true);
-                        return Err(to_rpc_error(ReferenceIndexError::IndexBehind));
-                    }
-                }
-                Err(other) => return Err(to_rpc_error(other)),
-            }
-
-            waited = true;
-            std::thread::sleep(INDEX_WAIT_POLL_INTERVAL);
+            wait.begin_wait();
+            let Some(delay) = next_poll_delay(Instant::now(), deadline) else {
+                wait.mark_timed_out();
+                return Err(to_rpc_error(ReferenceIndexError::IndexBehind));
+            };
+            std::thread::sleep(delay);
         }
     }
 }
@@ -235,7 +304,10 @@ mod tests {
     use std::{
         collections::{BTreeMap, VecDeque},
         ops::{RangeBounds, RangeInclusive},
-        sync::{Arc, Mutex},
+        sync::{
+            Arc, Barrier, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
 
     #[derive(Clone, Debug)]
@@ -277,9 +349,83 @@ mod tests {
     }
 
     #[derive(Clone, Debug)]
+    struct GrowingTestChain {
+        blocks: Arc<Mutex<Vec<CanonicalBlock>>>,
+    }
+
+    impl GrowingTestChain {
+        fn new(block: CanonicalBlock) -> Self {
+            Self {
+                blocks: Arc::new(Mutex::new(vec![block])),
+            }
+        }
+
+        fn push(&self, block: CanonicalBlock) {
+            self.blocks.lock().unwrap().push(block);
+        }
+    }
+
+    impl CanonicalChain for GrowingTestChain {
+        fn head(&self) -> Result<CanonicalTip, ReferenceIndexError> {
+            let blocks = self.blocks.lock().unwrap();
+            let block = blocks.last().unwrap();
+            Ok(CanonicalTip {
+                number: block.number,
+                hash: block.hash,
+                timestamp: block.timestamp,
+            })
+        }
+
+        fn canonical_hash(&self, number: u64) -> Result<Option<B256>, ReferenceIndexError> {
+            Ok(self
+                .blocks
+                .lock()
+                .unwrap()
+                .iter()
+                .find_map(|block| (block.number == number).then_some(block.hash)))
+        }
+
+        fn block_timestamp(&self, number: u64) -> Result<Option<u64>, ReferenceIndexError> {
+            Ok(self
+                .blocks
+                .lock()
+                .unwrap()
+                .iter()
+                .find_map(|block| (block.number == number).then_some(block.timestamp)))
+        }
+
+        fn finalized_block_number(&self) -> Result<Option<u64>, ReferenceIndexError> {
+            Ok(None)
+        }
+
+        fn canonical_blocks(
+            &self,
+            range: RangeInclusive<u64>,
+        ) -> Result<Vec<CanonicalBlock>, ReferenceIndexError> {
+            Ok(self
+                .blocks
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|block| range.contains(&block.number))
+                .cloned()
+                .collect())
+        }
+    }
+
+    #[derive(Debug)]
+    struct ChainInfoGate {
+        call: usize,
+        calls: AtomicUsize,
+        reached: Arc<Barrier>,
+        released: Arc<Barrier>,
+    }
+
+    #[derive(Clone, Debug)]
     struct TestProvider {
         chain_info: Arc<Mutex<VecDeque<ChainInfo>>>,
         headers: Arc<BTreeMap<B256, MorphHeader>>,
+        gate: Option<Arc<ChainInfoGate>>,
     }
 
     impl TestProvider {
@@ -290,10 +436,30 @@ mod tests {
             Self {
                 chain_info: Arc::new(Mutex::new(chain_info.into_iter().collect())),
                 headers: Arc::new(headers),
+                gate: None,
             }
         }
 
+        fn gate_chain_info_call(mut self, call: usize) -> (Self, Arc<Barrier>, Arc<Barrier>) {
+            let reached = Arc::new(Barrier::new(2));
+            let released = Arc::new(Barrier::new(2));
+            self.gate = Some(Arc::new(ChainInfoGate {
+                call,
+                calls: AtomicUsize::new(0),
+                reached: reached.clone(),
+                released: released.clone(),
+            }));
+            (self, reached, released)
+        }
+
         fn info(&self) -> ChainInfo {
+            if let Some(gate) = &self.gate {
+                let call = gate.calls.fetch_add(1, Ordering::Relaxed) + 1;
+                if call == gate.call {
+                    gate.reached.wait();
+                    gate.released.wait();
+                }
+            }
             let mut infos = self.chain_info.lock().unwrap();
             if infos.len() > 1 {
                 infos.pop_front().unwrap()
@@ -467,6 +633,63 @@ mod tests {
     }
 
     #[test]
+    fn pre_jade_empty_result_is_rejected_if_head_crosses_jade() {
+        let pre_jade_hash = B256::repeat_byte(0x11);
+        let jade_hash = B256::repeat_byte(0x22);
+        let (_dir, handle) = synced_handle(200, 199, pre_jade_hash);
+        let provider = TestProvider::new(
+            [
+                ChainInfo {
+                    best_hash: pre_jade_hash,
+                    best_number: 0,
+                },
+                ChainInfo {
+                    best_hash: jade_hash,
+                    best_number: 1,
+                },
+            ],
+            BTreeMap::from([(pre_jade_hash, header(0, 199)), (jade_hash, header(1, 200))]),
+        );
+        let handler = MorphRpcHandler::new(MorphRpc::new(handle, provider));
+
+        let error = handler
+            .get_transaction_hashes_by_reference(args())
+            .expect_err("a head change across Jade must invalidate the empty snapshot");
+
+        assert_eq!(error.code(), -32000);
+        assert_eq!(error.message(), "reference index is behind");
+    }
+
+    #[test]
+    fn changed_pre_jade_snapshot_retries_without_querying_the_opening_index() {
+        let first_hash = B256::repeat_byte(0x11);
+        let second_hash = B256::repeat_byte(0x22);
+        let handle = ReferenceIndexHandle::new(200);
+        let provider = TestProvider::new(
+            [
+                ChainInfo {
+                    best_hash: first_hash,
+                    best_number: 0,
+                },
+                ChainInfo {
+                    best_hash: second_hash,
+                    best_number: 1,
+                },
+                ChainInfo {
+                    best_hash: second_hash,
+                    best_number: 1,
+                },
+            ],
+            BTreeMap::from([(first_hash, header(0, 100)), (second_hash, header(1, 101))]),
+        );
+        let handler = MorphRpcHandler::new(MorphRpc::new(handle, provider));
+
+        let results = handler.get_transaction_hashes_by_reference(args()).unwrap();
+
+        assert!(results.is_empty());
+    }
+
+    #[test]
     fn rapid_sync_deferred_fails_fast_without_burning_the_wait_budget() {
         // Rapid-sync `Deferred`: a post-Jade query must return `IndexBehind`
         // promptly rather than sleeping out the full `INDEX_WAIT_TIMEOUT`, since
@@ -495,17 +718,177 @@ mod tests {
         );
         let handler = MorphRpcHandler::new(MorphRpc::new(handle, provider));
 
-        let started = Instant::now();
         let error = handler
             .get_transaction_hashes_by_reference(args())
             .unwrap_err();
-        let elapsed = started.elapsed();
 
         assert_eq!(error.message(), "reference index is behind");
-        assert!(
-            elapsed < INDEX_WAIT_TIMEOUT,
-            "deferred query should fail fast, took {elapsed:?}"
+    }
+
+    #[test]
+    fn poll_delay_never_exceeds_the_remaining_budget() {
+        let now = Instant::now();
+
+        assert_eq!(next_poll_delay(now, now), None);
+        assert_eq!(
+            next_poll_delay(now, now + Duration::from_millis(2)),
+            Some(Duration::from_millis(2))
         );
+        assert_eq!(
+            next_poll_delay(now, now + Duration::from_millis(10)),
+            Some(INDEX_WAIT_POLL_INTERVAL)
+        );
+    }
+
+    #[test]
+    fn live_lag_wait_eventually_returns_behind() {
+        let indexed_hash = B256::repeat_byte(0x11);
+        let head_hash = B256::repeat_byte(0x22);
+        let (_dir, handle) = synced_handle(0, 100, indexed_hash);
+        let provider = TestProvider::new(
+            [ChainInfo {
+                best_hash: head_hash,
+                best_number: 1,
+            }],
+            BTreeMap::from([(head_hash, header(1, 101))]),
+        );
+        let handler = MorphRpcHandler::new(MorphRpc::new(handle, provider));
+
+        let error = handler
+            .get_transaction_hashes_by_reference(args())
+            .unwrap_err();
+
+        assert_eq!(error.message(), "reference index is behind");
+    }
+
+    #[test]
+    fn live_lag_wait_returns_from_the_same_request_after_runtime_catches_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let indexed_hash = B256::repeat_byte(0x11);
+        let head_hash = B256::repeat_byte(0x22);
+        let chain = GrowingTestChain::new(CanonicalBlock {
+            number: 0,
+            hash: indexed_hash,
+            timestamp: 100,
+            transactions: Vec::new(),
+        });
+        let config = ReferenceIndexConfig::new(dir.path(), 2818, B256::ZERO, 0);
+        let (mut runtime, handle) = ReferenceIndexRuntime::new(config, chain.clone());
+        runtime.synchronize_once(false).unwrap();
+        chain.push(CanonicalBlock {
+            number: 1,
+            hash: head_hash,
+            timestamp: 101,
+            transactions: Vec::new(),
+        });
+
+        let provider = TestProvider::new(
+            [ChainInfo {
+                best_hash: head_hash,
+                best_number: 1,
+            }],
+            BTreeMap::from([(head_hash, header(1, 101))]),
+        );
+        let (provider, second_attempt, catch_up_complete) = provider.gate_chain_info_call(2);
+        let catch_up = std::thread::spawn(move || {
+            second_attempt.wait();
+            runtime.synchronize_once(false).unwrap();
+            catch_up_complete.wait();
+        });
+        let handler = MorphRpcHandler::new(MorphRpc::new(handle, provider));
+
+        let results = handler.get_transaction_hashes_by_reference(args()).unwrap();
+        catch_up.join().unwrap();
+
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn deferred_transition_after_wait_is_not_counted_as_a_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let indexed_hash = B256::repeat_byte(0x11);
+        let head_hash = B256::repeat_byte(0x22);
+        let chain = GrowingTestChain::new(CanonicalBlock {
+            number: 0,
+            hash: indexed_hash,
+            timestamp: 100,
+            transactions: Vec::new(),
+        });
+        let config = ReferenceIndexConfig::new(dir.path(), 2818, B256::ZERO, 0);
+        let (mut runtime, handle) = ReferenceIndexRuntime::new(config, chain.clone());
+        runtime.synchronize_once(false).unwrap();
+        chain.push(CanonicalBlock {
+            number: 1,
+            hash: head_hash,
+            timestamp: 101,
+            transactions: Vec::new(),
+        });
+
+        let provider = TestProvider::new(
+            [ChainInfo {
+                best_hash: head_hash,
+                best_number: 1,
+            }],
+            BTreeMap::from([(head_hash, header(1, 101))]),
+        );
+        let (provider, second_attempt, transition_complete) = provider.gate_chain_info_call(2);
+        let transition = std::thread::spawn(move || {
+            second_attempt.wait();
+            runtime.synchronize_once(true).unwrap();
+            transition_complete.wait();
+        });
+        let phase = handle.clone();
+        let outcomes = Arc::new(Mutex::new(Vec::new()));
+        let observed_outcomes = outcomes.clone();
+        let handler = MorphRpcHandler::new(MorphRpc::new(handle, provider)).with_wait_observer(
+            move |timed_out| {
+                observed_outcomes.lock().unwrap().push(timed_out);
+            },
+        );
+
+        let error = handler
+            .get_transaction_hashes_by_reference(args())
+            .unwrap_err();
+        transition.join().unwrap();
+
+        assert_eq!(error.message(), "reference index is behind");
+        assert_eq!(phase.phase(), ReferenceIndexPhase::Deferred);
+        assert_eq!(*outcomes.lock().unwrap(), [false]);
+    }
+
+    #[test]
+    fn provider_failure_after_wait_is_observed_without_a_timeout() {
+        let indexed_hash = B256::repeat_byte(0x11);
+        let head_hash = B256::repeat_byte(0x22);
+        let missing_header_hash = B256::repeat_byte(0x33);
+        let (_dir, handle) = synced_handle(0, 100, indexed_hash);
+        let provider = TestProvider::new(
+            [
+                ChainInfo {
+                    best_hash: head_hash,
+                    best_number: 1,
+                },
+                ChainInfo {
+                    best_hash: missing_header_hash,
+                    best_number: 2,
+                },
+            ],
+            BTreeMap::from([(head_hash, header(1, 101))]),
+        );
+        let outcomes = Arc::new(Mutex::new(Vec::new()));
+        let observed_outcomes = outcomes.clone();
+        let handler = MorphRpcHandler::new(MorphRpc::new(handle, provider)).with_wait_observer(
+            move |timed_out| {
+                observed_outcomes.lock().unwrap().push(timed_out);
+            },
+        );
+
+        let error = handler
+            .get_transaction_hashes_by_reference(args())
+            .unwrap_err();
+
+        assert_eq!(error.message(), "reference index is behind");
+        assert_eq!(*outcomes.lock().unwrap(), [false]);
     }
 
     #[test]

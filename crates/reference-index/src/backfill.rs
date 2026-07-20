@@ -92,3 +92,39 @@ pub(crate) fn commit_canonical_batch(
     tx.commit()?;
     Ok(references_written)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::B256;
+
+    fn block(number: u64) -> CanonicalBlock {
+        let mut hash = [0u8; 32];
+        hash[24..].copy_from_slice(&number.to_be_bytes());
+        CanonicalBlock {
+            number,
+            hash: B256::from(hash),
+            timestamp: number,
+            transactions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn finalized_breadcrumb_pruning_is_bounded_and_resumes_on_the_next_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = ReferenceIndexDb::open(dir.path(), 2818, B256::ZERO).unwrap();
+        let blocks = (0..=600).map(block).collect::<Vec<_>>();
+
+        commit_canonical_batch(&db, 0, 0, &blocks, Some(600)).unwrap();
+
+        assert!(db.indexed_block_hash(511).unwrap().is_none());
+        assert!(db.indexed_block_hash(512).unwrap().is_some());
+        assert!(db.indexed_block_hash(600).unwrap().is_some());
+
+        commit_canonical_batch(&db, 0, 601, &[block(601)], Some(600)).unwrap();
+
+        assert!(db.indexed_block_hash(599).unwrap().is_none());
+        assert!(db.indexed_block_hash(600).unwrap().is_some());
+        assert!(db.indexed_block_hash(601).unwrap().is_some());
+    }
+}

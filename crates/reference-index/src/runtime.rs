@@ -199,7 +199,9 @@ impl<C: CanonicalChain> ReferenceIndexRuntime<C> {
         // breadcrumbs) instead of walking all the way back to the Jade start.
         // Without finality yet, fall back to `jade_first_block`.
         let rewind_floor = finalized
-            .map_or(jade_first_block, |finalized| finalized.max(jade_first_block))
+            .map_or(jade_first_block, |finalized| {
+                finalized.max(jade_first_block)
+            })
             .min(candidate);
         let mut ancestor = None;
         let mut number = candidate;
@@ -710,7 +712,14 @@ mod tests {
         runtime.synchronize_once(false).unwrap();
         assert_eq!(handle.phase(), ReferenceIndexPhase::Live);
         // Without finality yet, every breadcrumb back to the Jade start is kept.
-        assert!(handle.db().unwrap().indexed_block_hash(0).unwrap().is_some());
+        assert!(
+            handle
+                .db()
+                .unwrap()
+                .indexed_block_hash(0)
+                .unwrap()
+                .is_some()
+        );
 
         // Finalize block 5, then reorg a suffix strictly above it.
         chain.set_finalized(5);
