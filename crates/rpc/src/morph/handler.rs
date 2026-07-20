@@ -260,6 +260,10 @@ mod tests {
             Ok((number == self.block.number).then_some(self.block.timestamp))
         }
 
+        fn finalized_block_number(&self) -> Result<Option<u64>, ReferenceIndexError> {
+            Ok(None)
+        }
+
         fn canonical_blocks(
             &self,
             range: RangeInclusive<u64>,

@@ -172,6 +172,7 @@ impl<C: CanonicalChain> ReferenceIndexRuntime<C> {
         &self,
         db: &ReferenceIndexDb,
         jade_first_block: u64,
+        finalized: Option<u64>,
         head: crate::CanonicalTip,
     ) -> Result<(), ReferenceIndexError> {
         let Some(cursor) = db.indexed_to()? else {
@@ -193,6 +194,13 @@ impl<C: CanonicalChain> ReferenceIndexRuntime<C> {
 
         self.handle.set_phase(ReferenceIndexPhase::Repairing);
         self.handle.metrics().reorgs_total.increment(1);
+        // A finalized block can never be reorged, so the rewind never needs to
+        // go below it — bounding the scan (and the retained `IndexedBlocks`
+        // breadcrumbs) instead of walking all the way back to the Jade start.
+        // Without finality yet, fall back to `jade_first_block`.
+        let rewind_floor = finalized
+            .map_or(jade_first_block, |finalized| finalized.max(jade_first_block))
+            .min(candidate);
         let mut ancestor = None;
         let mut number = candidate;
         loop {
@@ -205,7 +213,7 @@ impl<C: CanonicalChain> ReferenceIndexRuntime<C> {
                 ancestor = Some(number);
                 break;
             }
-            if number == jade_first_block {
+            if number == rewind_floor {
                 break;
             }
             number -= 1;
@@ -261,7 +269,8 @@ impl<C: CanonicalChain> ReferenceIndexRuntime<C> {
                     ))
                 })?,
         };
-        self.reconcile_cursor(&db, jade_first_block, head)?;
+        let finalized = self.chain.finalized_block_number()?;
+        self.reconcile_cursor(&db, jade_first_block, finalized, head)?;
         let start = db
             .indexed_to()?
             .map_or(jade_first_block, |cursor| cursor.saturating_add(1));
@@ -293,7 +302,7 @@ impl<C: CanonicalChain> ReferenceIndexRuntime<C> {
                 )));
             }
         }
-        commit_canonical_batch(&db, jade_first_block, start, &blocks)?;
+        commit_canonical_batch(&db, jade_first_block, start, &blocks, finalized)?;
         self.handle
             .metrics()
             .indexed_blocks_total
@@ -528,6 +537,7 @@ mod tests {
     #[derive(Clone, Debug)]
     struct TestChain {
         blocks: Arc<RwLock<Vec<CanonicalBlock>>>,
+        finalized: Arc<RwLock<Option<u64>>>,
     }
 
     impl TestChain {
@@ -542,6 +552,7 @@ mod tests {
                 .collect();
             Self {
                 blocks: Arc::new(RwLock::new(blocks)),
+                finalized: Arc::new(RwLock::new(None)),
             }
         }
 
@@ -553,6 +564,10 @@ mod tests {
 
         fn truncate(&self, len: u64) {
             self.blocks.write().truncate(len as usize);
+        }
+
+        fn set_finalized(&self, number: u64) {
+            *self.finalized.write() = Some(number);
         }
     }
 
@@ -581,6 +596,10 @@ mod tests {
                 .read()
                 .get(number as usize)
                 .map(|block| block.timestamp))
+        }
+
+        fn finalized_block_number(&self) -> Result<Option<u64>, crate::ReferenceIndexError> {
+            Ok(*self.finalized.read())
         }
 
         fn canonical_blocks(
@@ -683,6 +702,58 @@ mod tests {
     }
 
     #[test]
+    fn finalized_prunes_breadcrumbs_below_it_and_repairs_a_suffix_above_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let chain = TestChain::linear(10, 200);
+        let config = ReferenceIndexConfig::new(dir.path(), 2818, B256::ZERO, 200);
+        let (mut runtime, handle) = ReferenceIndexRuntime::new(config, chain.clone());
+        runtime.synchronize_once(false).unwrap();
+        assert_eq!(handle.phase(), ReferenceIndexPhase::Live);
+        // Without finality yet, every breadcrumb back to the Jade start is kept.
+        assert!(handle.db().unwrap().indexed_block_hash(0).unwrap().is_some());
+
+        // Finalize block 5, then reorg a suffix strictly above it.
+        chain.set_finalized(5);
+        chain.replace_suffix(7);
+        runtime.synchronize_once(false).unwrap();
+
+        assert_eq!(handle.phase(), ReferenceIndexPhase::Live);
+        let db = handle.db().unwrap();
+        // The suffix above finalized is repaired to the canonical hashes.
+        assert_eq!(
+            db.indexed_block_hash(7).unwrap(),
+            chain.canonical_hash(7).unwrap()
+        );
+        // Breadcrumbs below finalized are pruned; finalized and above survive.
+        assert!(db.indexed_block_hash(4).unwrap().is_none());
+        assert!(db.indexed_block_hash(5).unwrap().is_some());
+    }
+
+    #[test]
+    fn reorg_reaching_below_finalized_is_bounded_to_a_manual_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        let chain = TestChain::linear(10, 200);
+        let config = ReferenceIndexConfig::new(dir.path(), 2818, B256::ZERO, 200);
+        let (mut runtime, handle) = ReferenceIndexRuntime::new(config, chain.clone());
+        runtime.synchronize_once(false).unwrap();
+        assert_eq!(handle.phase(), ReferenceIndexPhase::Live);
+
+        // Finalize block 5, then diverge a range that reaches below it. A
+        // finalized block cannot legitimately reorg, so rather than scanning all
+        // the way back to the Jade start the rewind stops at finalized and
+        // surfaces a manual rebuild instead of silently repairing corruption.
+        chain.set_finalized(5);
+        chain.replace_suffix(3);
+        let error = runtime.synchronize_once(false).unwrap_err();
+
+        assert!(matches!(
+            error,
+            ReferenceIndexError::ManualRebuildRequired { .. }
+        ));
+        assert_eq!(handle.phase(), ReferenceIndexPhase::Unavailable);
+    }
+
+    #[test]
     fn pure_revert_rolls_the_cursor_back_to_the_new_head() {
         let dir = tempfile::tempdir().unwrap();
         let chain = TestChain::linear(10, 200);
@@ -740,6 +811,10 @@ mod tests {
 
         fn block_timestamp(&self, number: u64) -> Result<Option<u64>, ReferenceIndexError> {
             self.0.block_timestamp(number)
+        }
+
+        fn finalized_block_number(&self) -> Result<Option<u64>, ReferenceIndexError> {
+            self.0.finalized_block_number()
         }
 
         fn canonical_blocks(

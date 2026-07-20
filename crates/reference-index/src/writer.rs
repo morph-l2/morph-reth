@@ -136,6 +136,39 @@ pub(crate) fn set_jade_first_block_number<Tx: DbTxMut>(
     Ok(())
 }
 
+/// Prune `IndexedBlocks` breadcrumbs strictly below `floor`.
+///
+/// Only the `block_number -> block_hash` breadcrumbs consumed by reorg rewind
+/// are removed; the `ReferenceIndex` / `BlockReferenceIndex` query data is never
+/// touched, so pruned history stays fully queryable. Callers pass a floor at or
+/// below both the durable cursor tip and the reorg rewind lower bound, so reads
+/// and reconciliation are unaffected.
+pub(crate) fn prune_indexed_blocks_before<Tx: DbTxMut>(
+    tx: &Tx,
+    floor: u64,
+) -> Result<(), ReferenceIndexError> {
+    if floor == 0 {
+        return Ok(());
+    }
+
+    let mut stale = Vec::new();
+    {
+        let mut cursor = tx.cursor_write::<IndexedBlocks>()?;
+        let mut next = cursor.first()?;
+        while let Some((key, _)) = next {
+            if key.block_number >= floor {
+                break;
+            }
+            stale.push(key);
+            next = cursor.next()?;
+        }
+    }
+    for key in stale {
+        tx.delete::<IndexedBlocks>(key, None)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -4,7 +4,9 @@ use crate::{
     db::ReferenceIndexDb,
     source::{CanonicalBlock, CanonicalChain},
     types::ReferenceIndexError,
-    writer::{set_jade_first_block_number, update_indexed_to, write_block},
+    writer::{
+        prune_indexed_blocks_before, set_jade_first_block_number, update_indexed_to, write_block,
+    },
 };
 use reth_db_api::transaction::DbTx;
 
@@ -38,11 +40,18 @@ pub(crate) fn resolve_jade_first_block<C: CanonicalChain>(
 }
 
 /// Commit one already-validated contiguous canonical block batch.
+///
+/// `finalized` is the L1 finalized canonical block number, if any. Because a
+/// finalized block can never be reorged, `IndexedBlocks` breadcrumbs strictly
+/// below it are never needed for reorg rewind again and are pruned here — but
+/// only once the cursor tip has reached the pruning floor, so a deep backfill
+/// that is still below finalized keeps its rows (and the tip's row) intact.
 pub(crate) fn commit_canonical_batch(
     db: &ReferenceIndexDb,
     jade_first_block: u64,
     expected_start: u64,
     blocks: &[CanonicalBlock],
+    finalized: Option<u64>,
 ) -> Result<u64, ReferenceIndexError> {
     let Some(last) = blocks.last() else {
         return Ok(0);
@@ -71,6 +80,15 @@ pub(crate) fn commit_canonical_batch(
     }
     set_jade_first_block_number(&tx, jade_first_block)?;
     update_indexed_to(&tx, last.number)?;
+    // Prune reorg breadcrumbs below finalized, but never above the cursor tip:
+    // during a deep backfill still below finalized the floor is skipped so the
+    // tip's own breadcrumb (and everything reconcile may still need) survives.
+    if let Some(finalized) = finalized {
+        let floor = finalized.max(jade_first_block);
+        if floor <= last.number {
+            prune_indexed_blocks_before(&tx, floor)?;
+        }
+    }
     tx.commit()?;
     Ok(references_written)
 }
