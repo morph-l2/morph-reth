@@ -138,6 +138,17 @@ impl ReferenceIndexHandle {
         &self.shared.metrics
     }
 
+    /// Record the outcome of a bounded server-side catch-up wait performed by
+    /// the RPC layer. `timed_out` is true when the wait budget elapsed and the
+    /// query still returned `IndexBehind`.
+    pub fn observe_rpc_wait(&self, waited: std::time::Duration, timed_out: bool) {
+        self.shared.metrics.rpc_waits_total.increment(1);
+        self.shared.metrics.rpc_wait_duration_seconds.record(waited);
+        if timed_out {
+            self.shared.metrics.rpc_wait_timeouts_total.increment(1);
+        }
+    }
+
     /// Execute a paginated query at an exact canonical chain snapshot.
     ///
     /// Cursor validation and result iteration share one MDBX read transaction,
