@@ -604,13 +604,9 @@ mod tests {
         runtime.synchronize_once(false).unwrap();
 
         assert_eq!(handle.phase(), crate::ReferenceIndexPhase::PreJade);
-        let query = ReferenceQuery::new(B256::with_last_byte(0xaa), None, None).unwrap();
-        assert!(
-            handle
-                .query_at(query, chain.head().unwrap())
-                .unwrap()
-                .is_empty()
-        );
+        // Pre-Jade is answered as a complete empty result at the RPC layer via
+        // `is_pre_jade`; the reader never sees the query and no cursor is written.
+        assert!(handle.is_pre_jade(chain.head().unwrap().timestamp));
         assert_eq!(handle.db().unwrap().indexed_to().unwrap(), None);
     }
 
@@ -643,14 +639,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let chain = TestChain::linear(10, 200);
         let config = ReferenceIndexConfig::new(dir.path(), 2818, B256::ZERO, 200);
-        let (mut runtime, handle) = ReferenceIndexRuntime::new(config, chain);
+        let (mut runtime, handle) = ReferenceIndexRuntime::new(config, chain.clone());
         runtime.synchronize_once(false).unwrap();
-        let generation = handle.generation();
+        assert_eq!(handle.phase(), ReferenceIndexPhase::Live);
 
         runtime.synchronize_once(false).unwrap();
 
         assert_eq!(handle.phase(), ReferenceIndexPhase::Live);
-        assert_eq!(handle.generation(), generation);
+        // A no-op reconciliation still serves reads at the unchanged tip.
+        let query = ReferenceQuery::new(B256::with_last_byte(0xaa), None, None).unwrap();
+        assert!(
+            handle
+                .query_at(query, chain.head().unwrap())
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

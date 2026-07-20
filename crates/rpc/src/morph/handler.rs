@@ -84,6 +84,14 @@ where
             timestamp: header.timestamp(),
         };
 
+        // Pre-Jade is a complete, terminal empty answer: no reference-carrying
+        // transaction can exist before Jade, so return `[]` without touching the
+        // index. This must not be `IndexBehind` (which instructs clients to
+        // retry) — before Jade there is nothing to wait for.
+        if self.ctx.reference_index.is_pre_jade(canonical_tip.timestamp) {
+            return Ok(Vec::new());
+        }
+
         let result = self
             .ctx
             .reference_index
