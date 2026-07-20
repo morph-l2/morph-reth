@@ -124,10 +124,6 @@ impl ReferenceIndexHandle {
             .unavailable
             .store(phase == ReferenceIndexPhase::Unavailable, Ordering::Release);
         self.shared.metrics.phase.set(phase as u8 as f64);
-        self.shared
-            .metrics
-            .rpc_ready
-            .set(f64::from(phase == ReferenceIndexPhase::Live));
     }
 
     pub(crate) fn db(&self) -> Option<ReferenceIndexDb> {
@@ -139,11 +135,9 @@ impl ReferenceIndexHandle {
     }
 
     /// Record the outcome of a bounded server-side catch-up wait performed by
-    /// the RPC layer. `timed_out` is true when the wait budget elapsed and the
-    /// query still returned `IndexBehind`.
-    pub fn observe_rpc_wait(&self, waited: std::time::Duration, timed_out: bool) {
-        self.shared.metrics.rpc_waits_total.increment(1);
-        self.shared.metrics.rpc_wait_duration_seconds.record(waited);
+    /// the RPC layer. Counts only waits whose budget elapsed and still returned
+    /// `IndexBehind`; a wait that resolves to data (or fails fast) is not counted.
+    pub fn observe_rpc_wait(&self, timed_out: bool) {
         if timed_out {
             self.shared.metrics.rpc_wait_timeouts_total.increment(1);
         }

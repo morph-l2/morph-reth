@@ -81,8 +81,8 @@ impl<Provider> MorphRpcHandler<Provider> {
         }
     }
 
-    fn observe_rpc_wait(&self, waited: Duration, timed_out: bool) {
-        self.ctx.reference_index.observe_rpc_wait(waited, timed_out);
+    fn observe_rpc_wait(&self, timed_out: bool) {
+        self.ctx.reference_index.observe_rpc_wait(timed_out);
         #[cfg(test)]
         if let Some(observer) = &self.wait_observer {
             (observer.0)(timed_out);
@@ -98,7 +98,6 @@ impl<Provider> MorphRpcHandler<Provider> {
 
 struct RpcWaitGuard<'a, Provider> {
     handler: &'a MorphRpcHandler<Provider>,
-    started: Instant,
     waited: bool,
     timed_out: bool,
 }
@@ -107,7 +106,6 @@ impl<'a, Provider> RpcWaitGuard<'a, Provider> {
     fn new(handler: &'a MorphRpcHandler<Provider>) -> Self {
         Self {
             handler,
-            started: Instant::now(),
             waited: false,
             timed_out: false,
         }
@@ -129,8 +127,7 @@ impl<'a, Provider> RpcWaitGuard<'a, Provider> {
 impl<Provider> Drop for RpcWaitGuard<'_, Provider> {
     fn drop(&mut self) {
         if self.waited {
-            self.handler
-                .observe_rpc_wait(self.started.elapsed(), self.timed_out);
+            self.handler.observe_rpc_wait(self.timed_out);
         }
     }
 }

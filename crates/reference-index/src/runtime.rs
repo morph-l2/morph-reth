@@ -98,12 +98,7 @@ fn observe_canonical_notification(
     debug!(target: TARGET, changed_blocks, "canonical notification woke reference index");
 }
 
-fn observe_lagged_notification(
-    skipped: u64,
-    detector: &mut RapidSyncDetector,
-    handle: &ReferenceIndexHandle,
-) {
-    handle.metrics().lagged_notifications_total.increment(1);
+fn observe_lagged_notification(skipped: u64, detector: &mut RapidSyncDetector) {
     detector.record_lagged(Instant::now());
     warn!(target: TARGET, skipped, "reference index lagged canonical notifications; reconciling from provider");
 }
@@ -228,12 +223,7 @@ impl<C: CanonicalChain> ReferenceIndexRuntime<C> {
 
     /// Perform one synchronous reconciliation/backfill turn.
     pub fn synchronize_once(&mut self, defer: bool) -> Result<(), ReferenceIndexError> {
-        let started_at = Instant::now();
         let result = self.synchronize_once_inner(defer);
-        self.handle
-            .metrics()
-            .batch_duration_seconds
-            .record(started_at.elapsed());
         if result.is_err() {
             self.handle.metrics().failures_total.increment(1);
             self.handle.set_phase(ReferenceIndexPhase::Unavailable);
@@ -244,16 +234,13 @@ impl<C: CanonicalChain> ReferenceIndexRuntime<C> {
     fn synchronize_once_inner(&mut self, defer: bool) -> Result<(), ReferenceIndexError> {
         let db = self.open_db()?;
         let head = self.chain.head()?;
-        self.handle.metrics().target_block.set(head.number as f64);
         if head.timestamp < self.config.jade_timestamp {
-            self.handle.metrics().indexed_block.set(0.0);
             self.handle.metrics().lag_blocks.set(0.0);
             self.handle.set_phase(ReferenceIndexPhase::PreJade);
             return Ok(());
         }
         if defer {
             let indexed_to = db.indexed_to()?.unwrap_or_default();
-            self.handle.metrics().indexed_block.set(indexed_to as f64);
             self.handle
                 .metrics()
                 .lag_blocks
@@ -277,7 +264,6 @@ impl<C: CanonicalChain> ReferenceIndexRuntime<C> {
             .indexed_to()?
             .map_or(jade_first_block, |cursor| cursor.saturating_add(1));
         if start > head.number {
-            self.handle.metrics().indexed_block.set(head.number as f64);
             self.handle.metrics().lag_blocks.set(0.0);
             self.handle.set_phase(ReferenceIndexPhase::Live);
             return Ok(());
@@ -305,18 +291,8 @@ impl<C: CanonicalChain> ReferenceIndexRuntime<C> {
             }
         }
         commit_canonical_batch(&db, jade_first_block, start, &blocks, finalized)?;
-        self.handle
-            .metrics()
-            .indexed_blocks_total
-            .increment(blocks.len() as u64);
-        self.handle.metrics().committed_batches_total.increment(1);
 
         let current_head = self.chain.head()?;
-        self.handle
-            .metrics()
-            .target_block
-            .set(current_head.number as f64);
-        self.handle.metrics().indexed_block.set(end as f64);
         let lag = current_head.number.saturating_sub(end);
         self.handle.metrics().lag_blocks.set(lag as f64);
         if lag > LIVE_LAG_SLO {
@@ -362,7 +338,7 @@ impl<C: CanonicalChain> ReferenceIndexRuntime<C> {
                             observe_canonical_notification(notification, &mut detector);
                         }
                         PendingBroadcastEvent::Lagged(skipped) => {
-                            observe_lagged_notification(skipped, &mut detector, &handle);
+                            observe_lagged_notification(skipped, &mut detector);
                         }
                     }
                 });
@@ -437,7 +413,7 @@ impl<C: CanonicalChain> ReferenceIndexRuntime<C> {
                             observe_canonical_notification(notification, &mut detector);
                         }
                         Err(RecvError::Lagged(skipped)) => {
-                            observe_lagged_notification(skipped, &mut detector, &handle);
+                            observe_lagged_notification(skipped, &mut detector);
                         }
                         Err(RecvError::Closed) => {
                             notifications_open = false;
