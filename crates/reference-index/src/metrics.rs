@@ -30,4 +30,10 @@ pub(crate) struct ReferenceIndexMetrics {
     pub(crate) failures_total: Counter,
     /// Wall-clock duration of a reconciliation turn.
     pub(crate) batch_duration_seconds: Histogram,
+    /// RPC queries that entered the bounded server-side catch-up wait.
+    pub(crate) rpc_waits_total: Counter,
+    /// Bounded RPC waits that timed out and still returned `IndexBehind`.
+    pub(crate) rpc_wait_timeouts_total: Counter,
+    /// Wall-clock duration a query spent in the bounded catch-up wait.
+    pub(crate) rpc_wait_duration_seconds: Histogram,
 }

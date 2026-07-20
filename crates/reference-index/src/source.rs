@@ -4,7 +4,9 @@ use crate::{CanonicalTip, ReferenceIndexError};
 use alloy_consensus::{BlockHeader, Sealable};
 use alloy_primitives::B256;
 use morph_primitives::MorphTxEnvelope;
-use reth_provider::{BlockHashReader, BlockReader, BlockReaderIdExt, HeaderProvider};
+use reth_provider::{
+    BlockHashReader, BlockIdReader, BlockReader, BlockReaderIdExt, HeaderProvider,
+};
 use std::ops::RangeInclusive;
 
 /// Canonical block fields required to build the reference index.
@@ -30,6 +32,13 @@ pub trait CanonicalChain: Clone + Send + Sync + 'static {
 
     /// Return the canonical timestamp at `number`, if the header is retained.
     fn block_timestamp(&self, number: u64) -> Result<Option<u64>, ReferenceIndexError>;
+
+    /// Return the L1 finalized canonical block number, if finality is known.
+    ///
+    /// A finalized block can never be reorged, so this is the true lower bound
+    /// for reorg rewind and the pruning floor for reorg breadcrumbs. `None`
+    /// means finality is not yet established (fall back to the Jade start).
+    fn finalized_block_number(&self) -> Result<Option<u64>, ReferenceIndexError>;
 
     /// Load an inclusive range of canonical blocks with their transaction bodies.
     fn canonical_blocks(
@@ -62,6 +71,10 @@ where
 
     fn block_timestamp(&self, number: u64) -> Result<Option<u64>, ReferenceIndexError> {
         Ok(HeaderProvider::header_by_number(self, number)?.map(|header| header.timestamp()))
+    }
+
+    fn finalized_block_number(&self) -> Result<Option<u64>, ReferenceIndexError> {
+        Ok(BlockIdReader::finalized_block_number(self)?)
     }
 
     fn canonical_blocks(

@@ -32,11 +32,14 @@ pub trait MorphRpc {
     /// Returns `-32000 "reference index initializing"` while the runtime is
     /// opening the index.
     ///
-    /// Returns `-32000 "reference index is behind"` unless the durable index
-    /// cursor exactly matches the canonical head number and hash.
+    /// When the durable index cursor lags the canonical head, waits for up to
+    /// 100 ms for the index to catch up. Returns `-32000 "reference index is
+    /// behind"` if the cursor still does not exactly match the canonical head
+    /// number and hash, or while indexing is intentionally deferred.
     ///
-    /// Returns `-32000 "reference index is unavailable"` while the runtime is
-    /// repairing the index or after a non-recoverable index error.
+    /// Returns `-32000 "reference index is unavailable"` only after a
+    /// non-recoverable index error makes the runtime unavailable. A repair in
+    /// progress is reported as `"reference index is behind"`.
     ///
     /// Marked `blocking` because the handler runs synchronous MDBX reads.
     #[method(name = "getTransactionHashesByReference", blocking)]
