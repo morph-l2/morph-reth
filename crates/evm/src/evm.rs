@@ -136,6 +136,21 @@ impl<DB: Database, I> MorphEvm<DB, I> {
     pub fn take_post_fee_logs(&mut self) -> Vec<alloy_primitives::Log> {
         self.inner.take_post_fee_logs()
     }
+
+    /// Sets the recoverable sweep candidate allowance for the next transaction.
+    #[inline]
+    pub fn set_recoverable_sweep_candidate_allowance(&mut self, allowance: usize) {
+        self.inner
+            .set_recoverable_sweep_candidate_allowance(allowance);
+    }
+
+    /// Takes the recoverable sweep outcome produced by the latest transaction.
+    #[inline]
+    pub fn take_recoverable_sweep_outcome(
+        &mut self,
+    ) -> Option<morph_revm::RecoverableSweepOutcome> {
+        self.inner.take_recoverable_sweep_outcome()
+    }
 }
 
 impl<DB: Database, I> Deref for MorphEvm<DB, I>
@@ -272,6 +287,7 @@ mod tests {
                         basefee: 1,
                         ..Default::default()
                     },
+                    ..Default::default()
                 },
                 ..Default::default()
             },

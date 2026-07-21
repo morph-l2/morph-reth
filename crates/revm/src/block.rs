@@ -5,6 +5,13 @@ use revm::{
     context_interface::block::BlobExcessGasAndPrice,
 };
 
+/// Configuration for recoverable deposit sweeping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecoverableSweepConfig {
+    /// Address of the recoverable deposit registry.
+    pub registry_address: Address,
+}
+
 /// Morph block environment.
 #[derive(Debug, Clone, Default, derive_more::Deref, derive_more::DerefMut)]
 pub struct MorphBlockEnv {
@@ -12,6 +19,8 @@ pub struct MorphBlockEnv {
     #[deref]
     #[deref_mut]
     pub inner: BlockEnv,
+    /// Recoverable deposit sweep configuration, enabled from Onyx onward.
+    pub recoverable_sweep: Option<RecoverableSweepConfig>,
 }
 
 impl Block for MorphBlockEnv {

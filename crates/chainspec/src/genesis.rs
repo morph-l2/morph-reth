@@ -40,7 +40,7 @@ impl TryFrom<&OtherFields> for MorphGenesisInfo {
 /// the Morph hardforks were activated.
 ///
 /// Note: Bernoulli and Curie use block-based activation, while Morph203, Viridian,
-/// Emerald, and Jade use timestamp-based activation (matching go-ethereum behavior).
+/// Emerald, Jade, and Onyx use timestamp-based activation (matching go-ethereum behavior).
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MorphHardforkInfo {
@@ -62,6 +62,9 @@ pub struct MorphHardforkInfo {
     /// Jade hardfork timestamp.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub jade_fork_time: Option<u64>,
+    /// Onyx hardfork timestamp.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub onyx_time: Option<u64>,
 }
 
 impl MorphHardforkInfo {
@@ -89,6 +92,9 @@ pub struct MorphChainConfig {
     /// The maximum tx payload size per block in bytes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tx_payload_bytes_per_block: Option<usize>,
+    /// The address of the recoverable deposit registry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recoverable_deposit_registry_address: Option<Address>,
 }
 
 impl MorphChainConfig {
@@ -100,6 +106,11 @@ impl MorphChainConfig {
     /// Returns whether the fee vault is enabled.
     pub const fn is_fee_vault_enabled(&self) -> bool {
         self.fee_vault_address.is_some()
+    }
+
+    /// Returns the recoverable deposit registry address.
+    pub const fn recoverable_deposit_registry_address(&self) -> Option<Address> {
+        self.recoverable_deposit_registry_address
     }
 
     /// Checks if the given block size (in bytes) is valid for this chain.
@@ -136,7 +147,8 @@ mod tests {
           "morph203Time": 3000,
           "viridianTime": 4000,
           "emeraldTime": 5000,
-          "jadeForkTime": 6000
+          "jadeForkTime": 6000,
+          "onyxTime": 7000
         }
         "#;
 
@@ -152,6 +164,7 @@ mod tests {
                 viridian_time: Some(4000),
                 emerald_time: Some(5000),
                 jade_fork_time: Some(6000),
+                onyx_time: Some(7000),
             }
         );
     }
@@ -162,7 +175,8 @@ mod tests {
         {
           "morph": {
             "feeVaultAddress": "0x530000000000000000000000000000000000000a",
-            "maxTxPayloadBytesPerBlock": 122880
+            "maxTxPayloadBytesPerBlock": 122880,
+            "recoverableDepositRegistryAddress": "0x5300000000000000000000000000000000000023"
           }
         }
         "#;
@@ -175,9 +189,22 @@ mod tests {
             Some(address!("530000000000000000000000000000000000000a"))
         );
         assert_eq!(config.max_tx_payload_bytes_per_block, Some(122880));
+        assert_eq!(
+            config.recoverable_deposit_registry_address(),
+            Some(address!("5300000000000000000000000000000000000023"))
+        );
         assert!(config.is_fee_vault_enabled());
         assert!(config.is_valid_block_size(100000));
         assert!(!config.is_valid_block_size(200000));
+    }
+
+    #[test]
+    fn test_recoverable_deposit_registry_address_is_optional_in_serde() {
+        let config: MorphChainConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(config.recoverable_deposit_registry_address(), None);
+
+        let serialized = serde_json::to_value(config).unwrap();
+        assert_eq!(serialized.get("recoverableDepositRegistryAddress"), None);
     }
 
     #[test]
@@ -186,6 +213,7 @@ mod tests {
         assert!(!config.is_fee_vault_enabled());
         assert_eq!(config.fee_vault_address, None);
         assert_eq!(config.max_tx_payload_bytes_per_block, None);
+        assert_eq!(config.recoverable_deposit_registry_address(), None);
         // Without max size limit, any size is valid
         assert!(config.is_valid_block_size(usize::MAX));
     }

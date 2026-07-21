@@ -51,10 +51,11 @@ pub mod exec;
 pub mod handler;
 pub mod l1block;
 pub mod precompiles;
+pub mod recoverable_sweep;
 pub mod token_fee;
 mod tx;
 
-pub use block::MorphBlockEnv;
+pub use block::{MorphBlockEnv, RecoverableSweepConfig};
 pub use error::{MorphHaltReason, MorphInvalidTransaction};
 pub use evm::MorphEvm;
 pub use l1block::{
@@ -72,6 +73,14 @@ pub use l1block::{
     L1BlockInfo,
 };
 pub use precompiles::MorphPrecompiles;
+pub use recoverable_sweep::{
+    BALANCE_OF_GAS_LIMIT, BLOCK_SYSTEM_GAS, CANDIDATE_SYSTEM_GAS, MAX_CANDIDATES_PER_BLOCK,
+    MAX_CANDIDATES_PER_TX, RESOLVE_GAS_LIMIT, RecoverableSweepCandidate, RecoverableSweepFailure,
+    RecoverableSweepFailureReason, RecoverableSweepInvariantError, RecoverableSweepOutcome,
+    RecoverableSweepSuccess, RecoverableSweepTraceReplayScope, TRANSFER_GAS_LIMIT,
+    begin_recoverable_sweep_trace_replay, clear_recoverable_sweep_trace_replay,
+    recoverable_sweep_trace_replay_scope, set_recoverable_sweep_trace_replay_target,
+};
 pub use token_fee::{
     L2_TOKEN_REGISTRY_ADDRESS, TokenFeeInfo, compute_mapping_slot,
     compute_mapping_slot_for_address, encode_balance_of_calldata, query_erc20_balance,

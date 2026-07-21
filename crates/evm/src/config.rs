@@ -4,7 +4,7 @@ use alloy_primitives::B256;
 use morph_chainspec::hardfork::{MorphHardfork, MorphHardforks};
 use morph_primitives::Block;
 use morph_primitives::{MorphHeader, MorphPrimitives};
-use morph_revm::MorphBlockEnv;
+use morph_revm::{MorphBlockEnv, RecoverableSweepConfig};
 use reth_chainspec::EthChainSpec;
 use reth_evm::{ConfigureEvm, EvmEnv, EvmEnvFor, eth::EthBlockExecutionCtx};
 use reth_primitives_traits::{SealedBlock, SealedHeader};
@@ -12,6 +12,28 @@ use revm::context::{BlockEnv, CfgEnv};
 use revm::context_interface::block::BlobExcessGasAndPrice;
 use revm::primitives::U256;
 use std::borrow::Cow;
+
+impl MorphEvmConfig {
+    fn recoverable_sweep_config(
+        &self,
+        hardfork: MorphHardfork,
+    ) -> Result<Option<RecoverableSweepConfig>, MorphEvmError> {
+        if !hardfork.is_onyx() {
+            return Ok(None);
+        }
+
+        let registry_address = self
+            .chain_spec()
+            .recoverable_deposit_registry_address()
+            .ok_or_else(|| {
+                MorphEvmError::InvalidEvmConfig(
+                    "Onyx requires a recoverable deposit registry address".to_string(),
+                )
+            })?;
+
+        Ok(Some(RecoverableSweepConfig { registry_address }))
+    }
+}
 
 impl ConfigureEvm for MorphEvmConfig {
     type Primitives = MorphPrimitives;
@@ -32,6 +54,7 @@ impl ConfigureEvm for MorphEvmConfig {
         let spec = self
             .chain_spec()
             .morph_hardfork_at(header.number(), header.timestamp());
+        let recoverable_sweep = self.recoverable_sweep_config(spec)?;
 
         let mut cfg_env = CfgEnv::<MorphHardfork>::default()
             .with_chain_id(self.chain_spec().chain().id())
@@ -70,7 +93,10 @@ impl ConfigureEvm for MorphEvmConfig {
 
         Ok(EvmEnv {
             cfg_env,
-            block_env: MorphBlockEnv { inner: block_env },
+            block_env: MorphBlockEnv {
+                inner: block_env,
+                recoverable_sweep,
+            },
         })
     }
 
@@ -83,6 +109,7 @@ impl ConfigureEvm for MorphEvmConfig {
         let spec = self
             .chain_spec()
             .morph_hardfork_at(parent.number() + 1, attributes.timestamp);
+        let recoverable_sweep = self.recoverable_sweep_config(spec)?;
 
         let mut cfg_env = CfgEnv::<MorphHardfork>::default()
             .with_chain_id(self.chain_spec().chain().id())
@@ -121,7 +148,10 @@ impl ConfigureEvm for MorphEvmConfig {
 
         Ok(EvmEnv {
             cfg_env,
-            block_env: MorphBlockEnv { inner: block_env },
+            block_env: MorphBlockEnv {
+                inner: block_env,
+                recoverable_sweep,
+            },
         })
     }
 
@@ -167,7 +197,7 @@ impl ConfigureEvm for MorphEvmConfig {
 mod tests {
     use super::*;
     use alloy_consensus::Header;
-    use alloy_primitives::{B256, Bytes, U256};
+    use alloy_primitives::{B256, Bytes, U256, address};
     use morph_chainspec::MorphChainSpec;
     use reth_evm::{ConfigureEvm, NextBlockEnvAttributes};
     use std::sync::Arc;
@@ -203,6 +233,47 @@ mod tests {
         Arc::new(MorphChainSpec::from(genesis))
     }
 
+    fn create_onyx_chainspec(
+        onyx_time: u64,
+        registry_address: Option<alloy_primitives::Address>,
+    ) -> Arc<MorphChainSpec> {
+        let mut genesis_json = serde_json::json!({
+            "config": {
+                "chainId": 1337,
+                "homesteadBlock": 0,
+                "eip150Block": 0,
+                "eip155Block": 0,
+                "eip158Block": 0,
+                "byzantiumBlock": 0,
+                "constantinopleBlock": 0,
+                "petersburgBlock": 0,
+                "istanbulBlock": 0,
+                "berlinBlock": 0,
+                "londonBlock": 0,
+                "mergeNetsplitBlock": 0,
+                "terminalTotalDifficulty": 0,
+                "terminalTotalDifficultyPassed": true,
+                "shanghaiTime": 0,
+                "cancunTime": 0,
+                "bernoulliBlock": 0,
+                "curieBlock": 0,
+                "morph203Time": 0,
+                "viridianTime": 0,
+                "emeraldTime": 0,
+                "jadeForkTime": 0,
+                "onyxTime": onyx_time,
+                "morph": {}
+            },
+            "alloc": {}
+        });
+        if let Some(address) = registry_address {
+            genesis_json["config"]["morph"]["recoverableDepositRegistryAddress"] =
+                serde_json::json!(address);
+        }
+        let genesis: alloy_genesis::Genesis = serde_json::from_value(genesis_json).unwrap();
+        Arc::new(MorphChainSpec::from(genesis))
+    }
+
     fn create_morph_header(number: u64, timestamp: u64) -> MorphHeader {
         MorphHeader {
             inner: Header {
@@ -213,6 +284,22 @@ mod tests {
                 ..Default::default()
             },
             next_l1_msg_index: 0,
+        }
+    }
+
+    fn next_block_attributes(timestamp: u64) -> MorphNextBlockEnvAttributes {
+        MorphNextBlockEnvAttributes {
+            inner: NextBlockEnvAttributes {
+                timestamp,
+                suggested_fee_recipient: alloy_primitives::Address::ZERO,
+                prev_randao: B256::ZERO,
+                gas_limit: 30_000_000,
+                parent_beacon_block_root: None,
+                withdrawals: None,
+                extra_data: Bytes::new(),
+                slot_number: None,
+            },
+            base_fee_per_gas: Some(500_000),
         }
     }
 
@@ -264,6 +351,69 @@ mod tests {
         let env = config.evm_env(&header).unwrap();
 
         assert!(env.cfg_env.disable_eip7623);
+    }
+
+    #[test]
+    fn test_onyx_populates_recoverable_sweep_config() {
+        let registry = address!("5300000000000000000000000000000000000023");
+        let chain_spec = create_onyx_chainspec(100, Some(registry));
+        let config = MorphEvmConfig::new_with_default_factory(chain_spec);
+
+        let env = config.evm_env(&create_morph_header(100, 100)).unwrap();
+        assert_eq!(
+            env.block_env
+                .recoverable_sweep
+                .expect("Onyx config must be populated")
+                .registry_address,
+            registry
+        );
+
+        let next_env = config
+            .next_evm_env(&create_morph_header(99, 99), &next_block_attributes(100))
+            .unwrap();
+        assert_eq!(
+            next_env
+                .block_env
+                .recoverable_sweep
+                .expect("Onyx config must be populated")
+                .registry_address,
+            registry
+        );
+    }
+
+    #[test]
+    fn test_pre_onyx_ignores_recoverable_sweep_address() {
+        let registry = address!("5300000000000000000000000000000000000023");
+        let chain_spec = create_onyx_chainspec(100, Some(registry));
+        let config = MorphEvmConfig::new_with_default_factory(chain_spec);
+
+        let env = config.evm_env(&create_morph_header(99, 99)).unwrap();
+        assert!(env.block_env.recoverable_sweep.is_none());
+
+        let next_env = config
+            .next_evm_env(&create_morph_header(98, 98), &next_block_attributes(99))
+            .unwrap();
+        assert!(next_env.block_env.recoverable_sweep.is_none());
+    }
+
+    #[test]
+    fn test_onyx_requires_recoverable_sweep_address() {
+        let chain_spec = create_onyx_chainspec(100, None);
+        let config = MorphEvmConfig::new_with_default_factory(chain_spec);
+
+        assert!(matches!(
+            config.evm_env(&create_morph_header(100, 100)),
+            Err(MorphEvmError::InvalidEvmConfig(message))
+                if message.contains("recoverable deposit registry")
+        ));
+        assert!(matches!(
+            config.next_evm_env(
+                &create_morph_header(99, 99),
+                &next_block_attributes(100)
+            ),
+            Err(MorphEvmError::InvalidEvmConfig(message))
+                if message.contains("recoverable deposit registry")
+        ));
     }
 
     #[test]

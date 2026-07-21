@@ -3,11 +3,13 @@
 use crate::MorphEthApiError;
 use crate::eth::receipt::MorphReceiptConverter;
 use crate::types::{MorphRpcReceipt, MorphRpcTransaction, MorphTransactionRequest};
+use alloy_consensus::transaction::TxHashRef;
 use alloy_rpc_types_eth::Header as RpcHeader;
 use eyre::Result;
 use morph_chainspec::MorphChainSpec;
 use morph_evm::MorphEvmConfig;
 use morph_primitives::{MorphHeader, MorphPrimitives};
+use morph_revm::begin_recoverable_sweep_trace_replay;
 use reth_node_api::{FullNodeComponents, FullNodeTypes, NodeTypes};
 use reth_node_builder::rpc::{EthApiBuilder, EthApiCtx};
 use reth_primitives_traits::RecoveredBlock;
@@ -395,12 +397,18 @@ where
 {
     fn apply_pre_execution_changes(
         &self,
-        _block: &RecoveredBlock<<Self::Provider as BlockReader>::Block>,
+        block: &RecoveredBlock<<Self::Provider as BlockReader>::Block>,
         _db: &mut StateCacheDb,
     ) -> Result<(), Self::Error> {
         // Morph must skip Ethereum's 4788-style pre-block system calls during replay.
         // Standard Morph headers omit parentBeaconBlockRoot, so the default Ethereum
         // SystemCaller prelude would fail with "EIP-4788 beacon root missing".
+        begin_recoverable_sweep_trace_replay(
+            block
+                .transactions_recovered()
+                .map(|transaction| *transaction.tx_hash())
+                .collect(),
+        );
         Ok(())
     }
 }

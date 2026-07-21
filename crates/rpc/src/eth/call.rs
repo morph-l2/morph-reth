@@ -8,18 +8,31 @@
 
 use crate::MorphEthApiError;
 use crate::eth::{MorphEthApi, MorphNodeCore};
+use alloy_consensus::transaction::TxHashRef;
 use alloy_evm::call::{CallError, caller_gas_allowance as upstream_caller_gas_allowance};
-use alloy_primitives::U256;
+use alloy_primitives::{B256, U256};
+use alloy_rpc_types_eth::BlockId;
 use morph_chainspec::{MorphChainSpec, MorphHardforks};
-use morph_revm::{L1BlockInfo, MorphTxExt, TokenFeeInfo};
-use reth_evm::{EvmEnvFor, TxEnvFor};
-use reth_provider::ChainSpecProvider;
-use reth_rpc_eth_api::{
-    EthApiTypes, RpcNodeCore,
-    helpers::{Call, EthCall, estimate::EstimateCall},
+use morph_revm::{
+    L1BlockInfo, MorphTxExt, TokenFeeInfo, recoverable_sweep_trace_replay_scope,
+    set_recoverable_sweep_trace_replay_target,
 };
-use reth_rpc_eth_types::EthApiError;
-use revm::{Database, context::Transaction as RevmTransaction};
+use reth_errors::ProviderError;
+use reth_evm::{ConfigureEvm, Evm, EvmEnvFor, TxEnvFor};
+use reth_primitives_traits::Recovered;
+use reth_provider::ChainSpecProvider;
+use reth_revm::{
+    database::StateProviderDatabase,
+    db::{State, bal::EvmDatabaseError},
+};
+use reth_rpc_eth_api::{
+    EthApiTypes, FromEvmError, RpcNodeCore,
+    helpers::{Call, EthCall, LoadState, SpawnBlocking, estimate::EstimateCall},
+};
+use reth_rpc_eth_types::{EthApiError, StateCacheDb, cache::db::StateProviderTraitObjWrapper};
+use reth_storage_api::ProviderTx;
+use revm::{Database, DatabaseCommit, context::Transaction as RevmTransaction};
+use std::future::Future;
 
 impl<N, Rpc> EthCall for MorphEthApi<N, Rpc>
 where
@@ -63,6 +76,58 @@ where
 
     fn evm_memory_limit(&self) -> u64 {
         self.eth_api().evm_memory_limit()
+    }
+
+    fn spawn_with_state_at_block<F, R>(
+        &self,
+        at: impl Into<BlockId>,
+        f: F,
+    ) -> impl Future<Output = Result<R, <Self as EthApiTypes>::Error>> + Send
+    where
+        F: FnOnce(Self, StateCacheDb) -> Result<R, <Self as EthApiTypes>::Error> + Send + 'static,
+        R: Send + 'static,
+    {
+        let at = at.into();
+        self.spawn_blocking_io_fut(async move |this| {
+            let state = this.state_at_block_id(at).await?;
+            let db = State::builder()
+                .with_database(StateProviderDatabase::new(StateProviderTraitObjWrapper(
+                    state,
+                )))
+                .build();
+            let _scope = recoverable_sweep_trace_replay_scope();
+            f(this, db)
+        })
+    }
+
+    fn replay_transactions_until<'a, DB, I>(
+        &self,
+        db: &mut DB,
+        evm_env: EvmEnvFor<<Self as RpcNodeCore>::Evm>,
+        transactions: I,
+        target_tx_hash: B256,
+    ) -> Result<usize, <Self as EthApiTypes>::Error>
+    where
+        DB: Database<Error = EvmDatabaseError<ProviderError>> + DatabaseCommit + core::fmt::Debug,
+        I: IntoIterator<Item = Recovered<&'a ProviderTx<Self::Provider>>>,
+    {
+        set_recoverable_sweep_trace_replay_target(target_tx_hash);
+        let mut evm = self.evm_config().evm_with_env(db, evm_env);
+        let mut index = 0;
+        for transaction in transactions {
+            if *transaction.tx_hash() == target_tx_hash {
+                break;
+            }
+
+            let tx_env = self.evm_config().tx_env(transaction);
+            evm.transact_commit(tx_env).map_err(
+                <<Self as EthApiTypes>::Error as FromEvmError<
+                    <Self as RpcNodeCore>::Evm,
+                >>::from_evm_err,
+            )?;
+            index += 1;
+        }
+        Ok(index)
     }
 
     fn caller_gas_allowance(

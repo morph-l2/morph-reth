@@ -14,7 +14,9 @@
 //!   with 1000 tokens pre-funded for test account 0 and 1
 
 use alloy_primitives::{Address, B256, Bytes, U256};
-use morph_node::test_utils::{HardforkSchedule, MorphTxBuilder, TEST_TOKEN_ID, TestNodeBuilder};
+use morph_node::test_utils::{
+    HardforkSchedule, MorphTxBuilder, SLOT1_ERC20_RUNTIME_CODE, TEST_TOKEN_ID, TestNodeBuilder,
+};
 use reth_payload_primitives::BuiltPayload;
 
 use super::helpers::wallet_to_arc;
@@ -435,21 +437,6 @@ fn address_topic(address: Address) -> B256 {
     topic[12..].copy_from_slice(address.as_slice());
     B256::from(topic)
 }
-
-/// Optimized runtime for:
-///
-/// ```solidity
-/// contract Slot1Token {
-///     uint256 private dummy;
-///     mapping(address => uint256) public balanceOf; // slot 1
-///     event Transfer(address indexed from, address indexed to, uint256 value);
-///     function transfer(address to, uint256 amount) external returns (bool) { ... }
-/// }
-/// ```
-///
-/// Keeping `balanceOf` at slot 1 lets the test token use the same storage layout
-/// as `tests/assets/test-genesis.json` and the token registry's direct-slot path.
-const SLOT1_ERC20_RUNTIME_CODE: &str = "0x608060405234801561000f575f5ffd5b5060043610610034575f3560e01c806370a0823114610038578063a9059cbb1461006a575b5f5ffd5b61005761004636600461015e565b60016020525f908152604090205481565b6040519081526020015b60405180910390f35b61007d61007836600461017e565b61008d565b6040519015158152602001610061565b335f90815260016020526040812054828110156100da5760405162461bcd60e51b815260206004820152600760248201526662616c616e636560c81b604482015260640160405180910390fd5b335f81815260016020908152604080832087860390556001600160a01b03881680845292819020805488019055518681529192917fddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef910160405180910390a35060019392505050565b80356001600160a01b0381168114610159575f5ffd5b919050565b5f6020828403121561016e575f5ffd5b61017782610143565b9392505050565b5f5f6040838503121561018f575f5ffd5b61019883610143565b94602093909301359350505056";
 
 /// After a successful MorphTx v0 with ERC20 fee, the sender's token balance
 /// must decrease (fee was charged from tokens, not ETH).

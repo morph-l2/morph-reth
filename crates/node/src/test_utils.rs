@@ -69,13 +69,18 @@ pub enum HardforkSchedule {
     #[default]
     AllActive,
 
-    /// Jade is NOT active; all other forks are active at t=0.
+    /// Onyx is NOT active; all earlier forks are active at t=0.
+    ///
+    /// Use this to test pre-Onyx behavior.
+    PreOnyx,
+
+    /// Jade and Onyx are NOT active; all earlier forks are active at t=0.
     ///
     /// Use this to test pre-Jade behavior: state root validation skipped,
     /// MorphTx v1 rejected, etc.
     PreJade,
 
-    /// Viridian, Emerald, and Jade are NOT active; all earlier forks are at t=0.
+    /// Viridian and all later forks are NOT active; all earlier forks are at t=0.
     ///
     /// Use this to test pre-Viridian behavior: EIP-7702 rejected, etc.
     PreViridian,
@@ -100,7 +105,7 @@ impl HardforkSchedule {
     /// used to determine which forks are currently active on those networks.
     fn reference_genesis_json(&self) -> Option<&'static str> {
         match self {
-            Self::AllActive | Self::PreJade | Self::PreViridian => None,
+            Self::AllActive | Self::PreOnyx | Self::PreJade | Self::PreViridian => None,
             Self::Hoodi => Some(include_str!("../../chainspec/res/genesis/hoodi.json")),
             Self::Mainnet => Some(include_str!("../../chainspec/res/genesis/mainnet.json")),
         }
@@ -109,7 +114,8 @@ impl HardforkSchedule {
     /// Apply this schedule's fork timestamps to a mutable genesis JSON value.
     ///
     /// - `AllActive`: no changes (test genesis already has all forks at 0)
-    /// - `PreJade`: set `jadeForkTime` to `u64::MAX`
+    /// - `PreOnyx`: set `onyxTime` to `u64::MAX`
+    /// - `PreJade`: set `jadeForkTime` and `onyxTime` to `u64::MAX`
     /// - `Hoodi`/`Mainnet`: compare each `*Time` key against the reference network;
     ///   forks active now → 0, forks not yet active → `u64::MAX`.
     ///   Block-based forks (`*Block`) are always kept at 0.
@@ -118,16 +124,21 @@ impl HardforkSchedule {
             Self::AllActive => {
                 // nothing to do — test genesis has all forks at 0
             }
+            Self::PreOnyx => {
+                let config = genesis["config"].as_object_mut().expect("genesis.config");
+                config.insert("onyxTime".to_string(), serde_json::json!(u64::MAX));
+            }
             Self::PreJade => {
-                // Disable only Jade; all other forks remain at 0.
                 let config = genesis["config"].as_object_mut().expect("genesis.config");
                 config.insert("jadeForkTime".to_string(), serde_json::json!(u64::MAX));
+                config.insert("onyxTime".to_string(), serde_json::json!(u64::MAX));
             }
             Self::PreViridian => {
                 let config = genesis["config"].as_object_mut().expect("genesis.config");
                 config.insert("viridianTime".to_string(), serde_json::json!(u64::MAX));
                 config.insert("emeraldTime".to_string(), serde_json::json!(u64::MAX));
                 config.insert("jadeForkTime".to_string(), serde_json::json!(u64::MAX));
+                config.insert("onyxTime".to_string(), serde_json::json!(u64::MAX));
             }
             Self::Hoodi | Self::Mainnet => {
                 let reference_json = self.reference_genesis_json().unwrap();
@@ -157,6 +168,51 @@ impl HardforkSchedule {
                     *value = serde_json::json!(new_ts);
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod hardfork_schedule_tests {
+    use super::HardforkSchedule;
+
+    fn test_genesis() -> serde_json::Value {
+        serde_json::from_str(include_str!("../tests/assets/test-genesis.json")).unwrap()
+    }
+
+    fn assert_disabled(genesis: &serde_json::Value, key: &str) {
+        assert_eq!(genesis["config"][key].as_u64(), Some(u64::MAX));
+    }
+
+    #[test]
+    fn pre_onyx_disables_only_onyx() {
+        let mut genesis = test_genesis();
+        HardforkSchedule::PreOnyx.apply(&mut genesis);
+
+        assert_eq!(genesis["config"]["jadeForkTime"].as_u64(), Some(0));
+        assert_disabled(&genesis, "onyxTime");
+    }
+
+    #[test]
+    fn earlier_presets_disable_onyx_too() {
+        let mut pre_jade = test_genesis();
+        HardforkSchedule::PreJade.apply(&mut pre_jade);
+        assert_disabled(&pre_jade, "jadeForkTime");
+        assert_disabled(&pre_jade, "onyxTime");
+
+        let mut pre_viridian = test_genesis();
+        HardforkSchedule::PreViridian.apply(&mut pre_viridian);
+        for key in ["viridianTime", "emeraldTime", "jadeForkTime", "onyxTime"] {
+            assert_disabled(&pre_viridian, key);
+        }
+    }
+
+    #[test]
+    fn production_presets_disable_absent_onyx() {
+        for schedule in [HardforkSchedule::Hoodi, HardforkSchedule::Mainnet] {
+            let mut genesis = test_genesis();
+            schedule.apply(&mut genesis);
+            assert_disabled(&genesis, "onyxTime");
         }
     }
 }
@@ -724,6 +780,12 @@ pub const TEST_TOKEN_ADDRESS: Address = Address::new([
     0x53, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x22,
 ]);
+
+/// Runtime bytecode for the slot-1 ERC-20 used by node integration tests.
+///
+/// The contract exposes `balanceOf(address)` and `transfer(address,uint256)`,
+/// emits canonical `Transfer` logs, and stores balances in a mapping at slot 1.
+pub const SLOT1_ERC20_RUNTIME_CODE: &str = "0x608060405234801561000f575f5ffd5b5060043610610034575f3560e01c806370a0823114610038578063a9059cbb1461006a575b5f5ffd5b61005761004636600461015e565b60016020525f908152604090205481565b6040519081526020015b60405180910390f35b61007d61007836600461017e565b61008d565b6040519015158152602001610061565b335f90815260016020526040812054828110156100da5760405162461bcd60e51b815260206004820152600760248201526662616c616e636560c81b604482015260640160405180910390fd5b335f81815260016020908152604080832087860390556001600160a01b03881680845292819020805488019055518681529192917fddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef910160405180910390a35060019392505050565b80356001600160a01b0381168114610159575f5ffd5b919050565b5f6020828403121561016e575f5ffd5b61017782610143565b9392505050565b5f5f6040838503121561018f575f5ffd5b61019883610143565b94602093909301359350505056";
 
 // =============================================================================
 // MorphTxBuilder

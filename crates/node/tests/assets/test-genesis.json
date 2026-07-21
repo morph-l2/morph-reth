@@ -20,8 +20,10 @@
     "viridianTime": 0,
     "emeraldTime": 0,
     "jadeForkTime": 0,
+    "onyxTime": 0,
     "morph": {
-      "feeVaultAddress": "0x530000000000000000000000000000000000000a"
+      "feeVaultAddress": "0x530000000000000000000000000000000000000a",
+      "recoverableDepositRegistryAddress": "0x5300000000000000000000000000000000000023"
     }
   },
   "nonce": "0x0",

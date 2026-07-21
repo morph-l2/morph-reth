@@ -115,8 +115,8 @@ impl MorphPrecompiles {
             MorphHardfork::Bernoulli | MorphHardfork::Curie => bernoulli(),
             // Morph203 and Viridian share the same precompile set
             MorphHardfork::Morph203 | MorphHardfork::Viridian => morph203(),
-            // Emerald and Jade share the same precompile set.
-            MorphHardfork::Emerald | MorphHardfork::Jade => emerald(),
+            // Emerald, Jade, and Onyx share the same precompile set.
+            MorphHardfork::Emerald | MorphHardfork::Jade | MorphHardfork::Onyx => emerald(),
             hardfork => unreachable!("unsupported Morph hardfork: {hardfork:?}"),
         };
 
@@ -735,14 +735,20 @@ mod tests {
     }
 
     #[test]
-    fn test_jade_uses_emerald_precompiles() {
+    fn test_jade_and_onyx_use_emerald_precompiles() {
         let emerald_p = MorphPrecompiles::new_with_spec(MorphHardfork::Emerald);
         let jade_p = MorphPrecompiles::new_with_spec(MorphHardfork::Jade);
+        let onyx_p = MorphPrecompiles::new_with_spec(MorphHardfork::Onyx);
 
         assert_eq!(
             emerald_p.precompiles().len(),
             jade_p.precompiles().len(),
             "Jade should use same precompile set as Emerald"
+        );
+        assert_eq!(
+            emerald_p.precompiles().len(),
+            onyx_p.precompiles().len(),
+            "Onyx should use same precompile set as Emerald"
         );
         assert!(jade_p.contains(&addresses::P256_VERIFY));
         assert!(jade_p.contains(&addresses::BLS12_G1ADD));
@@ -750,14 +756,14 @@ mod tests {
     }
 
     #[test]
-    fn test_default_precompiles_use_jade() {
+    fn test_default_precompiles_use_onyx() {
         let default_p = MorphPrecompiles::default();
-        let jade_p = MorphPrecompiles::new_with_spec(MorphHardfork::Jade);
+        let onyx_p = MorphPrecompiles::new_with_spec(MorphHardfork::Onyx);
 
         assert_eq!(
             default_p.precompiles().len(),
-            jade_p.precompiles().len(),
-            "Default precompiles should match Jade"
+            onyx_p.precompiles().len(),
+            "Default precompiles should match Onyx"
         );
     }
 

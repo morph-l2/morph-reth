@@ -9,7 +9,7 @@ use revm::{
     DatabaseCommit, ExecuteCommitEvm, ExecuteEvm,
     context::{ContextSetters, TxEnv, result::ExecResultAndState},
     context_interface::{
-        ContextTr, JournalTr,
+        ContextTr, JournalTr, LocalContextTr,
         result::{EVMError, ExecutionResult},
     },
     handler::{Handler, SystemCallTx, system_call::SystemCallEvm},
@@ -20,6 +20,25 @@ use revm::{
 
 /// Total gas system transactions are allowed to use.
 const SYSTEM_CALL_GAS_LIMIT: u64 = 200_000;
+
+impl<DB: Database, I> MorphEvm<DB, I> {
+    fn discard_failed_inspection(&mut self) {
+        self.recoverable_sweep_candidate_allowance = None;
+        self.recoverable_sweep_outcome = None;
+        crate::recoverable_sweep::clear_recoverable_sweep_trace_replay();
+        self.cached_token_fee_info = None;
+        self.cached_l1_data_fee = Default::default();
+        self.pre_fee_logs.clear();
+        self.post_fee_logs.clear();
+
+        // `InspectEvm::inspect_tx` only finalizes successful output. A sweep error
+        // happens after the main transaction succeeded, so finalize and drop that
+        // state here to leave the EVM reusable without committing either phase.
+        let _ = self.inner.ctx.journal_mut().finalize();
+        self.inner.frame_stack.clear();
+        self.inner.ctx.local_mut().clear();
+    }
+}
 
 impl<DB, I> ExecuteEvm for MorphEvm<DB, I>
 where
@@ -37,8 +56,19 @@ where
 
     fn transact_one(&mut self, tx: Self::Tx) -> Result<Self::ExecutionResult, Self::Error> {
         self.inner.ctx.set_tx(tx);
+        self.recoverable_sweep_outcome = None;
         let mut h = MorphEvmHandler::new();
-        h.run(self)
+        match h.run(self) {
+            Ok(result) => {
+                self.apply_recoverable_sweep(&result)?;
+                Ok(result)
+            }
+            Err(error) => {
+                self.recoverable_sweep_candidate_allowance = None;
+                crate::recoverable_sweep::clear_recoverable_sweep_trace_replay();
+                Err(error)
+            }
+        }
     }
 
     fn finalize(&mut self) -> Self::State {
@@ -48,11 +78,19 @@ where
     fn replay(
         &mut self,
     ) -> Result<ExecResultAndState<Self::ExecutionResult, Self::State>, Self::Error> {
+        self.recoverable_sweep_outcome = None;
         let mut h = MorphEvmHandler::new();
-        h.run(self).map(|result| {
-            let state = self.finalize();
-            ExecResultAndState::new(result, state)
-        })
+        let result = match h.run(self) {
+            Ok(result) => result,
+            Err(error) => {
+                self.recoverable_sweep_candidate_allowance = None;
+                crate::recoverable_sweep::clear_recoverable_sweep_trace_replay();
+                return Err(error);
+            }
+        };
+        self.apply_recoverable_sweep(&result)?;
+        let state = self.finalize();
+        Ok(ExecResultAndState::new(result, state))
     }
 }
 
@@ -78,8 +116,24 @@ where
 
     fn inspect_one_tx(&mut self, tx: Self::Tx) -> Result<Self::ExecutionResult, Self::Error> {
         self.inner.ctx.set_tx(tx);
+        self.recoverable_sweep_outcome = None;
         let mut h = MorphEvmHandler::new();
-        h.inspect_run(self)
+        match h.inspect_run(self) {
+            Ok(result) => {
+                // Sweep system calls intentionally bypass inspector frame callbacks, so
+                // traces may hide them; applying the hook here still makes replay state canonical.
+                if let Err(error) = self.apply_recoverable_sweep(&result) {
+                    self.discard_failed_inspection();
+                    return Err(error);
+                }
+                Ok(result)
+            }
+            Err(error) => {
+                self.recoverable_sweep_candidate_allowance = None;
+                crate::recoverable_sweep::clear_recoverable_sweep_trace_replay();
+                Err(error)
+            }
+        }
     }
 }
 

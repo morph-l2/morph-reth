@@ -105,12 +105,13 @@ fn build_hardforks(genesis: &Genesis, chain_info: &MorphGenesisInfo) -> ChainHar
     .into_iter()
     .filter_map(|(fork, block)| block.map(|b| (fork, ForkCondition::Block(b))));
 
-    // Morph timestamp-based hardforks (Morph203, Viridian, Emerald, Jade)
+    // Morph timestamp-based hardforks (Morph203, Viridian, Emerald, Jade, Onyx)
     let time_forks = vec![
         (MorphHardfork::Morph203, hardfork_info.morph203_time),
         (MorphHardfork::Viridian, hardfork_info.viridian_time),
         (MorphHardfork::Emerald, hardfork_info.emerald_time),
         (MorphHardfork::Jade, hardfork_info.jade_fork_time),
+        (MorphHardfork::Onyx, hardfork_info.onyx_time),
     ]
     .into_iter()
     .filter_map(|(fork, time)| time.map(|t| (fork, ForkCondition::Timestamp(t))));
@@ -307,6 +308,13 @@ impl MorphChainSpec {
         self.info.morph_chain_info.max_tx_payload_bytes_per_block
     }
 
+    /// Returns the recoverable deposit registry address.
+    pub fn recoverable_deposit_registry_address(&self) -> Option<Address> {
+        self.info
+            .morph_chain_info
+            .recoverable_deposit_registry_address()
+    }
+
     /// Checks if the given block size (in bytes) is valid for this chain.
     pub fn is_valid_block_size(&self, size: usize) -> bool {
         self.info.morph_chain_info.is_valid_block_size(size)
@@ -474,8 +482,11 @@ mod tests {
                 "morph203Time": 0,
                 "viridianTime": 0,
                 "emeraldTime": 0,
+                "jadeForkTime": 0,
+                "onyxTime": 0,
                 "morph": {
-                    "feeVaultAddress": "0x530000000000000000000000000000000000000a"
+                    "feeVaultAddress": "0x530000000000000000000000000000000000000a",
+                    "recoverableDepositRegistryAddress": "0x5300000000000000000000000000000000000023"
                 }
             },
             "alloc": {}
@@ -492,6 +503,8 @@ mod tests {
         assert!(chainspec.is_curie_active_at_block(0));
         // Timestamp-based hardforks should be active at timestamp 0
         assert!(chainspec.is_emerald_active_at_timestamp(0));
+        assert!(chainspec.is_onyx_active_at_timestamp(0));
+        assert_eq!(chainspec.morph_hardfork_at(0, 0), MorphHardfork::Onyx);
     }
 
     #[test]
@@ -550,6 +563,8 @@ mod tests {
                 "morph203Time": 3000,
                 "viridianTime": 4000,
                 "emeraldTime": 5000,
+                "jadeForkTime": 6000,
+                "onyxTime": 7000,
                 "morph": {}
             },
             "alloc": {}
@@ -581,6 +596,13 @@ mod tests {
 
         assert!(!chainspec.is_emerald_active_at_timestamp(4000));
         assert!(chainspec.is_emerald_active_at_timestamp(5000));
+
+        // Test Onyx activation (timestamp-based)
+        let activation = chainspec.fork(MorphHardfork::Onyx);
+        assert_eq!(activation, ForkCondition::Timestamp(7000));
+
+        assert!(!chainspec.is_onyx_active_at_timestamp(6999));
+        assert!(chainspec.is_onyx_active_at_timestamp(7000));
     }
 
     #[test]
@@ -608,6 +630,8 @@ mod tests {
                 "morph203Time": 3000,
                 "viridianTime": 4000,
                 "emeraldTime": 5000,
+                "jadeForkTime": 6000,
+                "onyxTime": 7000,
                 "morph": {}
             },
             "alloc": {}
@@ -647,11 +671,11 @@ mod tests {
             MorphHardfork::Emerald
         );
 
-        // After Emerald (block 600, timestamp 6000)
-        assert_eq!(
-            chainspec.morph_hardfork_at(600, 6000),
-            MorphHardfork::Emerald
-        );
+        // At Jade time (block 600, timestamp 6000)
+        assert_eq!(chainspec.morph_hardfork_at(600, 6000), MorphHardfork::Jade);
+
+        // At Onyx time (block 700, timestamp 7000)
+        assert_eq!(chainspec.morph_hardfork_at(700, 7000), MorphHardfork::Onyx);
     }
 
     #[test]
@@ -664,9 +688,12 @@ mod tests {
                 "morph203Time": 0,
                 "viridianTime": 0,
                 "emeraldTime": 0,
+                "jadeForkTime": 0,
+                "onyxTime": 0,
                 "morph": {
                     "feeVaultAddress": "0x530000000000000000000000000000000000000a",
-                    "maxTxPayloadBytesPerBlock": 122880
+                    "maxTxPayloadBytesPerBlock": 122880,
+                    "recoverableDepositRegistryAddress": "0x5300000000000000000000000000000000000023"
                 }
             },
             "alloc": {}
@@ -682,9 +709,14 @@ mod tests {
         assert!(chainspec.is_morph203_active_at_timestamp(0));
         assert!(chainspec.is_viridian_active_at_timestamp(0));
         assert!(chainspec.is_emerald_active_at_timestamp(0));
+        assert!(chainspec.is_onyx_active_at_timestamp(0));
 
         // Config should be extracted from genesis
         assert!(chainspec.is_fee_vault_enabled());
+        assert_eq!(
+            chainspec.recoverable_deposit_registry_address(),
+            Some(address!("5300000000000000000000000000000000000023"))
+        );
     }
 
     #[test]
@@ -706,7 +738,8 @@ mod tests {
                 "curieBlock": 0,
                 "morph": {
                     "feeVaultAddress": "0x530000000000000000000000000000000000000a",
-                    "maxTxPayloadBytesPerBlock": 122880
+                    "maxTxPayloadBytesPerBlock": 122880,
+                    "recoverableDepositRegistryAddress": "0x5300000000000000000000000000000000000023"
                 }
             },
             "alloc": {}
@@ -717,6 +750,10 @@ mod tests {
 
         assert!(chainspec.is_fee_vault_enabled());
         assert_eq!(chainspec.max_tx_payload_bytes_per_block(), Some(122880));
+        assert_eq!(
+            chainspec.recoverable_deposit_registry_address(),
+            Some(address!("5300000000000000000000000000000000000023"))
+        );
         assert!(chainspec.is_valid_block_size(100000));
         assert!(!chainspec.is_valid_block_size(200000));
     }

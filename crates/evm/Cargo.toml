@@ -22,17 +22,19 @@ reth-evm.workspace = true
 reth-ethereum-primitives = { workspace = true, features = ["serde"] }
 reth-revm.workspace = true
 reth-primitives-traits.workspace = true
+reth-metrics.workspace = true
 reth-rpc-eth-api = { workspace = true, optional = true }
 
 alloy-evm.workspace = true
 alloy-consensus.workspace = true
 alloy-primitives.workspace = true
-alloy-rpc-types-eth.workspace = true
+alloy-rpc-types-eth = { workspace = true, optional = true }
 
 derive_more.workspace = true
 thiserror.workspace = true
 revm.workspace = true
 tracing.workspace = true
+metrics.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
@@ -44,4 +46,8 @@ default = []
 serde-bincode-compat = [
     "morph-primitives/serde-bincode-compat",
 ]
-rpc = ["dep:reth-rpc-eth-api", "morph-revm/rpc"]
+rpc = [
+    "dep:alloy-rpc-types-eth",
+    "dep:reth-rpc-eth-api",
+    "morph-revm/rpc",
+]

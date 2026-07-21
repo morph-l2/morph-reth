@@ -1,0 +1,23 @@
+{
+  "compiler": "0.8.30",
+  "settings": {
+    "optimizer": true,
+    "optimizer_runs": 200,
+    "metadata": false
+  },
+  "source_sha256": "781723bc8b740dc72556f91817ccc649e1de4015a670364902b38b3da2f896ab",
+  "runtimes": {
+    "TEST_REGISTRY_RUNTIME": {
+      "contract": "TestRecoverableRegistry",
+      "sha256": "4c1bd10b7eeacb4946053aee8d29a2b94b80e0dfab76eb8e66e00c0c28850e32"
+    },
+    "TEST_ROUTER_RUNTIME": {
+      "contract": "TestRecoverableRouter",
+      "sha256": "70ab47e7fad45e8226e2ed39c1cfb899df25920c59aad2f08a253dbdaea37e9c"
+    },
+    "TEST_CANDIDATE_EMITTER_RUNTIME": {
+      "contract": "TestCandidateEmitter",
+      "sha256": "fcd8fbb856584a811249949e12c8c4deee436e4c0ff72e6b07bd2d0419ec055a"
+    }
+  }
+}

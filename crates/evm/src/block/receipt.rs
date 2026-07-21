@@ -47,6 +47,7 @@ use tracing::warn;
 /// - `morph_tx_fields`: MorphTx-specific fields (token fee info, version, reference, memo)
 /// - `pre_fee_logs`: Transfer event logs from token fee deduction (survives tx revert)
 /// - `post_fee_logs`: Transfer event logs from token fee reimbursement
+/// - `sweep_logs`: Recoverable sweep call and protocol settlement logs
 #[derive(Debug)]
 pub(crate) struct MorphReceiptBuilderCtx<'a, E: Evm> {
     /// The executed transaction
@@ -64,6 +65,8 @@ pub(crate) struct MorphReceiptBuilderCtx<'a, E: Evm> {
     pub pre_fee_logs: Vec<Log>,
     /// Transfer event logs from token fee reimbursement (after main tx execution).
     pub post_fee_logs: Vec<Log>,
+    /// Recoverable sweep logs emitted after fee reimbursement.
+    pub sweep_logs: Vec<Log>,
 }
 
 /// MorphTx (0x7F) specific fields for receipts.
@@ -157,19 +160,22 @@ impl MorphReceiptBuilder for DefaultMorphReceiptBuilder {
             morph_tx_fields,
             pre_fee_logs,
             post_fee_logs,
+            sweep_logs,
         } = ctx;
 
         // Assemble logs in chronological order matching go-ethereum:
-        //   [deduct Transfer] + [main tx logs] + [refund Transfer]
+        //   [deduct Transfer] + [main tx logs] + [refund Transfer] + [sweep logs]
         // Fee logs are cached separately from the journal so they survive
         // main tx revert (revm's ExecutionResult::Revert carries no logs).
         let is_success = result.is_success();
         let main_logs = result.into_logs();
-        let mut logs =
-            Vec::with_capacity(pre_fee_logs.len() + main_logs.len() + post_fee_logs.len());
+        let mut logs = Vec::with_capacity(
+            pre_fee_logs.len() + main_logs.len() + post_fee_logs.len() + sweep_logs.len(),
+        );
         logs.extend(pre_fee_logs);
         logs.extend(main_logs);
         logs.extend(post_fee_logs);
+        logs.extend(sweep_logs);
 
         let inner = Receipt {
             status: is_success.into(),
@@ -359,6 +365,7 @@ mod tests {
             morph_tx_fields: None,
             pre_fee_logs: vec![],
             post_fee_logs: vec![],
+            sweep_logs: vec![],
         };
 
         let receipt = builder.build_receipt(ctx);
@@ -382,6 +389,7 @@ mod tests {
             morph_tx_fields: None,
             pre_fee_logs: vec![],
             post_fee_logs: vec![],
+            sweep_logs: vec![],
         };
 
         let receipt = builder.build_receipt(ctx);
@@ -405,6 +413,7 @@ mod tests {
             morph_tx_fields: None,
             pre_fee_logs: vec![],
             post_fee_logs: vec![],
+            sweep_logs: vec![],
         };
 
         let receipt = builder.build_receipt(ctx);
@@ -437,6 +446,7 @@ mod tests {
             morph_tx_fields: Some(fields),
             pre_fee_logs: vec![],
             post_fee_logs: vec![],
+            sweep_logs: vec![],
         };
 
         let receipt = builder.build_receipt(ctx);
@@ -473,6 +483,7 @@ mod tests {
             morph_tx_fields: None,
             pre_fee_logs: vec![],
             post_fee_logs: vec![],
+            sweep_logs: vec![],
         };
 
         let receipt = builder.build_receipt(ctx);
@@ -506,6 +517,7 @@ mod tests {
             morph_tx_fields: None,
             pre_fee_logs: vec![],
             post_fee_logs: vec![],
+            sweep_logs: vec![],
         };
 
         let receipt = builder.build_receipt(ctx);
@@ -534,6 +546,7 @@ mod tests {
             morph_tx_fields: None,
             pre_fee_logs: vec![],
             post_fee_logs: vec![],
+            sweep_logs: vec![],
         };
 
         let receipt = builder.build_receipt(ctx);
@@ -571,6 +584,7 @@ mod tests {
             morph_tx_fields: None,
             pre_fee_logs: vec![pre_log.clone()],
             post_fee_logs: vec![post_log.clone()],
+            sweep_logs: vec![],
         };
 
         let receipt = builder.build_receipt(ctx);
@@ -595,12 +609,19 @@ mod tests {
             logs[1].address, post_log.address,
             "second log must be post_fee_log"
         );
+        assert!(
+            logs.iter()
+                .all(|log| log.address != Address::repeat_byte(0xDD)),
+            "reverted main transactions must not include sweep logs"
+        );
     }
 
-    /// Log ordering on successful tx: [pre_fee_log, main_tx_log, post_fee_log].
+    /// Log ordering on successful tx:
+    /// [pre_fee_log, main_tx_log, post_fee_log, sweep_log].
     ///
     /// Matches go-ethereum's receipt log ordering where fee deduction comes
-    /// first (before main tx), and fee refund comes last (after main tx).
+    /// first (before main tx), fee refund follows the main tx, and sweep logs
+    /// are appended last.
     #[test]
     fn test_fee_log_ordering_on_success() {
         let builder = DefaultMorphReceiptBuilder;
@@ -609,6 +630,7 @@ mod tests {
         let pre_log = make_fee_log(0xAA);
         let main_log = make_fee_log(0xCC);
         let post_log = make_fee_log(0xBB);
+        let sweep_log = make_fee_log(0xDD);
 
         let ctx = MorphReceiptBuilderCtx::<TestEvm> {
             tx: &tx,
@@ -618,13 +640,14 @@ mod tests {
             morph_tx_fields: None,
             pre_fee_logs: vec![pre_log.clone()],
             post_fee_logs: vec![post_log.clone()],
+            sweep_logs: vec![sweep_log.clone()],
         };
 
         let receipt = builder.build_receipt(ctx);
         assert!(TxReceipt::status(&receipt));
 
         let logs = TxReceipt::logs(&receipt);
-        assert_eq!(logs.len(), 3, "pre_fee + main + post_fee = 3 logs");
+        assert_eq!(logs.len(), 4, "pre_fee + main + post_fee + sweep = 4 logs");
         assert_eq!(
             logs[0].address, pre_log.address,
             "pre_fee_log must be first"
@@ -635,8 +658,9 @@ mod tests {
         );
         assert_eq!(
             logs[2].address, post_log.address,
-            "post_fee_log must be last"
+            "post_fee_log must be third"
         );
+        assert_eq!(logs[3].address, sweep_log.address, "sweep_log must be last");
     }
 
     /// Fee logs without refund: only pre_fee_log when no gas is refunded.
@@ -658,6 +682,7 @@ mod tests {
             morph_tx_fields: None,
             pre_fee_logs: vec![pre_log.clone()],
             post_fee_logs: vec![], // no refund
+            sweep_logs: vec![],
         };
 
         let receipt = builder.build_receipt(ctx);

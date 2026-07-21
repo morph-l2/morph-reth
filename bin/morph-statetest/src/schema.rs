@@ -30,6 +30,13 @@ pub struct MorphTestUnit {
     pub transaction: MorphTransactionParts,
     #[serde(default)]
     pub out: Option<Bytes>,
+    /// Optional recoverable-deposit registry address for Onyx sweep vectors.
+    ///
+    /// When a fixture omits it, the runner falls back to the canonical
+    /// statetest registry address so existing suites stay a no-op unless the
+    /// `pre` state actually deploys a registry there.
+    #[serde(default, rename = "recoverableDepositRegistry")]
+    pub recoverable_deposit_registry: Option<Address>,
 }
 
 #[derive(Debug, Error)]
@@ -364,7 +371,8 @@ pub fn parse_fork(name: &str) -> Result<MorphHardfork, SchemaError> {
         "morph203" | "morph-203" => Ok(MorphHardfork::Morph203),
         "viridian" | "prague" => Ok(MorphHardfork::Viridian),
         "emerald" => Ok(MorphHardfork::Emerald),
-        "jade" | "osaka" => Ok(MorphHardfork::Jade),
+        "jade" => Ok(MorphHardfork::Jade),
+        "onyx" | "osaka" => Ok(MorphHardfork::Onyx),
         "cancun" => Ok(MorphHardfork::Morph203),
         _ => Err(SchemaError::UnknownFork(name.to_string())),
     }
@@ -437,6 +445,17 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_fork_maps_onyx_name_to_onyx() {
+        assert_eq!(parse_fork("Onyx").unwrap(), MorphHardfork::Onyx);
+    }
+
+    #[test]
+    fn parse_fork_maps_osaka_alias_to_onyx_without_changing_jade() {
+        assert_eq!(parse_fork("Osaka").unwrap(), MorphHardfork::Onyx);
+        assert_eq!(parse_fork("Jade").unwrap(), MorphHardfork::Jade);
+    }
 
     #[test]
     fn statetest_without_txbytes_sets_l1_fee_encoding() {

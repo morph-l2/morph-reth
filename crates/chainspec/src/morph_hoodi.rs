@@ -63,5 +63,8 @@ mod tests {
 
         assert!(!MORPH_HOODI.is_jade_active_at_timestamp(1774418399));
         assert!(MORPH_HOODI.is_jade_active_at_timestamp(1774418400));
+
+        // Onyx is intentionally not scheduled on production Hoodi yet.
+        assert!(!MORPH_HOODI.is_onyx_active_at_timestamp(u64::MAX));
     }
 }
