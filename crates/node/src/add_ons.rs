@@ -29,6 +29,7 @@ use reth_node_builder::{
 use reth_provider::{
     BlockWriter, CanonChainTracker, ChainSpecProvider, DBProvider, DatabaseProviderFactory,
 };
+use reth_prune_types::PruneMode;
 use reth_rpc_builder::Identity;
 use reth_rpc_eth_api::RpcNodeCore;
 use reth_tracing::tracing;
@@ -89,11 +90,13 @@ where
 }
 
 fn ensure_reference_index_pruning_compatible(
-    bodies_history_pruning_enabled: bool,
+    bodies_history_prune_mode: Option<PruneMode>,
 ) -> eyre::Result<()> {
-    if bodies_history_pruning_enabled {
+    let can_prune_bodies =
+        bodies_history_prune_mode.is_some_and(|mode| mode.next_pruned_block(None).is_some());
+    if can_prune_bodies {
         eyre::bail!(
-            "Morph reference index requires canonical block bodies from Jade onward; disable bodies-history pruning"
+            "Morph reference index requires canonical block bodies from Jade onward; configured bodies-history pruning mode {bodies_history_prune_mode:?} can delete required bodies"
         )
     }
     Ok(())
@@ -139,12 +142,11 @@ where
 
         // The reference index backfills directly from canonical block bodies. Read the
         // effective modes from the provider so both CLI arguments and reth.toml are covered.
-        let bodies_history_pruning_enabled = provider
+        let bodies_history_prune_mode = provider
             .database_provider_ro()?
             .prune_modes_ref()
-            .bodies_history
-            .is_some();
-        ensure_reference_index_pruning_compatible(bodies_history_pruning_enabled)?;
+            .bodies_history;
+        ensure_reference_index_pruning_compatible(bodies_history_prune_mode)?;
 
         let canonical_notifications = provider.subscribe_to_canonical_state();
         let jade_timestamp = match chain_spec.morph_fork_activation(MorphHardfork::Jade) {
@@ -305,15 +307,27 @@ where
 #[cfg(test)]
 mod tests {
     use super::ensure_reference_index_pruning_compatible;
+    use reth_prune_types::PruneMode;
 
     #[test]
-    fn reference_index_accepts_retained_block_bodies() {
-        assert!(ensure_reference_index_pruning_compatible(false).is_ok());
+    fn reference_index_accepts_no_bodies_history_pruning() {
+        assert!(ensure_reference_index_pruning_compatible(None).is_ok());
     }
 
     #[test]
-    fn reference_index_rejects_bodies_history_pruning() {
-        let error = ensure_reference_index_pruning_compatible(true).unwrap_err();
-        assert!(error.to_string().contains("bodies-history pruning"));
+    fn reference_index_accepts_noop_bodies_history_pruning() {
+        assert!(ensure_reference_index_pruning_compatible(Some(PruneMode::Before(0))).is_ok());
+    }
+
+    #[test]
+    fn reference_index_rejects_effective_bodies_history_pruning() {
+        for mode in [
+            PruneMode::Before(1),
+            PruneMode::Distance(10_064),
+            PruneMode::Full,
+        ] {
+            let error = ensure_reference_index_pruning_compatible(Some(mode)).unwrap_err();
+            assert!(error.to_string().contains("bodies-history pruning"));
+        }
     }
 }

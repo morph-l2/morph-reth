@@ -12,7 +12,6 @@ use morph_primitives::MorphPrimitives;
 use reth_chain_state::{CanonStateNotification, CanonStateNotifications};
 use reth_tasks::TaskExecutor;
 use std::{
-    collections::VecDeque,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -25,51 +24,44 @@ use tracing::{debug, info, warn};
 
 const RAPID_SYNC_BLOCK_THRESHOLD: u64 = 64;
 const RAPID_SYNC_WINDOW: Duration = Duration::from_secs(2);
-const RAPID_SYNC_QUIET_PERIOD: Duration = Duration::from_secs(5);
 const RECONCILE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_RETRY_BACKOFF: Duration = Duration::from_secs(30);
 const TARGET: &str = "morph::reference_index";
 
 #[derive(Debug)]
 struct RapidSyncDetector {
-    observations: VecDeque<(Instant, u64)>,
+    window_started: Instant,
     blocks_in_window: u64,
-    defer_until: Option<Instant>,
 }
 
 impl RapidSyncDetector {
-    fn new() -> Self {
+    fn new(now: Instant) -> Self {
         Self {
-            observations: VecDeque::new(),
+            window_started: now,
             blocks_in_window: 0,
-            defer_until: None,
+        }
+    }
+
+    fn reset_expired_window(&mut self, now: Instant) {
+        if now.saturating_duration_since(self.window_started) >= RAPID_SYNC_WINDOW {
+            self.window_started = now;
+            self.blocks_in_window = 0;
         }
     }
 
     fn record_blocks(&mut self, now: Instant, blocks: usize) {
-        if blocks == 0 {
-            return;
-        }
-        while self.observations.front().is_some_and(|(observed_at, _)| {
-            now.saturating_duration_since(*observed_at) > RAPID_SYNC_WINDOW
-        }) {
-            let (_, expired_blocks) = self.observations.pop_front().expect("front was present");
-            self.blocks_in_window = self.blocks_in_window.saturating_sub(expired_blocks);
-        }
-        let already_deferred = self.should_defer(now);
-        self.observations.push_back((now, blocks as u64));
+        self.reset_expired_window(now);
         self.blocks_in_window = self.blocks_in_window.saturating_add(blocks as u64);
-        if already_deferred || self.blocks_in_window > RAPID_SYNC_BLOCK_THRESHOLD {
-            self.defer_until = Some(now + RAPID_SYNC_QUIET_PERIOD);
-        }
     }
 
     fn record_lagged(&mut self, now: Instant) {
-        self.defer_until = Some(now + RAPID_SYNC_QUIET_PERIOD);
+        self.reset_expired_window(now);
+        self.blocks_in_window = RAPID_SYNC_BLOCK_THRESHOLD + 1;
     }
 
-    fn should_defer(&self, now: Instant) -> bool {
-        self.defer_until.is_some_and(|until| now < until)
+    fn should_defer(&mut self, now: Instant) -> bool {
+        self.reset_expired_window(now);
+        self.blocks_in_window > RAPID_SYNC_BLOCK_THRESHOLD
     }
 }
 
@@ -106,12 +98,7 @@ fn observe_canonical_notification(
     debug!(target: TARGET, changed_blocks, "canonical notification woke reference index");
 }
 
-fn observe_lagged_notification(
-    skipped: u64,
-    detector: &mut RapidSyncDetector,
-    handle: &ReferenceIndexHandle,
-) {
-    handle.metrics().lagged_notifications_total.increment(1);
+fn observe_lagged_notification(skipped: u64, detector: &mut RapidSyncDetector) {
     detector.record_lagged(Instant::now());
     warn!(target: TARGET, skipped, "reference index lagged canonical notifications; reconciling from provider");
 }
@@ -180,6 +167,7 @@ impl<C: CanonicalChain> ReferenceIndexRuntime<C> {
         &self,
         db: &ReferenceIndexDb,
         jade_first_block: u64,
+        finalized: Option<u64>,
         head: crate::CanonicalTip,
     ) -> Result<(), ReferenceIndexError> {
         let Some(cursor) = db.indexed_to()? else {
@@ -201,6 +189,15 @@ impl<C: CanonicalChain> ReferenceIndexRuntime<C> {
 
         self.handle.set_phase(ReferenceIndexPhase::Repairing);
         self.handle.metrics().reorgs_total.increment(1);
+        // A finalized block can never be reorged, so the rewind never needs to
+        // go below it — bounding the scan (and the retained `IndexedBlocks`
+        // breadcrumbs) instead of walking all the way back to the Jade start.
+        // Without finality yet, fall back to `jade_first_block`.
+        let rewind_floor = finalized
+            .map_or(jade_first_block, |finalized| {
+                finalized.max(jade_first_block)
+            })
+            .min(candidate);
         let mut ancestor = None;
         let mut number = candidate;
         loop {
@@ -213,7 +210,7 @@ impl<C: CanonicalChain> ReferenceIndexRuntime<C> {
                 ancestor = Some(number);
                 break;
             }
-            if number == jade_first_block {
+            if number == rewind_floor {
                 break;
             }
             number -= 1;
@@ -226,12 +223,7 @@ impl<C: CanonicalChain> ReferenceIndexRuntime<C> {
 
     /// Perform one synchronous reconciliation/backfill turn.
     pub fn synchronize_once(&mut self, defer: bool) -> Result<(), ReferenceIndexError> {
-        let started_at = Instant::now();
         let result = self.synchronize_once_inner(defer);
-        self.handle
-            .metrics()
-            .batch_duration_seconds
-            .record(started_at.elapsed());
         if result.is_err() {
             self.handle.metrics().failures_total.increment(1);
             self.handle.set_phase(ReferenceIndexPhase::Unavailable);
@@ -242,16 +234,13 @@ impl<C: CanonicalChain> ReferenceIndexRuntime<C> {
     fn synchronize_once_inner(&mut self, defer: bool) -> Result<(), ReferenceIndexError> {
         let db = self.open_db()?;
         let head = self.chain.head()?;
-        self.handle.metrics().target_block.set(head.number as f64);
         if head.timestamp < self.config.jade_timestamp {
-            self.handle.metrics().indexed_block.set(0.0);
             self.handle.metrics().lag_blocks.set(0.0);
             self.handle.set_phase(ReferenceIndexPhase::PreJade);
             return Ok(());
         }
         if defer {
             let indexed_to = db.indexed_to()?.unwrap_or_default();
-            self.handle.metrics().indexed_block.set(indexed_to as f64);
             self.handle
                 .metrics()
                 .lag_blocks
@@ -269,12 +258,12 @@ impl<C: CanonicalChain> ReferenceIndexRuntime<C> {
                     ))
                 })?,
         };
-        self.reconcile_cursor(&db, jade_first_block, head)?;
+        let finalized = self.chain.finalized_block_number()?;
+        self.reconcile_cursor(&db, jade_first_block, finalized, head)?;
         let start = db
             .indexed_to()?
             .map_or(jade_first_block, |cursor| cursor.saturating_add(1));
         if start > head.number {
-            self.handle.metrics().indexed_block.set(head.number as f64);
             self.handle.metrics().lag_blocks.set(0.0);
             self.handle.set_phase(ReferenceIndexPhase::Live);
             return Ok(());
@@ -301,19 +290,9 @@ impl<C: CanonicalChain> ReferenceIndexRuntime<C> {
                 )));
             }
         }
-        commit_canonical_batch(&db, jade_first_block, start, &blocks)?;
-        self.handle
-            .metrics()
-            .indexed_blocks_total
-            .increment(blocks.len() as u64);
-        self.handle.metrics().committed_batches_total.increment(1);
+        commit_canonical_batch(&db, jade_first_block, start, &blocks, finalized)?;
 
         let current_head = self.chain.head()?;
-        self.handle
-            .metrics()
-            .target_block
-            .set(current_head.number as f64);
-        self.handle.metrics().indexed_block.set(end as f64);
         let lag = current_head.number.saturating_sub(end);
         self.handle.metrics().lag_blocks.set(lag as f64);
         if lag > LIVE_LAG_SLO {
@@ -344,7 +323,7 @@ impl<C: CanonicalChain> ReferenceIndexRuntime<C> {
         // Consume tokio's immediate first tick so a queued canonical
         // notification can classify rapid sync before the first DB batch.
         poll.tick().await;
-        let mut detector = RapidSyncDetector::new();
+        let mut detector = RapidSyncDetector::new(Instant::now());
         let mut notifications_open = true;
         let mut sync_requested = false;
         let mut retry_backoff = Duration::from_secs(1);
@@ -359,7 +338,7 @@ impl<C: CanonicalChain> ReferenceIndexRuntime<C> {
                             observe_canonical_notification(notification, &mut detector);
                         }
                         PendingBroadcastEvent::Lagged(skipped) => {
-                            observe_lagged_notification(skipped, &mut detector, &handle);
+                            observe_lagged_notification(skipped, &mut detector);
                         }
                     }
                 });
@@ -371,9 +350,8 @@ impl<C: CanonicalChain> ReferenceIndexRuntime<C> {
                 && detector.should_defer(Instant::now())
                 && handle.phase() == ReferenceIndexPhase::Deferred
             {
-                // Stay completely off the index DB while rapid historical
-                // sync is still active. Notifications continue to extend the
-                // quiet-period deadline; polling resumes catch-up afterwards.
+                // Stay completely off the index DB for the current rapid-sync
+                // window. Polling resumes catch-up as soon as the window resets.
                 sync_requested = false;
             }
             if sync_requested {
@@ -435,7 +413,7 @@ impl<C: CanonicalChain> ReferenceIndexRuntime<C> {
                             observe_canonical_notification(notification, &mut detector);
                         }
                         Err(RecvError::Lagged(skipped)) => {
-                            observe_lagged_notification(skipped, &mut detector, &handle);
+                            observe_lagged_notification(skipped, &mut detector);
                         }
                         Err(RecvError::Closed) => {
                             notifications_open = false;
@@ -464,50 +442,51 @@ mod tests {
     };
 
     #[test]
-    fn rapid_sync_detector_defers_after_more_than_64_blocks_and_recovers_after_quiet_period() {
+    fn rapid_sync_detector_defers_after_more_than_64_blocks_in_one_window() {
         let start = Instant::now();
-        let mut detector = RapidSyncDetector::new();
+        let mut detector = RapidSyncDetector::new(start);
 
         detector.record_blocks(start + Duration::from_secs(1), 64);
         assert!(!detector.should_defer(start + Duration::from_secs(1)));
 
         detector.record_blocks(start + Duration::from_millis(1500), 1);
-        assert!(detector.should_defer(start + Duration::from_secs(4)));
-        assert!(!detector.should_defer(start + Duration::from_millis(6501)));
+        assert!(detector.should_defer(start + Duration::from_millis(1999)));
+        assert!(!detector.should_defer(start + Duration::from_millis(2001)));
     }
 
     #[test]
-    fn rapid_sync_detector_uses_a_sliding_two_second_window() {
+    fn rapid_sync_detector_does_not_mix_adjacent_windows() {
         let start = Instant::now();
-        let mut detector = RapidSyncDetector::new();
+        let mut detector = RapidSyncDetector::new(start);
 
         detector.record_blocks(start + Duration::from_millis(1900), 32);
         detector.record_blocks(start + Duration::from_millis(2100), 33);
 
-        assert!(detector.should_defer(start + Duration::from_secs(3)));
+        assert!(!detector.should_defer(start + Duration::from_millis(2100)));
     }
 
     #[test]
-    fn deferred_sync_waits_five_seconds_after_low_rate_tail_activity() {
+    fn normal_block_activity_does_not_extend_rapid_sync_deferral() {
         let start = Instant::now();
-        let mut detector = RapidSyncDetector::new();
+        let mut detector = RapidSyncDetector::new(start);
 
         detector.record_blocks(start, 65);
-        detector.record_blocks(start + Duration::from_secs(3), 1);
+        assert!(detector.should_defer(start + Duration::from_secs(1)));
 
-        assert!(detector.should_defer(start + Duration::from_millis(7999)));
-        assert!(!detector.should_defer(start + Duration::from_millis(8001)));
+        detector.record_blocks(start + Duration::from_secs(1), 1);
+
+        assert!(!detector.should_defer(start + Duration::from_millis(2001)));
     }
 
     #[test]
-    fn lagged_notifications_enter_the_same_quiet_period() {
+    fn lagged_notifications_defer_only_for_the_current_window() {
         let start = Instant::now();
-        let mut detector = RapidSyncDetector::new();
+        let mut detector = RapidSyncDetector::new(start);
 
         detector.record_lagged(start);
 
-        assert!(detector.should_defer(start + Duration::from_secs(4)));
-        assert!(!detector.should_defer(start + Duration::from_millis(5001)));
+        assert!(detector.should_defer(start + Duration::from_secs(1)));
+        assert!(!detector.should_defer(start + Duration::from_millis(2001)));
     }
 
     #[test]
@@ -517,7 +496,7 @@ mod tests {
             sender.send(1usize).unwrap();
         }
         let now = Instant::now();
-        let mut detector = RapidSyncDetector::new();
+        let mut detector = RapidSyncDetector::new(now);
         let mut received = 0usize;
 
         let remains_open = drain_ready_broadcast(&mut receiver, |event| match event {
@@ -536,6 +515,7 @@ mod tests {
     #[derive(Clone, Debug)]
     struct TestChain {
         blocks: Arc<RwLock<Vec<CanonicalBlock>>>,
+        finalized: Arc<RwLock<Option<u64>>>,
     }
 
     impl TestChain {
@@ -550,6 +530,7 @@ mod tests {
                 .collect();
             Self {
                 blocks: Arc::new(RwLock::new(blocks)),
+                finalized: Arc::new(RwLock::new(None)),
             }
         }
 
@@ -561,6 +542,10 @@ mod tests {
 
         fn truncate(&self, len: u64) {
             self.blocks.write().truncate(len as usize);
+        }
+
+        fn set_finalized(&self, number: u64) {
+            *self.finalized.write() = Some(number);
         }
     }
 
@@ -591,6 +576,10 @@ mod tests {
                 .map(|block| block.timestamp))
         }
 
+        fn finalized_block_number(&self) -> Result<Option<u64>, crate::ReferenceIndexError> {
+            Ok(*self.finalized.read())
+        }
+
         fn canonical_blocks(
             &self,
             range: RangeInclusive<u64>,
@@ -612,13 +601,9 @@ mod tests {
         runtime.synchronize_once(false).unwrap();
 
         assert_eq!(handle.phase(), crate::ReferenceIndexPhase::PreJade);
-        let query = ReferenceQuery::new(B256::with_last_byte(0xaa), None, None).unwrap();
-        assert!(
-            handle
-                .query_at(query, chain.head().unwrap())
-                .unwrap()
-                .is_empty()
-        );
+        // Pre-Jade is answered as a complete empty result at the RPC layer via
+        // `is_pre_jade`; the reader never sees the query and no cursor is written.
+        assert!(handle.is_pre_jade(chain.head().unwrap().timestamp));
         assert_eq!(handle.db().unwrap().indexed_to().unwrap(), None);
     }
 
@@ -651,14 +636,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let chain = TestChain::linear(10, 200);
         let config = ReferenceIndexConfig::new(dir.path(), 2818, B256::ZERO, 200);
-        let (mut runtime, handle) = ReferenceIndexRuntime::new(config, chain);
+        let (mut runtime, handle) = ReferenceIndexRuntime::new(config, chain.clone());
         runtime.synchronize_once(false).unwrap();
-        let generation = handle.generation();
+        assert_eq!(handle.phase(), ReferenceIndexPhase::Live);
 
         runtime.synchronize_once(false).unwrap();
 
         assert_eq!(handle.phase(), ReferenceIndexPhase::Live);
-        assert_eq!(handle.generation(), generation);
+        // A no-op reconciliation still serves reads at the unchanged tip.
+        let query = ReferenceQuery::new(B256::with_last_byte(0xaa), None, None).unwrap();
+        assert!(
+            handle
+                .query_at(query, chain.head().unwrap())
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -685,6 +677,65 @@ mod tests {
             handle.db().unwrap().indexed_block_hash(7).unwrap(),
             chain.canonical_hash(7).unwrap()
         );
+    }
+
+    #[test]
+    fn finalized_prunes_breadcrumbs_below_it_and_repairs_a_suffix_above_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let chain = TestChain::linear(10, 200);
+        let config = ReferenceIndexConfig::new(dir.path(), 2818, B256::ZERO, 200);
+        let (mut runtime, handle) = ReferenceIndexRuntime::new(config, chain.clone());
+        runtime.synchronize_once(false).unwrap();
+        assert_eq!(handle.phase(), ReferenceIndexPhase::Live);
+        // Without finality yet, every breadcrumb back to the Jade start is kept.
+        assert!(
+            handle
+                .db()
+                .unwrap()
+                .indexed_block_hash(0)
+                .unwrap()
+                .is_some()
+        );
+
+        // Finalize block 5, then reorg a suffix strictly above it.
+        chain.set_finalized(5);
+        chain.replace_suffix(7);
+        runtime.synchronize_once(false).unwrap();
+
+        assert_eq!(handle.phase(), ReferenceIndexPhase::Live);
+        let db = handle.db().unwrap();
+        // The suffix above finalized is repaired to the canonical hashes.
+        assert_eq!(
+            db.indexed_block_hash(7).unwrap(),
+            chain.canonical_hash(7).unwrap()
+        );
+        // Breadcrumbs below finalized are pruned; finalized and above survive.
+        assert!(db.indexed_block_hash(4).unwrap().is_none());
+        assert!(db.indexed_block_hash(5).unwrap().is_some());
+    }
+
+    #[test]
+    fn reorg_reaching_below_finalized_is_bounded_to_a_manual_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        let chain = TestChain::linear(10, 200);
+        let config = ReferenceIndexConfig::new(dir.path(), 2818, B256::ZERO, 200);
+        let (mut runtime, handle) = ReferenceIndexRuntime::new(config, chain.clone());
+        runtime.synchronize_once(false).unwrap();
+        assert_eq!(handle.phase(), ReferenceIndexPhase::Live);
+
+        // Finalize block 5, then diverge a range that reaches below it. A
+        // finalized block cannot legitimately reorg, so rather than scanning all
+        // the way back to the Jade start the rewind stops at finalized and
+        // surfaces a manual rebuild instead of silently repairing corruption.
+        chain.set_finalized(5);
+        chain.replace_suffix(3);
+        let error = runtime.synchronize_once(false).unwrap_err();
+
+        assert!(matches!(
+            error,
+            ReferenceIndexError::ManualRebuildRequired { .. }
+        ));
+        assert_eq!(handle.phase(), ReferenceIndexPhase::Unavailable);
     }
 
     #[test]
@@ -745,6 +796,10 @@ mod tests {
 
         fn block_timestamp(&self, number: u64) -> Result<Option<u64>, ReferenceIndexError> {
             self.0.block_timestamp(number)
+        }
+
+        fn finalized_block_number(&self) -> Result<Option<u64>, ReferenceIndexError> {
+            self.0.finalized_block_number()
         }
 
         fn canonical_blocks(

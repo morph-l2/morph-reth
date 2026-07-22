@@ -11,10 +11,16 @@ use parking_lot::RwLock;
 use reth_db_api::{cursor::DbCursorRO, transaction::DbTx};
 use std::sync::{
     Arc,
-    atomic::{AtomicU8, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU8, Ordering},
 };
 
-/// Runtime phase that controls whether reference queries can be served.
+/// Runtime phase, exported purely for metrics and logs.
+///
+/// The read path no longer branches on this. Read correctness comes from the
+/// MDBX read-transaction snapshot plus the `(indexed_to, indexed_hash) == tip`
+/// comparison in [`ReferenceIndexHandle::query_at`], and from the before/after
+/// `chain_info()` bracketing in the RPC layer. The only read-gate bit derived
+/// from phase is [`ReferenceIndexShared::unavailable`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ReferenceIndexPhase {
@@ -52,17 +58,24 @@ impl ReferenceIndexPhase {
 #[derive(Debug)]
 struct ReferenceIndexShared {
     db: RwLock<Option<ReferenceIndexDb>>,
+    /// Latest runtime phase. Kept for metrics/logs only; not read on the query
+    /// path (see [`ReferenceIndexPhase`]).
     phase: AtomicU8,
-    /// Even values are stable snapshots; odd values mean a transition is in progress.
-    generation: AtomicU64,
+    /// Set while the runtime is in [`ReferenceIndexPhase::Unavailable`] (manual
+    /// rebuild required / persistent failure). The read path returns
+    /// `IndexUnavailable` so clients stop retrying; in every other phase the
+    /// tip comparison decides on its own (`IndexBehind` when the cursor lags).
+    unavailable: AtomicBool,
     metrics: ReferenceIndexMetrics,
 }
 
 /// Cloneable query handle shared by the runtime and RPC layer.
 ///
-/// The runtime installs the database and advances the phase. Queries only
-/// succeed in [`ReferenceIndexPhase::Live`] when the durable cursor exactly
-/// matches the supplied canonical tip number and hash.
+/// The runtime installs the database and advances the phase. A query succeeds
+/// only when the durable cursor exactly matches the supplied canonical tip
+/// (number and hash) within a single MDBX snapshot; otherwise it is
+/// `IndexBehind`. The `Unavailable` phase is the one runtime state that
+/// short-circuits to `IndexUnavailable`.
 #[derive(Clone, Debug)]
 pub struct ReferenceIndexHandle {
     shared: Arc<ReferenceIndexShared>,
@@ -76,7 +89,7 @@ impl ReferenceIndexHandle {
             shared: Arc::new(ReferenceIndexShared {
                 db: RwLock::new(None),
                 phase: AtomicU8::new(ReferenceIndexPhase::Opening as u8),
-                generation: AtomicU64::new(0),
+                unavailable: AtomicBool::new(false),
                 metrics: ReferenceIndexMetrics::default(),
             }),
             jade_timestamp,
@@ -88,6 +101,16 @@ impl ReferenceIndexHandle {
         ReferenceIndexPhase::from_u8(self.shared.phase.load(Ordering::Acquire))
     }
 
+    /// Whether a canonical tip at `timestamp` predates Jade.
+    ///
+    /// Before Jade no reference-carrying transaction can exist, so the complete
+    /// result is empty. The RPC layer short-circuits on this so pre-Jade
+    /// queries never reach [`Self::query_at`] — a pre-Jade answer is a terminal
+    /// empty result, not `IndexBehind`, and clients must not retry it.
+    pub fn is_pre_jade(&self, timestamp: u64) -> bool {
+        timestamp < self.jade_timestamp
+    }
+
     pub(crate) fn install_db(&self, db: ReferenceIndexDb) {
         *self.shared.db.write() = Some(db);
     }
@@ -96,14 +119,11 @@ impl ReferenceIndexHandle {
         if self.phase() == phase {
             return;
         }
-        self.shared.generation.fetch_add(1, Ordering::AcqRel);
         self.shared.phase.store(phase as u8, Ordering::Release);
-        self.shared.generation.fetch_add(1, Ordering::Release);
-        self.shared.metrics.phase.set(phase as u8 as f64);
         self.shared
-            .metrics
-            .rpc_ready
-            .set(f64::from(phase == ReferenceIndexPhase::Live));
+            .unavailable
+            .store(phase == ReferenceIndexPhase::Unavailable, Ordering::Release);
+        self.shared.metrics.phase.set(phase as u8 as f64);
     }
 
     pub(crate) fn db(&self) -> Option<ReferenceIndexDb> {
@@ -114,9 +134,13 @@ impl ReferenceIndexHandle {
         &self.shared.metrics
     }
 
-    #[cfg(test)]
-    pub(crate) fn generation(&self) -> u64 {
-        self.shared.generation.load(Ordering::Acquire)
+    /// Record the outcome of a bounded server-side catch-up wait performed by
+    /// the RPC layer. Counts only waits whose budget elapsed and still returned
+    /// `IndexBehind`; a wait that resolves to data (or fails fast) is not counted.
+    pub fn observe_rpc_wait(&self, timed_out: bool) {
+        if timed_out {
+            self.shared.metrics.rpc_wait_timeouts_total.increment(1);
+        }
     }
 
     /// Execute a paginated query at an exact canonical chain snapshot.
@@ -130,39 +154,18 @@ impl ReferenceIndexHandle {
         query: ReferenceQuery,
         canonical_tip: CanonicalTip,
     ) -> Result<Vec<ReferenceTransactionResult>, ReferenceIndexError> {
-        let generation = loop {
-            let generation = self.shared.generation.load(Ordering::Acquire);
-            if generation.is_multiple_of(2) {
-                break generation;
-            }
-            std::hint::spin_loop();
-        };
-        match self.phase() {
-            ReferenceIndexPhase::Opening => return Err(ReferenceIndexError::Initializing),
-            ReferenceIndexPhase::PreJade => {
-                return if canonical_tip.timestamp < self.jade_timestamp {
-                    Ok(Vec::new())
-                } else {
-                    Err(ReferenceIndexError::IndexBehind)
-                };
-            }
-            ReferenceIndexPhase::Deferred | ReferenceIndexPhase::Backfill => {
-                return Err(ReferenceIndexError::IndexBehind);
-            }
-            ReferenceIndexPhase::Repairing | ReferenceIndexPhase::Unavailable => {
-                return Err(ReferenceIndexError::IndexUnavailable);
-            }
-            ReferenceIndexPhase::Live => {}
+        if self.shared.unavailable.load(Ordering::Acquire) {
+            return Err(ReferenceIndexError::IndexUnavailable);
         }
 
-        let db = self.db().ok_or(ReferenceIndexError::IndexUnavailable)?;
+        let db = self.db().ok_or(ReferenceIndexError::Initializing)?;
         let tx = db.tx()?;
         let indexed_to = tx
             .get::<IndexMeta>(IndexMetaKey::IndexedTo.into())?
             .map(decode_u64)
             .transpose()?;
         let Some(indexed_to) = indexed_to else {
-            return Err(ReferenceIndexError::IndexUnavailable);
+            return Err(ReferenceIndexError::IndexBehind);
         };
 
         let indexed_hash = tx
@@ -171,7 +174,7 @@ impl ReferenceIndexHandle {
             })?
             .map(|value| value.0);
         let Some(indexed_hash) = indexed_hash else {
-            return Err(ReferenceIndexError::IndexUnavailable);
+            return Err(ReferenceIndexError::IndexBehind);
         };
         if indexed_to != canonical_tip.number || indexed_hash != canonical_tip.hash {
             return Err(ReferenceIndexError::IndexBehind);
@@ -203,12 +206,6 @@ impl ReferenceIndexHandle {
                 });
             }
             next = cursor.next()?;
-        }
-
-        if self.shared.generation.load(Ordering::Acquire) != generation
-            || self.phase() != ReferenceIndexPhase::Live
-        {
-            return Err(ReferenceIndexError::IndexUnavailable);
         }
 
         Ok(results)
@@ -253,13 +250,30 @@ mod tests {
     }
 
     #[test]
-    fn setting_the_same_phase_does_not_invalidate_readers() {
-        let handle = ReferenceIndexHandle::new(200);
-        let generation = handle.shared.generation.load(Ordering::Acquire);
+    fn unavailable_phase_blocks_reads_and_recovers() {
+        let dir = TempDir::new().unwrap();
+        let db = ReferenceIndexDb::open(dir.path(), 2818, B256::ZERO).unwrap();
+        let tx = db.tx_mut().unwrap();
+        write_block(&tx, 10, B256::repeat_byte(0xaa), 100, &[]).unwrap();
+        update_indexed_to(&tx, 10).unwrap();
+        tx.commit().unwrap();
+        let handle = handle_with_phase(db, 0, ReferenceIndexPhase::Unavailable);
+        let query = ReferenceQuery::new(B256::with_last_byte(1), None, None).unwrap();
+        let tip = CanonicalTip {
+            number: 10,
+            hash: B256::repeat_byte(0xaa),
+            timestamp: 100,
+        };
 
-        handle.set_phase(ReferenceIndexPhase::Opening);
+        // Unavailable short-circuits even when the cursor matches the tip.
+        assert!(matches!(
+            handle.query_at(query, tip),
+            Err(ReferenceIndexError::IndexUnavailable)
+        ));
 
-        assert_eq!(handle.shared.generation.load(Ordering::Acquire), generation);
+        // Recovering out of Unavailable clears the gate; the matching tip serves.
+        handle.set_phase(ReferenceIndexPhase::Live);
+        assert!(handle.query_at(query, tip).unwrap().is_empty());
     }
 
     #[test]
@@ -307,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    fn live_query_treats_a_missing_cursor_as_unavailable() {
+    fn query_with_a_missing_cursor_is_behind() {
         let dir = TempDir::new().unwrap();
         let db = ReferenceIndexDb::open(dir.path(), 2818, B256::ZERO).unwrap();
         let handle = handle_with_phase(db, 0, ReferenceIndexPhase::Live);
@@ -320,12 +334,12 @@ mod tests {
 
         assert!(matches!(
             handle.query_at(query, tip),
-            Err(ReferenceIndexError::IndexUnavailable)
+            Err(ReferenceIndexError::IndexBehind)
         ));
     }
 
     #[test]
-    fn live_query_treats_a_missing_cursor_hash_as_unavailable() {
+    fn query_with_a_missing_cursor_hash_is_behind() {
         let dir = TempDir::new().unwrap();
         let db = ReferenceIndexDb::open(dir.path(), 2818, B256::ZERO).unwrap();
         let tx = db.tx_mut().unwrap();
@@ -341,23 +355,16 @@ mod tests {
 
         assert!(matches!(
             handle.query_at(query, tip),
-            Err(ReferenceIndexError::IndexUnavailable)
+            Err(ReferenceIndexError::IndexBehind)
         ));
     }
 
     #[test]
-    fn pre_jade_query_is_complete_without_a_cursor() {
-        let dir = TempDir::new().unwrap();
-        let db = ReferenceIndexDb::open(dir.path(), 2818, B256::ZERO).unwrap();
-        let handle = handle_with_phase(db, 200, ReferenceIndexPhase::PreJade);
-        let query = ReferenceQuery::new(B256::with_last_byte(1), None, None).unwrap();
-        let tip = CanonicalTip {
-            number: 100,
-            hash: B256::repeat_byte(0xaa),
-            timestamp: 199,
-        };
-
-        assert!(handle.query_at(query, tip).unwrap().is_empty());
+    fn is_pre_jade_reflects_the_jade_timestamp() {
+        let handle = ReferenceIndexHandle::new(200);
+        assert!(handle.is_pre_jade(199));
+        assert!(!handle.is_pre_jade(200));
+        assert!(!handle.is_pre_jade(201));
     }
 
     #[test]
