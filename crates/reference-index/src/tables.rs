@@ -1,5 +1,7 @@
 //! Reference index table declarations.
 
+#![allow(unreachable_pub)] // `tables!` generates public marker types inside this private module.
+
 use alloy_primitives::B256;
 use reth_codecs::DecompressError;
 use reth_db_api::{

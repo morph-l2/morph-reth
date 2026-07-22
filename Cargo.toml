@@ -117,9 +117,6 @@ reth-engine-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v
 reth-engine-tree = { git = "https://github.com/paradigmxyz/reth", tag = "v2.4.0" }
 reth-errors = { git = "https://github.com/paradigmxyz/reth", tag = "v2.4.0" }
 reth-eth-wire-types = { git = "https://github.com/paradigmxyz/reth", tag = "v2.4.0" }
-reth-exex = { git = "https://github.com/paradigmxyz/reth", tag = "v2.4.0" }
-reth-exex-test-utils = { git = "https://github.com/paradigmxyz/reth", tag = "v2.4.0" }
-reth-exex-types = { git = "https://github.com/paradigmxyz/reth", tag = "v2.4.0" }
 reth-ethereum = { git = "https://github.com/paradigmxyz/reth", tag = "v2.4.0" }
 reth-ethereum-cli = { git = "https://github.com/paradigmxyz/reth", tag = "v2.4.0" }
 reth-ethereum-consensus = { git = "https://github.com/paradigmxyz/reth", tag = "v2.4.0" }
@@ -139,6 +136,7 @@ reth-payload-builder = { git = "https://github.com/paradigmxyz/reth", tag = "v2.
 reth-payload-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v2.4.0" }
 reth-payload-util = { git = "https://github.com/paradigmxyz/reth", tag = "v2.4.0" }
 reth-primitives-traits = { version = "0.5.0", default-features = false }
+reth-prune-types = { git = "https://github.com/paradigmxyz/reth", tag = "v2.4.0" }
 reth-provider = { git = "https://github.com/paradigmxyz/reth", tag = "v2.4.0" }
 reth-rpc = { git = "https://github.com/paradigmxyz/reth", tag = "v2.4.0" }
 reth-rpc-api = { git = "https://github.com/paradigmxyz/reth", tag = "v2.4.0" }

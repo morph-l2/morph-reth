@@ -94,6 +94,18 @@ mod tests {
     }
 
     #[test]
+    fn reference_index_disable_flag_is_not_supported() {
+        assert!(
+            CommandParser::<MorphArgs>::try_parse_from(["test", "--morph.disable-reference-index"])
+                .is_err()
+        );
+        assert!(
+            CommandParser::<MorphArgs>::try_parse_from(["test", "--disable-reference-index"])
+                .is_err()
+        );
+    }
+
+    #[test]
     fn test_default_trait_impl() {
         let args = MorphArgs::default();
         assert_eq!(

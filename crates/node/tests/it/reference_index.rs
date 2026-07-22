@@ -1,53 +1,81 @@
-//! Integration tests for `morph_getTransactionHashesByReference`.
+//! End-to-end tests for `morph_getTransactionHashesByReference`.
 //!
-//! These tests spin up a real Morph test node, produce blocks with reference-
-//! carrying `MorphTx` transactions, then run the reference index backfill +
-//! reconcile against the node's provider, and verify the query results.
-//!
-//! Because `reth_e2e_test_utils::setup_engine` doesn't support ExEx injection,
-//! we test the storage layer (backfill/reconcile/query) directly rather than
-//! through the live ExEx.  The ExEx logic is separately covered by the unit
-//! tests in `morph-reference-index`.
+//! The node add-on owns the reference-index runtime. These tests only produce
+//! canonical blocks and call the public RPC, so they cover notification wakeups,
+//! provider-backed backfill, cursor readiness, and RPC registration together.
 
 use alloy_consensus::transaction::TxHashRef;
 use alloy_primitives::{B256, U64};
-use morph_node::test_utils::{MorphTxBuilder, TEST_TOKEN_ID, TestNodeBuilder};
-use morph_reference_index::{
-    DEFAULT_LAG_THRESHOLD, DEFAULT_MAX_REORG_DEPTH, ReferenceIndexDb, ReferenceIndexReader,
-    ReferenceQuery, backfill::run_backfill, reconcile::run_startup_reconcile,
+use jsonrpsee::core::client::ClientT;
+use morph_node::test_utils::{
+    HardforkSchedule, MorphTestNode, MorphTxBuilder, TEST_TOKEN_ID, TestNodeBuilder,
 };
+use morph_reference_index::ReferenceTransactionResult;
+use morph_rpc::ReferenceQueryArgs;
 use reth_payload_primitives::BuiltPayload;
-use reth_provider::BlockNumReader;
-use tempfile::TempDir;
+use std::time::Duration;
 
-// ── helpers ───────────────────────────────────────────────────────────────────
+async fn wait_for_reference_query(
+    node: &MorphTestNode,
+    args: ReferenceQueryArgs,
+) -> eyre::Result<Vec<ReferenceTransactionResult>> {
+    let client = node
+        .rpc_client()
+        .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut last_error = None;
 
-async fn open_and_backfill_index<P>(provider: &P, dir: &TempDir) -> ReferenceIndexDb
-where
-    P: reth_provider::BlockReader<Block = morph_primitives::Block>
-        + reth_provider::HeaderProvider<Header = morph_primitives::MorphHeader>
-        + BlockNumReader
-        + reth_provider::BlockHashReader
-        + reth_provider::ChainSpecProvider<ChainSpec = morph_chainspec::MorphChainSpec>,
-{
-    let chain_spec = provider.chain_spec();
-    let chain_id = reth_chainspec::EthChainSpec::chain(chain_spec.as_ref()).id();
-    let genesis_hash = reth_chainspec::EthChainSpec::genesis_hash(chain_spec.as_ref());
+    while tokio::time::Instant::now() < deadline {
+        match client
+            .request("morph_getTransactionHashesByReference", (args.clone(),))
+            .await
+        {
+            Ok(results) => return Ok(results),
+            Err(error) => {
+                last_error = Some(error.to_string());
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }
+    }
 
-    let db = ReferenceIndexDb::open(dir.path(), chain_id, genesis_hash).unwrap();
-
-    let head = provider.best_block_number().unwrap();
-    run_backfill(&db, provider, chain_spec.as_ref(), head, 256).unwrap();
-    run_startup_reconcile(&db, provider, head, DEFAULT_MAX_REORG_DEPTH).unwrap();
-
-    db.set_ready(true);
-    db
+    Err(eyre::eyre!(
+        "reference index did not become queryable before timeout: {}",
+        last_error.as_deref().unwrap_or("no RPC response")
+    ))
 }
 
-// ── tests ─────────────────────────────────────────────────────────────────────
+fn query_args(reference: B256, offset: Option<u64>, limit: Option<u64>) -> ReferenceQueryArgs {
+    ReferenceQueryArgs {
+        reference,
+        offset,
+        limit,
+    }
+}
 
-/// Produce one block with a reference-carrying MorphTx and verify the index
-/// returns it for the correct reference.
+/// Before Jade, the namespace is available and returns an empty result without
+/// requiring per-block index writes.
+#[tokio::test(flavor = "multi_thread")]
+async fn reference_index_is_empty_before_jade() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, _wallet) = TestNodeBuilder::new()
+        .with_schedule(HardforkSchedule::PreJade)
+        .build()
+        .await?;
+    let node = nodes.pop().unwrap();
+    assert!(
+        !node.inner.data_dir.exex_wal().exists(),
+        "reference index must not create an ExEx WAL"
+    );
+    let results =
+        wait_for_reference_query(&node, query_args(B256::with_last_byte(0x98), None, None)).await?;
+
+    assert!(results.is_empty());
+    Ok(())
+}
+
+/// Produce one block with a reference-carrying MorphTx and verify the live
+/// background index returns it through the public RPC.
 #[tokio::test(flavor = "multi_thread")]
 async fn reference_index_finds_single_morph_tx() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -70,13 +98,7 @@ async fn reference_index_finds_single_morph_tx() -> eyre::Result<()> {
         .unwrap()
         .tx_hash();
 
-    let dir = TempDir::new()?;
-    let db = open_and_backfill_index(&node.inner.provider, &dir).await;
-
-    let reader = ReferenceIndexReader::new(db, DEFAULT_LAG_THRESHOLD);
-    let canonical_tip = node.inner.provider.best_block_number()?;
-    let query = ReferenceQuery::new(reference, None, None).unwrap();
-    let results = reader.query(query, canonical_tip)?;
+    let results = wait_for_reference_query(&node, query_args(reference, None, None)).await?;
 
     assert_eq!(results.len(), 1, "should find exactly one transaction");
     assert_eq!(results[0].transaction_hash, tx_hash);
@@ -85,7 +107,7 @@ async fn reference_index_finds_single_morph_tx() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Produce multiple blocks with the same reference and verify pagination.
+/// Produce multiple blocks with the same reference and verify RPC pagination.
 #[tokio::test(flavor = "multi_thread")]
 async fn reference_index_pagination() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -117,33 +139,20 @@ async fn reference_index_pagination() -> eyre::Result<()> {
         );
     }
 
-    let dir = TempDir::new()?;
-    let db = open_and_backfill_index(&node.inner.provider, &dir).await;
-
-    let reader = ReferenceIndexReader::new(db, DEFAULT_LAG_THRESHOLD);
-    let canonical_tip = node.inner.provider.best_block_number()?;
-
-    // Page 1: offset=0, limit=2 → first two entries.
-    let page1 = reader.query(
-        ReferenceQuery::new(reference, Some(0), Some(2)).unwrap(),
-        canonical_tip,
-    )?;
+    let page1 = wait_for_reference_query(&node, query_args(reference, Some(0), Some(2))).await?;
     assert_eq!(page1.len(), 2);
     assert_eq!(page1[0].transaction_hash, tx_hashes[0]);
     assert_eq!(page1[1].transaction_hash, tx_hashes[1]);
 
-    // Page 2: offset=2, limit=2 → last entry only.
-    let page2 = reader.query(
-        ReferenceQuery::new(reference, Some(2), Some(2)).unwrap(),
-        canonical_tip,
-    )?;
+    let page2 = wait_for_reference_query(&node, query_args(reference, Some(2), Some(2))).await?;
     assert_eq!(page2.len(), 1);
     assert_eq!(page2[0].transaction_hash, tx_hashes[2]);
 
     Ok(())
 }
 
-/// A different reference key returns no results.
+/// A different reference key returns an empty successful result once the index
+/// is exactly at the canonical head.
 #[tokio::test(flavor = "multi_thread")]
 async fn reference_index_no_results_for_unrelated_reference() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -160,15 +169,7 @@ async fn reference_index_no_results_for_unrelated_reference() -> eyre::Result<()
     node.rpc.inject_tx(raw_tx).await?;
     node.advance_block().await?;
 
-    let dir = TempDir::new()?;
-    let db = open_and_backfill_index(&node.inner.provider, &dir).await;
-    let reader = ReferenceIndexReader::new(db, DEFAULT_LAG_THRESHOLD);
-    let canonical_tip = node.inner.provider.best_block_number()?;
-
-    let results = reader.query(
-        ReferenceQuery::new(other_reference, None, None).unwrap(),
-        canonical_tip,
-    )?;
+    let results = wait_for_reference_query(&node, query_args(other_reference, None, None)).await?;
     assert!(
         results.is_empty(),
         "unrelated reference should return nothing"
