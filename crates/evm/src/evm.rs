@@ -137,19 +137,16 @@ impl<DB: Database, I> MorphEvm<DB, I> {
         self.inner.take_post_fee_logs()
     }
 
-    /// Sets the recoverable sweep candidate allowance for the next transaction.
+    /// Sets the sweep candidate allowance for the next transaction.
     #[inline]
-    pub fn set_recoverable_sweep_candidate_allowance(&mut self, allowance: usize) {
-        self.inner
-            .set_recoverable_sweep_candidate_allowance(allowance);
+    pub fn set_sweep_candidate_allowance(&mut self, allowance: usize) {
+        self.inner.set_sweep_candidate_allowance(allowance);
     }
 
-    /// Takes the recoverable sweep outcome produced by the latest transaction.
+    /// Takes the sweep outcome produced by the latest transaction.
     #[inline]
-    pub fn take_recoverable_sweep_outcome(
-        &mut self,
-    ) -> Option<morph_revm::RecoverableSweepOutcome> {
-        self.inner.take_recoverable_sweep_outcome()
+    pub fn take_sweep_outcome(&mut self) -> Option<morph_revm::SweepOutcome> {
+        self.inner.take_sweep_outcome()
     }
 }
 

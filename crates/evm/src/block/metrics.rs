@@ -1,11 +1,11 @@
-//! Observability for the Onyx recoverable-sweep engine.
+//! Observability for the Onyx sweep engine.
 //!
 //! Metrics are recorded only from committed transactions, so speculative or
 //! discarded candidates (e.g. a payload-builder attempt that is rolled back)
 //! never move these counters. The reference index intentionally does not
 //! consume these events.
 
-use morph_revm::{RecoverableSweepFailure, RecoverableSweepFailureReason};
+use morph_revm::{SweepFailure, SweepFailureReason};
 use reth_metrics::{
     Metrics,
     metrics::{Counter, counter},
@@ -13,11 +13,11 @@ use reth_metrics::{
 
 /// Name of the labeled failure-reason series. Must stay under the same scope
 /// as the `#[metrics(scope = ...)]` struct below so both share one namespace.
-const FAILURES_BY_REASON: &str = "morph.recoverable_sweep.failures_by_reason";
+const FAILURES_BY_REASON: &str = "morph.sweep.failures_by_reason";
 
 #[derive(Metrics, Clone)]
-#[metrics(scope = "morph.recoverable_sweep")]
-pub(crate) struct RecoverableSweepMetrics {
+#[metrics(scope = "morph.sweep")]
+pub(crate) struct SweepMetrics {
     /// Candidates checked after committed transactions; each is charged a fixed
     /// system-gas debit regardless of outcome.
     candidates_checked_total: Counter,
@@ -31,18 +31,18 @@ pub(crate) struct RecoverableSweepMetrics {
     /// value is an operational signal (misconfigured deposit or 7702 abuse),
     /// not just a benign no-op.
     code_skipped_total: Counter,
-    /// Fixed recoverable-sweep system gas committed to blocks. Its rate against
+    /// Fixed sweep system gas committed to blocks. Its rate against
     /// the per-block budget shows how close blocks run to the sweep cap.
     system_gas_total: Counter,
 }
 
-impl RecoverableSweepMetrics {
-    /// Records one committed transaction's recoverable-sweep outcome.
+impl SweepMetrics {
+    /// Records one committed transaction's sweep outcome.
     pub(crate) fn record(
         &self,
         checked_candidates: usize,
         successes: usize,
-        failures: &[RecoverableSweepFailure],
+        failures: &[SweepFailure],
         system_gas_used: u64,
     ) {
         self.candidates_checked_total
@@ -52,10 +52,7 @@ impl RecoverableSweepMetrics {
         self.system_gas_total.increment(system_gas_used);
 
         for failure in failures {
-            if matches!(
-                failure.reason,
-                RecoverableSweepFailureReason::DepositHasCode
-            ) {
+            if matches!(failure.reason, SweepFailureReason::DepositHasCode) {
                 self.code_skipped_total.increment(1);
             }
             // A labeled counter gives the full per-reason breakdown; the derive

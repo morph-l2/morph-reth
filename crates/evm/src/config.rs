@@ -4,7 +4,7 @@ use alloy_primitives::B256;
 use morph_chainspec::hardfork::{MorphHardfork, MorphHardforks};
 use morph_primitives::Block;
 use morph_primitives::{MorphHeader, MorphPrimitives};
-use morph_revm::{MorphBlockEnv, RecoverableSweepConfig};
+use morph_revm::{MorphBlockEnv, SweepConfig};
 use reth_chainspec::EthChainSpec;
 use reth_evm::{ConfigureEvm, EvmEnv, EvmEnvFor, eth::EthBlockExecutionCtx};
 use reth_primitives_traits::{SealedBlock, SealedHeader};
@@ -14,10 +14,7 @@ use revm::primitives::U256;
 use std::borrow::Cow;
 
 impl MorphEvmConfig {
-    fn recoverable_sweep_config(
-        &self,
-        hardfork: MorphHardfork,
-    ) -> Result<Option<RecoverableSweepConfig>, MorphEvmError> {
+    fn sweep_config(&self, hardfork: MorphHardfork) -> Result<Option<SweepConfig>, MorphEvmError> {
         if !hardfork.is_onyx() {
             return Ok(None);
         }
@@ -31,7 +28,7 @@ impl MorphEvmConfig {
                 )
             })?;
 
-        Ok(Some(RecoverableSweepConfig { registry_address }))
+        Ok(Some(SweepConfig { registry_address }))
     }
 }
 
@@ -54,7 +51,7 @@ impl ConfigureEvm for MorphEvmConfig {
         let spec = self
             .chain_spec()
             .morph_hardfork_at(header.number(), header.timestamp());
-        let recoverable_sweep = self.recoverable_sweep_config(spec)?;
+        let sweep = self.sweep_config(spec)?;
 
         let mut cfg_env = CfgEnv::<MorphHardfork>::default()
             .with_chain_id(self.chain_spec().chain().id())
@@ -95,7 +92,7 @@ impl ConfigureEvm for MorphEvmConfig {
             cfg_env,
             block_env: MorphBlockEnv {
                 inner: block_env,
-                recoverable_sweep,
+                sweep,
             },
         })
     }
@@ -109,7 +106,7 @@ impl ConfigureEvm for MorphEvmConfig {
         let spec = self
             .chain_spec()
             .morph_hardfork_at(parent.number() + 1, attributes.timestamp);
-        let recoverable_sweep = self.recoverable_sweep_config(spec)?;
+        let sweep = self.sweep_config(spec)?;
 
         let mut cfg_env = CfgEnv::<MorphHardfork>::default()
             .with_chain_id(self.chain_spec().chain().id())
@@ -150,7 +147,7 @@ impl ConfigureEvm for MorphEvmConfig {
             cfg_env,
             block_env: MorphBlockEnv {
                 inner: block_env,
-                recoverable_sweep,
+                sweep,
             },
         })
     }
@@ -354,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    fn test_onyx_populates_recoverable_sweep_config() {
+    fn test_onyx_populates_sweep_config() {
         let registry = address!("5300000000000000000000000000000000000023");
         let chain_spec = create_onyx_chainspec(100, Some(registry));
         let config = MorphEvmConfig::new_with_default_factory(chain_spec);
@@ -362,7 +359,7 @@ mod tests {
         let env = config.evm_env(&create_morph_header(100, 100)).unwrap();
         assert_eq!(
             env.block_env
-                .recoverable_sweep
+                .sweep
                 .expect("Onyx config must be populated")
                 .registry_address,
             registry
@@ -374,7 +371,7 @@ mod tests {
         assert_eq!(
             next_env
                 .block_env
-                .recoverable_sweep
+                .sweep
                 .expect("Onyx config must be populated")
                 .registry_address,
             registry
@@ -382,22 +379,22 @@ mod tests {
     }
 
     #[test]
-    fn test_pre_onyx_ignores_recoverable_sweep_address() {
+    fn test_pre_onyx_ignores_sweep_address() {
         let registry = address!("5300000000000000000000000000000000000023");
         let chain_spec = create_onyx_chainspec(100, Some(registry));
         let config = MorphEvmConfig::new_with_default_factory(chain_spec);
 
         let env = config.evm_env(&create_morph_header(99, 99)).unwrap();
-        assert!(env.block_env.recoverable_sweep.is_none());
+        assert!(env.block_env.sweep.is_none());
 
         let next_env = config
             .next_evm_env(&create_morph_header(98, 98), &next_block_attributes(99))
             .unwrap();
-        assert!(next_env.block_env.recoverable_sweep.is_none());
+        assert!(next_env.block_env.sweep.is_none());
     }
 
     #[test]
-    fn test_onyx_requires_recoverable_sweep_address() {
+    fn test_onyx_requires_sweep_address() {
         let chain_spec = create_onyx_chainspec(100, None);
         let config = MorphEvmConfig::new_with_default_factory(chain_spec);
 

@@ -4,7 +4,7 @@ use alloy_primitives::{B256, Bytes};
 use alloy_trie::{HashBuilder, Nibbles, TrieAccount, root::storage_root_unhashed};
 use morph_chainspec::hardfork::MorphHardfork;
 use morph_evm::{MorphBlockEnv, evm::MorphEvm};
-use morph_revm::{MAX_CANDIDATES_PER_TX, RecoverableSweepConfig};
+use morph_revm::{MAX_CANDIDATES_PER_TX, SweepConfig};
 use revm::{
     context::{CfgEnv, result::ExecutionResult},
     database::{EmptyDB, PlainAccount, State},
@@ -154,7 +154,7 @@ fn execute_case(
     // From Onyx onward the EL sweeps whitelisted ERC-20 inflows to the
     // registered master after the main transaction. A single statetest runs one
     // transaction, so the per-transaction candidate cap is the whole allowance.
-    let recoverable_sweep = fork.is_onyx().then(|| RecoverableSweepConfig {
+    let sweep = fork.is_onyx().then(|| SweepConfig {
         registry_address: unit
             .recoverable_deposit_registry
             .unwrap_or(MORPH_STATE_TEST_RECOVERABLE_REGISTRY),
@@ -163,7 +163,7 @@ fn execute_case(
         cfg_env: cfg,
         block_env: MorphBlockEnv {
             inner: block,
-            recoverable_sweep,
+            sweep,
         },
     };
 
@@ -171,7 +171,7 @@ fn execute_case(
         let mut evm = MorphEvm::new(&mut state, env)
             .with_inspector(TracerEip3155::buffered(stderr()).without_summary());
         evm.enable_inspector();
-        evm.set_recoverable_sweep_candidate_allowance(MAX_CANDIDATES_PER_TX);
+        evm.set_sweep_candidate_allowance(MAX_CANDIDATES_PER_TX);
         let exec_result = evm.transact_commit(tx);
         let receipt_logs = collect_receipt_logs(&mut evm, &exec_result);
         return Ok(build_outcome(
@@ -186,7 +186,7 @@ fn execute_case(
     }
 
     let mut evm = MorphEvm::new(&mut state, env);
-    evm.set_recoverable_sweep_candidate_allowance(MAX_CANDIDATES_PER_TX);
+    evm.set_sweep_candidate_allowance(MAX_CANDIDATES_PER_TX);
     let exec_result = evm.transact_commit(tx);
     let receipt_logs = collect_receipt_logs(&mut evm, &exec_result);
     Ok(build_outcome(
@@ -256,9 +256,9 @@ where
         logs.extend(result.logs().iter().cloned());
     }
     logs.extend(evm.take_post_fee_logs());
-    // Recoverable sweep logs (token call logs + synthesized `RecoverableSweep`)
+    // Sweep logs (token call logs + synthesized `RecoverableSweep`)
     // are appended last, matching the block executor's receipt ordering.
-    if let Some(outcome) = evm.take_recoverable_sweep_outcome() {
+    if let Some(outcome) = evm.take_sweep_outcome() {
         logs.extend(outcome.logs);
     }
     logs

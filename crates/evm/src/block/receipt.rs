@@ -47,7 +47,7 @@ use tracing::warn;
 /// - `morph_tx_fields`: MorphTx-specific fields (token fee info, version, reference, memo)
 /// - `pre_fee_logs`: Transfer event logs from token fee deduction (survives tx revert)
 /// - `post_fee_logs`: Transfer event logs from token fee reimbursement
-/// - `sweep_logs`: Recoverable sweep call and protocol settlement logs
+/// - `sweep_logs`: Sweep call and protocol settlement logs
 #[derive(Debug)]
 pub(crate) struct MorphReceiptBuilderCtx<'a, E: Evm> {
     /// The executed transaction
@@ -65,7 +65,7 @@ pub(crate) struct MorphReceiptBuilderCtx<'a, E: Evm> {
     pub pre_fee_logs: Vec<Log>,
     /// Transfer event logs from token fee reimbursement (after main tx execution).
     pub post_fee_logs: Vec<Log>,
-    /// Recoverable sweep logs emitted after fee reimbursement.
+    /// Sweep logs emitted after fee reimbursement.
     pub sweep_logs: Vec<Log>,
 }
 

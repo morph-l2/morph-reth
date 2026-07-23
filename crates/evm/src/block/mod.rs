@@ -9,7 +9,7 @@ mod factory;
 mod metrics;
 mod receipt;
 
-use metrics::RecoverableSweepMetrics;
+use metrics::SweepMetrics;
 
 pub(crate) use factory::MorphBlockExecutorFactory;
 pub(crate) use receipt::{
@@ -30,8 +30,7 @@ use morph_chainspec::{MorphChainSpec, MorphHardfork, MorphHardforks};
 use morph_primitives::{MorphReceipt, MorphTxEnvelope};
 use morph_revm::{
     BLOCK_SYSTEM_GAS, CANDIDATE_SYSTEM_GAS, L1_GAS_PRICE_ORACLE_ADDRESS, MAX_CANDIDATES_PER_BLOCK,
-    MAX_CANDIDATES_PER_TX, MorphHaltReason, RecoverableSweepOutcome, TokenFeeInfo,
-    evm::MorphContext,
+    MAX_CANDIDATES_PER_TX, MorphHaltReason, SweepOutcome, TokenFeeInfo, evm::MorphContext,
 };
 use reth_primitives_traits::Recovered;
 use reth_revm::{DatabaseCommit, Inspector, context::result::ResultAndState};
@@ -52,8 +51,8 @@ pub struct MorphTxResult {
     pub pre_fee_logs: Vec<Log>,
     /// Token-fee reimbursement Transfer logs (survive main-tx revert).
     pub post_fee_logs: Vec<Log>,
-    /// Recoverable sweep state, logs, and fixed system usage produced after the main transaction.
-    pub recoverable_sweep: RecoverableSweepOutcome,
+    /// Sweep state, logs, and fixed system usage produced after the main transaction.
+    pub sweep: SweepOutcome,
 }
 
 impl TxResult for MorphTxResult {
@@ -101,12 +100,12 @@ pub struct MorphBlockExecutor<DB: Database, I> {
     receipts: Vec<MorphReceipt>,
     /// Total gas used by executed transactions
     gas_used: u64,
-    /// Recoverable sweep candidates consumed by committed transactions.
-    committed_recoverable_sweep_candidates: usize,
-    /// Fixed recoverable sweep system gas consumed by committed transactions.
-    committed_recoverable_sweep_system_gas: u64,
-    /// Recoverable sweep observability counters.
-    recoverable_sweep_metrics: RecoverableSweepMetrics,
+    /// Sweep candidates consumed by committed transactions.
+    committed_sweep_candidates: usize,
+    /// Fixed sweep system gas consumed by committed transactions.
+    committed_sweep_system_gas: u64,
+    /// Sweep observability counters.
+    sweep_metrics: SweepMetrics,
     /// Cached hardfork for this block (constant across all transactions).
     /// Set in `apply_pre_execution_changes`, reused in `commit_transaction`.
     hardfork: MorphHardfork,
@@ -134,9 +133,9 @@ where
             receipt_builder,
             receipts: Vec::new(),
             gas_used: 0,
-            committed_recoverable_sweep_candidates: 0,
-            committed_recoverable_sweep_system_gas: 0,
-            recoverable_sweep_metrics: RecoverableSweepMetrics::default(),
+            committed_sweep_candidates: 0,
+            committed_sweep_system_gas: 0,
+            sweep_metrics: SweepMetrics::default(),
             hardfork: MorphHardfork::default(),
         }
     }
@@ -260,15 +259,14 @@ where
         let signer = *recovered.signer();
 
         let remaining_candidates = MAX_CANDIDATES_PER_BLOCK
-            .checked_sub(self.committed_recoverable_sweep_candidates)
-            .expect("committed recoverable sweep candidates exceed the block limit");
-        let allowance = if self.evm.block().recoverable_sweep.is_some() {
+            .checked_sub(self.committed_sweep_candidates)
+            .expect("committed sweep candidates exceed the block limit");
+        let allowance = if self.evm.block().sweep.is_some() {
             remaining_candidates.min(MAX_CANDIDATES_PER_TX)
         } else {
             0
         };
-        self.evm
-            .set_recoverable_sweep_candidate_allowance(allowance);
+        self.evm.set_sweep_candidate_allowance(allowance);
 
         // Execute the transaction
         let result = self
@@ -280,10 +278,10 @@ where
         let l1_fee = self.evm.cached_l1_data_fee();
         let pre_fee_logs = self.evm.take_pre_fee_logs();
         let post_fee_logs = self.evm.take_post_fee_logs();
-        let recoverable_sweep = self
+        let sweep = self
             .evm
-            .take_recoverable_sweep_outcome()
-            .ok_or_else(|| BlockExecutionError::msg("missing recoverable sweep outcome"))?;
+            .take_sweep_outcome()
+            .ok_or_else(|| BlockExecutionError::msg("missing sweep outcome"))?;
 
         Ok(MorphTxResult {
             result,
@@ -291,7 +289,7 @@ where
             l1_fee,
             pre_fee_logs,
             post_fee_logs,
-            recoverable_sweep,
+            sweep,
         })
     }
 
@@ -302,65 +300,62 @@ where
             l1_fee,
             pre_fee_logs,
             post_fee_logs,
-            recoverable_sweep,
+            sweep,
         } = output;
 
-        let checked_candidates = recoverable_sweep.checked_candidates;
+        let checked_candidates = sweep.checked_candidates;
         assert!(
             checked_candidates <= MAX_CANDIDATES_PER_TX,
-            "recoverable sweep outcome exceeds the per-transaction candidate limit"
+            "sweep outcome exceeds the per-transaction candidate limit"
         );
         assert_eq!(
-            recoverable_sweep
-                .successes
-                .len()
-                .checked_add(recoverable_sweep.failures.len()),
+            sweep.successes.len().checked_add(sweep.failures.len()),
             Some(checked_candidates),
-            "every checked recoverable sweep candidate must have an outcome"
+            "every checked sweep candidate must have an outcome"
         );
         let expected_system_gas = u64::try_from(checked_candidates)
-            .expect("recoverable sweep candidate count does not fit in u64")
+            .expect("sweep candidate count does not fit in u64")
             .checked_mul(CANDIDATE_SYSTEM_GAS)
-            .expect("recoverable sweep system gas overflow");
+            .expect("sweep system gas overflow");
         assert_eq!(
-            recoverable_sweep.system_gas_used, expected_system_gas,
-            "recoverable sweep outcome has inconsistent fixed system gas"
+            sweep.system_gas_used, expected_system_gas,
+            "sweep outcome has inconsistent fixed system gas"
         );
 
         let committed_candidates = self
-            .committed_recoverable_sweep_candidates
+            .committed_sweep_candidates
             .checked_add(checked_candidates)
-            .expect("committed recoverable sweep candidate count overflow");
+            .expect("committed sweep candidate count overflow");
         assert!(
             committed_candidates <= MAX_CANDIDATES_PER_BLOCK,
-            "committed recoverable sweep candidates exceed the block limit"
+            "committed sweep candidates exceed the block limit"
         );
         let committed_system_gas = self
-            .committed_recoverable_sweep_system_gas
-            .checked_add(recoverable_sweep.system_gas_used)
-            .expect("committed recoverable sweep system gas overflow");
+            .committed_sweep_system_gas
+            .checked_add(sweep.system_gas_used)
+            .expect("committed sweep system gas overflow");
         assert!(
             committed_system_gas <= BLOCK_SYSTEM_GAS,
-            "committed recoverable sweep system gas exceeds the block limit"
+            "committed sweep system gas exceeds the block limit"
         );
         assert_eq!(
             committed_system_gas,
             u64::try_from(committed_candidates)
-                .expect("committed recoverable sweep candidate count does not fit in u64")
+                .expect("committed sweep candidate count does not fit in u64")
                 .checked_mul(CANDIDATE_SYSTEM_GAS)
-                .expect("committed recoverable sweep system gas overflow"),
-            "committed recoverable sweep counters are inconsistent"
+                .expect("committed sweep system gas overflow"),
+            "committed sweep counters are inconsistent"
         );
-        self.committed_recoverable_sweep_candidates = committed_candidates;
-        self.committed_recoverable_sweep_system_gas = committed_system_gas;
+        self.committed_sweep_candidates = committed_candidates;
+        self.committed_sweep_system_gas = committed_system_gas;
 
         // Observability only; recorded here so speculative/discarded candidates
         // never move the counters (this runs solely on committed transactions).
-        self.recoverable_sweep_metrics.record(
+        self.sweep_metrics.record(
             checked_candidates,
-            recoverable_sweep.successes.len(),
-            &recoverable_sweep.failures,
-            recoverable_sweep.system_gas_used,
+            sweep.successes.len(),
+            &sweep.failures,
+            sweep.system_gas_used,
         );
 
         // EIP-8037 separates regular and state gas; pre-Amsterdam morph treats
@@ -393,7 +388,7 @@ where
             morph_tx_fields,
             pre_fee_logs,
             post_fee_logs,
-            sweep_logs: recoverable_sweep.logs,
+            sweep_logs: sweep.logs,
         };
         self.receipts.push(self.receipt_builder.build_receipt(ctx));
 
@@ -440,7 +435,7 @@ mod tests {
     use morph_chainspec::MORPH_MAINNET;
     use morph_primitives::transaction::TxL1Msg;
     use morph_revm::{
-        BLOCK_SYSTEM_GAS, CANDIDATE_SYSTEM_GAS, MAX_CANDIDATES_PER_BLOCK, RecoverableSweepConfig,
+        BLOCK_SYSTEM_GAS, CANDIDATE_SYSTEM_GAS, MAX_CANDIDATES_PER_BLOCK, SweepConfig,
     };
     use revm::{
         context::{BlockEnv, CfgEnv},
@@ -518,7 +513,7 @@ mod tests {
                         gas_limit: 30_000_000,
                         ..Default::default()
                     },
-                    recoverable_sweep: Some(RecoverableSweepConfig {
+                    sweep: Some(SweepConfig {
                         registry_address: REGISTRY,
                     }),
                 },
@@ -547,31 +542,31 @@ mod tests {
 
         let discarded = executor
             .execute_transaction_with_commit_condition(l1_message(EMITTER_16, 0), |output| {
-                discarded_checked = output.recoverable_sweep.checked_candidates;
+                discarded_checked = output.sweep.checked_candidates;
                 CommitChanges::No
             })
             .unwrap();
 
         assert!(discarded.is_none());
         assert_eq!(discarded_checked, 16);
-        assert_eq!(executor.committed_recoverable_sweep_candidates, 0);
-        assert_eq!(executor.committed_recoverable_sweep_system_gas, 0);
+        assert_eq!(executor.committed_sweep_candidates, 0);
+        assert_eq!(executor.committed_sweep_system_gas, 0);
 
         let output = executor
             .execute_transaction_without_commit(l1_message(EMITTER_16, 0))
             .unwrap();
-        assert_eq!(output.recoverable_sweep.checked_candidates, 16);
+        assert_eq!(output.sweep.checked_candidates, 16);
         executor.commit_transaction(output);
 
-        assert_eq!(executor.committed_recoverable_sweep_candidates, 16);
+        assert_eq!(executor.committed_sweep_candidates, 16);
         assert_eq!(
-            executor.committed_recoverable_sweep_system_gas,
+            executor.committed_sweep_system_gas,
             16 * CANDIDATE_SYSTEM_GAS
         );
     }
 
     #[test]
-    fn recoverable_sweep_allowance_caps_block_at_64_candidates() {
+    fn sweep_allowance_caps_block_at_64_candidates() {
         let mut executor = test_executor();
         let transactions = [
             (EMITTER_16, 16),
@@ -586,40 +581,34 @@ mod tests {
                 .execute_transaction_without_commit(l1_message(emitter, queue_index as u64))
                 .unwrap();
             assert_eq!(
-                output.recoverable_sweep.checked_candidates, expected_checked,
+                output.sweep.checked_candidates, expected_checked,
                 "unexpected allowance for transaction {queue_index}"
             );
             executor.commit_transaction(output);
         }
 
         assert_eq!(
-            executor.committed_recoverable_sweep_candidates,
+            executor.committed_sweep_candidates,
             MAX_CANDIDATES_PER_BLOCK
         );
-        assert_eq!(
-            executor.committed_recoverable_sweep_system_gas,
-            BLOCK_SYSTEM_GAS
-        );
+        assert_eq!(executor.committed_sweep_system_gas, BLOCK_SYSTEM_GAS);
 
         let exhausted = executor
             .execute_transaction_without_commit(l1_message(EMITTER_16, 5))
             .unwrap();
-        assert_eq!(exhausted.recoverable_sweep.checked_candidates, 0);
-        assert_eq!(exhausted.recoverable_sweep.system_gas_used, 0);
+        assert_eq!(exhausted.sweep.checked_candidates, 0);
+        assert_eq!(exhausted.sweep.system_gas_used, 0);
     }
 
     #[test]
-    fn block_execution_gas_excludes_recoverable_sweep_system_gas() {
+    fn block_execution_gas_excludes_sweep_system_gas() {
         let mut executor = test_executor();
         let output = executor
             .execute_transaction_without_commit(l1_message(EMITTER_16, 0))
             .unwrap();
         let main_gas_used = output.result.result.gas().tx_gas_used();
 
-        assert_eq!(
-            output.recoverable_sweep.system_gas_used,
-            16 * CANDIDATE_SYSTEM_GAS
-        );
+        assert_eq!(output.sweep.system_gas_used, 16 * CANDIDATE_SYSTEM_GAS);
         let gas_output = executor.commit_transaction(output);
         assert_eq!(gas_output.tx_gas_used(), main_gas_used);
 
@@ -632,7 +621,7 @@ mod tests {
     }
 
     #[test]
-    fn reverted_main_transaction_does_not_run_or_commit_recoverable_sweep() {
+    fn reverted_main_transaction_does_not_run_or_commit_sweep() {
         let mut executor = test_executor();
         let output = executor
             .execute_transaction_without_commit(l1_message(REVERTING_EMITTER, 0))
@@ -640,11 +629,11 @@ mod tests {
 
         assert!(!output.result.result.is_success());
         assert!(output.result.result.logs().is_empty());
-        assert_eq!(output.recoverable_sweep.checked_candidates, 0);
-        assert_eq!(output.recoverable_sweep.system_gas_used, 0);
-        assert!(output.recoverable_sweep.logs.is_empty());
-        assert!(output.recoverable_sweep.successes.is_empty());
-        assert!(output.recoverable_sweep.failures.is_empty());
+        assert_eq!(output.sweep.checked_candidates, 0);
+        assert_eq!(output.sweep.system_gas_used, 0);
+        assert!(output.sweep.logs.is_empty());
+        assert!(output.sweep.successes.is_empty());
+        assert!(output.sweep.failures.is_empty());
         assert!(
             !output.result.state.contains_key(&REGISTRY),
             "a reverted main transaction must not enter the sweep phase"
@@ -652,8 +641,8 @@ mod tests {
 
         executor.commit_transaction(output);
 
-        assert_eq!(executor.committed_recoverable_sweep_candidates, 0);
-        assert_eq!(executor.committed_recoverable_sweep_system_gas, 0);
+        assert_eq!(executor.committed_sweep_candidates, 0);
+        assert_eq!(executor.committed_sweep_system_gas, 0);
         let receipt = &executor.receipts[0];
         assert!(!receipt.status());
         assert!(receipt.logs().is_empty());

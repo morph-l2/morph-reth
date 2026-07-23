@@ -45,7 +45,7 @@ const TEST_ROUTER_RUNTIME: &str = "0x608060405234801561000f575f5ffd5b50600436106
 const TEST_CANDIDATE_EMITTER_RUNTIME: &str = "0x6080604052348015600e575f5ffd5b5060015b6010816001600160a01b031611607057604051600181526001600160a01b0382169033907fddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef9060200160405180910390a3606a816072565b90506012565b005b5f6001600160a01b0382166002600160a01b03198101609f57634e487b7160e01b5f52601160045260245ffd5b6001019291505056";
 
 /// Deployed runtime of the PRODUCTION `RecoverableDepositRegistry`
-/// (`morph/contracts` `feat/onyx-recoverable-sweep`, solc 0.8.24). Snapshot
+/// (`morph/contracts` `feat/onyx-sweep`, solc 0.8.24). Snapshot
 /// sha256 `02d0d79f86c497bd237bf3fb30efad42e5f88366a32753ff8ac5d80f50fa08b0`.
 ///
 /// Injected directly at [`REGISTRY`] (no proxy): `resolveSweep`, `initialize`
@@ -173,7 +173,7 @@ async fn transfer_to_deposit(schedule: HardforkSchedule) -> eyre::Result<(U256, 
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn onyx_activation_gates_recoverable_sweep() -> eyre::Result<()> {
+async fn onyx_activation_gates_sweep() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let (deposit, master, log_count) = transfer_to_deposit(HardforkSchedule::PreOnyx).await?;
@@ -891,7 +891,7 @@ async fn user_transaction_after_block_sweep_budget_exhaustion_still_succeeds() -
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn synthetic_trace_calls_do_not_run_recoverable_sweep() -> eyre::Result<()> {
+async fn synthetic_trace_calls_do_not_run_sweep() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let (mut nodes, wallet) = stateful_builder().build().await?;

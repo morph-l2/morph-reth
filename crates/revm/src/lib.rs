@@ -51,11 +51,11 @@ pub mod exec;
 pub mod handler;
 pub mod l1block;
 pub mod precompiles;
-pub mod recoverable_sweep;
+pub mod sweep;
 pub mod token_fee;
 mod tx;
 
-pub use block::{MorphBlockEnv, RecoverableSweepConfig};
+pub use block::{MorphBlockEnv, SweepConfig};
 pub use error::{MorphHaltReason, MorphInvalidTransaction};
 pub use evm::MorphEvm;
 pub use l1block::{
@@ -73,13 +73,12 @@ pub use l1block::{
     L1BlockInfo,
 };
 pub use precompiles::MorphPrecompiles;
-pub use recoverable_sweep::{
+pub use sweep::{
     BALANCE_OF_GAS_LIMIT, BLOCK_SYSTEM_GAS, CANDIDATE_SYSTEM_GAS, MAX_CANDIDATES_PER_BLOCK,
-    MAX_CANDIDATES_PER_TX, RESOLVE_GAS_LIMIT, RecoverableSweepCandidate, RecoverableSweepFailure,
-    RecoverableSweepFailureReason, RecoverableSweepInvariantError, RecoverableSweepOutcome,
-    RecoverableSweepSuccess, RecoverableSweepTraceReplayScope, TRANSFER_GAS_LIMIT,
-    begin_recoverable_sweep_trace_replay, clear_recoverable_sweep_trace_replay,
-    recoverable_sweep_trace_replay_scope, set_recoverable_sweep_trace_replay_target,
+    MAX_CANDIDATES_PER_TX, RESOLVE_GAS_LIMIT, SweepCandidate, SweepFailure, SweepFailureReason,
+    SweepInvariantError, SweepOutcome, SweepSuccess, SweepTraceReplayScope, TRANSFER_GAS_LIMIT,
+    begin_sweep_trace_replay, clear_sweep_trace_replay, set_sweep_trace_replay_target,
+    sweep_trace_replay_scope,
 };
 pub use token_fee::{
     L2_TOKEN_REGISTRY_ADDRESS, TokenFeeInfo, compute_mapping_slot,

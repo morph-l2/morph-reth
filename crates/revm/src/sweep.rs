@@ -1,6 +1,4 @@
-use crate::{
-    MorphEvm, MorphInvalidTransaction, MorphTxEnv, RecoverableSweepConfig, handler::MorphEvmHandler,
-};
+use crate::{MorphEvm, MorphInvalidTransaction, MorphTxEnv, SweepConfig, handler::MorphEvmHandler};
 use alloy_evm::Database;
 use alloy_primitives::{Address, B256, Bytes, Log, U256, b256};
 use revm::{
@@ -15,9 +13,9 @@ use revm::{
 };
 use std::{cell::RefCell, collections::HashSet};
 
-/// Maximum recoverable sweep candidates checked after one transaction.
+/// Maximum sweep candidates checked after one transaction.
 pub const MAX_CANDIDATES_PER_TX: usize = 16;
-/// Maximum recoverable sweep candidates checked in one block.
+/// Maximum sweep candidates checked in one block.
 pub const MAX_CANDIDATES_PER_BLOCK: usize = 64;
 /// Gas limit for the Registry resolver static call.
 pub const RESOLVE_GAS_LIMIT: u64 = 50_000;
@@ -27,7 +25,7 @@ pub const BALANCE_OF_GAS_LIMIT: u64 = 50_000;
 pub const TRANSFER_GAS_LIMIT: u64 = 200_000;
 /// Fixed system-gas debit for every checked candidate.
 pub const CANDIDATE_SYSTEM_GAS: u64 = 350_000;
-/// Maximum recoverable sweep system gas in one block.
+/// Maximum sweep system gas in one block.
 pub const BLOCK_SYSTEM_GAS: u64 = 22_400_000;
 
 #[derive(Debug)]
@@ -52,9 +50,9 @@ thread_local! {
 ///
 /// Trace RPC replay closures are synchronous, so a thread-local context shares
 /// the block budget across their otherwise independent EVM instances.
-pub fn begin_recoverable_sweep_trace_replay(transaction_hashes: Vec<B256>) {
+pub fn begin_sweep_trace_replay(transaction_hashes: Vec<B256>) {
     let Some(finish_hash) = transaction_hashes.last().copied() else {
-        clear_recoverable_sweep_trace_replay();
+        clear_sweep_trace_replay();
         return;
     };
     TRACE_REPLAY_CONTEXT.with(|context| {
@@ -68,7 +66,7 @@ pub fn begin_recoverable_sweep_trace_replay(transaction_hashes: Vec<B256>) {
 }
 
 /// Sets the target transaction that ends a single-transaction canonical replay.
-pub fn set_recoverable_sweep_trace_replay_target(target: B256) {
+pub fn set_sweep_trace_replay_target(target: B256) {
     TRACE_REPLAY_CONTEXT.with(|context| {
         let mut context = context.borrow_mut();
         let Some(replay) = context.as_mut() else {
@@ -83,7 +81,7 @@ pub fn set_recoverable_sweep_trace_replay_target(target: B256) {
 }
 
 /// Clears any canonical trace replay state on the current worker thread.
-pub fn clear_recoverable_sweep_trace_replay() {
+pub fn clear_sweep_trace_replay() {
     TRACE_REPLAY_CONTEXT.with(|context| {
         *context.borrow_mut() = None;
     });
@@ -92,25 +90,25 @@ pub fn clear_recoverable_sweep_trace_replay() {
 /// RAII boundary for one synchronous state-at-block RPC replay closure.
 #[derive(Debug)]
 #[must_use = "the scope must live for the entire replay closure"]
-pub struct RecoverableSweepTraceReplayScope;
+pub struct SweepTraceReplayScope;
 
 /// Clears stale replay state and returns a guard that also clears on drop.
-pub fn recoverable_sweep_trace_replay_scope() -> RecoverableSweepTraceReplayScope {
-    clear_recoverable_sweep_trace_replay();
-    RecoverableSweepTraceReplayScope
+pub fn sweep_trace_replay_scope() -> SweepTraceReplayScope {
+    clear_sweep_trace_replay();
+    SweepTraceReplayScope
 }
 
-impl Drop for RecoverableSweepTraceReplayScope {
+impl Drop for SweepTraceReplayScope {
     fn drop(&mut self) {
-        clear_recoverable_sweep_trace_replay();
+        clear_sweep_trace_replay();
     }
 }
 
-pub(crate) fn recoverable_sweep_trace_replay_transaction(
+pub(crate) fn sweep_trace_replay_transaction(
     rlp_bytes: Option<&Bytes>,
 ) -> Option<TraceReplayTransaction> {
     let Some(rlp_bytes) = rlp_bytes else {
-        clear_recoverable_sweep_trace_replay();
+        clear_sweep_trace_replay();
         return None;
     };
     let transaction_hash = alloy_primitives::keccak256(rlp_bytes);
@@ -128,7 +126,7 @@ pub(crate) fn recoverable_sweep_trace_replay_transaction(
     })
 }
 
-pub(crate) fn finish_recoverable_sweep_trace_replay_transaction(
+pub(crate) fn finish_sweep_trace_replay_transaction(
     transaction: Option<TraceReplayTransaction>,
     checked_candidates: usize,
 ) {
@@ -167,18 +165,18 @@ const RESOLVE_SELECTOR: [u8; 4] = [0x9f, 0xaa, 0x2f, 0x2f];
 const BALANCE_OF_SELECTOR: [u8; 4] = [0x70, 0xa0, 0x82, 0x31];
 const TRANSFER_SELECTOR: [u8; 4] = [0xa9, 0x05, 0x9c, 0xbb];
 
-/// A token/deposit pair eligible for a recoverable sweep check.
+/// A token/deposit pair eligible for a sweep check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct RecoverableSweepCandidate {
+pub struct SweepCandidate {
     /// ERC-20 token contract.
     pub token: Address,
     /// Recoverable deposit address.
     pub deposit: Address,
 }
 
-/// Classification for a recoverable sweep business failure.
+/// Classification for a sweep business failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RecoverableSweepFailureReason {
+pub enum SweepFailureReason {
     /// Registry resolver reverted or halted.
     ResolverCallFailed,
     /// Registry resolver returned a non-canonical address.
@@ -211,7 +209,7 @@ pub enum RecoverableSweepFailureReason {
     DuplicateTransferLog,
 }
 
-impl RecoverableSweepFailureReason {
+impl SweepFailureReason {
     /// Stable snake_case label for metrics dimensions.
     ///
     /// These strings are a low-cardinality observability contract; keep them
@@ -239,18 +237,18 @@ impl RecoverableSweepFailureReason {
 
 /// A checked candidate that did not complete a sweep.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct RecoverableSweepFailure {
+pub struct SweepFailure {
     /// Candidate that failed.
-    pub candidate: RecoverableSweepCandidate,
+    pub candidate: SweepCandidate,
     /// Business-failure classification.
-    pub reason: RecoverableSweepFailureReason,
+    pub reason: SweepFailureReason,
 }
 
 /// A successfully swept candidate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct RecoverableSweepSuccess {
+pub struct SweepSuccess {
     /// Candidate that was swept.
-    pub candidate: RecoverableSweepCandidate,
+    pub candidate: SweepCandidate,
     /// Registry-resolved master recipient.
     pub master: Address,
     /// Full pre-transfer deposit balance.
@@ -261,25 +259,25 @@ pub struct RecoverableSweepSuccess {
 
 /// Internal consensus invariant violation while constructing sweep receipt logs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum RecoverableSweepInvariantError {
+pub enum SweepInvariantError {
     /// The receipt-relative transfer log offset cannot be represented as `uint32`.
-    #[error("recoverable sweep transfer log offset exceeds uint32")]
+    #[error("sweep transfer log offset exceeds uint32")]
     TransferLogOffsetOverflow,
 }
 
 /// Take-once result cached by [`MorphEvm`] after transaction execution.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RecoverableSweepOutcome {
+pub struct SweepOutcome {
     /// Token call logs and EL-synthesized `RecoverableSweep` logs.
     pub logs: Vec<Log>,
     /// Number of candidates checked against the supplied allowance.
     pub checked_candidates: usize,
     /// Fixed system-gas debit for checked candidates.
     pub system_gas_used: u64,
-    /// Successful recoverable sweeps.
-    pub successes: Vec<RecoverableSweepSuccess>,
+    /// Successful sweeps.
+    pub successes: Vec<SweepSuccess>,
     /// Classified business failures.
-    pub failures: Vec<RecoverableSweepFailure>,
+    pub failures: Vec<SweepFailure>,
 }
 
 #[inline]
@@ -293,10 +291,7 @@ fn is_canonical_address_topic(topic: B256) -> bool {
 }
 
 /// Parses one exact ERC-20 transfer or Registry sweep-request log.
-pub fn parse_recoverable_sweep_candidate(
-    log: &Log,
-    registry: Address,
-) -> Option<RecoverableSweepCandidate> {
+pub fn parse_sweep_candidate(log: &Log, registry: Address) -> Option<SweepCandidate> {
     let topics = log.topics();
     // The `Transfer` branch deliberately does NOT require canonical address
     // topics: it takes the low 20 bytes of `topics[2]` regardless of the high
@@ -308,7 +303,7 @@ pub fn parse_recoverable_sweep_candidate(
     // a non-canonical request topic therefore cannot originate from the real
     // Registry and must be rejected.
     if topics.len() == 3 && topics[0] == TRANSFER_TOPIC && log.data.data.len() == 32 {
-        return Some(RecoverableSweepCandidate {
+        return Some(SweepCandidate {
             token: log.address,
             deposit: address_from_topic(topics[2]),
         });
@@ -321,7 +316,7 @@ pub fn parse_recoverable_sweep_candidate(
         && is_canonical_address_topic(topics[1])
         && is_canonical_address_topic(topics[2])
     {
-        return Some(RecoverableSweepCandidate {
+        return Some(SweepCandidate {
             token: address_from_topic(topics[1]),
             deposit: address_from_topic(topics[2]),
         });
@@ -330,24 +325,21 @@ pub fn parse_recoverable_sweep_candidate(
     None
 }
 
-/// Collects first-seen, deduplicated recoverable sweep candidates.
-pub fn collect_recoverable_sweep_candidates(
-    main_logs: &[Log],
-    registry: Address,
-) -> Vec<RecoverableSweepCandidate> {
+/// Collects first-seen, deduplicated sweep candidates.
+pub fn collect_sweep_candidates(main_logs: &[Log], registry: Address) -> Vec<SweepCandidate> {
     let mut seen = HashSet::with_capacity(MAX_CANDIDATES_PER_TX);
     main_logs
         .iter()
-        .filter_map(|log| parse_recoverable_sweep_candidate(log, registry))
+        .filter_map(|log| parse_sweep_candidate(log, registry))
         .filter(|candidate| seen.insert(*candidate))
         .take(MAX_CANDIDATES_PER_TX)
         .collect()
 }
 
 /// Builds the EL-synthesized protocol settlement log.
-pub fn build_recoverable_sweep_log(
+pub fn build_sweep_log(
     registry: Address,
-    candidate: RecoverableSweepCandidate,
+    candidate: SweepCandidate,
     master: Address,
     amount: U256,
     transfer_log_offset: u32,
@@ -502,13 +494,13 @@ where
 }
 
 #[inline]
-fn decode_address(output: &Bytes) -> Result<Address, RecoverableSweepFailureReason> {
+fn decode_address(output: &Bytes) -> Result<Address, SweepFailureReason> {
     if output.len() != 32 || output[..12] != [0; 12] {
-        return Err(RecoverableSweepFailureReason::ResolverMalformed);
+        return Err(SweepFailureReason::ResolverMalformed);
     }
     let address = Address::from_slice(&output[12..]);
     if address.is_zero() {
-        return Err(RecoverableSweepFailureReason::ResolverZero);
+        return Err(SweepFailureReason::ResolverZero);
     }
     Ok(address)
 }
@@ -516,8 +508,8 @@ fn decode_address(output: &Bytes) -> Result<Address, RecoverableSweepFailureReas
 #[inline]
 fn decode_balance(
     output: &Bytes,
-    malformed: RecoverableSweepFailureReason,
-) -> Result<U256, RecoverableSweepFailureReason> {
+    malformed: SweepFailureReason,
+) -> Result<U256, SweepFailureReason> {
     if output.len() != 32 {
         return Err(malformed);
     }
@@ -525,24 +517,24 @@ fn decode_balance(
 }
 
 #[inline]
-fn classify_transfer_output(output: &Bytes) -> Result<(), RecoverableSweepFailureReason> {
+fn classify_transfer_output(output: &Bytes) -> Result<(), SweepFailureReason> {
     if output.is_empty() {
         return Ok(());
     }
     if output.len() != 32 {
-        return Err(RecoverableSweepFailureReason::TransferMalformed);
+        return Err(SweepFailureReason::TransferMalformed);
     }
     match U256::from_be_slice(output) {
-        U256::ZERO => Err(RecoverableSweepFailureReason::TransferFalse),
+        U256::ZERO => Err(SweepFailureReason::TransferFalse),
         value if value == U256::from(1) => Ok(()),
-        _ => Err(RecoverableSweepFailureReason::TransferMalformed),
+        _ => Err(SweepFailureReason::TransferMalformed),
     }
 }
 
 #[inline]
 fn is_matching_transfer(
     log: &Log,
-    candidate: RecoverableSweepCandidate,
+    candidate: SweepCandidate,
     master: Address,
     amount: U256,
 ) -> bool {
@@ -556,34 +548,28 @@ fn is_matching_transfer(
         && log.data.data.as_ref() == amount.to_be_bytes::<32>()
 }
 
-fn push_failure(
-    outcome: &mut RecoverableSweepOutcome,
-    candidate: RecoverableSweepCandidate,
-    reason: RecoverableSweepFailureReason,
-) {
-    outcome
-        .failures
-        .push(RecoverableSweepFailure { candidate, reason });
+fn push_failure(outcome: &mut SweepOutcome, candidate: SweepCandidate, reason: SweepFailureReason) {
+    outcome.failures.push(SweepFailure { candidate, reason });
 }
 
 fn checked_transfer_log_offset(
     receipt_prefix_logs: usize,
     earlier_sweep_logs: usize,
     matching_log_offset: usize,
-) -> Result<u32, RecoverableSweepInvariantError> {
+) -> Result<u32, SweepInvariantError> {
     receipt_prefix_logs
         .checked_add(earlier_sweep_logs)
         .and_then(|offset| offset.checked_add(matching_log_offset))
         .and_then(|offset| u32::try_from(offset).ok())
-        .ok_or(RecoverableSweepInvariantError::TransferLogOffsetOverflow)
+        .ok_or(SweepInvariantError::TransferLogOffsetOverflow)
 }
 
 fn check_candidate<DB, I>(
     evm: &mut MorphEvm<DB, I>,
-    config: RecoverableSweepConfig,
-    candidate: RecoverableSweepCandidate,
+    config: SweepConfig,
+    candidate: SweepCandidate,
     receipt_prefix_logs: usize,
-    outcome: &mut RecoverableSweepOutcome,
+    outcome: &mut SweepOutcome,
 ) -> Result<(), EVMError<DB::Error, MorphInvalidTransaction>>
 where
     DB: Database,
@@ -597,11 +583,7 @@ where
         true,
     )?;
     let Some(resolver_output) = resolver.output else {
-        push_failure(
-            outcome,
-            candidate,
-            RecoverableSweepFailureReason::ResolverCallFailed,
-        );
+        push_failure(outcome, candidate, SweepFailureReason::ResolverCallFailed);
         return Ok(());
     };
     let master = match decode_address(&resolver_output) {
@@ -621,11 +603,7 @@ where
         .as_ref()
         .is_some_and(|code| !code.is_empty());
     if deposit_has_code {
-        push_failure(
-            outcome,
-            candidate,
-            RecoverableSweepFailureReason::DepositHasCode,
-        );
+        push_failure(outcome, candidate, SweepFailureReason::DepositHasCode);
         return Ok(());
     }
 
@@ -638,17 +616,10 @@ where
         true,
     )?;
     let Some(balance_output) = balance.output else {
-        push_failure(
-            outcome,
-            candidate,
-            RecoverableSweepFailureReason::BalanceCallFailed,
-        );
+        push_failure(outcome, candidate, SweepFailureReason::BalanceCallFailed);
         return Ok(());
     };
-    let balance = match decode_balance(
-        &balance_output,
-        RecoverableSweepFailureReason::BalanceMalformed,
-    ) {
+    let balance = match decode_balance(&balance_output, SweepFailureReason::BalanceMalformed) {
         Ok(balance) => balance,
         Err(reason) => {
             push_failure(outcome, candidate, reason);
@@ -656,11 +627,7 @@ where
         }
     };
     if balance.is_zero() {
-        push_failure(
-            outcome,
-            candidate,
-            RecoverableSweepFailureReason::BalanceZero,
-        );
+        push_failure(outcome, candidate, SweepFailureReason::BalanceZero);
         return Ok(());
     }
 
@@ -676,7 +643,7 @@ where
             false,
         )?;
         let Some(transfer_output) = transfer.output else {
-            return Ok(Err(RecoverableSweepFailureReason::TransferCallFailed));
+            return Ok(Err(SweepFailureReason::TransferCallFailed));
         };
         if let Err(reason) = classify_transfer_output(&transfer_output) {
             return Ok(Err(reason));
@@ -691,17 +658,17 @@ where
             true,
         )?;
         let Some(post_balance_output) = post_balance.output else {
-            return Ok(Err(RecoverableSweepFailureReason::PostBalanceCallFailed));
+            return Ok(Err(SweepFailureReason::PostBalanceCallFailed));
         };
         let post_balance = match decode_balance(
             &post_balance_output,
-            RecoverableSweepFailureReason::PostBalanceMalformed,
+            SweepFailureReason::PostBalanceMalformed,
         ) {
             Ok(balance) => balance,
             Err(reason) => return Ok(Err(reason)),
         };
         if !post_balance.is_zero() {
-            return Ok(Err(RecoverableSweepFailureReason::PostBalanceNonZero));
+            return Ok(Err(SweepFailureReason::PostBalanceNonZero));
         }
 
         let mut matching_logs = evm.ctx_ref().journal().logs[log_start..]
@@ -709,10 +676,10 @@ where
             .enumerate()
             .filter(|(_, log)| is_matching_transfer(log, candidate, master, balance));
         let Some((matching_log_offset, _)) = matching_logs.next() else {
-            return Ok(Err(RecoverableSweepFailureReason::MissingTransferLog));
+            return Ok(Err(SweepFailureReason::MissingTransferLog));
         };
         if matching_logs.next().is_some() {
-            Ok(Err(RecoverableSweepFailureReason::DuplicateTransferLog))
+            Ok(Err(SweepFailureReason::DuplicateTransferLog))
         } else {
             Ok(Ok(matching_log_offset))
         }
@@ -745,14 +712,14 @@ where
             evm.ctx_mut().journal_mut().checkpoint_commit();
 
             outcome.logs.extend(call_logs);
-            outcome.logs.push(build_recoverable_sweep_log(
+            outcome.logs.push(build_sweep_log(
                 config.registry_address,
                 candidate,
                 master,
                 balance,
                 transfer_log_offset,
             ));
-            outcome.successes.push(RecoverableSweepSuccess {
+            outcome.successes.push(SweepSuccess {
                 candidate,
                 master,
                 amount: balance,
@@ -763,18 +730,18 @@ where
     }
 }
 
-/// Executes independent recoverable sweep candidates against the post-main state.
-pub(crate) fn execute_recoverable_sweeps<DB, I>(
+/// Executes independent sweep candidates against the post-main state.
+pub(crate) fn execute_sweeps<DB, I>(
     evm: &mut MorphEvm<DB, I>,
-    config: RecoverableSweepConfig,
-    candidates: &[RecoverableSweepCandidate],
+    config: SweepConfig,
+    candidates: &[SweepCandidate],
     receipt_prefix_logs: usize,
     allowance: usize,
-) -> Result<RecoverableSweepOutcome, EVMError<DB::Error, MorphInvalidTransaction>>
+) -> Result<SweepOutcome, EVMError<DB::Error, MorphInvalidTransaction>>
 where
     DB: Database,
 {
-    let mut outcome = RecoverableSweepOutcome::default();
+    let mut outcome = SweepOutcome::default();
     for candidate in candidates
         .iter()
         .copied()
@@ -790,7 +757,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{MorphBlockEnv, MorphEvm, RecoverableSweepConfig, evm::MorphContext};
+    use crate::{MorphBlockEnv, MorphEvm, SweepConfig, evm::MorphContext};
     use alloy_primitives::{Address, B256, Bytes, Log, U256, address, b256};
     use morph_chainspec::hardfork::MorphHardfork;
     use revm::{
@@ -845,21 +812,21 @@ mod tests {
     #[test]
     fn failure_reason_labels_are_stable_and_distinct() {
         let reasons = [
-            RecoverableSweepFailureReason::ResolverCallFailed,
-            RecoverableSweepFailureReason::ResolverMalformed,
-            RecoverableSweepFailureReason::ResolverZero,
-            RecoverableSweepFailureReason::DepositHasCode,
-            RecoverableSweepFailureReason::BalanceCallFailed,
-            RecoverableSweepFailureReason::BalanceMalformed,
-            RecoverableSweepFailureReason::BalanceZero,
-            RecoverableSweepFailureReason::TransferCallFailed,
-            RecoverableSweepFailureReason::TransferFalse,
-            RecoverableSweepFailureReason::TransferMalformed,
-            RecoverableSweepFailureReason::PostBalanceCallFailed,
-            RecoverableSweepFailureReason::PostBalanceMalformed,
-            RecoverableSweepFailureReason::PostBalanceNonZero,
-            RecoverableSweepFailureReason::MissingTransferLog,
-            RecoverableSweepFailureReason::DuplicateTransferLog,
+            SweepFailureReason::ResolverCallFailed,
+            SweepFailureReason::ResolverMalformed,
+            SweepFailureReason::ResolverZero,
+            SweepFailureReason::DepositHasCode,
+            SweepFailureReason::BalanceCallFailed,
+            SweepFailureReason::BalanceMalformed,
+            SweepFailureReason::BalanceZero,
+            SweepFailureReason::TransferCallFailed,
+            SweepFailureReason::TransferFalse,
+            SweepFailureReason::TransferMalformed,
+            SweepFailureReason::PostBalanceCallFailed,
+            SweepFailureReason::PostBalanceMalformed,
+            SweepFailureReason::PostBalanceNonZero,
+            SweepFailureReason::MissingTransferLog,
+            SweepFailureReason::DuplicateTransferLog,
         ];
         let labels: HashSet<&str> = reasons.iter().map(|r| r.as_label()).collect();
         assert_eq!(
@@ -879,15 +846,15 @@ mod tests {
         let exact_request = request_log(TOKEN_B, DEPOSIT);
 
         assert_eq!(
-            parse_recoverable_sweep_candidate(&exact_transfer, REGISTRY),
-            Some(RecoverableSweepCandidate {
+            parse_sweep_candidate(&exact_transfer, REGISTRY),
+            Some(SweepCandidate {
                 token: TOKEN_A,
                 deposit: DEPOSIT,
             })
         );
         assert_eq!(
-            parse_recoverable_sweep_candidate(&exact_request, REGISTRY),
-            Some(RecoverableSweepCandidate {
+            parse_sweep_candidate(&exact_request, REGISTRY),
+            Some(SweepCandidate {
                 token: TOKEN_B,
                 deposit: DEPOSIT,
             })
@@ -937,7 +904,7 @@ mod tests {
             ),
         ];
         for log in malformed {
-            assert_eq!(parse_recoverable_sweep_candidate(&log, REGISTRY), None);
+            assert_eq!(parse_sweep_candidate(&log, REGISTRY), None);
         }
 
         let mut noncanonical_token = address_topic(TOKEN_A);
@@ -947,10 +914,7 @@ mod tests {
             vec![REQUEST_TOPIC, noncanonical_token, address_topic(DEPOSIT)],
             Bytes::new(),
         );
-        assert_eq!(
-            parse_recoverable_sweep_candidate(&malformed_request, REGISTRY),
-            None
-        );
+        assert_eq!(parse_sweep_candidate(&malformed_request, REGISTRY), None);
     }
 
     #[test]
@@ -966,26 +930,26 @@ mod tests {
             logs.push(transfer_log(token, Address::ZERO, deposit, U256::from(1)));
         }
 
-        let candidates = collect_recoverable_sweep_candidates(&logs, REGISTRY);
+        let candidates = collect_sweep_candidates(&logs, REGISTRY);
 
         assert_eq!(candidates.len(), MAX_CANDIDATES_PER_TX);
         assert_eq!(
             candidates[0],
-            RecoverableSweepCandidate {
+            SweepCandidate {
                 token: TOKEN_A,
                 deposit: DEPOSIT,
             }
         );
         assert_eq!(
             candidates[1],
-            RecoverableSweepCandidate {
+            SweepCandidate {
                 token: TOKEN_B,
                 deposit: DEPOSIT,
             }
         );
         assert_eq!(
             candidates[2],
-            RecoverableSweepCandidate {
+            SweepCandidate {
                 token: Address::with_last_byte(10),
                 deposit: Address::with_last_byte(100),
             }
@@ -994,18 +958,12 @@ mod tests {
 
     #[test]
     fn sweep_event_uses_canonical_abi_and_receipt_relative_offset() {
-        let candidate = RecoverableSweepCandidate {
+        let candidate = SweepCandidate {
             token: TOKEN_A,
             deposit: DEPOSIT,
         };
 
-        let log = build_recoverable_sweep_log(
-            REGISTRY,
-            candidate,
-            MASTER,
-            U256::from(0x1234),
-            0x0102_0304,
-        );
+        let log = build_sweep_log(REGISTRY, candidate, MASTER, U256::from(0x1234), 0x0102_0304);
 
         assert_eq!(log.address, REGISTRY);
         assert_eq!(
@@ -1425,7 +1383,7 @@ mod tests {
         let mut evm = MorphEvm::new(MorphContext::new(db, MorphHardfork::Onyx), NoOpInspector);
         evm.block = MorphBlockEnv {
             inner: BlockEnv::default(),
-            recoverable_sweep: enabled.then_some(RecoverableSweepConfig {
+            sweep: enabled.then_some(SweepConfig {
                 registry_address: REGISTRY,
             }),
         };
@@ -1444,8 +1402,8 @@ mod tests {
         }
     }
 
-    fn candidate(token: Address) -> RecoverableSweepCandidate {
-        RecoverableSweepCandidate {
+    fn candidate(token: Address) -> SweepCandidate {
+        SweepCandidate {
             token,
             deposit: DEPOSIT,
         }
@@ -1455,19 +1413,16 @@ mod tests {
         resolver_mode: ResolverMode,
         balance_mode: BalanceMode,
         transfer_mode: TransferMode,
-    ) -> (
-        MorphEvm<CacheDB<EmptyDB>, NoOpInspector>,
-        RecoverableSweepOutcome,
-    ) {
+    ) -> (MorphEvm<CacheDB<EmptyDB>, NoOpInspector>, SweepOutcome) {
         let mut evm = make_evm(
             resolver_mode,
             &[(TOKEN_A, balance_mode, transfer_mode)],
             None,
             true,
         );
-        let outcome = execute_recoverable_sweeps(
+        let outcome = execute_sweeps(
             &mut evm,
-            RecoverableSweepConfig {
+            SweepConfig {
                 registry_address: REGISTRY,
             },
             &[candidate(TOKEN_A)],
@@ -1493,7 +1448,7 @@ mod tests {
             .unwrap()
     }
 
-    fn only_failure(outcome: &RecoverableSweepOutcome) -> RecoverableSweepFailureReason {
+    fn only_failure(outcome: &SweepOutcome) -> SweepFailureReason {
         assert_eq!(outcome.failures.len(), 1);
         outcome.failures[0].reason
     }
@@ -1518,13 +1473,13 @@ mod tests {
         let mut evm = MorphEvm::new(MorphContext::new(db, MorphHardfork::Onyx), NoOpInspector);
         evm.block = MorphBlockEnv {
             inner: BlockEnv::default(),
-            recoverable_sweep: Some(RecoverableSweepConfig {
+            sweep: Some(SweepConfig {
                 registry_address: REGISTRY,
             }),
         };
         evm.tx.inner.caller = Address::with_last_byte(0xee);
         evm.tx.inner.gas_limit = 777;
-        evm.set_recoverable_sweep_candidate_allowance(2);
+        evm.set_sweep_candidate_allowance(2);
         let result: ExecutionResult<crate::MorphHaltReason> = ExecutionResult::Success {
             reason: SuccessReason::Stop,
             gas: ResultGas::default(),
@@ -1535,7 +1490,7 @@ mod tests {
             output: Output::Call(Bytes::new()),
         };
 
-        let error = evm.apply_recoverable_sweep(&result).unwrap_err();
+        let error = evm.apply_sweep(&result).unwrap_err();
 
         assert!(matches!(error, EVMError::Database(OpcodeStorageError)));
         assert_eq!(
@@ -1563,11 +1518,11 @@ mod tests {
             None,
             false,
         );
-        disabled.set_recoverable_sweep_candidate_allowance(1);
+        disabled.set_sweep_candidate_allowance(1);
         assert!(disabled.transact_one(main_tx()).unwrap().is_success());
         assert_eq!(
-            disabled.take_recoverable_sweep_outcome().unwrap(),
-            RecoverableSweepOutcome::default()
+            disabled.take_sweep_outcome().unwrap(),
+            SweepOutcome::default()
         );
 
         let mut no_allowance = make_evm(
@@ -1578,8 +1533,8 @@ mod tests {
         );
         assert!(no_allowance.transact_one(main_tx()).unwrap().is_success());
         assert_eq!(
-            no_allowance.take_recoverable_sweep_outcome().unwrap(),
-            RecoverableSweepOutcome::default()
+            no_allowance.take_sweep_outcome().unwrap(),
+            SweepOutcome::default()
         );
 
         let mut reverted = make_evm_with_main_mode(
@@ -1589,11 +1544,11 @@ mod tests {
             true,
             MainMode::Revert,
         );
-        reverted.set_recoverable_sweep_candidate_allowance(1);
+        reverted.set_sweep_candidate_allowance(1);
         assert!(!reverted.transact_one(main_tx()).unwrap().is_success());
         assert_eq!(
-            reverted.take_recoverable_sweep_outcome().unwrap(),
-            RecoverableSweepOutcome::default()
+            reverted.take_sweep_outcome().unwrap(),
+            SweepOutcome::default()
         );
 
         let mut enabled = make_evm(
@@ -1602,14 +1557,14 @@ mod tests {
             None,
             true,
         );
-        enabled.set_recoverable_sweep_candidate_allowance(1);
+        enabled.set_sweep_candidate_allowance(1);
         let result = enabled.transact_one(main_tx()).unwrap();
-        let outcome = enabled.take_recoverable_sweep_outcome().unwrap();
+        let outcome = enabled.take_sweep_outcome().unwrap();
         assert!(result.is_success());
         assert_eq!(result.logs().len(), 1);
         assert_eq!(result.output(), Some(&Bytes::new()));
         assert_eq!(outcome.successes.len(), 1);
-        assert!(enabled.take_recoverable_sweep_outcome().is_none());
+        assert!(enabled.take_sweep_outcome().is_none());
     }
 
     #[test]
@@ -1621,21 +1576,14 @@ mod tests {
             true,
         );
         replay.tx = main_tx();
-        replay.set_recoverable_sweep_candidate_allowance(1);
+        replay.set_sweep_candidate_allowance(1);
         let replayed = replay.replay().unwrap();
         assert!(replayed.result.is_success());
         assert_eq!(
             replayed.state[&TOKEN_A].storage[&U256::ZERO].present_value,
             U256::ZERO
         );
-        assert_eq!(
-            replay
-                .take_recoverable_sweep_outcome()
-                .unwrap()
-                .successes
-                .len(),
-            1
-        );
+        assert_eq!(replay.take_sweep_outcome().unwrap().successes.len(), 1);
 
         let mut inspected = make_evm(
             ResolverMode::Master,
@@ -1643,18 +1591,11 @@ mod tests {
             None,
             true,
         );
-        inspected.set_recoverable_sweep_candidate_allowance(1);
+        inspected.set_sweep_candidate_allowance(1);
         let result = inspected.inspect_one_tx(main_tx()).unwrap();
         assert!(result.is_success());
         assert_eq!(token_balance(&mut inspected, TOKEN_A), U256::ZERO);
-        assert_eq!(
-            inspected
-                .take_recoverable_sweep_outcome()
-                .unwrap()
-                .successes
-                .len(),
-            1
-        );
+        assert_eq!(inspected.take_sweep_outcome().unwrap().successes.len(), 1);
     }
 
     #[test]
@@ -1677,11 +1618,11 @@ mod tests {
             let mut evm = MorphEvm::new(MorphContext::new(db, MorphHardfork::Onyx), NoOpInspector);
             evm.block = MorphBlockEnv {
                 inner: BlockEnv::default(),
-                recoverable_sweep: Some(RecoverableSweepConfig {
+                sweep: Some(SweepConfig {
                     registry_address: REGISTRY,
                 }),
             };
-            evm.set_recoverable_sweep_candidate_allowance(1);
+            evm.set_sweep_candidate_allowance(1);
             let mut tx = main_tx();
             tx.inner.kind = TxKind::Call(TOKEN_B);
 
@@ -1691,8 +1632,8 @@ mod tests {
                 evm.inspect_tx(tx.clone()).map(|_| ()).unwrap_err()
             };
             assert!(matches!(error, EVMError::Database(OpcodeStorageError)));
-            assert!(evm.take_recoverable_sweep_outcome().is_none());
-            assert_eq!(evm.recoverable_sweep_candidate_allowance, None);
+            assert!(evm.take_sweep_outcome().is_none());
+            assert_eq!(evm.sweep_candidate_allowance, None);
             assert!(evm.pre_fee_logs.is_empty());
             assert!(evm.post_fee_logs.is_empty());
             assert!(evm.frame_stack().index().is_none());
@@ -1719,10 +1660,7 @@ mod tests {
                 later.state[&TOKEN_B].storage[&U256::from(1)].present_value,
                 U256::from(7)
             );
-            assert_eq!(
-                evm.take_recoverable_sweep_outcome().unwrap(),
-                RecoverableSweepOutcome::default()
-            );
+            assert_eq!(evm.take_sweep_outcome().unwrap(), SweepOutcome::default());
             assert!(evm.ctx_ref().journal().state.is_empty());
         }
     }
@@ -1735,9 +1673,9 @@ mod tests {
             None,
             true,
         );
-        evm.set_recoverable_sweep_candidate_allowance(1);
+        evm.set_sweep_candidate_allowance(1);
         assert!(evm.transact_one(main_tx()).unwrap().is_success());
-        let outcome = evm.take_recoverable_sweep_outcome().unwrap();
+        let outcome = evm.take_sweep_outcome().unwrap();
         assert_eq!(outcome.logs.len(), 2);
         assert_eq!(token_balance(&mut evm, TOKEN_A), U256::ZERO);
 
@@ -1763,21 +1701,15 @@ mod tests {
     #[test]
     fn resolver_zero_malformed_revert_and_static_violation_are_skipped() {
         for (mode, expected) in [
-            (
-                ResolverMode::Zero,
-                RecoverableSweepFailureReason::ResolverZero,
-            ),
+            (ResolverMode::Zero, SweepFailureReason::ResolverZero),
             (
                 ResolverMode::Malformed,
-                RecoverableSweepFailureReason::ResolverMalformed,
+                SweepFailureReason::ResolverMalformed,
             ),
-            (
-                ResolverMode::Revert,
-                RecoverableSweepFailureReason::ResolverCallFailed,
-            ),
+            (ResolverMode::Revert, SweepFailureReason::ResolverCallFailed),
             (
                 ResolverMode::Mutating,
-                RecoverableSweepFailureReason::ResolverCallFailed,
+                SweepFailureReason::ResolverCallFailed,
             ),
         ] {
             let (mut evm, outcome) = execute_one(mode, BalanceMode::Normal, TransferMode::True);
@@ -1805,9 +1737,9 @@ mod tests {
                 Some(code),
                 true,
             );
-            let outcome = execute_recoverable_sweeps(
+            let outcome = execute_sweeps(
                 &mut evm,
-                RecoverableSweepConfig {
+                SweepConfig {
                     registry_address: REGISTRY,
                 },
                 &[candidate(TOKEN_A)],
@@ -1816,10 +1748,7 @@ mod tests {
             )
             .unwrap();
 
-            assert_eq!(
-                only_failure(&outcome),
-                RecoverableSweepFailureReason::DepositHasCode
-            );
+            assert_eq!(only_failure(&outcome), SweepFailureReason::DepositHasCode);
             assert_eq!(
                 token_balance(&mut evm, TOKEN_A),
                 U256::from(INITIAL_BALANCE)
@@ -1830,18 +1759,9 @@ mod tests {
     #[test]
     fn balance_failures_skip_without_mutating_token_state() {
         for (mode, expected) in [
-            (
-                BalanceMode::Zero,
-                RecoverableSweepFailureReason::BalanceZero,
-            ),
-            (
-                BalanceMode::Malformed,
-                RecoverableSweepFailureReason::BalanceMalformed,
-            ),
-            (
-                BalanceMode::Revert,
-                RecoverableSweepFailureReason::BalanceCallFailed,
-            ),
+            (BalanceMode::Zero, SweepFailureReason::BalanceZero),
+            (BalanceMode::Malformed, SweepFailureReason::BalanceMalformed),
+            (BalanceMode::Revert, SweepFailureReason::BalanceCallFailed),
         ] {
             let (mut evm, outcome) = execute_one(ResolverMode::Master, mode, TransferMode::True);
             assert_eq!(only_failure(&outcome), expected);
@@ -1883,11 +1803,11 @@ mod tests {
         assert_eq!(checked_transfer_log_offset(4, 2, 1), Ok(7));
         assert_eq!(
             checked_transfer_log_offset(usize::MAX, 1, 0),
-            Err(RecoverableSweepInvariantError::TransferLogOffsetOverflow)
+            Err(SweepInvariantError::TransferLogOffsetOverflow)
         );
         assert_eq!(
             checked_transfer_log_offset(u32::MAX as usize, 1, 0),
-            Err(RecoverableSweepInvariantError::TransferLogOffsetOverflow)
+            Err(SweepInvariantError::TransferLogOffsetOverflow)
         );
     }
 
@@ -1897,42 +1817,42 @@ mod tests {
             (
                 BalanceMode::Normal,
                 TransferMode::False,
-                RecoverableSweepFailureReason::TransferFalse,
+                SweepFailureReason::TransferFalse,
             ),
             (
                 BalanceMode::Normal,
                 TransferMode::Malformed,
-                RecoverableSweepFailureReason::TransferMalformed,
+                SweepFailureReason::TransferMalformed,
             ),
             (
                 BalanceMode::Normal,
                 TransferMode::Revert,
-                RecoverableSweepFailureReason::TransferCallFailed,
+                SweepFailureReason::TransferCallFailed,
             ),
             (
                 BalanceMode::Normal,
                 TransferMode::PostBalanceNonZero,
-                RecoverableSweepFailureReason::PostBalanceNonZero,
+                SweepFailureReason::PostBalanceNonZero,
             ),
             (
                 BalanceMode::MalformedAfterTransfer,
                 TransferMode::True,
-                RecoverableSweepFailureReason::PostBalanceMalformed,
+                SweepFailureReason::PostBalanceMalformed,
             ),
             (
                 BalanceMode::RevertAfterTransfer,
                 TransferMode::True,
-                RecoverableSweepFailureReason::PostBalanceCallFailed,
+                SweepFailureReason::PostBalanceCallFailed,
             ),
             (
                 BalanceMode::Normal,
                 TransferMode::MissingLog,
-                RecoverableSweepFailureReason::MissingTransferLog,
+                SweepFailureReason::MissingTransferLog,
             ),
             (
                 BalanceMode::Normal,
                 TransferMode::DuplicateLog,
-                RecoverableSweepFailureReason::DuplicateTransferLog,
+                SweepFailureReason::DuplicateTransferLog,
             ),
         ] {
             let (mut evm, outcome) = execute_one(ResolverMode::Master, balance_mode, transfer_mode);
@@ -1956,9 +1876,9 @@ mod tests {
             None,
             true,
         );
-        let outcome = execute_recoverable_sweeps(
+        let outcome = execute_sweeps(
             &mut evm,
-            RecoverableSweepConfig {
+            SweepConfig {
                 registry_address: REGISTRY,
             },
             &[candidate(TOKEN_A), candidate(TOKEN_B)],
@@ -1982,42 +1902,36 @@ mod tests {
 
     #[test]
     fn trace_replay_context_shares_budget_and_clears_at_target() {
-        clear_recoverable_sweep_trace_replay();
+        clear_sweep_trace_replay();
         let first = Bytes::from_static(b"canonical-first");
         let second = Bytes::from_static(b"canonical-second");
         let first_hash = alloy_primitives::keccak256(&first);
         let second_hash = alloy_primitives::keccak256(&second);
-        begin_recoverable_sweep_trace_replay(vec![first_hash, second_hash]);
-        assert!(
-            recoverable_sweep_trace_replay_transaction(Some(&Bytes::from_static(b"synthetic")))
-                .is_none()
-        );
+        begin_sweep_trace_replay(vec![first_hash, second_hash]);
+        assert!(sweep_trace_replay_transaction(Some(&Bytes::from_static(b"synthetic"))).is_none());
         TRACE_REPLAY_CONTEXT.with(|context| assert!(context.borrow().is_none()));
 
-        begin_recoverable_sweep_trace_replay(vec![first_hash, second_hash]);
+        begin_sweep_trace_replay(vec![first_hash, second_hash]);
         let first_transaction =
-            recoverable_sweep_trace_replay_transaction(Some(&first)).expect("first transaction");
+            sweep_trace_replay_transaction(Some(&first)).expect("first transaction");
         assert_eq!(first_transaction.allowance, MAX_CANDIDATES_PER_TX);
-        finish_recoverable_sweep_trace_replay_transaction(Some(first_transaction), 16);
+        finish_sweep_trace_replay_transaction(Some(first_transaction), 16);
 
-        set_recoverable_sweep_trace_replay_target(second_hash);
+        set_sweep_trace_replay_target(second_hash);
         let second_transaction =
-            recoverable_sweep_trace_replay_transaction(Some(&second)).expect("second transaction");
+            sweep_trace_replay_transaction(Some(&second)).expect("second transaction");
         assert_eq!(second_transaction.allowance, MAX_CANDIDATES_PER_TX);
-        finish_recoverable_sweep_trace_replay_transaction(Some(second_transaction), 0);
+        finish_sweep_trace_replay_transaction(Some(second_transaction), 0);
 
         TRACE_REPLAY_CONTEXT.with(|context| assert!(context.borrow().is_none()));
-        assert!(
-            recoverable_sweep_trace_replay_transaction(Some(&Bytes::from_static(b"synthetic")))
-                .is_none()
-        );
+        assert!(sweep_trace_replay_transaction(Some(&Bytes::from_static(b"synthetic"))).is_none());
     }
 
     #[test]
     fn trace_replay_error_clears_context_before_later_raw_inspection() {
-        clear_recoverable_sweep_trace_replay();
+        clear_sweep_trace_replay();
         let raw = Bytes::from_static(b"canonical-error");
-        begin_recoverable_sweep_trace_replay(vec![alloy_primitives::keccak256(&raw)]);
+        begin_sweep_trace_replay(vec![alloy_primitives::keccak256(&raw)]);
 
         let mut evm = make_evm(
             ResolverMode::Master,
@@ -2033,10 +1947,7 @@ mod tests {
 
         let result = evm.inspect_one_tx(main_tx()).unwrap();
         assert!(result.is_success());
-        assert_eq!(
-            evm.take_recoverable_sweep_outcome().unwrap(),
-            RecoverableSweepOutcome::default()
-        );
+        assert_eq!(evm.take_sweep_outcome().unwrap(), SweepOutcome::default());
         assert_eq!(
             token_balance(&mut evm, TOKEN_A),
             U256::from(INITIAL_BALANCE)
@@ -2046,23 +1957,20 @@ mod tests {
     #[test]
     fn explicit_zero_allowance_cannot_fall_back_to_trace_context() {
         let raw = Bytes::from_static(b"canonical-explicit-zero");
-        begin_recoverable_sweep_trace_replay(vec![alloy_primitives::keccak256(&raw)]);
+        begin_sweep_trace_replay(vec![alloy_primitives::keccak256(&raw)]);
         let mut evm = make_evm(
             ResolverMode::Master,
             &[(TOKEN_A, BalanceMode::Normal, TransferMode::True)],
             None,
             true,
         );
-        evm.set_recoverable_sweep_candidate_allowance(0);
+        evm.set_sweep_candidate_allowance(0);
         TRACE_REPLAY_CONTEXT.with(|context| assert!(context.borrow().is_none()));
 
         let mut tx = main_tx();
         tx.rlp_bytes = Some(raw);
         assert!(evm.transact_one(tx).unwrap().is_success());
-        assert_eq!(
-            evm.take_recoverable_sweep_outcome().unwrap(),
-            RecoverableSweepOutcome::default()
-        );
+        assert_eq!(evm.take_sweep_outcome().unwrap(), SweepOutcome::default());
         assert_eq!(
             token_balance(&mut evm, TOKEN_A),
             U256::from(INITIAL_BALANCE)
@@ -2072,25 +1980,25 @@ mod tests {
     #[test]
     fn trace_replay_scope_clears_context_on_error_and_panic() {
         let stale = Bytes::from_static(b"stale-before-scope");
-        begin_recoverable_sweep_trace_replay(vec![alloy_primitives::keccak256(&stale)]);
+        begin_sweep_trace_replay(vec![alloy_primitives::keccak256(&stale)]);
         let pending_error = Bytes::from_static(b"pending-before-error");
         let error: Result<(), ()> = {
-            let _scope = recoverable_sweep_trace_replay_scope();
+            let _scope = sweep_trace_replay_scope();
             TRACE_REPLAY_CONTEXT.with(|context| assert!(context.borrow().is_none()));
-            begin_recoverable_sweep_trace_replay(vec![alloy_primitives::keccak256(&pending_error)]);
+            begin_sweep_trace_replay(vec![alloy_primitives::keccak256(&pending_error)]);
             Err(())
         };
         assert!(error.is_err());
         TRACE_REPLAY_CONTEXT.with(|context| assert!(context.borrow().is_none()));
         assert!(
-            recoverable_sweep_trace_replay_transaction(Some(&pending_error)).is_none(),
+            sweep_trace_replay_transaction(Some(&pending_error)).is_none(),
             "matching bytes from the failed replay must not inherit sweep authority"
         );
 
         let unwind = std::panic::catch_unwind(|| {
-            let _scope = recoverable_sweep_trace_replay_scope();
+            let _scope = sweep_trace_replay_scope();
             let pending = Bytes::from_static(b"pending-before-panic");
-            begin_recoverable_sweep_trace_replay(vec![alloy_primitives::keccak256(&pending)]);
+            begin_sweep_trace_replay(vec![alloy_primitives::keccak256(&pending)]);
             panic!("deliberate trace replay panic");
         });
         assert!(unwind.is_err());

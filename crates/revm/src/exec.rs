@@ -23,9 +23,9 @@ const SYSTEM_CALL_GAS_LIMIT: u64 = 200_000;
 
 impl<DB: Database, I> MorphEvm<DB, I> {
     fn discard_failed_inspection(&mut self) {
-        self.recoverable_sweep_candidate_allowance = None;
-        self.recoverable_sweep_outcome = None;
-        crate::recoverable_sweep::clear_recoverable_sweep_trace_replay();
+        self.sweep_candidate_allowance = None;
+        self.sweep_outcome = None;
+        crate::sweep::clear_sweep_trace_replay();
         self.cached_token_fee_info = None;
         self.cached_l1_data_fee = Default::default();
         self.pre_fee_logs.clear();
@@ -56,16 +56,16 @@ where
 
     fn transact_one(&mut self, tx: Self::Tx) -> Result<Self::ExecutionResult, Self::Error> {
         self.inner.ctx.set_tx(tx);
-        self.recoverable_sweep_outcome = None;
+        self.sweep_outcome = None;
         let mut h = MorphEvmHandler::new();
         match h.run(self) {
             Ok(result) => {
-                self.apply_recoverable_sweep(&result)?;
+                self.apply_sweep(&result)?;
                 Ok(result)
             }
             Err(error) => {
-                self.recoverable_sweep_candidate_allowance = None;
-                crate::recoverable_sweep::clear_recoverable_sweep_trace_replay();
+                self.sweep_candidate_allowance = None;
+                crate::sweep::clear_sweep_trace_replay();
                 Err(error)
             }
         }
@@ -78,17 +78,17 @@ where
     fn replay(
         &mut self,
     ) -> Result<ExecResultAndState<Self::ExecutionResult, Self::State>, Self::Error> {
-        self.recoverable_sweep_outcome = None;
+        self.sweep_outcome = None;
         let mut h = MorphEvmHandler::new();
         let result = match h.run(self) {
             Ok(result) => result,
             Err(error) => {
-                self.recoverable_sweep_candidate_allowance = None;
-                crate::recoverable_sweep::clear_recoverable_sweep_trace_replay();
+                self.sweep_candidate_allowance = None;
+                crate::sweep::clear_sweep_trace_replay();
                 return Err(error);
             }
         };
-        self.apply_recoverable_sweep(&result)?;
+        self.apply_sweep(&result)?;
         let state = self.finalize();
         Ok(ExecResultAndState::new(result, state))
     }
@@ -116,21 +116,21 @@ where
 
     fn inspect_one_tx(&mut self, tx: Self::Tx) -> Result<Self::ExecutionResult, Self::Error> {
         self.inner.ctx.set_tx(tx);
-        self.recoverable_sweep_outcome = None;
+        self.sweep_outcome = None;
         let mut h = MorphEvmHandler::new();
         match h.inspect_run(self) {
             Ok(result) => {
                 // Sweep system calls intentionally bypass inspector frame callbacks, so
                 // traces may hide them; applying the hook here still makes replay state canonical.
-                if let Err(error) = self.apply_recoverable_sweep(&result) {
+                if let Err(error) = self.apply_sweep(&result) {
                     self.discard_failed_inspection();
                     return Err(error);
                 }
                 Ok(result)
             }
             Err(error) => {
-                self.recoverable_sweep_candidate_allowance = None;
-                crate::recoverable_sweep::clear_recoverable_sweep_trace_replay();
+                self.sweep_candidate_allowance = None;
+                crate::sweep::clear_sweep_trace_replay();
                 Err(error)
             }
         }

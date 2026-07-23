@@ -14,8 +14,7 @@ use alloy_primitives::{B256, U256};
 use alloy_rpc_types_eth::BlockId;
 use morph_chainspec::{MorphChainSpec, MorphHardforks};
 use morph_revm::{
-    L1BlockInfo, MorphTxExt, TokenFeeInfo, recoverable_sweep_trace_replay_scope,
-    set_recoverable_sweep_trace_replay_target,
+    L1BlockInfo, MorphTxExt, TokenFeeInfo, set_sweep_trace_replay_target, sweep_trace_replay_scope,
 };
 use reth_errors::ProviderError;
 use reth_evm::{ConfigureEvm, Evm, EvmEnvFor, TxEnvFor};
@@ -95,7 +94,7 @@ where
                     state,
                 )))
                 .build();
-            let _scope = recoverable_sweep_trace_replay_scope();
+            let _scope = sweep_trace_replay_scope();
             f(this, db)
         })
     }
@@ -111,7 +110,7 @@ where
         DB: Database<Error = EvmDatabaseError<ProviderError>> + DatabaseCommit + core::fmt::Debug,
         I: IntoIterator<Item = Recovered<&'a ProviderTx<Self::Provider>>>,
     {
-        set_recoverable_sweep_trace_replay_target(target_tx_hash);
+        set_sweep_trace_replay_target(target_tx_hash);
         let mut evm = self.evm_config().evm_with_env(db, evm_env);
         let mut index = 0;
         for transaction in transactions {

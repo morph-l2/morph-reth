@@ -2,11 +2,10 @@ use crate::{
     MorphBlockEnv, MorphHaltReason, MorphInvalidTransaction, MorphTxEnv,
     l1block::L1BlockInfo,
     precompiles::MorphPrecompiles,
-    recoverable_sweep::{
-        MAX_CANDIDATES_PER_TX, RecoverableSweepInvariantError, RecoverableSweepOutcome,
-        clear_recoverable_sweep_trace_replay, collect_recoverable_sweep_candidates,
-        execute_recoverable_sweeps, finish_recoverable_sweep_trace_replay_transaction,
-        recoverable_sweep_trace_replay_transaction,
+    sweep::{
+        MAX_CANDIDATES_PER_TX, SweepInvariantError, SweepOutcome, clear_sweep_trace_replay,
+        collect_sweep_candidates, execute_sweeps, finish_sweep_trace_replay_transaction,
+        sweep_trace_replay_transaction,
     },
     token_fee::TokenFeeInfo,
 };
@@ -280,13 +279,13 @@ pub struct MorphEvm<DB: Database, I> {
     pub(crate) pre_fee_logs: Vec<alloy_primitives::Log>,
     /// Transfer event logs from token fee reimbursement (post-execution phase).
     pub(crate) post_fee_logs: Vec<alloy_primitives::Log>,
-    /// Explicit recoverable sweep allowance from the consensus block executor.
+    /// Explicit sweep allowance from the consensus block executor.
     ///
     /// `Some(0)` means the block budget is exhausted. `None` allows canonical
     /// trace replay to use its thread-local block context.
-    pub(crate) recoverable_sweep_candidate_allowance: Option<usize>,
-    /// Take-once recoverable sweep result for the latest transaction.
-    pub(crate) recoverable_sweep_outcome: Option<RecoverableSweepOutcome>,
+    pub(crate) sweep_candidate_allowance: Option<usize>,
+    /// Take-once sweep result for the latest transaction.
+    pub(crate) sweep_outcome: Option<SweepOutcome>,
 }
 
 impl<DB: Database, I> MorphEvm<DB, I> {
@@ -348,8 +347,8 @@ impl<DB: Database, I> MorphEvm<DB, I> {
             cached_l1_data_fee: U256::ZERO,
             pre_fee_logs: Vec::new(),
             post_fee_logs: Vec::new(),
-            recoverable_sweep_candidate_allowance: None,
-            recoverable_sweep_outcome: None,
+            sweep_candidate_allowance: None,
+            sweep_outcome: None,
         }
     }
 }
@@ -402,81 +401,77 @@ impl<DB: Database, I> MorphEvm<DB, I> {
         std::mem::take(&mut self.post_fee_logs)
     }
 
-    /// Sets the recoverable sweep candidate allowance for the next transaction.
+    /// Sets the sweep candidate allowance for the next transaction.
     ///
     /// Without an explicit allowance or canonical trace context, sweep is disabled.
     #[inline]
-    pub fn set_recoverable_sweep_candidate_allowance(&mut self, allowance: usize) {
-        clear_recoverable_sweep_trace_replay();
-        self.recoverable_sweep_candidate_allowance = Some(allowance.min(MAX_CANDIDATES_PER_TX));
+    pub fn set_sweep_candidate_allowance(&mut self, allowance: usize) {
+        clear_sweep_trace_replay();
+        self.sweep_candidate_allowance = Some(allowance.min(MAX_CANDIDATES_PER_TX));
     }
 
-    /// Takes the recoverable sweep outcome produced by the latest transaction.
+    /// Takes the sweep outcome produced by the latest transaction.
     #[inline]
-    pub fn take_recoverable_sweep_outcome(&mut self) -> Option<RecoverableSweepOutcome> {
-        self.recoverable_sweep_outcome.take()
+    pub fn take_sweep_outcome(&mut self) -> Option<SweepOutcome> {
+        self.sweep_outcome.take()
     }
 
-    pub(crate) fn apply_recoverable_sweep(
+    pub(crate) fn apply_sweep(
         &mut self,
         result: &ExecutionResult<MorphHaltReason>,
     ) -> Result<(), EVMError<DB::Error, MorphInvalidTransaction>> {
-        let explicit_allowance = self.recoverable_sweep_candidate_allowance.take();
+        let explicit_allowance = self.sweep_candidate_allowance.take();
         let trace_transaction = explicit_allowance
             .is_none()
-            .then(|| recoverable_sweep_trace_replay_transaction(self.tx.rlp_bytes.as_ref()))
+            .then(|| sweep_trace_replay_transaction(self.tx.rlp_bytes.as_ref()))
             .flatten();
         let allowance = explicit_allowance.unwrap_or_else(|| {
             trace_transaction
                 .as_ref()
                 .map_or(0, |transaction| transaction.allowance)
         });
-        self.recoverable_sweep_outcome = Some(RecoverableSweepOutcome::default());
+        self.sweep_outcome = Some(SweepOutcome::default());
 
-        let Some(config) = self.block.recoverable_sweep else {
-            finish_recoverable_sweep_trace_replay_transaction(trace_transaction, 0);
+        let Some(config) = self.block.sweep else {
+            finish_sweep_trace_replay_transaction(trace_transaction, 0);
             return Ok(());
         };
         let ExecutionResult::Success { logs, .. } = result else {
-            finish_recoverable_sweep_trace_replay_transaction(trace_transaction, 0);
+            finish_sweep_trace_replay_transaction(trace_transaction, 0);
             return Ok(());
         };
         if allowance == 0 {
-            finish_recoverable_sweep_trace_replay_transaction(trace_transaction, 0);
+            finish_sweep_trace_replay_transaction(trace_transaction, 0);
             return Ok(());
         }
 
-        let candidates = collect_recoverable_sweep_candidates(logs, config.registry_address);
+        let candidates = collect_sweep_candidates(logs, config.registry_address);
         let Some(receipt_prefix_logs) = self
             .pre_fee_logs
             .len()
             .checked_add(logs.len())
             .and_then(|count| count.checked_add(self.post_fee_logs.len()))
         else {
-            clear_recoverable_sweep_trace_replay();
+            clear_sweep_trace_replay();
             return Err(EVMError::Custom(
-                RecoverableSweepInvariantError::TransferLogOffsetOverflow.to_string(),
+                SweepInvariantError::TransferLogOffsetOverflow.to_string(),
             ));
         };
         let checkpoint = self.ctx_mut().journal_mut().checkpoint();
-        match execute_recoverable_sweeps(self, config, &candidates, receipt_prefix_logs, allowance)
-        {
+        match execute_sweeps(self, config, &candidates, receipt_prefix_logs, allowance) {
             Ok(outcome) => {
                 let checked_candidates = outcome.checked_candidates;
                 self.ctx_mut().journal_mut().checkpoint_commit();
                 // Sweep logs are already cached in `outcome`; close this implicit
                 // transaction so a later discard cannot revert successful sweep state.
                 self.ctx_mut().journal_mut().commit_tx();
-                self.recoverable_sweep_outcome = Some(outcome);
-                finish_recoverable_sweep_trace_replay_transaction(
-                    trace_transaction,
-                    checked_candidates,
-                );
+                self.sweep_outcome = Some(outcome);
+                finish_sweep_trace_replay_transaction(trace_transaction, checked_candidates);
                 Ok(())
             }
             Err(error) => {
                 self.ctx_mut().journal_mut().checkpoint_revert(checkpoint);
-                clear_recoverable_sweep_trace_replay();
+                clear_sweep_trace_replay();
                 Err(error)
             }
         }

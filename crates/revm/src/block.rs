@@ -7,7 +7,7 @@ use revm::{
 
 /// Configuration for recoverable deposit sweeping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RecoverableSweepConfig {
+pub struct SweepConfig {
     /// Address of the recoverable deposit registry.
     pub registry_address: Address,
 }
@@ -20,7 +20,7 @@ pub struct MorphBlockEnv {
     #[deref_mut]
     pub inner: BlockEnv,
     /// Recoverable deposit sweep configuration, enabled from Onyx onward.
-    pub recoverable_sweep: Option<RecoverableSweepConfig>,
+    pub sweep: Option<SweepConfig>,
 }
 
 impl Block for MorphBlockEnv {
