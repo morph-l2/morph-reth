@@ -23,7 +23,7 @@
     "onyxTime": 0,
     "morph": {
       "feeVaultAddress": "0x530000000000000000000000000000000000000a",
-      "recoverableDepositRegistryAddress": "0x5300000000000000000000000000000000000023"
+      "sweepRegistryAddress": "0x5300000000000000000000000000000000000023"
     }
   },
   "nonce": "0x0",

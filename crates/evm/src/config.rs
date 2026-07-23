@@ -19,14 +19,9 @@ impl MorphEvmConfig {
             return Ok(None);
         }
 
-        let registry_address = self
-            .chain_spec()
-            .recoverable_deposit_registry_address()
-            .ok_or_else(|| {
-                MorphEvmError::InvalidEvmConfig(
-                    "Onyx requires a recoverable deposit registry address".to_string(),
-                )
-            })?;
+        let registry_address = self.chain_spec().sweep_registry_address().ok_or_else(|| {
+            MorphEvmError::InvalidEvmConfig("Onyx requires a sweep registry address".to_string())
+        })?;
 
         Ok(Some(SweepConfig { registry_address }))
     }
@@ -264,8 +259,7 @@ mod tests {
             "alloc": {}
         });
         if let Some(address) = registry_address {
-            genesis_json["config"]["morph"]["recoverableDepositRegistryAddress"] =
-                serde_json::json!(address);
+            genesis_json["config"]["morph"]["sweepRegistryAddress"] = serde_json::json!(address);
         }
         let genesis: alloy_genesis::Genesis = serde_json::from_value(genesis_json).unwrap();
         Arc::new(MorphChainSpec::from(genesis))
@@ -401,7 +395,7 @@ mod tests {
         assert!(matches!(
             config.evm_env(&create_morph_header(100, 100)),
             Err(MorphEvmError::InvalidEvmConfig(message))
-                if message.contains("recoverable deposit registry")
+                if message.contains("sweep registry")
         ));
         assert!(matches!(
             config.next_evm_env(
@@ -409,7 +403,7 @@ mod tests {
                 &next_block_attributes(100)
             ),
             Err(MorphEvmError::InvalidEvmConfig(message))
-                if message.contains("recoverable deposit registry")
+                if message.contains("sweep registry")
         ));
     }
 

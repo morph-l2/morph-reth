@@ -1,4 +1,4 @@
-//! Recoverable deposit sweep integration tests.
+//! Deposit sweep integration tests.
 
 use alloy_consensus::{BlockHeader, TxReceipt, transaction::TxHashRef};
 use alloy_primitives::{Address, B256, Bytes, U256, address, b256, logs_bloom};
@@ -29,32 +29,31 @@ const AMOUNT: u64 = 123;
 const TRANSFER_TOPIC: B256 =
     b256!("ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef");
 const REQUEST_TOPIC: B256 =
-    b256!("346554ceae624a5906db47e5591fb8c2f586147cfa7524691bf09d284b167a34");
-const SWEEP_TOPIC: B256 = b256!("4cb65f464c97b7cae979110960f2dba5a9447c795638563ad5f1e2b52c6f37dd");
+    b256!("24e3f180db341974dcd99a5e223d9d944422e303230ddde6659302f8620bbcff");
+const SWEEP_TOPIC: B256 = b256!("035b37215a69e14a80883933d6aa84f0919a67af9410a4a73e8a23baeca011f0");
 
 /// Runtime produced by solc 0.8.30 (optimizer runs=200, metadata disabled) from
-/// `tests/assets/RecoverableSweepFixtures.sol::TestRecoverableRegistry`.
+/// `tests/assets/SweepFixtures.sol::TestSweepRegistry`.
 ///
 /// It is a deterministic test double, not production Registry bytecode.
-const TEST_REGISTRY_RUNTIME: &str = "0x608060405234801561000f575f5ffd5b506004361061003f575f3560e01c80639faa2f2f14610043578063ba1b6c8414610094578063eb991b0e146100de575b5f5ffd5b61007861005136600461014b565b6001600160a01b039182165f90815260208181526040808320938516835292905220541690565b6040516001600160a01b03909116815260200160405180910390f35b6100dc6100a236600461017c565b6001600160a01b039283165f9081526020818152604080832094861683529390529190912080546001600160a01b03191691909216179055565b005b6100dc6100ec36600461014b565b806001600160a01b0316826001600160a01b03167f346554ceae624a5906db47e5591fb8c2f586147cfa7524691bf09d284b167a3460405160405180910390a35050565b80356001600160a01b0381168114610146575f5ffd5b919050565b5f5f6040838503121561015c575f5ffd5b61016583610130565b915061017360208401610130565b90509250929050565b5f5f5f6060848603121561018e575f5ffd5b61019784610130565b92506101a560208501610130565b91506101b360408501610130565b9050925092509256";
+const TEST_REGISTRY_RUNTIME: &str = "0x608060405234801561000f575f5ffd5b506004361061003f575f3560e01c8063663a375c146100435780639faa2f2f14610058578063ba1b6c84146100a9575b5f5ffd5b610056610051366004610150565b6100f1565b005b61008d610066366004610150565b6001600160a01b039182165f90815260208181526040808320938516835292905220541690565b6040516001600160a01b03909116815260200160405180910390f35b6100566100b7366004610181565b6001600160a01b039283165f9081526020818152604080832094861683529390529190912080546001600160a01b03191691909216179055565b806001600160a01b0316826001600160a01b03167f24e3f180db341974dcd99a5e223d9d944422e303230ddde6659302f8620bbcff60405160405180910390a35050565b80356001600160a01b038116811461014b575f5ffd5b919050565b5f5f60408385031215610161575f5ffd5b61016a83610135565b915061017860208401610135565b90509250929050565b5f5f5f60608486031215610193575f5ffd5b61019c84610135565b92506101aa60208501610135565b91506101b860408501610135565b9050925092509256";
 
-/// Runtime for `RecoverableSweepFixtures.sol::TestRecoverableRouter`.
+/// Runtime for `SweepFixtures.sol::TestSweepRouter`.
 const TEST_ROUTER_RUNTIME: &str = "0x608060405234801561000f575f5ffd5b5060043610610034575f3560e01c806341f47c231461003857806393d1fef41461004d575b5f5ffd5b61004b61004636600461024a565b610060565b005b61004b61005b366004610292565b610149565b604051632e86db2160e21b81526001600160a01b0380861660048301528085166024830152831660448201526023605360981b019063ba1b6c84906064015f604051808303815f87803b1580156100b5575f5ffd5b505af11580156100c7573d5f5f3e3d5ffd5b505060405163a9059cbb60e01b81526001600160a01b038681166004830152602482018590528716925063a9059cbb91506044016020604051808303815f875af1158015610117573d5f5f3e3d5ffd5b505050506040513d601f19601f8201168201806040525081019061013b91906102cc565b610143575f5ffd5b50505050565b60405163a9059cbb60e01b81526001600160a01b0383811660048301526024820183905284169063a9059cbb906044016020604051808303815f875af1158015610195573d5f5f3e3d5ffd5b505050506040513d601f19601f820116820180604052508101906101b991906102cc565b6101c1575f5ffd5b604051632e86db2160e21b81526001600160a01b038085166004830152831660248201525f60448201526023605360981b019063ba1b6c84906064015f604051808303815f87803b158015610214575f5ffd5b505af1158015610226573d5f5f3e3d5ffd5b50505050505050565b80356001600160a01b0381168114610245575f5ffd5b919050565b5f5f5f5f6080858703121561025d575f5ffd5b6102668561022f565b93506102746020860161022f565b92506102826040860161022f565b9396929550929360600135925050565b5f5f5f606084860312156102a4575f5ffd5b6102ad8461022f565b92506102bb6020850161022f565b929592945050506040919091013590565b5f602082840312156102dc575f5ffd5b815180151581146102eb575f5ffd5b939250505056";
 
-/// Runtime for `RecoverableSweepFixtures.sol::TestCandidateEmitter`.
+/// Runtime for `SweepFixtures.sol::TestCandidateEmitter`.
 const TEST_CANDIDATE_EMITTER_RUNTIME: &str = "0x6080604052348015600e575f5ffd5b5060015b6010816001600160a01b031611607057604051600181526001600160a01b0382169033907fddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef9060200160405180910390a3606a816072565b90506012565b005b5f6001600160a01b0382166002600160a01b03198101609f57634e487b7160e01b5f52601160045260245ffd5b6001019291505056";
 
-/// Deployed runtime of the PRODUCTION `RecoverableDepositRegistry`
+/// Deployed runtime of the PRODUCTION `SweepRegistry`
 /// (`morph/contracts` `feat/onyx-sweep`, solc 0.8.24). Snapshot
-/// sha256 `02d0d79f86c497bd237bf3fb30efad42e5f88366a32753ff8ac5d80f50fa08b0`.
+/// sha256 `139ca164f0572d57a8ce51b6debe5bf695aa8e3fa11925796f7c5526d398316b`.
 ///
 /// Injected directly at [`REGISTRY`] (no proxy): `resolveSweep`, `initialize`
-/// and `registerRecoverableDeposit` all read/write this account's own storage,
+/// and `registerSweep` all read/write this account's own storage,
 /// so the transparent-proxy wrapper is unnecessary for exercising the EL <-> real
-/// contract ABI. This drives the same `resolveSweep`/`RecoverableSweepRequested`
+/// contract ABI. This drives the same `resolveSweep`/`SweepRequested`
 /// contract the mainnet Registry will expose, instead of the test double above.
-const PROD_REGISTRY_RUNTIME: &str =
-    include_str!("../assets/RecoverableDepositRegistry.deployed.hex");
+const PROD_REGISTRY_RUNTIME: &str = include_str!("../assets/SweepRegistry.deployed.hex");
 
 fn token_balance_slot(account: Address) -> B256 {
     let mut preimage = [0_u8; 64];
@@ -284,7 +283,7 @@ async fn poke_sweeps_historical_balance_and_attaches_all_logs() -> eyre::Result<
         .with_v1_eth_fee()
         .with_to(REGISTRY)
         .with_data(encode_address_args(
-            [0xeb, 0x99, 0x1b, 0x0e],
+            [0x66, 0x3a, 0x37, 0x5c],
             &[TEST_TOKEN_ADDRESS, DEPOSIT],
         ))
         .build_signed()?;
@@ -1099,7 +1098,7 @@ fn addr_word(a: Address) -> [u8; 32] {
     w
 }
 
-/// Produces the deposit's EIP-712 `RecoverableDepositAuthorization` signature
+/// Produces the deposit's EIP-712 `SweepAuthorization` signature
 /// (65-byte r||s||v) exactly as the production Registry verifies it (§5.3).
 fn sign_deposit_auth(
     deposit_signer: &alloy_signer_local::PrivateKeySigner,
@@ -1117,14 +1116,14 @@ fn sign_deposit_auth(
         "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)",
     );
     let auth_typehash = keccak256(
-        "RecoverableDepositAuthorization(address deposit,address master,address registry,uint256 chainId,uint256 nonce,uint64 deadline,bytes32 mode,bytes32 sweepScope)",
+        "SweepAuthorization(address deposit,address master,address registry,uint256 chainId,uint256 nonce,uint64 deadline,bytes32 mode,bytes32 sweepScope)",
     );
-    let mode = keccak256("MORPH_RECOVERABLE_DEPOSIT_V1");
+    let mode = keccak256("MORPH_SWEEP_V1");
     let sweep_scope = keccak256("WHITELISTED_ERC20_TO_MASTER_ONLY");
 
     let mut dom = Vec::new();
     dom.extend_from_slice(domain_typehash.as_slice());
-    dom.extend_from_slice(keccak256("RecoverableDepositRegistry").as_slice());
+    dom.extend_from_slice(keccak256("SweepRegistry").as_slice());
     dom.extend_from_slice(keccak256("1").as_slice());
     dom.extend_from_slice(&U256::from(chain_id).to_be_bytes::<32>());
     dom.extend_from_slice(&addr_word(registry));
@@ -1156,7 +1155,7 @@ fn sign_deposit_auth(
     Ok(bytes)
 }
 
-/// ABI-encodes `registerRecoverableDeposit(address,address,uint256,uint64,bytes)`.
+/// ABI-encodes `registerSweep(address,address,uint256,uint64,bytes)`.
 fn register_calldata(
     deposit: Address,
     master: Address,
@@ -1164,7 +1163,7 @@ fn register_calldata(
     deadline: u64,
     sig: &[u8],
 ) -> Bytes {
-    let mut data = vec![0x03, 0x13, 0x5f, 0x37];
+    let mut data = vec![0xd7, 0x1b, 0x77, 0xe8];
     data.extend_from_slice(&addr_word(deposit));
     data.extend_from_slice(&addr_word(master));
     data.extend_from_slice(&U256::from(nonce).to_be_bytes::<32>());
@@ -1177,9 +1176,9 @@ fn register_calldata(
     data.into()
 }
 
-/// Drives the EL against the PRODUCTION `RecoverableDepositRegistry` (not the
+/// Drives the EL against the PRODUCTION `SweepRegistry` (not the
 /// test double): real `initialize` + `setTokenWhitelist` + EIP-712
-/// `registerRecoverableDeposit`, then a whitelisted inflow that the EL sweeps
+/// `registerSweep`, then a whitelisted inflow that the EL sweeps
 /// through the contract's real `resolveSweep` three-check logic.
 #[tokio::test(flavor = "multi_thread")]
 async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
@@ -1243,7 +1242,7 @@ async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
         "setTokenWhitelist must succeed"
     );
 
-    // registerRecoverableDeposit with the deposit's real EIP-712 signature
+    // registerSweep with the deposit's real EIP-712 signature
     let sig = sign_deposit_auth(
         &deposit_signer,
         deposit,
@@ -1269,11 +1268,11 @@ async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
         .expect("register receipt");
     assert!(
         reg_receipt.status(),
-        "registerRecoverableDeposit must succeed with a valid EIP-712 deposit signature"
+        "registerSweep must succeed with a valid EIP-712 deposit signature"
     );
     assert!(
         reg_receipt.logs().iter().any(|l| l.address == REGISTRY),
-        "registration must emit a RecoverableDepositRegistered event from the Registry"
+        "registration must emit a SweepRegistered event from the Registry"
     );
 
     // whitelisted inflow into the deposit -> EL sweeps via the real resolveSweep
@@ -1293,10 +1292,10 @@ async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
     assert!(receipt.status());
     let logs = receipt.logs();
 
-    // [main Transfer(owner->deposit)] ... [sweep Transfer(deposit->master)] [RecoverableSweep]
+    // [main Transfer(owner->deposit)] ... [sweep Transfer(deposit->master)] [Swept]
     assert!(
         logs.len() >= 3,
-        "expected main + sweep + RecoverableSweep logs, got {}",
+        "expected main + sweep + Swept logs, got {}",
         logs.len()
     );
     assert_eq!(

@@ -5,10 +5,10 @@ use revm::{
     context_interface::block::BlobExcessGasAndPrice,
 };
 
-/// Configuration for recoverable deposit sweeping.
+/// Configuration for deposit sweeping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SweepConfig {
-    /// Address of the recoverable deposit registry.
+    /// Address of the sweep registry.
     pub registry_address: Address,
 }
 
@@ -19,7 +19,7 @@ pub struct MorphBlockEnv {
     #[deref]
     #[deref_mut]
     pub inner: BlockEnv,
-    /// Recoverable deposit sweep configuration, enabled from Onyx onward.
+    /// Sweep configuration, enabled from Onyx onward.
     pub sweep: Option<SweepConfig>,
 }
 

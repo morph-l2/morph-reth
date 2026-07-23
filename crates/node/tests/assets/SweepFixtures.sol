@@ -2,11 +2,11 @@
 pragma solidity 0.8.30;
 
 /// Test-only Registry fixture for morph-node integration tests.
-/// This is not the production RecoverableDepositRegistry contract.
-contract TestRecoverableRegistry {
+/// This is not the production SweepRegistry contract.
+contract TestSweepRegistry {
     mapping(address token => mapping(address deposit => address master)) private masters;
 
-    event RecoverableSweepRequested(address indexed token, address indexed deposit);
+    event SweepRequested(address indexed token, address indexed deposit);
 
     function resolveSweep(address token, address deposit) external view returns (address) {
         return masters[token][deposit];
@@ -16,12 +16,12 @@ contract TestRecoverableRegistry {
         masters[token][deposit] = master;
     }
 
-    function pokeRecoverableSweep(address token, address deposit) external {
-        emit RecoverableSweepRequested(token, deposit);
+    function pokeSweep(address token, address deposit) external {
+        emit SweepRequested(token, deposit);
     }
 }
 
-interface ITestRecoverableRegistry {
+interface ITestSweepRegistry {
     function setSweep(address token, address deposit, address master) external;
 }
 
@@ -30,9 +30,9 @@ interface ITestErc20 {
 }
 
 /// Test-only router used to mutate Registry state and emit an inflow in one transaction.
-contract TestRecoverableRouter {
-    ITestRecoverableRegistry private constant REGISTRY =
-        ITestRecoverableRegistry(0x5300000000000000000000000000000000000023);
+contract TestSweepRouter {
+    ITestSweepRegistry private constant REGISTRY =
+        ITestSweepRegistry(0x5300000000000000000000000000000000000023);
 
     function enableThenTransfer(address token, address deposit, address master, uint256 amount) external {
         REGISTRY.setSweep(token, deposit, master);

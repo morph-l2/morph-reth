@@ -159,8 +159,8 @@ pub(crate) fn finish_sweep_trace_replay_transaction(
 const TRANSFER_TOPIC: B256 =
     b256!("ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef");
 const REQUEST_TOPIC: B256 =
-    b256!("346554ceae624a5906db47e5591fb8c2f586147cfa7524691bf09d284b167a34");
-const SWEEP_TOPIC: B256 = b256!("4cb65f464c97b7cae979110960f2dba5a9447c795638563ad5f1e2b52c6f37dd");
+    b256!("24e3f180db341974dcd99a5e223d9d944422e303230ddde6659302f8620bbcff");
+const SWEEP_TOPIC: B256 = b256!("035b37215a69e14a80883933d6aa84f0919a67af9410a4a73e8a23baeca011f0");
 const RESOLVE_SELECTOR: [u8; 4] = [0x9f, 0xaa, 0x2f, 0x2f];
 const BALANCE_OF_SELECTOR: [u8; 4] = [0x70, 0xa0, 0x82, 0x31];
 const TRANSFER_SELECTOR: [u8; 4] = [0xa9, 0x05, 0x9c, 0xbb];
@@ -170,7 +170,7 @@ const TRANSFER_SELECTOR: [u8; 4] = [0xa9, 0x05, 0x9c, 0xbb];
 pub struct SweepCandidate {
     /// ERC-20 token contract.
     pub token: Address,
-    /// Recoverable deposit address.
+    /// Deposit address.
     pub deposit: Address,
 }
 
@@ -268,7 +268,7 @@ pub enum SweepInvariantError {
 /// Take-once result cached by [`MorphEvm`] after transaction execution.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SweepOutcome {
-    /// Token call logs and EL-synthesized `RecoverableSweep` logs.
+    /// Token call logs and EL-synthesized `Swept` logs.
     pub logs: Vec<Log>,
     /// Number of candidates checked against the supplied allowance.
     pub checked_candidates: usize,
@@ -297,7 +297,7 @@ pub fn parse_sweep_candidate(log: &Log, registry: Address) -> Option<SweepCandid
     // topics: it takes the low 20 bytes of `topics[2]` regardless of the high
     // bytes, matching go-ethereum's `common.BytesToAddress`. Keeping the same
     // lenient extraction is what makes reth and geth agree on the candidate set
-    // for a non-canonically-encoded token log. The `RecoverableSweepRequested`
+    // for a non-canonically-encoded token log. The `SweepRequested`
     // branch below is strict instead, because that event is emitted only by the
     // Registry, whose Solidity `indexed address` topics are always zero-padded;
     // a non-canonical request topic therefore cannot originate from the real
@@ -785,9 +785,9 @@ mod tests {
     const TRANSFER_TOPIC: B256 =
         b256!("ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef");
     const REQUEST_TOPIC: B256 =
-        b256!("346554ceae624a5906db47e5591fb8c2f586147cfa7524691bf09d284b167a34");
+        b256!("24e3f180db341974dcd99a5e223d9d944422e303230ddde6659302f8620bbcff");
     const SWEEP_TOPIC: B256 =
-        b256!("4cb65f464c97b7cae979110960f2dba5a9447c795638563ad5f1e2b52c6f37dd");
+        b256!("035b37215a69e14a80883933d6aa84f0919a67af9410a4a73e8a23baeca011f0");
 
     fn address_topic(address: Address) -> B256 {
         B256::left_padding_from(address.as_slice())

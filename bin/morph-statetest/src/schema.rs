@@ -30,13 +30,13 @@ pub struct MorphTestUnit {
     pub transaction: MorphTransactionParts,
     #[serde(default)]
     pub out: Option<Bytes>,
-    /// Optional recoverable-deposit registry address for Onyx sweep vectors.
+    /// Optional sweep registry address for Onyx sweep vectors.
     ///
     /// When a fixture omits it, the runner falls back to the canonical
     /// statetest registry address so existing suites stay a no-op unless the
     /// `pre` state actually deploys a registry there.
-    #[serde(default, rename = "recoverableDepositRegistry")]
-    pub recoverable_deposit_registry: Option<Address>,
+    #[serde(default, rename = "sweepRegistry")]
+    pub sweep_registry: Option<Address>,
 }
 
 #[derive(Debug, Error)]

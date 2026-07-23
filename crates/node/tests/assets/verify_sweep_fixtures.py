@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Verify embedded recoverable-sweep runtimes against their Solidity source.
+"""Verify embedded sweep runtimes against their Solidity source.
 
 This is a developer-only reproducibility check; Rust CI does not need Forge:
 
-    python3 crates/node/tests/assets/verify_recoverable_sweep_fixtures.py
+    python3 crates/node/tests/assets/verify_sweep_fixtures.py
 """
 
 from __future__ import annotations
@@ -19,9 +19,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[4]
 ASSETS = Path(__file__).resolve().parent
-SOURCE = ASSETS / "RecoverableSweepFixtures.sol"
-MANIFEST = ASSETS / "RecoverableSweepFixtures.hashes.json"
-RUST_TEST = ROOT / "crates/node/tests/it/recoverable_sweep.rs"
+SOURCE = ASSETS / "SweepFixtures.sol"
+MANIFEST = ASSETS / "SweepFixtures.hashes.json"
+RUST_TEST = ROOT / "crates/node/tests/it/sweep.rs"
 
 
 def sha256(data: bytes) -> str:
@@ -39,7 +39,7 @@ def compiled_runtime(contract: str, compiler: str) -> str:
     command = [
         "forge",
         "inspect",
-        f"crates/node/tests/assets/RecoverableSweepFixtures.sol:{contract}",
+        f"crates/node/tests/assets/SweepFixtures.sol:{contract}",
         "deployedBytecode",
         "--root",
         str(ROOT),
@@ -53,9 +53,9 @@ def compiled_runtime(contract: str, compiler: str) -> str:
         "--no-metadata",
         "--no-cache",
         "--out",
-        "/tmp/morph-reth-recoverable-sweep-out",
+        "/tmp/morph-reth-sweep-out",
         "--cache-path",
-        "/tmp/morph-reth-recoverable-sweep-cache",
+        "/tmp/morph-reth-sweep-cache",
     ]
     return subprocess.check_output(command, cwd=ROOT, text=True).strip()
 

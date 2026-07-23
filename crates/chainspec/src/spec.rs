@@ -308,11 +308,9 @@ impl MorphChainSpec {
         self.info.morph_chain_info.max_tx_payload_bytes_per_block
     }
 
-    /// Returns the recoverable deposit registry address.
-    pub fn recoverable_deposit_registry_address(&self) -> Option<Address> {
-        self.info
-            .morph_chain_info
-            .recoverable_deposit_registry_address()
+    /// Returns the sweep registry address.
+    pub fn sweep_registry_address(&self) -> Option<Address> {
+        self.info.morph_chain_info.sweep_registry_address()
     }
 
     /// Checks if the given block size (in bytes) is valid for this chain.
@@ -486,7 +484,7 @@ mod tests {
                 "onyxTime": 0,
                 "morph": {
                     "feeVaultAddress": "0x530000000000000000000000000000000000000a",
-                    "recoverableDepositRegistryAddress": "0x5300000000000000000000000000000000000023"
+                    "sweepRegistryAddress": "0x5300000000000000000000000000000000000023"
                 }
             },
             "alloc": {}
@@ -693,7 +691,7 @@ mod tests {
                 "morph": {
                     "feeVaultAddress": "0x530000000000000000000000000000000000000a",
                     "maxTxPayloadBytesPerBlock": 122880,
-                    "recoverableDepositRegistryAddress": "0x5300000000000000000000000000000000000023"
+                    "sweepRegistryAddress": "0x5300000000000000000000000000000000000023"
                 }
             },
             "alloc": {}
@@ -714,7 +712,7 @@ mod tests {
         // Config should be extracted from genesis
         assert!(chainspec.is_fee_vault_enabled());
         assert_eq!(
-            chainspec.recoverable_deposit_registry_address(),
+            chainspec.sweep_registry_address(),
             Some(address!("5300000000000000000000000000000000000023"))
         );
     }
@@ -739,7 +737,7 @@ mod tests {
                 "morph": {
                     "feeVaultAddress": "0x530000000000000000000000000000000000000a",
                     "maxTxPayloadBytesPerBlock": 122880,
-                    "recoverableDepositRegistryAddress": "0x5300000000000000000000000000000000000023"
+                    "sweepRegistryAddress": "0x5300000000000000000000000000000000000023"
                 }
             },
             "alloc": {}
@@ -751,7 +749,7 @@ mod tests {
         assert!(chainspec.is_fee_vault_enabled());
         assert_eq!(chainspec.max_tx_payload_bytes_per_block(), Some(122880));
         assert_eq!(
-            chainspec.recoverable_deposit_registry_address(),
+            chainspec.sweep_registry_address(),
             Some(address!("5300000000000000000000000000000000000023"))
         );
         assert!(chainspec.is_valid_block_size(100000));

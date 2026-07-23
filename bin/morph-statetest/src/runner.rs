@@ -19,13 +19,13 @@ use thiserror::Error;
 const MORPH_STATE_TEST_FEE_VAULT_ADDRESS: Address =
     address!("48442aa154897eef141df231cc1517fc8c1d170f");
 
-/// Canonical recoverable-deposit registry address for Onyx statetest vectors.
+/// Canonical sweep registry address for Onyx statetest vectors.
 ///
-/// Mirrors the `recoverableDepositRegistryAddress` used by the test chain
+/// Mirrors the `sweepRegistryAddress` used by the test chain
 /// config and the morph-node e2e suite, so the same fixtures resolve against a
 /// registry the `pre` state deploys at this address. A fixture may override it
-/// via `recoverableDepositRegistry`.
-const MORPH_STATE_TEST_RECOVERABLE_REGISTRY: Address =
+/// via `sweepRegistry`.
+const MORPH_STATE_TEST_SWEEP_REGISTRY: Address =
     address!("5300000000000000000000000000000000000023");
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -156,8 +156,8 @@ fn execute_case(
     // transaction, so the per-transaction candidate cap is the whole allowance.
     let sweep = fork.is_onyx().then(|| SweepConfig {
         registry_address: unit
-            .recoverable_deposit_registry
-            .unwrap_or(MORPH_STATE_TEST_RECOVERABLE_REGISTRY),
+            .sweep_registry
+            .unwrap_or(MORPH_STATE_TEST_SWEEP_REGISTRY),
     });
     let env = EvmEnv {
         cfg_env: cfg,
@@ -256,7 +256,7 @@ where
         logs.extend(result.logs().iter().cloned());
     }
     logs.extend(evm.take_post_fee_logs());
-    // Sweep logs (token call logs + synthesized `RecoverableSweep`)
+    // Sweep logs (token call logs + synthesized `Swept`)
     // are appended last, matching the block executor's receipt ordering.
     if let Some(outcome) = evm.take_sweep_outcome() {
         logs.extend(outcome.logs);
@@ -375,7 +375,7 @@ mod tests {
 
     // Test-only registry: `resolveSweep(token,deposit)` returns the master stored
     // in the nested `masters[token][deposit]` mapping at base slot 0.
-    const TEST_REGISTRY_RUNTIME: &str = "0x608060405234801561000f575f5ffd5b506004361061003f575f3560e01c80639faa2f2f14610043578063ba1b6c8414610094578063eb991b0e146100de575b5f5ffd5b61007861005136600461014b565b6001600160a01b039182165f90815260208181526040808320938516835292905220541690565b6040516001600160a01b03909116815260200160405180910390f35b6100dc6100a236600461017c565b6001600160a01b039283165f9081526020818152604080832094861683529390529190912080546001600160a01b03191691909216179055565b005b6100dc6100ec36600461014b565b806001600160a01b0316826001600160a01b03167f346554ceae624a5906db47e5591fb8c2f586147cfa7524691bf09d284b167a3460405160405180910390a35050565b80356001600160a01b0381168114610146575f5ffd5b919050565b5f5f6040838503121561015c575f5ffd5b61016583610130565b915061017360208401610130565b90509250929050565b5f5f5f6060848603121561018e575f5ffd5b61019784610130565b92506101a560208501610130565b91506101b360408501610130565b9050925092509256";
+    const TEST_REGISTRY_RUNTIME: &str = "0x608060405234801561000f575f5ffd5b506004361061003f575f3560e01c8063663a375c146100435780639faa2f2f14610058578063ba1b6c84146100a9575b5f5ffd5b610056610051366004610150565b6100f1565b005b61008d610066366004610150565b6001600160a01b039182165f90815260208181526040808320938516835292905220541690565b6040516001600160a01b03909116815260200160405180910390f35b6100566100b7366004610181565b6001600160a01b039283165f9081526020818152604080832094861683529390529190912080546001600160a01b03191691909216179055565b806001600160a01b0316826001600160a01b03167f24e3f180db341974dcd99a5e223d9d944422e303230ddde6659302f8620bbcff60405160405180910390a35050565b80356001600160a01b038116811461014b575f5ffd5b919050565b5f5f60408385031215610161575f5ffd5b61016a83610135565b915061017860208401610135565b90509250929050565b5f5f5f60608486031215610193575f5ffd5b61019c84610135565b92506101aa60208501610135565b91506101b860408501610135565b9050925092509256";
 
     const SENDER: Address = address!("a94f5374fce5edbc8e2a8697c15331677e6ebf0b");
     const TOKEN: Address = address!("00000000000000000000000000000000000000aa");
@@ -450,7 +450,7 @@ mod tests {
             }}"#,
             sender = hex::encode_prefixed(SENDER),
             token = hex::encode_prefixed(TOKEN),
-            registry = hex::encode_prefixed(MORPH_STATE_TEST_RECOVERABLE_REGISTRY),
+            registry = hex::encode_prefixed(MORPH_STATE_TEST_SWEEP_REGISTRY),
             erc20 = SLOT1_ERC20_RUNTIME,
             registry_code = TEST_REGISTRY_RUNTIME,
             sender_bal_slot = word(erc20_balance_slot(SENDER)),
@@ -486,7 +486,7 @@ mod tests {
         );
         assert_ne!(
             jade.logs_root, onyx.logs_root,
-            "Onyx sweep must append the sweep Transfer and RecoverableSweep logs"
+            "Onyx sweep must append the sweep Transfer and Swept logs"
         );
     }
 
