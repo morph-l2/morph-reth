@@ -44,6 +44,18 @@ const TEST_ROUTER_RUNTIME: &str = "0x608060405234801561000f575f5ffd5b50600436106
 /// Runtime for `RecoverableSweepFixtures.sol::TestCandidateEmitter`.
 const TEST_CANDIDATE_EMITTER_RUNTIME: &str = "0x6080604052348015600e575f5ffd5b5060015b6010816001600160a01b031611607057604051600181526001600160a01b0382169033907fddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef9060200160405180910390a3606a816072565b90506012565b005b5f6001600160a01b0382166002600160a01b03198101609f57634e487b7160e01b5f52601160045260245ffd5b6001019291505056";
 
+/// Deployed runtime of the PRODUCTION `RecoverableDepositRegistry`
+/// (`morph/contracts` `feat/onyx-recoverable-sweep`, solc 0.8.24). Snapshot
+/// sha256 `02d0d79f86c497bd237bf3fb30efad42e5f88366a32753ff8ac5d80f50fa08b0`.
+///
+/// Injected directly at [`REGISTRY`] (no proxy): `resolveSweep`, `initialize`
+/// and `registerRecoverableDeposit` all read/write this account's own storage,
+/// so the transparent-proxy wrapper is unnecessary for exercising the EL <-> real
+/// contract ABI. This drives the same `resolveSweep`/`RecoverableSweepRequested`
+/// contract the mainnet Registry will expose, instead of the test double above.
+const PROD_REGISTRY_RUNTIME: &str =
+    include_str!("../assets/RecoverableDepositRegistry.deployed.hex");
+
 fn token_balance_slot(account: Address) -> B256 {
     let mut preimage = [0_u8; 64];
     preimage[12..32].copy_from_slice(account.as_slice());
@@ -1075,6 +1087,255 @@ async fn successful_onyx_receipt_commits_sweep_roots_bloom_and_user_gas() -> eyr
             .storage(TEST_TOKEN_ADDRESS, token_balance_slot(MASTER))?
             .unwrap_or_default(),
         U256::from(AMOUNT)
+    );
+
+    Ok(())
+}
+
+/// Left-pads an address into a 32-byte ABI word.
+fn addr_word(a: Address) -> [u8; 32] {
+    let mut w = [0u8; 32];
+    w[12..].copy_from_slice(a.as_slice());
+    w
+}
+
+/// Produces the deposit's EIP-712 `RecoverableDepositAuthorization` signature
+/// (65-byte r||s||v) exactly as the production Registry verifies it (§5.3).
+fn sign_deposit_auth(
+    deposit_signer: &alloy_signer_local::PrivateKeySigner,
+    deposit: Address,
+    master: Address,
+    registry: Address,
+    chain_id: u64,
+    nonce: u64,
+    deadline: u64,
+) -> eyre::Result<Vec<u8>> {
+    use alloy_primitives::keccak256;
+    use alloy_signer::SignerSync;
+
+    let domain_typehash = keccak256(
+        "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)",
+    );
+    let auth_typehash = keccak256(
+        "RecoverableDepositAuthorization(address deposit,address master,address registry,uint256 chainId,uint256 nonce,uint64 deadline,bytes32 mode,bytes32 sweepScope)",
+    );
+    let mode = keccak256("MORPH_RECOVERABLE_DEPOSIT_V1");
+    let sweep_scope = keccak256("WHITELISTED_ERC20_TO_MASTER_ONLY");
+
+    let mut dom = Vec::new();
+    dom.extend_from_slice(domain_typehash.as_slice());
+    dom.extend_from_slice(keccak256("RecoverableDepositRegistry").as_slice());
+    dom.extend_from_slice(keccak256("1").as_slice());
+    dom.extend_from_slice(&U256::from(chain_id).to_be_bytes::<32>());
+    dom.extend_from_slice(&addr_word(registry));
+    let domain_sep = keccak256(&dom);
+
+    let mut sh = Vec::new();
+    sh.extend_from_slice(auth_typehash.as_slice());
+    sh.extend_from_slice(&addr_word(deposit));
+    sh.extend_from_slice(&addr_word(master));
+    sh.extend_from_slice(&addr_word(registry));
+    sh.extend_from_slice(&U256::from(chain_id).to_be_bytes::<32>());
+    sh.extend_from_slice(&U256::from(nonce).to_be_bytes::<32>());
+    sh.extend_from_slice(&U256::from(deadline).to_be_bytes::<32>());
+    sh.extend_from_slice(mode.as_slice());
+    sh.extend_from_slice(sweep_scope.as_slice());
+    let struct_hash = keccak256(&sh);
+
+    let mut pre = Vec::with_capacity(66);
+    pre.extend_from_slice(&[0x19, 0x01]);
+    pre.extend_from_slice(domain_sep.as_slice());
+    pre.extend_from_slice(struct_hash.as_slice());
+    let digest = keccak256(&pre);
+
+    // OZ ECDSA.recover expects v in {27,28}; alloy may return y_parity {0,1}.
+    let mut bytes = deposit_signer.sign_hash_sync(&digest)?.as_bytes().to_vec();
+    if bytes.len() == 65 && bytes[64] < 27 {
+        bytes[64] += 27;
+    }
+    Ok(bytes)
+}
+
+/// ABI-encodes `registerRecoverableDeposit(address,address,uint256,uint64,bytes)`.
+fn register_calldata(
+    deposit: Address,
+    master: Address,
+    nonce: u64,
+    deadline: u64,
+    sig: &[u8],
+) -> Bytes {
+    let mut data = vec![0x03, 0x13, 0x5f, 0x37];
+    data.extend_from_slice(&addr_word(deposit));
+    data.extend_from_slice(&addr_word(master));
+    data.extend_from_slice(&U256::from(nonce).to_be_bytes::<32>());
+    data.extend_from_slice(&U256::from(deadline).to_be_bytes::<32>());
+    data.extend_from_slice(&U256::from(160u64).to_be_bytes::<32>()); // offset to bytes arg
+    data.extend_from_slice(&U256::from(sig.len()).to_be_bytes::<32>());
+    data.extend_from_slice(sig);
+    let pad = (32 - sig.len() % 32) % 32;
+    data.extend(std::iter::repeat_n(0u8, pad));
+    data.into()
+}
+
+/// Drives the EL against the PRODUCTION `RecoverableDepositRegistry` (not the
+/// test double): real `initialize` + `setTokenWhitelist` + EIP-712
+/// `registerRecoverableDeposit`, then a whitelisted inflow that the EL sweeps
+/// through the contract's real `resolveSweep` three-check logic.
+#[tokio::test(flavor = "multi_thread")]
+async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, wallet) = TestNodeBuilder::new()
+        .with_account_code(TEST_TOKEN_ADDRESS, SLOT1_ERC20_RUNTIME_CODE)
+        .with_account_code(REGISTRY, PROD_REGISTRY_RUNTIME.trim())
+        .build()
+        .await?;
+    let mut node = nodes.pop().unwrap();
+
+    // owner == master == the funded wallet, so the register caller is authorized
+    // as the master itself (caller == master path of the auth check).
+    let owner = wallet.inner.address();
+    let master = owner;
+    let deposit_signer = morph_node::test_utils::wallet_at_index(9, wallet.chain_id);
+    let deposit = deposit_signer.address();
+    let deadline = u64::MAX;
+
+    // initialize(owner)
+    let mut init = vec![0xc4, 0xd6, 0x6d, 0xe8];
+    init.extend_from_slice(&addr_word(owner));
+    let tx0 = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
+        .with_v1_eth_fee()
+        .with_gas_limit(5_000_000)
+        .with_to(REGISTRY)
+        .with_data(init)
+        .build_signed()?;
+    node.rpc.inject_tx(tx0).await?;
+    let init_payload = node.advance_block().await?;
+    let init_hash = *init_payload.block().body().transactions[0].tx_hash();
+    assert!(
+        node.inner
+            .provider
+            .receipt_by_hash(init_hash)?
+            .expect("init receipt")
+            .status(),
+        "initialize(owner) must succeed"
+    );
+
+    // setTokenWhitelist(token, true)
+    let mut wl = vec![0xc9, 0xbc, 0xc9, 0x7e];
+    wl.extend_from_slice(&addr_word(TEST_TOKEN_ADDRESS));
+    wl.extend_from_slice(&U256::from(1).to_be_bytes::<32>());
+    let tx1 = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 1)
+        .with_v1_eth_fee()
+        .with_gas_limit(5_000_000)
+        .with_to(REGISTRY)
+        .with_data(wl)
+        .build_signed()?;
+    node.rpc.inject_tx(tx1).await?;
+    let wl_payload = node.advance_block().await?;
+    let wl_hash = *wl_payload.block().body().transactions[0].tx_hash();
+    assert!(
+        node.inner
+            .provider
+            .receipt_by_hash(wl_hash)?
+            .expect("whitelist receipt")
+            .status(),
+        "setTokenWhitelist must succeed"
+    );
+
+    // registerRecoverableDeposit with the deposit's real EIP-712 signature
+    let sig = sign_deposit_auth(
+        &deposit_signer,
+        deposit,
+        master,
+        REGISTRY,
+        wallet.chain_id,
+        0,
+        deadline,
+    )?;
+    let tx2 = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 2)
+        .with_v1_eth_fee()
+        .with_gas_limit(5_000_000)
+        .with_to(REGISTRY)
+        .with_data(register_calldata(deposit, master, 0, deadline, &sig))
+        .build_signed()?;
+    node.rpc.inject_tx(tx2).await?;
+    let reg_payload = node.advance_block().await?;
+    let reg_hash = *reg_payload.block().body().transactions[0].tx_hash();
+    let reg_receipt = node
+        .inner
+        .provider
+        .receipt_by_hash(reg_hash)?
+        .expect("register receipt");
+    assert!(
+        reg_receipt.status(),
+        "registerRecoverableDeposit must succeed with a valid EIP-712 deposit signature"
+    );
+    assert!(
+        reg_receipt.logs().iter().any(|l| l.address == REGISTRY),
+        "registration must emit a RecoverableDepositRegistered event from the Registry"
+    );
+
+    // whitelisted inflow into the deposit -> EL sweeps via the real resolveSweep
+    let tx3 = MorphTxBuilder::new(wallet.chain_id, wallet.inner, 3)
+        .with_v1_eth_fee()
+        .with_to(TEST_TOKEN_ADDRESS)
+        .with_data(transfer_calldata(deposit, U256::from(AMOUNT)))
+        .build_signed()?;
+    node.rpc.inject_tx(tx3).await?;
+    let payload = node.advance_block().await?;
+    let tx_hash = *payload.block().body().transactions[0].tx_hash();
+    let receipt = node
+        .inner
+        .provider
+        .receipt_by_hash(tx_hash)?
+        .expect("transfer receipt");
+    assert!(receipt.status());
+    let logs = receipt.logs();
+
+    // [main Transfer(owner->deposit)] ... [sweep Transfer(deposit->master)] [RecoverableSweep]
+    assert!(
+        logs.len() >= 3,
+        "expected main + sweep + RecoverableSweep logs, got {}",
+        logs.len()
+    );
+    assert_eq!(
+        logs[0].topics(),
+        &[TRANSFER_TOPIC, address_topic(owner), address_topic(deposit)]
+    );
+    let sweep_transfer = &logs[logs.len() - 2];
+    assert_eq!(
+        sweep_transfer.topics(),
+        &[
+            TRANSFER_TOPIC,
+            address_topic(deposit),
+            address_topic(master)
+        ]
+    );
+    assert_eq!(
+        U256::from_be_slice(&sweep_transfer.data.data),
+        U256::from(AMOUNT)
+    );
+    let sweep = &logs[logs.len() - 1];
+    assert_eq!(sweep.address, REGISTRY);
+    assert_eq!(
+        sweep.topics(),
+        &[
+            SWEEP_TOPIC,
+            address_topic(TEST_TOKEN_ADDRESS),
+            address_topic(deposit),
+            address_topic(master)
+        ]
+    );
+
+    // deposit fully drained through the production resolveSweep(master) path
+    let state = node.inner.provider.latest()?;
+    assert_eq!(
+        state
+            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(deposit))?
+            .unwrap_or_default(),
+        U256::ZERO,
+        "deposit must be swept to zero via the production Registry resolveSweep"
     );
 
     Ok(())
