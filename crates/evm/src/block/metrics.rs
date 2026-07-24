@@ -18,6 +18,8 @@ const FAILURES_BY_REASON: &str = "morph.sweep.failures_by_reason";
 #[derive(Metrics, Clone)]
 #[metrics(scope = "morph.sweep")]
 pub(crate) struct SweepMetrics {
+    /// Raw Registry/Transfer triggers that consumed bounded policy preflight.
+    preflights_total: Counter,
     /// Candidates checked after committed transactions; each is charged a fixed
     /// system-gas debit regardless of outcome.
     candidates_checked_total: Counter,
@@ -25,7 +27,7 @@ pub(crate) struct SweepMetrics {
     sweeps_total: Counter,
     /// Checked candidates that did not sweep, across every classified reason.
     failures_total: Counter,
-    /// Deposits skipped because they carried code or an EIP-7702 delegation.
+    /// Deposits skipped because their EIP-7702 delegation did not match policy.
     ///
     /// Broken out separately from [`Self::failures_total`] because a rising
     /// value is an operational signal (misconfigured deposit or 7702 abuse),
@@ -40,11 +42,14 @@ impl SweepMetrics {
     /// Records one committed transaction's sweep outcome.
     pub(crate) fn record(
         &self,
+        preflighted_candidates: usize,
         checked_candidates: usize,
         successes: usize,
         failures: &[SweepFailure],
         system_gas_used: u64,
     ) {
+        self.preflights_total
+            .increment(preflighted_candidates as u64);
         self.candidates_checked_total
             .increment(checked_candidates as u64);
         self.sweeps_total.increment(successes as u64);
@@ -52,7 +57,10 @@ impl SweepMetrics {
         self.system_gas_total.increment(system_gas_used);
 
         for failure in failures {
-            if matches!(failure.reason, SweepFailureReason::DepositHasCode) {
+            if matches!(
+                failure.reason,
+                SweepFailureReason::DepositDelegationMismatch
+            ) {
                 self.code_skipped_total.increment(1);
             }
             // A labeled counter gives the full per-reason breakdown; the derive

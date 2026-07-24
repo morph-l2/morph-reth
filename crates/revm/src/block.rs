@@ -10,6 +10,10 @@ use revm::{
 pub struct SweepConfig {
     /// Address of the sweep registry.
     pub registry_address: Address,
+    /// Fixed EIP-7702 implementation authorized for sweep deposits.
+    pub delegate_address: Address,
+    /// Expected runtime code hash of the fixed sweep-deposit implementation.
+    pub delegate_code_hash: B256,
 }
 
 /// Morph block environment.

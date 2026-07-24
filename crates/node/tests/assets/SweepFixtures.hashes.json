@@ -5,11 +5,15 @@
     "optimizer_runs": 200,
     "metadata": false
   },
-  "source_sha256": "cc30db0c7ac6107f7d76290f2613510ee7857e82f5794652440418831de880c7",
+  "source_sha256": "d402505640bca56bb1633f5c8ada2f22175ed36215e46c9ec08385905e260d5c",
   "runtimes": {
     "TEST_REGISTRY_RUNTIME": {
       "contract": "TestSweepRegistry",
-      "sha256": "4f2974d849fa6186312c7276da21add387b3ddb147f40f0a43ef8ae6e9f97221"
+      "sha256": "166b148df0c944f137f64354a7de5d321ced0bb21283ffc05b35cff44363d3e4"
+    },
+    "TEST_SWEEP_DEPOSIT_RUNTIME": {
+      "contract": "TestSweepDeposit",
+      "sha256": "75f9e8d1a45bd5b91e977436ebe191c7106b5f1c73076e402212188d23b3f8eb"
     },
     "TEST_ROUTER_RUNTIME": {
       "contract": "TestSweepRouter",
@@ -18,6 +22,42 @@
     "TEST_CANDIDATE_EMITTER_RUNTIME": {
       "contract": "TestCandidateEmitter",
       "sha256": "fcd8fbb856584a811249949e12c8c4deee436e4c0ff72e6b07bd2d0419ec055a"
+    }
+  },
+  "production": {
+    "compiler": "0.8.24",
+    "settings": {
+      "evm_version": "cancun",
+      "optimizer": true,
+      "optimizer_runs": 999999,
+      "metadata_bytecode_hash": "none"
+    },
+    "sources": {
+      "contracts/l2/system/SweepDeposit.sol": "ce5d78306d91d1b5e05ea106ee6c07d0ad6bfbb7546e30bc7d7ff40f12eb9a01",
+      "contracts/l2/system/SweepRegistry.sol": "8eb5bbed2a225e4a75e84e1155ba898cc327c4aa5086410f4a0416fab85dae16",
+      "contracts/l2/system/ISweepRegistry.sol": "8f38f11a908e71c237d6c7f1834a5e6a4101c179dd5b2faaa93a6bcd328a3024"
+    },
+    "deployment": {
+      "chain_id": 53077,
+      "deployer": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+      "deployer_private_key": "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d",
+      "delegate_nonce": 0,
+      "registry_nonce": 1,
+      "owner": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+      "delegate": "0x8464135c8F25Da09e49BC8782676a84730C318bC",
+      "registry": "0x71C95911E9a5D330f4D621842EC243EE1343292e"
+    },
+    "runtimes": {
+      "SWEEP_DEPOSIT_RUNTIME": {
+        "file_sha256": "83c7798082e8c0f69e0aca0ff6361d316dcdd9169efed9df508171ebfcf3ac55",
+        "runtime_sha256": "61c5121d6fd9b22863d075d73e31117246daa0454b2b707d1a92aed369f63c85",
+        "code_hash": "0x1ab19a80d458401e286c39d6602804d83354d8c28a34560ccda9c14cc7ed707f"
+      },
+      "SWEEP_REGISTRY_RUNTIME": {
+        "file_sha256": "4bb9b83ad506a4764ee78b1faa3187a5ff5f7fb1bab38843a3363752a4cb3249",
+        "runtime_sha256": "434ec8bbd55a8ef2bdc9e59f8a9f9da61138670bbf8b331b5dd11c78a14d524a",
+        "code_hash": "0x595e6e83530f5d07cb689346f532fb401d11f8c98e1f33423156db89ad52887b"
+      }
     }
   }
 }

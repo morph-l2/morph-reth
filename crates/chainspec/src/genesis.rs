@@ -1,6 +1,6 @@
 //! Morph types for genesis data.
 
-use alloy_primitives::Address;
+use alloy_primitives::{Address, B256};
 use alloy_serde::OtherFields;
 use serde::{Deserialize, Serialize, de::Error as _};
 
@@ -95,6 +95,12 @@ pub struct MorphChainConfig {
     /// The address of the sweep registry.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sweep_registry_address: Option<Address>,
+    /// The fixed EIP-7702 implementation authorized for sweep deposits.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sweep_deposit_delegate_address: Option<Address>,
+    /// Expected runtime code hash of the fixed sweep-deposit implementation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sweep_deposit_delegate_code_hash: Option<B256>,
 }
 
 impl MorphChainConfig {
@@ -111,6 +117,16 @@ impl MorphChainConfig {
     /// Returns the sweep registry address.
     pub const fn sweep_registry_address(&self) -> Option<Address> {
         self.sweep_registry_address
+    }
+
+    /// Returns the fixed EIP-7702 implementation for sweep deposits.
+    pub const fn sweep_deposit_delegate_address(&self) -> Option<Address> {
+        self.sweep_deposit_delegate_address
+    }
+
+    /// Returns the expected sweep-deposit implementation runtime code hash.
+    pub const fn sweep_deposit_delegate_code_hash(&self) -> Option<B256> {
+        self.sweep_deposit_delegate_code_hash
     }
 
     /// Checks if the given block size (in bytes) is valid for this chain.
@@ -176,7 +192,9 @@ mod tests {
           "morph": {
             "feeVaultAddress": "0x530000000000000000000000000000000000000a",
             "maxTxPayloadBytesPerBlock": 122880,
-            "sweepRegistryAddress": "0x5300000000000000000000000000000000000023"
+            "sweepRegistryAddress": "0x5300000000000000000000000000000000000023",
+            "sweepDepositDelegateAddress": "0x5300000000000000000000000000000000000024",
+            "sweepDepositDelegateCodeHash": "0x1111111111111111111111111111111111111111111111111111111111111111"
           }
         }
         "#;
@@ -193,6 +211,14 @@ mod tests {
             config.sweep_registry_address(),
             Some(address!("5300000000000000000000000000000000000023"))
         );
+        assert_eq!(
+            config.sweep_deposit_delegate_address(),
+            Some(address!("5300000000000000000000000000000000000024"))
+        );
+        assert_eq!(
+            config.sweep_deposit_delegate_code_hash(),
+            Some(B256::repeat_byte(0x11))
+        );
         assert!(config.is_fee_vault_enabled());
         assert!(config.is_valid_block_size(100000));
         assert!(!config.is_valid_block_size(200000));
@@ -202,9 +228,13 @@ mod tests {
     fn test_sweep_registry_address_is_optional_in_serde() {
         let config: MorphChainConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(config.sweep_registry_address(), None);
+        assert_eq!(config.sweep_deposit_delegate_address(), None);
+        assert_eq!(config.sweep_deposit_delegate_code_hash(), None);
 
         let serialized = serde_json::to_value(config).unwrap();
         assert_eq!(serialized.get("sweepRegistryAddress"), None);
+        assert_eq!(serialized.get("sweepDepositDelegateAddress"), None);
+        assert_eq!(serialized.get("sweepDepositDelegateCodeHash"), None);
     }
 
     #[test]
@@ -214,6 +244,8 @@ mod tests {
         assert_eq!(config.fee_vault_address, None);
         assert_eq!(config.max_tx_payload_bytes_per_block, None);
         assert_eq!(config.sweep_registry_address(), None);
+        assert_eq!(config.sweep_deposit_delegate_address(), None);
+        assert_eq!(config.sweep_deposit_delegate_code_hash(), None);
         // Without max size limit, any size is valid
         assert!(config.is_valid_block_size(usize::MAX));
     }

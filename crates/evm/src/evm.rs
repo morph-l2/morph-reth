@@ -137,10 +137,10 @@ impl<DB: Database, I> MorphEvm<DB, I> {
         self.inner.take_post_fee_logs()
     }
 
-    /// Sets the sweep candidate allowance for the next transaction.
+    /// Sets the sweep execution authority for the next transaction.
     #[inline]
-    pub fn set_sweep_candidate_allowance(&mut self, allowance: usize) {
-        self.inner.set_sweep_candidate_allowance(allowance);
+    pub fn set_sweep_execution_mode(&mut self, mode: morph_revm::SweepExecutionMode) {
+        self.inner.set_sweep_execution_mode(mode);
     }
 
     /// Takes the sweep outcome produced by the latest transaction.

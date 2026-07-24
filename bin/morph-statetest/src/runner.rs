@@ -4,7 +4,7 @@ use alloy_primitives::{B256, Bytes};
 use alloy_trie::{HashBuilder, Nibbles, TrieAccount, root::storage_root_unhashed};
 use morph_chainspec::hardfork::MorphHardfork;
 use morph_evm::{MorphBlockEnv, evm::MorphEvm};
-use morph_revm::{MAX_CANDIDATES_PER_TX, SweepConfig};
+use morph_revm::{MAX_CANDIDATES_PER_TX, SweepConfig, SweepExecutionMode, SweepTxPlan};
 use revm::{
     context::{CfgEnv, result::ExecutionResult},
     database::{EmptyDB, PlainAccount, State},
@@ -27,6 +27,13 @@ const MORPH_STATE_TEST_FEE_VAULT_ADDRESS: Address =
 /// via `sweepRegistry`.
 const MORPH_STATE_TEST_SWEEP_REGISTRY: Address =
     address!("5300000000000000000000000000000000000023");
+/// Canonical EIP-7702 sweep-deposit implementation for Onyx state tests.
+const MORPH_STATE_TEST_SWEEP_DELEGATE: Address =
+    address!("5300000000000000000000000000000000000024");
+/// Expected runtime hash for the canonical state-test sweep delegate.
+///
+/// Fixtures that exercise sweep must override this alongside `sweepDelegate`.
+const MORPH_STATE_TEST_SWEEP_DELEGATE_CODE_HASH: B256 = B256::ZERO;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RunnerOptions {
@@ -158,6 +165,12 @@ fn execute_case(
         registry_address: unit
             .sweep_registry
             .unwrap_or(MORPH_STATE_TEST_SWEEP_REGISTRY),
+        delegate_address: unit
+            .sweep_delegate
+            .unwrap_or(MORPH_STATE_TEST_SWEEP_DELEGATE),
+        delegate_code_hash: unit
+            .sweep_delegate_code_hash
+            .unwrap_or(MORPH_STATE_TEST_SWEEP_DELEGATE_CODE_HASH),
     });
     let env = EvmEnv {
         cfg_env: cfg,
@@ -171,7 +184,9 @@ fn execute_case(
         let mut evm = MorphEvm::new(&mut state, env)
             .with_inspector(TracerEip3155::buffered(stderr()).without_summary());
         evm.enable_inspector();
-        evm.set_sweep_candidate_allowance(MAX_CANDIDATES_PER_TX);
+        evm.set_sweep_execution_mode(SweepExecutionMode::Canonical(
+            SweepTxPlan::single_transaction(MAX_CANDIDATES_PER_TX),
+        ));
         let exec_result = evm.transact_commit(tx);
         let receipt_logs = collect_receipt_logs(&mut evm, &exec_result);
         return Ok(build_outcome(
@@ -186,7 +201,9 @@ fn execute_case(
     }
 
     let mut evm = MorphEvm::new(&mut state, env);
-    evm.set_sweep_candidate_allowance(MAX_CANDIDATES_PER_TX);
+    evm.set_sweep_execution_mode(SweepExecutionMode::Canonical(
+        SweepTxPlan::single_transaction(MAX_CANDIDATES_PER_TX),
+    ));
     let exec_result = evm.transact_commit(tx);
     let receipt_logs = collect_receipt_logs(&mut evm, &exec_result);
     Ok(build_outcome(
@@ -373,15 +390,20 @@ mod tests {
     // balance mapping lives at slot 1. Shared with the morph-node e2e suite.
     const SLOT1_ERC20_RUNTIME: &str = "0x608060405234801561000f575f5ffd5b5060043610610034575f3560e01c806370a0823114610038578063a9059cbb1461006a575b5f5ffd5b61005761004636600461015e565b60016020525f908152604090205481565b6040519081526020015b60405180910390f35b61007d61007836600461017e565b61008d565b6040519015158152602001610061565b335f90815260016020526040812054828110156100da5760405162461bcd60e51b815260206004820152600760248201526662616c616e636560c81b604482015260640160405180910390fd5b335f81815260016020908152604080832087860390556001600160a01b03881680845292819020805488019055518681529192917fddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef910160405180910390a35060019392505050565b80356001600160a01b0381168114610159575f5ffd5b919050565b5f6020828403121561016e575f5ffd5b61017782610143565b9392505050565b5f5f6040838503121561018f575f5ffd5b61019883610143565b94602093909301359350505056";
 
-    // Test-only registry: `resolveSweep(token,deposit)` returns the master stored
-    // in the nested `masters[token][deposit]` mapping at base slot 0.
-    const TEST_REGISTRY_RUNTIME: &str = "0x608060405234801561000f575f5ffd5b506004361061003f575f3560e01c8063663a375c146100435780639faa2f2f14610058578063ba1b6c84146100a9575b5f5ffd5b610056610051366004610150565b6100f1565b005b61008d610066366004610150565b6001600160a01b039182165f90815260208181526040808320938516835292905220541690565b6040516001600160a01b03909116815260200160405180910390f35b6100566100b7366004610181565b6001600160a01b039283165f9081526020818152604080832094861683529390529190912080546001600160a01b03191691909216179055565b806001600160a01b0316826001600160a01b03167f24e3f180db341974dcd99a5e223d9d944422e303230ddde6659302f8620bbcff60405160405180910390a35050565b80356001600160a01b038116811461014b575f5ffd5b919050565b5f5f60408385031215610161575f5ffd5b61016a83610135565b915061017860208401610135565b90509250929050565b5f5f5f60608486031215610193575f5ffd5b61019c84610135565b92506101aa60208501610135565b91506101b860408501610135565b9050925092509256";
+    // Test-only Registry returns an atomic `(master, token code hash, minimum)`
+    // policy from the frozen `resolveSweep(token,deposit)` selector.
+    const TEST_REGISTRY_RUNTIME: &str = "0x608060405234801561000f575f5ffd5b5060043610610055575f3560e01c8063663a375c14610059578063753d75631461006e5780639faa2f2f146100a5578063ba1b6c84146100dd578063fcdd97bf1461013a575b5f5ffd5b61006c61006736600461025f565b610167565b005b61009061007c366004610290565b60016020525f908152604090205460ff1681565b60405190151581526020015b60405180910390f35b6100b86100b336600461025f565b6101ab565b604080516001600160a01b03909416845260208401929092529082015260600161009c565b61006c6100eb3660046102b0565b6001600160a01b039283165f908152600160208181526040808420805460ff19169093179092558281528183209486168352939093529190912080546001600160a01b03191691909216179055565b610159610148366004610290565b60026020525f908152604090205481565b60405190815260200161009c565b806001600160a01b0316826001600160a01b03167f24e3f180db341974dcd99a5e223d9d944422e303230ddde6659302f8620bbcff60405160405180910390a35050565b6001600160a01b038083165f8181526020818152604080832086861684528252808320549383526001909152812054919092169190819060ff1615806101f857506001600160a01b038316155b1561020a57505f91508190508061023d565b6001600160a01b0385165f818152600260205260409020549084903f82156102325782610235565b60015b935093509350505b9250925092565b80356001600160a01b038116811461025a575f5ffd5b919050565b5f5f60408385031215610270575f5ffd5b61027983610244565b915061028760208401610244565b90509250929050565b5f602082840312156102a0575f5ffd5b6102a982610244565b9392505050565b5f5f5f606084860312156102c2575f5ffd5b6102cb84610244565b92506102d960208501610244565b91506102e760408501610244565b9050925092509256";
+
+    const TEST_SWEEP_DEPOSIT_RUNTIME: &str = "0x608060405234801561000f575f5ffd5b5060043610610029575f3560e01c806362c067671461002d575b5f5ffd5b61004061003b3660046101cf565b610042565b005b336024605360981b01146100935760405162461bcd60e51b815260206004820152601360248201527237b7363c9039bbb2b2b81032bc32b1baba37b960691b60448201526064015b60405180910390fd5b6040516001600160a01b038381166024830152604482018390525f91829186169060640160408051601f198184030181529181526020820180516001600160e01b031663a9059cbb60e01b179052516100ec9190610208565b5f604051808303815f865af19150503d805f8114610125576040519150601f19603f3d011682016040523d82523d5f602084013e61012a565b606091505b509150915081801561014557506001600160a01b0385163b15155b8015610169575080511580610169575080806020019051810190610169919061021e565b6101ad5760405162461bcd60e51b81526020600482015260156024820152741d1bdad95b881d1c985b9cd9995c8819985a5b1959605a1b604482015260640161008a565b5050505050565b80356001600160a01b03811681146101ca575f5ffd5b919050565b5f5f5f606084860312156101e1575f5ffd5b6101ea846101b4565b92506101f8602085016101b4565b9150604084013590509250925092565b5f82518060208501845e5f920191825250919050565b5f6020828403121561022e575f5ffd5b8151801515811461023d575f5ffd5b939250505056";
 
     const SENDER: Address = address!("a94f5374fce5edbc8e2a8697c15331677e6ebf0b");
     const TOKEN: Address = address!("00000000000000000000000000000000000000aa");
     const DEPOSIT: Address = address!("00000000000000000000000000000000000000d0");
     const MASTER: Address = address!("00000000000000000000000000000000000000e0");
     const AMOUNT: u64 = 1000;
+    const TEST_DEPOSIT_DELEGATION: &str = "0xef01005300000000000000000000000000000000000024";
+    const TEST_SWEEP_DEPOSIT_CODE_HASH: &str =
+        "0xa3d7ce37754038b8bc7dc02bbe2ac1618612ee29a3305c1e316479267cead85d";
 
     fn erc20_balance_slot(account: Address) -> B256 {
         let mut preimage = [0u8; 64];
@@ -398,6 +420,13 @@ mod tests {
         outer_preimage[12..32].copy_from_slice(deposit.as_slice());
         outer_preimage[32..64].copy_from_slice(inner.as_slice());
         keccak256(outer_preimage)
+    }
+
+    fn registry_whitelist_slot(token: Address) -> B256 {
+        let mut preimage = [0u8; 64];
+        preimage[12..32].copy_from_slice(token.as_slice());
+        preimage[63] = 1;
+        keccak256(preimage)
     }
 
     fn word(value: B256) -> String {
@@ -427,10 +456,14 @@ mod tests {
                   "currentTimestamp": "0x1",
                   "currentBaseFee": "0x0"
                 }},
+                "sweepDelegate": "{delegate}",
+                "sweepDelegateCodeHash": "{delegate_code_hash}",
                 "pre": {{
                   "{sender}": {{ "balance": "0x3635c9adc5dea00000", "nonce": "0x0", "code": "0x", "storage": {{}} }},
                   "{token}": {{ "balance": "0x0", "nonce": "0x0", "code": "{erc20}", "storage": {{ "{sender_bal_slot}": "{amount_word}" }} }},
-                  "{registry}": {{ "balance": "0x0", "nonce": "0x0", "code": "{registry_code}", "storage": {{ "{master_slot}": "{master_word}" }} }}
+                  "{deposit}": {{ "balance": "0x0", "nonce": "0x0", "code": "{deposit_delegation}", "storage": {{}} }},
+                  "{delegate}": {{ "balance": "0x0", "nonce": "0x0", "code": "{delegate_code}", "storage": {{}} }},
+                  "{registry}": {{ "balance": "0x0", "nonce": "0x0", "code": "{registry_code}", "storage": {{ "{master_slot}": "{master_word}", "{whitelist_slot}": "0x01" }} }}
                 }},
                 "transaction": {{
                   "nonce": "0x0",
@@ -450,12 +483,18 @@ mod tests {
             }}"#,
             sender = hex::encode_prefixed(SENDER),
             token = hex::encode_prefixed(TOKEN),
+            deposit = hex::encode_prefixed(DEPOSIT),
+            delegate = hex::encode_prefixed(MORPH_STATE_TEST_SWEEP_DELEGATE),
+            delegate_code_hash = TEST_SWEEP_DEPOSIT_CODE_HASH,
+            deposit_delegation = TEST_DEPOSIT_DELEGATION,
+            delegate_code = TEST_SWEEP_DEPOSIT_RUNTIME,
             registry = hex::encode_prefixed(MORPH_STATE_TEST_SWEEP_REGISTRY),
             erc20 = SLOT1_ERC20_RUNTIME,
             registry_code = TEST_REGISTRY_RUNTIME,
             sender_bal_slot = word(erc20_balance_slot(SENDER)),
             amount_word = word(B256::from(U256::from(AMOUNT).to_be_bytes())),
             master_slot = word(registry_master_slot(TOKEN, DEPOSIT)),
+            whitelist_slot = word(registry_whitelist_slot(TOKEN)),
             master_word = word(B256::left_padding_from(MASTER.as_slice())),
             data = transfer_data,
         );

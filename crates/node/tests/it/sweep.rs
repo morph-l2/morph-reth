@@ -5,7 +5,7 @@ use alloy_primitives::{Address, B256, Bytes, U256, address, b256, logs_bloom};
 use jsonrpsee::core::client::ClientT;
 use morph_node::test_utils::{
     HardforkSchedule, L1MessageBuilder, MorphTestNode, MorphTxBuilder, SLOT1_ERC20_RUNTIME_CODE,
-    TEST_TOKEN_ADDRESS, TestNodeBuilder,
+    TEST_TOKEN_ADDRESS, TEST_TOKEN_ID, TestNodeBuilder, make_sponsored_eip7702_call,
 };
 use morph_payload_types::{
     AssembleL2BlockV2Params, ExecutableL2Data, MorphBuiltPayload, MorphPayloadTypes,
@@ -18,6 +18,7 @@ use reth_provider::{HeaderProvider, ReceiptProvider, StateProviderFactory};
 use super::helpers::advance_block_with_l1_messages;
 
 const REGISTRY: Address = address!("5300000000000000000000000000000000000023");
+const DELEGATE: Address = address!("5300000000000000000000000000000000000024");
 const DEPOSIT: Address = address!("1000000000000000000000000000000000000001");
 const DEPOSIT_TWO: Address = address!("1000000000000000000000000000000000000002");
 const MASTER: Address = address!("2000000000000000000000000000000000000002");
@@ -26,6 +27,14 @@ const ROUTER: Address = address!("4000000000000000000000000000000000000004");
 const CANDIDATE_EMITTER: Address = address!("5000000000000000000000000000000000000005");
 const SENDER: Address = address!("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
 const AMOUNT: u64 = 123;
+const TEST_DEPOSIT_DELEGATION: &str = "0xef01005300000000000000000000000000000000000024";
+const PROD_REGISTRY: Address = address!("71C95911E9a5D330f4D621842EC243EE1343292e");
+const PROD_DELEGATE: Address = address!("8464135c8F25Da09e49BC8782676a84730C318bC");
+const PROD_SWEEP_DEPOSIT_CODE_HASH: B256 =
+    b256!("1ab19a80d458401e286c39d6602804d83354d8c28a34560ccda9c14cc7ed707f");
+const PROD_DEPOSIT_DELEGATION: &str = "0xef01008464135c8f25da09e49bc8782676a84730c318bc";
+const SLOT1_ERC20_CODE_HASH: B256 =
+    b256!("e71da1ef1d982047e78309f44c426e0870ac83a406380f3a2251d64d8cec943e");
 const TRANSFER_TOPIC: B256 =
     b256!("ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef");
 const REQUEST_TOPIC: B256 =
@@ -36,7 +45,10 @@ const SWEEP_TOPIC: B256 = b256!("035b37215a69e14a80883933d6aa84f0919a67af9410a4a
 /// `tests/assets/SweepFixtures.sol::TestSweepRegistry`.
 ///
 /// It is a deterministic test double, not production Registry bytecode.
-const TEST_REGISTRY_RUNTIME: &str = "0x608060405234801561000f575f5ffd5b506004361061003f575f3560e01c8063663a375c146100435780639faa2f2f14610058578063ba1b6c84146100a9575b5f5ffd5b610056610051366004610150565b6100f1565b005b61008d610066366004610150565b6001600160a01b039182165f90815260208181526040808320938516835292905220541690565b6040516001600160a01b03909116815260200160405180910390f35b6100566100b7366004610181565b6001600160a01b039283165f9081526020818152604080832094861683529390529190912080546001600160a01b03191691909216179055565b806001600160a01b0316826001600160a01b03167f24e3f180db341974dcd99a5e223d9d944422e303230ddde6659302f8620bbcff60405160405180910390a35050565b80356001600160a01b038116811461014b575f5ffd5b919050565b5f5f60408385031215610161575f5ffd5b61016a83610135565b915061017860208401610135565b90509250929050565b5f5f5f60608486031215610193575f5ffd5b61019c84610135565b92506101aa60208501610135565b91506101b860408501610135565b9050925092509256";
+const TEST_REGISTRY_RUNTIME: &str = "0x608060405234801561000f575f5ffd5b5060043610610055575f3560e01c8063663a375c14610059578063753d75631461006e5780639faa2f2f146100a5578063ba1b6c84146100dd578063fcdd97bf1461013a575b5f5ffd5b61006c61006736600461025f565b610167565b005b61009061007c366004610290565b60016020525f908152604090205460ff1681565b60405190151581526020015b60405180910390f35b6100b86100b336600461025f565b6101ab565b604080516001600160a01b03909416845260208401929092529082015260600161009c565b61006c6100eb3660046102b0565b6001600160a01b039283165f908152600160208181526040808420805460ff19169093179092558281528183209486168352939093529190912080546001600160a01b03191691909216179055565b610159610148366004610290565b60026020525f908152604090205481565b60405190815260200161009c565b806001600160a01b0316826001600160a01b03167f24e3f180db341974dcd99a5e223d9d944422e303230ddde6659302f8620bbcff60405160405180910390a35050565b6001600160a01b038083165f8181526020818152604080832086861684528252808320549383526001909152812054919092169190819060ff1615806101f857506001600160a01b038316155b1561020a57505f91508190508061023d565b6001600160a01b0385165f818152600260205260409020549084903f82156102325782610235565b60015b935093509350505b9250925092565b80356001600160a01b038116811461025a575f5ffd5b919050565b5f5f60408385031215610270575f5ffd5b61027983610244565b915061028760208401610244565b90509250929050565b5f602082840312156102a0575f5ffd5b6102a982610244565b9392505050565b5f5f5f606084860312156102c2575f5ffd5b6102cb84610244565b92506102d960208501610244565b91506102e760408501610244565b9050925092509256";
+
+/// Runtime for `SweepFixtures.sol::TestSweepDeposit`.
+const TEST_SWEEP_DEPOSIT_RUNTIME: &str = "0x608060405234801561000f575f5ffd5b5060043610610029575f3560e01c806362c067671461002d575b5f5ffd5b61004061003b3660046101cf565b610042565b005b336024605360981b01146100935760405162461bcd60e51b815260206004820152601360248201527237b7363c9039bbb2b2b81032bc32b1baba37b960691b60448201526064015b60405180910390fd5b6040516001600160a01b038381166024830152604482018390525f91829186169060640160408051601f198184030181529181526020820180516001600160e01b031663a9059cbb60e01b179052516100ec9190610208565b5f604051808303815f865af19150503d805f8114610125576040519150601f19603f3d011682016040523d82523d5f602084013e61012a565b606091505b509150915081801561014557506001600160a01b0385163b15155b8015610169575080511580610169575080806020019051810190610169919061021e565b6101ad5760405162461bcd60e51b81526020600482015260156024820152741d1bdad95b881d1c985b9cd9995c8819985a5b1959605a1b604482015260640161008a565b5050505050565b80356001600160a01b03811681146101ca575f5ffd5b919050565b5f5f5f606084860312156101e1575f5ffd5b6101ea846101b4565b92506101f8602085016101b4565b9150604084013590509250925092565b5f82518060208501845e5f920191825250919050565b5f6020828403121561022e575f5ffd5b8151801515811461023d575f5ffd5b939250505056";
 
 /// Runtime for `SweepFixtures.sol::TestSweepRouter`.
 const TEST_ROUTER_RUNTIME: &str = "0x608060405234801561000f575f5ffd5b5060043610610034575f3560e01c806341f47c231461003857806393d1fef41461004d575b5f5ffd5b61004b61004636600461024a565b610060565b005b61004b61005b366004610292565b610149565b604051632e86db2160e21b81526001600160a01b0380861660048301528085166024830152831660448201526023605360981b019063ba1b6c84906064015f604051808303815f87803b1580156100b5575f5ffd5b505af11580156100c7573d5f5f3e3d5ffd5b505060405163a9059cbb60e01b81526001600160a01b038681166004830152602482018590528716925063a9059cbb91506044016020604051808303815f875af1158015610117573d5f5f3e3d5ffd5b505050506040513d601f19601f8201168201806040525081019061013b91906102cc565b610143575f5ffd5b50505050565b60405163a9059cbb60e01b81526001600160a01b0383811660048301526024820183905284169063a9059cbb906044016020604051808303815f875af1158015610195573d5f5f3e3d5ffd5b505050506040513d601f19601f820116820180604052508101906101b991906102cc565b6101c1575f5ffd5b604051632e86db2160e21b81526001600160a01b038085166004830152831660248201525f60448201526023605360981b019063ba1b6c84906064015f604051808303815f87803b158015610214575f5ffd5b505af1158015610226573d5f5f3e3d5ffd5b50505050505050565b80356001600160a01b0381168114610245575f5ffd5b919050565b5f5f5f5f6080858703121561025d575f5ffd5b6102668561022f565b93506102746020860161022f565b92506102826040860161022f565b9396929550929360600135925050565b5f5f5f606084860312156102a4575f5ffd5b6102ad8461022f565b92506102bb6020850161022f565b929592945050506040919091013590565b5f602082840312156102dc575f5ffd5b815180151581146102eb575f5ffd5b939250505056";
@@ -44,15 +56,14 @@ const TEST_ROUTER_RUNTIME: &str = "0x608060405234801561000f575f5ffd5b50600436106
 /// Runtime for `SweepFixtures.sol::TestCandidateEmitter`.
 const TEST_CANDIDATE_EMITTER_RUNTIME: &str = "0x6080604052348015600e575f5ffd5b5060015b6010816001600160a01b031611607057604051600181526001600160a01b0382169033907fddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef9060200160405180910390a3606a816072565b90506012565b005b5f6001600160a01b0382166002600160a01b03198101609f57634e487b7160e01b5f52601160045260245ffd5b6001019291505056";
 
-/// Deployed runtime of the PRODUCTION `SweepRegistry`
-/// (`morph/contracts` `feat/onyx-sweep`, solc 0.8.24). Snapshot
-/// sha256 `139ca164f0572d57a8ce51b6debe5bf695aa8e3fa11925796f7c5526d398316b`.
+/// Exact production-tuple runtime of `SweepDeposit`.
+const PROD_SWEEP_DEPOSIT_RUNTIME: &str = include_str!("../assets/SweepDeposit.deployed.hex");
+
+/// Exact production-tuple runtime of `SweepRegistry`.
 ///
-/// Injected directly at [`REGISTRY`] (no proxy): `resolveSweep`, `initialize`
-/// and `registerSweep` all read/write this account's own storage,
-/// so the transparent-proxy wrapper is unnecessary for exercising the EL <-> real
-/// contract ABI. This drives the same `resolveSweep`/`SweepRequested`
-/// contract the mainnet Registry will expose, instead of the test double above.
+/// The constructor-set owner is restored in genesis storage. Source, compiler,
+/// immutable, file, and runtime hashes are enforced by
+/// `verify_sweep_fixtures.py` against the sibling `morph` checkout.
 const PROD_REGISTRY_RUNTIME: &str = include_str!("../assets/SweepRegistry.deployed.hex");
 
 fn token_balance_slot(account: Address) -> B256 {
@@ -106,6 +117,9 @@ fn stateful_builder() -> TestNodeBuilder {
     TestNodeBuilder::new()
         .with_account_code(TEST_TOKEN_ADDRESS, SLOT1_ERC20_RUNTIME_CODE)
         .with_account_code(REGISTRY, TEST_REGISTRY_RUNTIME)
+        .with_account_code(DELEGATE, TEST_SWEEP_DEPOSIT_RUNTIME)
+        .with_account_code(DEPOSIT, TEST_DEPOSIT_DELEGATION)
+        .with_account_code(DEPOSIT_TWO, TEST_DEPOSIT_DELEGATION)
 }
 
 async fn import_payload(node: &MorphTestNode, payload: &MorphBuiltPayload) -> eyre::Result<()> {
@@ -127,12 +141,7 @@ async fn import_payload(node: &MorphTestNode, payload: &MorphBuiltPayload) -> ey
 }
 
 async fn transfer_to_deposit(schedule: HardforkSchedule) -> eyre::Result<(U256, U256, usize)> {
-    let (mut nodes, wallet) = TestNodeBuilder::new()
-        .with_schedule(schedule)
-        .with_account_code(TEST_TOKEN_ADDRESS, SLOT1_ERC20_RUNTIME_CODE)
-        .with_account_code(REGISTRY, TEST_REGISTRY_RUNTIME)
-        .build()
-        .await?;
+    let (mut nodes, wallet) = stateful_builder().with_schedule(schedule).build().await?;
     let mut node = nodes.pop().unwrap();
 
     let register = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
@@ -730,7 +739,7 @@ async fn reorg_removes_sweep_receipt_logs_and_state() -> eyre::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn user_transaction_after_block_sweep_budget_exhaustion_still_succeeds() -> eyre::Result<()> {
+async fn unwhitelisted_fake_logs_do_not_exhaust_the_execution_quota() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let (mut nodes, wallet) = stateful_builder()
@@ -776,7 +785,7 @@ async fn user_transaction_after_block_sweep_budget_exhaustion_still_succeeds() -
         assert_eq!(
             receipt.logs().len(),
             16,
-            "each leading transaction must consume sixteen candidates"
+            "each leading transaction emits sixteen bounded preflight candidates"
         );
         assert!(
             receipt
@@ -794,8 +803,8 @@ async fn user_transaction_after_block_sweep_budget_exhaustion_still_succeeds() -
     assert!(receipt.status());
     assert_eq!(
         receipt.logs().len(),
-        1,
-        "exhausted budget must leave only the eligible inflow Transfer"
+        3,
+        "unwhitelisted fake logs must not suppress the eligible sweep"
     );
     assert_eq!(
         receipt.logs()[0].topics(),
@@ -815,13 +824,13 @@ async fn user_transaction_after_block_sweep_budget_exhaustion_still_succeeds() -
         state
             .storage(TEST_TOKEN_ADDRESS, token_balance_slot(DEPOSIT))?
             .unwrap_or_default(),
-        U256::from(AMOUNT)
+        U256::ZERO
     );
     assert_eq!(
         state
             .storage(TEST_TOKEN_ADDRESS, token_balance_slot(MASTER))?
             .unwrap_or_default(),
-        U256::ZERO
+        U256::from(AMOUNT)
     );
 
     let rpc = node
@@ -841,14 +850,14 @@ async fn user_transaction_after_block_sweep_budget_exhaustion_still_succeeds() -
     let deposit_slot = token_balance_slot(DEPOSIT).to_string();
     let master_slot = token_balance_slot(MASTER).to_string();
     let amount_word = B256::from(U256::from(AMOUNT).to_be_bytes::<32>()).to_string();
-    assert_eq!(
-        trace["post"][&token_key]["storage"][&deposit_slot],
-        serde_json::Value::String(amount_word.clone()),
-        "target transaction trace must preserve exhausted block budget"
-    );
     assert!(
-        trace["post"][&token_key]["storage"][&master_slot].is_null(),
-        "target transaction trace must not credit master after budget exhaustion"
+        trace["post"][&token_key]["storage"][&deposit_slot].is_null(),
+        "net-zero deposit storage should be omitted from the target diff"
+    );
+    assert_eq!(
+        trace["post"][&token_key]["storage"][&master_slot],
+        serde_json::Value::String(amount_word.clone()),
+        "target transaction trace must include the eligible sweep"
     );
 
     let block_trace: serde_json::Value = rpc
@@ -857,12 +866,15 @@ async fn user_transaction_after_block_sweep_budget_exhaustion_still_succeeds() -
             (payload.block().hash(), trace_options),
         )
         .await?;
-    assert_eq!(
-        block_trace[4]["result"]["post"][&token_key]["storage"][&deposit_slot],
-        serde_json::Value::String(amount_word),
-        "full debug block replay must preserve exhausted block budget"
+    assert!(
+        block_trace[4]["result"]["post"][&token_key]["storage"][&deposit_slot].is_null(),
+        "full debug replay should omit the net-zero deposit slot"
     );
-    assert!(block_trace[4]["result"]["post"][&token_key]["storage"][&master_slot].is_null());
+    assert_eq!(
+        block_trace[4]["result"]["post"][&token_key]["storage"][&master_slot],
+        serde_json::Value::String(amount_word),
+        "full debug block replay must include the eligible sweep"
+    );
 
     let parity_trace = node
         .rpc
@@ -878,12 +890,12 @@ async fn user_transaction_after_block_sweep_budget_exhaustion_still_succeeds() -
         )
         .await?;
     assert!(
-        !parity_replay[4]["stateDiff"][&token_key]["storage"][&deposit_slot].is_null(),
-        "parity block replay must retain the final inflow at the deposit"
+        parity_replay[4]["stateDiff"][&token_key]["storage"][&deposit_slot].is_null(),
+        "parity replay should omit the net-zero deposit slot"
     );
     assert!(
-        parity_replay[4]["stateDiff"][&token_key]["storage"][&master_slot].is_null(),
-        "parity block replay must preserve exhausted block budget"
+        !parity_replay[4]["stateDiff"][&token_key]["storage"][&master_slot].is_null(),
+        "parity block replay must include the eligible sweep"
     );
 
     Ok(())
@@ -976,11 +988,7 @@ async fn synthetic_trace_calls_do_not_run_sweep() -> eyre::Result<()> {
 async fn successful_onyx_receipt_commits_sweep_roots_bloom_and_user_gas() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (mut nodes, wallet) = TestNodeBuilder::new()
-        .with_account_code(TEST_TOKEN_ADDRESS, SLOT1_ERC20_RUNTIME_CODE)
-        .with_account_code(REGISTRY, TEST_REGISTRY_RUNTIME)
-        .build()
-        .await?;
+    let (mut nodes, wallet) = stateful_builder().build().await?;
     let mut node = nodes.pop().unwrap();
 
     let register = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
@@ -1100,31 +1108,49 @@ fn addr_word(a: Address) -> [u8; 32] {
 
 /// Produces the deposit's EIP-712 `SweepAuthorization` signature
 /// (65-byte r||s||v) exactly as the production Registry verifies it (§5.3).
-fn sign_deposit_auth(
-    deposit_signer: &alloy_signer_local::PrivateKeySigner,
+#[derive(Debug, Clone, Copy)]
+struct DepositAuthorization {
     deposit: Address,
     master: Address,
     registry: Address,
     chain_id: u64,
     nonce: u64,
     deadline: u64,
+    delegate: Address,
+    delegate_code_hash: B256,
+}
+
+fn sign_deposit_auth(
+    deposit_signer: &alloy_signer_local::PrivateKeySigner,
+    authorization: DepositAuthorization,
 ) -> eyre::Result<Vec<u8>> {
     use alloy_primitives::keccak256;
     use alloy_signer::SignerSync;
+
+    let DepositAuthorization {
+        deposit,
+        master,
+        registry,
+        chain_id,
+        nonce,
+        deadline,
+        delegate,
+        delegate_code_hash,
+    } = authorization;
 
     let domain_typehash = keccak256(
         "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)",
     );
     let auth_typehash = keccak256(
-        "SweepAuthorization(address deposit,address master,address registry,uint256 chainId,uint256 nonce,uint64 deadline,bytes32 mode,bytes32 sweepScope)",
+        "SweepAuthorization(address deposit,address master,address registry,uint256 chainId,uint256 nonce,uint64 deadline,address delegate,bytes32 delegateCodeHash,bytes32 mode,bytes32 sweepScope)",
     );
-    let mode = keccak256("MORPH_SWEEP_V1");
-    let sweep_scope = keccak256("WHITELISTED_ERC20_TO_MASTER_ONLY");
+    let mode = keccak256("MORPH_SWEEP_V2");
+    let sweep_scope = keccak256("PINNED_ERC20_BALANCE_TO_MASTER_ONLY");
 
     let mut dom = Vec::new();
     dom.extend_from_slice(domain_typehash.as_slice());
     dom.extend_from_slice(keccak256("SweepRegistry").as_slice());
-    dom.extend_from_slice(keccak256("1").as_slice());
+    dom.extend_from_slice(keccak256("2").as_slice());
     dom.extend_from_slice(&U256::from(chain_id).to_be_bytes::<32>());
     dom.extend_from_slice(&addr_word(registry));
     let domain_sep = keccak256(&dom);
@@ -1137,6 +1163,8 @@ fn sign_deposit_auth(
     sh.extend_from_slice(&U256::from(chain_id).to_be_bytes::<32>());
     sh.extend_from_slice(&U256::from(nonce).to_be_bytes::<32>());
     sh.extend_from_slice(&U256::from(deadline).to_be_bytes::<32>());
+    sh.extend_from_slice(&addr_word(delegate));
+    sh.extend_from_slice(delegate_code_hash.as_slice());
     sh.extend_from_slice(mode.as_slice());
     sh.extend_from_slice(sweep_scope.as_slice());
     let struct_hash = keccak256(&sh);
@@ -1176,89 +1204,235 @@ fn register_calldata(
     data.into()
 }
 
-/// Drives the EL against the PRODUCTION `SweepRegistry` (not the
-/// test double): real `initialize` + `setTokenWhitelist` + EIP-712
-/// `registerSweep`, then a whitelisted inflow that the EL sweeps
-/// through the contract's real `resolveSweep` three-check logic.
+/// Drives the EL against the production `SweepRegistry` (not the test double):
+/// owner policy setup + V2 EIP-712 registration + a pinned-codehash token
+/// inflow swept through the contract's real fail-closed `resolveSweep`.
 #[tokio::test(flavor = "multi_thread")]
 async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
+    const PRELOADED_FEE_BALANCE: u128 = 100_000_000_000_000_000_000;
+    let deposit_signer = morph_node::test_utils::wallet_at_index(9, 2910);
+    let deposit = deposit_signer.address();
+    let fee_deposit_signer = morph_node::test_utils::wallet_at_index(8, 2910);
+    let fee_deposit = fee_deposit_signer.address();
     let (mut nodes, wallet) = TestNodeBuilder::new()
+        .with_sweep_config(PROD_REGISTRY, PROD_DELEGATE, PROD_SWEEP_DEPOSIT_CODE_HASH)
         .with_account_code(TEST_TOKEN_ADDRESS, SLOT1_ERC20_RUNTIME_CODE)
-        .with_account_code(REGISTRY, PROD_REGISTRY_RUNTIME.trim())
+        .with_account_code(PROD_DELEGATE, PROD_SWEEP_DEPOSIT_RUNTIME.trim())
+        .with_account_code(PROD_REGISTRY, PROD_REGISTRY_RUNTIME.trim())
+        .with_account_code(fee_deposit, PROD_DEPOSIT_DELEGATION)
+        .with_account_storage(PROD_REGISTRY, B256::ZERO, address_topic(SENDER))
+        .with_account_storage(
+            TEST_TOKEN_ADDRESS,
+            token_balance_slot(fee_deposit),
+            B256::from(U256::from(PRELOADED_FEE_BALANCE).to_be_bytes::<32>()),
+        )
         .build()
         .await?;
     let mut node = nodes.pop().unwrap();
 
-    // owner == master == the funded wallet, so the register caller is authorized
-    // as the master itself (caller == master path of the auth check).
     let owner = wallet.inner.address();
+    assert_eq!(owner, SENDER);
     let master = owner;
-    let deposit_signer = morph_node::test_utils::wallet_at_index(9, wallet.chain_id);
-    let deposit = deposit_signer.address();
     let deadline = u64::MAX;
+    let deposit_before = node.inner.provider.latest()?.basic_account(&deposit)?;
+    assert_eq!(
+        deposit_before
+            .as_ref()
+            .map(|account| account.balance)
+            .unwrap_or_default(),
+        U256::ZERO,
+        "sponsored deposit must start with no native balance"
+    );
+    assert_eq!(
+        deposit_before
+            .map(|account| account.nonce)
+            .unwrap_or_default(),
+        0,
+        "sponsored deposit authorization nonce must start at zero"
+    );
 
-    // initialize(owner)
-    let mut init = vec![0xc4, 0xd6, 0x6d, 0xe8];
-    init.extend_from_slice(&addr_word(owner));
+    // setMasterApproval(master, true)
+    let mut master_approval = vec![0x80, 0x53, 0xd0, 0xca];
+    master_approval.extend_from_slice(&addr_word(master));
+    master_approval.extend_from_slice(&U256::from(1).to_be_bytes::<32>());
     let tx0 = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
         .with_v1_eth_fee()
         .with_gas_limit(5_000_000)
-        .with_to(REGISTRY)
-        .with_data(init)
+        .with_to(PROD_REGISTRY)
+        .with_data(master_approval)
         .build_signed()?;
     node.rpc.inject_tx(tx0).await?;
-    let init_payload = node.advance_block().await?;
-    let init_hash = *init_payload.block().body().transactions[0].tx_hash();
+    let approval_payload = node.advance_block().await?;
+    let approval_hash = *approval_payload.block().body().transactions[0].tx_hash();
     assert!(
         node.inner
             .provider
-            .receipt_by_hash(init_hash)?
-            .expect("init receipt")
+            .receipt_by_hash(approval_hash)?
+            .expect("master approval receipt")
             .status(),
-        "initialize(owner) must succeed"
+        "setMasterApproval must succeed"
     );
 
-    // setTokenWhitelist(token, true)
-    let mut wl = vec![0xc9, 0xbc, 0xc9, 0x7e];
-    wl.extend_from_slice(&addr_word(TEST_TOKEN_ADDRESS));
-    wl.extend_from_slice(&U256::from(1).to_be_bytes::<32>());
+    // setTokenPolicy(token, true, token.codehash, minimumAmount)
+    let mut token_policy = vec![0x6c, 0x8c, 0x33, 0xf4];
+    token_policy.extend_from_slice(&addr_word(TEST_TOKEN_ADDRESS));
+    token_policy.extend_from_slice(&U256::from(1).to_be_bytes::<32>());
+    token_policy.extend_from_slice(SLOT1_ERC20_CODE_HASH.as_slice());
+    token_policy.extend_from_slice(&U256::from(1).to_be_bytes::<32>());
     let tx1 = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 1)
         .with_v1_eth_fee()
         .with_gas_limit(5_000_000)
-        .with_to(REGISTRY)
-        .with_data(wl)
+        .with_to(PROD_REGISTRY)
+        .with_data(token_policy)
         .build_signed()?;
     node.rpc.inject_tx(tx1).await?;
-    let wl_payload = node.advance_block().await?;
-    let wl_hash = *wl_payload.block().body().transactions[0].tx_hash();
+    let policy_payload = node.advance_block().await?;
+    let policy_hash = *policy_payload.block().body().transactions[0].tx_hash();
     assert!(
         node.inner
             .provider
-            .receipt_by_hash(wl_hash)?
-            .expect("whitelist receipt")
+            .receipt_by_hash(policy_hash)?
+            .expect("token policy receipt")
             .status(),
-        "setTokenWhitelist must succeed"
+        "setTokenPolicy must succeed"
+    );
+
+    // Register a second, genesis-delegated zero-native deposit. Keeping this
+    // authority out of the preceding Type-4 authorization transaction isolates
+    // fee-refund sweeping from txpool authority-reservation timing.
+    let fee_deposit_sig = sign_deposit_auth(
+        &fee_deposit_signer,
+        DepositAuthorization {
+            deposit: fee_deposit,
+            master,
+            registry: PROD_REGISTRY,
+            chain_id: wallet.chain_id,
+            nonce: 0,
+            deadline,
+            delegate: PROD_DELEGATE,
+            delegate_code_hash: PROD_SWEEP_DEPOSIT_CODE_HASH,
+        },
+    )?;
+    let fee_registration = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 2)
+        .with_v1_eth_fee()
+        .with_gas_limit(5_000_000)
+        .with_to(PROD_REGISTRY)
+        .with_data(register_calldata(
+            fee_deposit,
+            master,
+            0,
+            deadline,
+            &fee_deposit_sig,
+        ))
+        .build_signed()?;
+    node.rpc.inject_tx(fee_registration).await?;
+    let fee_registration_payload = node.advance_block().await?;
+    let fee_registration_hash = *fee_registration_payload.block().body().transactions[0].tx_hash();
+    assert!(
+        node.inner
+            .provider
+            .receipt_by_hash(fee_registration_hash)?
+            .expect("fee deposit registration receipt")
+            .status(),
+        "genesis-delegated fee deposit registration must succeed"
+    );
+
+    // The registered zero-native deposit pays for a successful MorphTx with
+    // the storage-slot fee token. An intrinsic-only gas limit leaves no unused
+    // gas to reimburse, so the configured token-fee caller itself must trigger
+    // settlement of the balance left after the maximum fee deduction.
+    assert_eq!(
+        node.inner
+            .provider
+            .latest()?
+            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(fee_deposit))?
+            .unwrap_or_default(),
+        U256::from(PRELOADED_FEE_BALANCE)
+    );
+    let fee_tx = MorphTxBuilder::new(wallet.chain_id, fee_deposit_signer, 0)
+        .with_v0_token_fee(TEST_TOKEN_ID)
+        .with_gas_limit(21_000)
+        .with_to(RECIPIENT)
+        .build_signed()?;
+    node.rpc.inject_tx(fee_tx).await?;
+    let fee_payload = node.advance_block().await?;
+    assert_eq!(
+        fee_payload.block().body().transactions.len(),
+        1,
+        "registered fee-token transaction must be executable"
+    );
+    let fee_tx_hash = *fee_payload.block().body().transactions[0].tx_hash();
+    let fee_receipt = node
+        .inner
+        .provider
+        .receipt_by_hash(fee_tx_hash)?
+        .expect("fee-token receipt");
+    assert!(fee_receipt.status(), "fee-token MorphTx must succeed");
+    assert_eq!(
+        fee_receipt.logs().len(),
+        2,
+        "slot fee accounting emits no receipt logs; only sweep settlement should remain"
+    );
+    assert_eq!(
+        fee_receipt.logs()[0].topics(),
+        &[
+            TRANSFER_TOPIC,
+            address_topic(fee_deposit),
+            address_topic(master)
+        ]
+    );
+    let post_fee_sweep_amount = U256::from_be_slice(&fee_receipt.logs()[0].data.data);
+    assert!(
+        post_fee_sweep_amount > U256::ZERO
+            && post_fee_sweep_amount < U256::from(PRELOADED_FEE_BALANCE),
+        "sweep must settle the post-fee balance after retaining the charged fee"
+    );
+    assert_eq!(fee_receipt.logs()[1].address, PROD_REGISTRY);
+    assert_eq!(fee_receipt.logs()[1].topics()[0], SWEEP_TOPIC);
+    let state_after_fee_sweep = node.inner.provider.latest()?;
+    assert_eq!(
+        state_after_fee_sweep
+            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(fee_deposit))?
+            .unwrap_or_default(),
+        U256::ZERO,
+        "post-fee balance must be swept to zero even when reimbursement is zero"
+    );
+    assert_eq!(
+        state_after_fee_sweep
+            .basic_account(&fee_deposit)?
+            .expect("delegated fee deposit account")
+            .balance,
+        U256::ZERO,
+        "fee-token execution must not require native balance"
     );
 
     // registerSweep with the deposit's real EIP-712 signature
     let sig = sign_deposit_auth(
         &deposit_signer,
-        deposit,
-        master,
-        REGISTRY,
-        wallet.chain_id,
-        0,
-        deadline,
+        DepositAuthorization {
+            deposit,
+            master,
+            registry: PROD_REGISTRY,
+            chain_id: wallet.chain_id,
+            nonce: 0,
+            deadline,
+            delegate: PROD_DELEGATE,
+            delegate_code_hash: PROD_SWEEP_DEPOSIT_CODE_HASH,
+        },
     )?;
-    let tx2 = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 2)
-        .with_v1_eth_fee()
-        .with_gas_limit(5_000_000)
-        .with_to(REGISTRY)
-        .with_data(register_calldata(deposit, master, 0, deadline, &sig))
-        .build_signed()?;
-    node.rpc.inject_tx(tx2).await?;
+    let tx3 = make_sponsored_eip7702_call(
+        wallet.chain_id,
+        wallet.inner.clone(),
+        3,
+        deposit_signer,
+        0,
+        PROD_DELEGATE,
+        PROD_REGISTRY,
+        register_calldata(deposit, master, 0, deadline, &sig),
+    )?;
+    node.rpc.inject_tx(tx3).await?;
     let reg_payload = node.advance_block().await?;
     let reg_hash = *reg_payload.block().body().transactions[0].tx_hash();
     let reg_receipt = node
@@ -1271,17 +1445,35 @@ async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
         "registerSweep must succeed with a valid EIP-712 deposit signature"
     );
     assert!(
-        reg_receipt.logs().iter().any(|l| l.address == REGISTRY),
+        reg_receipt
+            .logs()
+            .iter()
+            .any(|l| l.address == PROD_REGISTRY),
         "registration must emit a SweepRegistered event from the Registry"
     );
+    let deposit_after_registration = node
+        .inner
+        .provider
+        .latest()?
+        .basic_account(&deposit)?
+        .expect("EIP-7702 authorization must create the deposit account");
+    assert_eq!(
+        deposit_after_registration.balance,
+        U256::ZERO,
+        "sponsored onboarding must not pre-fund the deposit"
+    );
+    assert_eq!(
+        deposit_after_registration.nonce, 1,
+        "authorization must consume the deposit EOA nonce"
+    );
 
-    // whitelisted inflow into the deposit -> EL sweeps via the real resolveSweep
-    let tx3 = MorphTxBuilder::new(wallet.chain_id, wallet.inner, 3)
+    // Pinned-codehash inflow -> EL sweeps via the real resolveSweep.
+    let tx4 = MorphTxBuilder::new(wallet.chain_id, wallet.inner, 4)
         .with_v1_eth_fee()
         .with_to(TEST_TOKEN_ADDRESS)
         .with_data(transfer_calldata(deposit, U256::from(AMOUNT)))
         .build_signed()?;
-    node.rpc.inject_tx(tx3).await?;
+    node.rpc.inject_tx(tx4).await?;
     let payload = node.advance_block().await?;
     let tx_hash = *payload.block().body().transactions[0].tx_hash();
     let receipt = node
@@ -1316,7 +1508,7 @@ async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
         U256::from(AMOUNT)
     );
     let sweep = &logs[logs.len() - 1];
-    assert_eq!(sweep.address, REGISTRY);
+    assert_eq!(sweep.address, PROD_REGISTRY);
     assert_eq!(
         sweep.topics(),
         &[
@@ -1327,7 +1519,7 @@ async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
         ]
     );
 
-    // deposit fully drained through the production resolveSweep(master) path
+    // Deposit fully drained through the production atomic policy path.
     let state = node.inner.provider.latest()?;
     assert_eq!(
         state

@@ -23,13 +23,13 @@ const SYSTEM_CALL_GAS_LIMIT: u64 = 200_000;
 
 impl<DB: Database, I> MorphEvm<DB, I> {
     fn discard_failed_inspection(&mut self) {
-        self.sweep_candidate_allowance = None;
+        self.set_sweep_execution_mode(crate::sweep::SweepExecutionMode::Disabled);
         self.sweep_outcome = None;
-        crate::sweep::clear_sweep_trace_replay();
         self.cached_token_fee_info = None;
         self.cached_l1_data_fee = Default::default();
         self.pre_fee_logs.clear();
         self.post_fee_logs.clear();
+        self.post_fee_sweep_candidate = None;
 
         // `InspectEvm::inspect_tx` only finalizes successful output. A sweep error
         // happens after the main transaction succeeded, so finalize and drop that
@@ -64,8 +64,7 @@ where
                 Ok(result)
             }
             Err(error) => {
-                self.sweep_candidate_allowance = None;
-                crate::sweep::clear_sweep_trace_replay();
+                self.set_sweep_execution_mode(crate::sweep::SweepExecutionMode::Disabled);
                 Err(error)
             }
         }
@@ -83,8 +82,7 @@ where
         let result = match h.run(self) {
             Ok(result) => result,
             Err(error) => {
-                self.sweep_candidate_allowance = None;
-                crate::sweep::clear_sweep_trace_replay();
+                self.set_sweep_execution_mode(crate::sweep::SweepExecutionMode::Disabled);
                 return Err(error);
             }
         };
@@ -129,8 +127,7 @@ where
                 Ok(result)
             }
             Err(error) => {
-                self.sweep_candidate_allowance = None;
-                crate::sweep::clear_sweep_trace_replay();
+                self.set_sweep_execution_mode(crate::sweep::SweepExecutionMode::Disabled);
                 Err(error)
             }
         }

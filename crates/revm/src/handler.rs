@@ -14,7 +14,7 @@ use revm::{
 };
 
 use crate::{
-    MorphEvm, MorphInvalidTransaction, MorphTxEnv,
+    MorphEvm, MorphInvalidTransaction, MorphTxEnv, SweepCandidate,
     error::MorphHaltReason,
     evm::MorphContext,
     l1block::L1BlockInfo,
@@ -101,6 +101,7 @@ where
         evm.cached_token_fee_info = None;
         evm.pre_fee_logs.clear();
         evm.post_fee_logs.clear();
+        evm.post_fee_sweep_candidate = None;
 
         let (_, tx, _, journal, _, _) = evm.ctx().all_mut();
 
@@ -377,6 +378,9 @@ where
     ///
     /// Uses the cached `TokenFeeInfo` from the deduction phase to ensure
     /// consistent price_ratio/scale, matching go-ethereum's `st.feeRate`/`st.tokenScale`.
+    /// A configured sweep deposit is also recorded as a candidate independently
+    /// of whether the refund is zero, a self-transfer, or fails: the successful
+    /// transaction may still leave a pre-existing token balance to settle.
     #[inline]
     fn reimburse_caller_token_fee(
         &self,
@@ -385,8 +389,30 @@ where
     ) -> Result<(), EVMError<DB::Error, MorphInvalidTransaction>> {
         let caller = evm.ctx_ref().tx().caller();
         let beneficiary = evm.ctx_ref().block().beneficiary();
+        let caller_can_trigger_sweep = is_configured_sweep_deposit(evm, caller);
         let basefee = evm.ctx.block().basefee() as u128;
         let effective_gas_price = evm.ctx.tx().effective_gas_price(basefee);
+
+        // Use cached token fee info from the deduction phase (set in
+        // validate_and_deduct_token_fee). Keep it populated so the block
+        // executor's receipt builder can also reuse it without re-querying the DB.
+        let token_fee_info =
+            evm.cached_token_fee_info
+                .ok_or(MorphInvalidTransaction::TokenTransferFailed {
+                    reason: "cached_token_fee_info not set by validate_and_deduct_token_fee".into(),
+                })?;
+
+        // This trigger belongs to the successful token-fee transaction, not to
+        // the refund transfer. Even a zero/no-op/failed refund can leave an
+        // existing deposit balance behind. apply_sweep later filters out failed
+        // main execution, and the exact EIP-7702 designator gate keeps ordinary
+        // fee-token traffic from consuming sweep preflight budget.
+        if caller_can_trigger_sweep {
+            evm.post_fee_sweep_candidate = Some(SweepCandidate {
+                token: token_fee_info.token_address,
+                deposit: caller,
+            });
+        }
 
         let refunded = gas.refunded().max(0) as u64;
         let reimburse_eth = U256::from(
@@ -397,16 +423,6 @@ where
             return Ok(());
         }
 
-        // Use cached token fee info from the deduction phase (set in validate_and_deduct_token_fee).
-        // This ensures the same price_ratio/scale is used for both deduction and reimbursement.
-        // The cache is kept populated (not taken) so the block executor's receipt builder
-        // can also read it without re-querying the DB.
-        let token_fee_info =
-            evm.cached_token_fee_info
-                .ok_or(MorphInvalidTransaction::TokenTransferFailed {
-                    reason: "cached_token_fee_info not set by validate_and_deduct_token_fee".into(),
-                })?;
-
         // Calculate token amount required for total fee
         let token_amount_required = token_fee_info.eth_to_token_amount(reimburse_eth);
 
@@ -414,16 +430,18 @@ where
         // and continues on failure: "Continue execution even if refund fails - refund
         // should not cause transaction to fail" (state_transition.go:698).
         let refund_result = if let Some(balance_slot) = token_fee_info.balance_slot {
-            let journal = evm.ctx().journal_mut();
-            transfer_erc20_with_slot(
-                journal,
-                beneficiary,
-                caller,
-                token_fee_info.token_address,
-                token_amount_required,
-                balance_slot,
-            )
-            .map(|_| ())
+            let result = {
+                let journal = evm.ctx().journal_mut();
+                transfer_erc20_with_slot(
+                    journal,
+                    beneficiary,
+                    caller,
+                    token_fee_info.token_address,
+                    token_amount_required,
+                    balance_slot,
+                )
+            };
+            result.map(|_| ())
         } else {
             // Cache refund Transfer logs separately, matching the pre_fee_logs
             // pattern from validate_and_deduct_token_fee.
@@ -655,6 +673,28 @@ where
 
         Ok(())
     }
+}
+
+/// Returns whether `caller` is already delegated to the block's pinned sweep implementation.
+///
+/// The caller account is loaded with code during transaction validation, so this is a
+/// journal-only liveness filter: ordinary fee-token traffic cannot consume sweep preflight
+/// budget, while every configured token-fee caller that could pass the later delegation
+/// preflight remains eligible even when its reimbursement is zero, a no-op, or fails.
+fn is_configured_sweep_deposit<DB, I>(evm: &MorphEvm<DB, I>, caller: Address) -> bool
+where
+    DB: alloy_evm::Database,
+{
+    let Some(config) = evm.ctx_ref().block().sweep else {
+        return false;
+    };
+    evm.ctx_ref()
+        .journal()
+        .state
+        .get(&caller)
+        .and_then(|account| account.info.code.as_ref())
+        .and_then(revm::state::Bytecode::eip7702_address)
+        == Some(config.delegate_address)
 }
 
 /// Execute `f` within a journal checkpoint. Commits on `Ok`, reverts on `Err`.
@@ -1005,7 +1045,7 @@ fn calculate_caller_fee_with_l1_cost(
 mod tests {
     use super::*;
     use crate::MorphBlockEnv;
-    use alloy_primitives::{Bytes, TxKind, address, keccak256};
+    use alloy_primitives::{B256, Bytes, TxKind, address, keccak256};
     use morph_chainspec::hardfork::MorphHardfork;
     use morph_primitives::MORPH_TX_TYPE_ID;
     use revm::{
@@ -1230,6 +1270,178 @@ mod tests {
             .sload(token, from_storage_slot)
             .unwrap();
         assert_eq!(from_balance_after, U256::from(10));
+    }
+
+    #[test]
+    fn slot_fee_transaction_records_configured_deposit_for_every_refund_outcome() {
+        let caller = address!("1000000000000000000000000000000000000001");
+        let beneficiary = address!("2000000000000000000000000000000000000002");
+        let token = address!("3000000000000000000000000000000000000003");
+        let sweep_delegate = address!("4000000000000000000000000000000000000004");
+        let balance_slot = U256::from(7);
+        let beneficiary_storage_slot = compute_mapping_slot_for_address(balance_slot, beneficiary);
+        let caller_storage_slot = compute_mapping_slot_for_address(balance_slot, caller);
+
+        let mut db = CacheDB::new(EmptyDB::default());
+        db.insert_account_info(token, AccountInfo::default());
+        let designator = Bytecode::new_eip7702(sweep_delegate);
+        db.insert_account_info(
+            caller,
+            AccountInfo {
+                code_hash: designator.hash_slow(),
+                code: Some(designator),
+                ..Default::default()
+            },
+        );
+        db.insert_account_storage(token, beneficiary_storage_slot, U256::from(10))
+            .unwrap();
+        db.insert_account_storage(token, caller_storage_slot, U256::ZERO)
+            .unwrap();
+
+        let mut evm = MorphEvm::new(
+            MorphContext::new(db, MorphHardfork::default()),
+            NoOpInspector,
+        );
+        evm.block = MorphBlockEnv {
+            inner: BlockEnv {
+                beneficiary,
+                ..Default::default()
+            },
+            sweep: Some(crate::SweepConfig {
+                registry_address: Address::ZERO,
+                delegate_address: sweep_delegate,
+                delegate_code_hash: B256::ZERO,
+            }),
+        };
+        evm.tx = MorphTxEnv {
+            inner: TxEnv {
+                caller,
+                gas_price: 1,
+                ..Default::default()
+            },
+            fee_token_id: Some(1),
+            ..Default::default()
+        };
+        evm.cached_token_fee_info = Some(TokenFeeInfo {
+            token_address: token,
+            is_active: true,
+            price_ratio: U256::from(1),
+            scale: U256::from(1),
+            caller,
+            balance: U256::ZERO,
+            balance_slot: Some(balance_slot),
+            ..Default::default()
+        });
+        let journal = evm.ctx_mut().journal_mut();
+        let _ = journal.load_account_with_code(caller).unwrap();
+        let _ = journal.load_account_mut(token).unwrap();
+        journal.touch(token);
+
+        let handler = MorphEvmHandler::default();
+        handler
+            .reimburse_caller_token_fee(&mut evm, &Gas::new(1))
+            .unwrap();
+
+        assert_eq!(
+            evm.post_fee_sweep_candidate,
+            Some(crate::SweepCandidate {
+                token,
+                deposit: caller,
+            })
+        );
+        assert_eq!(
+            *evm.ctx_mut()
+                .journal_mut()
+                .sload(token, caller_storage_slot)
+                .unwrap(),
+            U256::from(1)
+        );
+
+        evm.post_fee_sweep_candidate = None;
+        evm.block.sweep.as_mut().unwrap().delegate_address = Address::ZERO;
+        handler
+            .reimburse_caller_token_fee(&mut evm, &Gas::new(1))
+            .unwrap();
+        assert!(
+            evm.post_fee_sweep_candidate.is_none(),
+            "ordinary fee-token callers must not consume sweep preflight budget"
+        );
+        assert_eq!(
+            *evm.ctx_mut()
+                .journal_mut()
+                .sload(token, beneficiary_storage_slot)
+                .unwrap(),
+            U256::from(8)
+        );
+        assert_eq!(
+            *evm.ctx_mut()
+                .journal_mut()
+                .sload(token, caller_storage_slot)
+                .unwrap(),
+            U256::from(2)
+        );
+
+        evm.block.sweep.as_mut().unwrap().delegate_address = sweep_delegate;
+        evm.block.inner.beneficiary = caller;
+        handler
+            .reimburse_caller_token_fee(&mut evm, &Gas::new(1))
+            .unwrap();
+        assert_eq!(
+            evm.post_fee_sweep_candidate,
+            Some(crate::SweepCandidate {
+                token,
+                deposit: caller,
+            }),
+            "a self-refund can still leave a pre-existing balance to sweep"
+        );
+        assert_eq!(
+            *evm.ctx_mut()
+                .journal_mut()
+                .sload(token, caller_storage_slot)
+                .unwrap(),
+            U256::from(2)
+        );
+
+        evm.post_fee_sweep_candidate = None;
+        evm.block.inner.beneficiary = beneficiary;
+        handler
+            .reimburse_caller_token_fee(&mut evm, &Gas::new(9))
+            .unwrap();
+        assert_eq!(
+            evm.post_fee_sweep_candidate,
+            Some(crate::SweepCandidate {
+                token,
+                deposit: caller,
+            }),
+            "a failed refund can still leave a pre-existing balance to sweep"
+        );
+        assert_eq!(
+            *evm.ctx_mut()
+                .journal_mut()
+                .sload(token, beneficiary_storage_slot)
+                .unwrap(),
+            U256::from(8)
+        );
+        assert_eq!(
+            *evm.ctx_mut()
+                .journal_mut()
+                .sload(token, caller_storage_slot)
+                .unwrap(),
+            U256::from(2)
+        );
+
+        evm.post_fee_sweep_candidate = None;
+        handler
+            .reimburse_caller_token_fee(&mut evm, &Gas::new(0))
+            .unwrap();
+        assert_eq!(
+            evm.post_fee_sweep_candidate,
+            Some(crate::SweepCandidate {
+                token,
+                deposit: caller,
+            }),
+            "zero reimbursement must still settle a configured deposit"
+        );
     }
 
     #[test]

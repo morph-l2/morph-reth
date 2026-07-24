@@ -313,6 +313,18 @@ impl MorphChainSpec {
         self.info.morph_chain_info.sweep_registry_address()
     }
 
+    /// Returns the fixed EIP-7702 implementation for sweep deposits.
+    pub fn sweep_deposit_delegate_address(&self) -> Option<Address> {
+        self.info.morph_chain_info.sweep_deposit_delegate_address()
+    }
+
+    /// Returns the expected sweep-deposit implementation runtime code hash.
+    pub fn sweep_deposit_delegate_code_hash(&self) -> Option<B256> {
+        self.info
+            .morph_chain_info
+            .sweep_deposit_delegate_code_hash()
+    }
+
     /// Checks if the given block size (in bytes) is valid for this chain.
     pub fn is_valid_block_size(&self, size: usize) -> bool {
         self.info.morph_chain_info.is_valid_block_size(size)

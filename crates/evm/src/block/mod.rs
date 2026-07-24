@@ -29,8 +29,8 @@ use alloy_primitives::{Address, Log, U256};
 use morph_chainspec::{MorphChainSpec, MorphHardfork, MorphHardforks};
 use morph_primitives::{MorphReceipt, MorphTxEnvelope};
 use morph_revm::{
-    BLOCK_SYSTEM_GAS, CANDIDATE_SYSTEM_GAS, L1_GAS_PRICE_ORACLE_ADDRESS, MAX_CANDIDATES_PER_BLOCK,
-    MAX_CANDIDATES_PER_TX, MorphHaltReason, SweepOutcome, TokenFeeInfo, evm::MorphContext,
+    L1_GAS_PRICE_ORACLE_ADDRESS, MAX_CANDIDATES_PER_TX, MAX_PREFLIGHTS_PER_TX, MorphHaltReason,
+    SweepBlockSession, SweepExecutionMode, SweepOutcome, TokenFeeInfo, evm::MorphContext,
 };
 use reth_primitives_traits::Recovered;
 use reth_revm::{DatabaseCommit, Inspector, context::result::ResultAndState};
@@ -100,10 +100,8 @@ pub struct MorphBlockExecutor<DB: Database, I> {
     receipts: Vec<MorphReceipt>,
     /// Total gas used by executed transactions
     gas_used: u64,
-    /// Sweep candidates consumed by committed transactions.
-    committed_sweep_candidates: usize,
-    /// Fixed sweep system gas consumed by committed transactions.
-    committed_sweep_system_gas: u64,
+    /// Canonical sweep budget and request deduplication for this block.
+    sweep_session: SweepBlockSession,
     /// Sweep observability counters.
     sweep_metrics: SweepMetrics,
     /// Cached hardfork for this block (constant across all transactions).
@@ -133,8 +131,7 @@ where
             receipt_builder,
             receipts: Vec::new(),
             gas_used: 0,
-            committed_sweep_candidates: 0,
-            committed_sweep_system_gas: 0,
+            sweep_session: SweepBlockSession::default(),
             sweep_metrics: SweepMetrics::default(),
             hardfork: MorphHardfork::default(),
         }
@@ -258,15 +255,12 @@ where
         let consensus_tx = recovered.tx().clone();
         let signer = *recovered.signer();
 
-        let remaining_candidates = MAX_CANDIDATES_PER_BLOCK
-            .checked_sub(self.committed_sweep_candidates)
-            .expect("committed sweep candidates exceed the block limit");
-        let allowance = if self.evm.block().sweep.is_some() {
-            remaining_candidates.min(MAX_CANDIDATES_PER_TX)
+        let sweep_mode = if self.evm.block().sweep.is_some() {
+            SweepExecutionMode::Canonical(self.sweep_session.plan())
         } else {
-            0
+            SweepExecutionMode::Disabled
         };
-        self.evm.set_sweep_candidate_allowance(allowance);
+        self.evm.set_sweep_execution_mode(sweep_mode);
 
         // Execute the transaction
         let result = self
@@ -303,59 +297,35 @@ where
             sweep,
         } = output;
 
-        let checked_candidates = sweep.checked_candidates;
+        let preflighted_candidates = sweep.block_effect.preflighted_candidates();
+        let checked_candidates = sweep.block_effect.checked_candidates();
+        assert!(
+            preflighted_candidates <= MAX_PREFLIGHTS_PER_TX,
+            "sweep outcome exceeds the per-transaction preflight limit"
+        );
         assert!(
             checked_candidates <= MAX_CANDIDATES_PER_TX,
             "sweep outcome exceeds the per-transaction candidate limit"
         );
+        assert!(
+            checked_candidates <= preflighted_candidates,
+            "executed sweep candidates must have passed preflight"
+        );
         assert_eq!(
             sweep.successes.len().checked_add(sweep.failures.len()),
-            Some(checked_candidates),
-            "every checked sweep candidate must have an outcome"
+            Some(preflighted_candidates),
+            "every preflighted sweep candidate must have an outcome"
         );
-        let expected_system_gas = u64::try_from(checked_candidates)
-            .expect("sweep candidate count does not fit in u64")
-            .checked_mul(CANDIDATE_SYSTEM_GAS)
-            .expect("sweep system gas overflow");
-        assert_eq!(
-            sweep.system_gas_used, expected_system_gas,
-            "sweep outcome has inconsistent fixed system gas"
-        );
-
-        let committed_candidates = self
-            .committed_sweep_candidates
-            .checked_add(checked_candidates)
-            .expect("committed sweep candidate count overflow");
-        assert!(
-            committed_candidates <= MAX_CANDIDATES_PER_BLOCK,
-            "committed sweep candidates exceed the block limit"
-        );
-        let committed_system_gas = self
-            .committed_sweep_system_gas
-            .checked_add(sweep.system_gas_used)
-            .expect("committed sweep system gas overflow");
-        assert!(
-            committed_system_gas <= BLOCK_SYSTEM_GAS,
-            "committed sweep system gas exceeds the block limit"
-        );
-        assert_eq!(
-            committed_system_gas,
-            u64::try_from(committed_candidates)
-                .expect("committed sweep candidate count does not fit in u64")
-                .checked_mul(CANDIDATE_SYSTEM_GAS)
-                .expect("committed sweep system gas overflow"),
-            "committed sweep counters are inconsistent"
-        );
-        self.committed_sweep_candidates = committed_candidates;
-        self.committed_sweep_system_gas = committed_system_gas;
+        self.sweep_session.commit(&sweep.block_effect);
 
         // Observability only; recorded here so speculative/discarded candidates
         // never move the counters (this runs solely on committed transactions).
         self.sweep_metrics.record(
+            preflighted_candidates,
             checked_candidates,
             sweep.successes.len(),
             &sweep.failures,
-            sweep.system_gas_used,
+            sweep.block_effect.system_gas_used(),
         );
 
         // EIP-8037 separates regular and state gas; pre-Amsterdam morph treats
@@ -435,7 +405,8 @@ mod tests {
     use morph_chainspec::MORPH_MAINNET;
     use morph_primitives::transaction::TxL1Msg;
     use morph_revm::{
-        BLOCK_SYSTEM_GAS, CANDIDATE_SYSTEM_GAS, MAX_CANDIDATES_PER_BLOCK, SweepConfig,
+        BLOCK_SYSTEM_GAS, MAX_CANDIDATES_PER_BLOCK, MAX_PREFLIGHTS_PER_BLOCK, PREFLIGHT_SYSTEM_GAS,
+        SweepConfig,
     };
     use revm::{
         context::{BlockEnv, CfgEnv},
@@ -450,6 +421,8 @@ mod tests {
     const CALLER: Address = Address::repeat_byte(0xCA);
     const TRANSFER_TOPIC: B256 =
         b256!("ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef");
+    const REQUEST_TOPIC: B256 =
+        b256!("24e3f180db341974dcd99a5e223d9d944422e303230ddde6659302f8620bbcff");
 
     fn push32(code: &mut Vec<u8>, value: B256) {
         code.push(0x7f);
@@ -485,6 +458,26 @@ mod tests {
         Bytecode::new_raw(Bytes::from(code))
     }
 
+    fn request_emitter_code(candidate: morph_revm::SweepCandidate) -> Bytecode {
+        let mut code = Vec::new();
+        push32(
+            &mut code,
+            B256::left_padding_from(candidate.deposit.as_slice()),
+        );
+        push32(
+            &mut code,
+            B256::left_padding_from(candidate.token.as_slice()),
+        );
+        push32(&mut code, REQUEST_TOPIC);
+        code.extend_from_slice(&[
+            0x5f, // PUSH0 data size
+            0x5f, // PUSH0 data offset
+            0xa3, // LOG3
+            0x00, // STOP
+        ]);
+        Bytecode::new_raw(Bytes::from(code))
+    }
+
     fn insert_code(db: &mut CacheDB<EmptyDB>, address: Address, code: Bytecode) {
         db.insert_account_info(
             address,
@@ -515,12 +508,26 @@ mod tests {
                     },
                     sweep: Some(SweepConfig {
                         registry_address: REGISTRY,
+                        delegate_address: Address::with_last_byte(0x24),
+                        delegate_code_hash: B256::ZERO,
                     }),
                 },
             },
         );
 
         MorphBlockExecutor::new(evm, MORPH_MAINNET.clone(), DefaultMorphReceiptBuilder)
+    }
+
+    fn test_executor_with_request_emitter(
+        candidate: morph_revm::SweepCandidate,
+    ) -> MorphBlockExecutor<CacheDB<EmptyDB>, revm::inspector::NoOpInspector> {
+        let mut executor = test_executor();
+        insert_code(
+            executor.evm.db_mut(),
+            REGISTRY,
+            request_emitter_code(candidate),
+        );
+        executor
     }
 
     fn l1_message(to: Address, queue_index: u64) -> Recovered<MorphTxEnvelope> {
@@ -538,66 +545,139 @@ mod tests {
     #[test]
     fn discarded_speculative_output_does_not_consume_sweep_budget() {
         let mut executor = test_executor();
-        let mut discarded_checked = 0;
+        let mut discarded_preflighted = 0;
 
         let discarded = executor
             .execute_transaction_with_commit_condition(l1_message(EMITTER_16, 0), |output| {
-                discarded_checked = output.sweep.checked_candidates;
+                discarded_preflighted = output.sweep.block_effect.preflighted_candidates();
                 CommitChanges::No
             })
             .unwrap();
 
         assert!(discarded.is_none());
-        assert_eq!(discarded_checked, 16);
-        assert_eq!(executor.committed_sweep_candidates, 0);
-        assert_eq!(executor.committed_sweep_system_gas, 0);
+        assert_eq!(discarded_preflighted, 16);
+        assert_eq!(
+            executor.sweep_session.remaining_candidates(),
+            MAX_CANDIDATES_PER_BLOCK
+        );
+        assert_eq!(
+            executor.sweep_session.remaining_system_gas(),
+            BLOCK_SYSTEM_GAS
+        );
 
         let output = executor
             .execute_transaction_without_commit(l1_message(EMITTER_16, 0))
             .unwrap();
-        assert_eq!(output.sweep.checked_candidates, 16);
+        assert_eq!(output.sweep.block_effect.preflighted_candidates(), 16);
+        assert_eq!(output.sweep.block_effect.checked_candidates(), 0);
         executor.commit_transaction(output);
 
-        assert_eq!(executor.committed_sweep_candidates, 16);
         assert_eq!(
-            executor.committed_sweep_system_gas,
-            16 * CANDIDATE_SYSTEM_GAS
+            executor.sweep_session.remaining_candidates(),
+            MAX_CANDIDATES_PER_BLOCK
+        );
+        assert_eq!(
+            executor.sweep_session.remaining_preflights(),
+            MAX_PREFLIGHTS_PER_BLOCK - 16
+        );
+        assert_eq!(
+            executor.sweep_session.remaining_system_gas(),
+            BLOCK_SYSTEM_GAS - 16 * PREFLIGHT_SYSTEM_GAS
         );
     }
 
     #[test]
-    fn sweep_allowance_caps_block_at_64_candidates() {
+    fn invalid_triggers_are_bounded_by_the_block_preflight_budget() {
         let mut executor = test_executor();
-        let transactions = [
-            (EMITTER_16, 16),
-            (EMITTER_16, 16),
-            (EMITTER_16, 16),
-            (EMITTER_10, 10),
-            (EMITTER_16, 6),
-        ];
-
-        for (queue_index, (emitter, expected_checked)) in transactions.into_iter().enumerate() {
+        for queue_index in 0..(MAX_PREFLIGHTS_PER_BLOCK / 16) {
             let output = executor
-                .execute_transaction_without_commit(l1_message(emitter, queue_index as u64))
+                .execute_transaction_without_commit(l1_message(EMITTER_16, queue_index as u64))
                 .unwrap();
             assert_eq!(
-                output.sweep.checked_candidates, expected_checked,
-                "unexpected allowance for transaction {queue_index}"
+                output.sweep.block_effect.preflighted_candidates(),
+                16,
+                "unexpected preflight allowance for transaction {queue_index}"
             );
+            assert_eq!(output.sweep.block_effect.checked_candidates(), 0);
             executor.commit_transaction(output);
         }
+        let tail = MAX_PREFLIGHTS_PER_BLOCK % 16;
+        let tail_output = executor
+            .execute_transaction_without_commit(l1_message(EMITTER_16, 98))
+            .unwrap();
+        assert_eq!(
+            tail_output.sweep.block_effect.preflighted_candidates(),
+            tail
+        );
+        assert_eq!(tail_output.sweep.block_effect.checked_candidates(), 0);
+        executor.commit_transaction(tail_output);
 
         assert_eq!(
-            executor.committed_sweep_candidates,
+            executor.sweep_session.remaining_candidates(),
             MAX_CANDIDATES_PER_BLOCK
         );
-        assert_eq!(executor.committed_sweep_system_gas, BLOCK_SYSTEM_GAS);
+        assert_eq!(executor.sweep_session.remaining_preflights(), 0);
+        assert_eq!(
+            executor.sweep_session.remaining_system_gas(),
+            BLOCK_SYSTEM_GAS - MAX_PREFLIGHTS_PER_BLOCK as u64 * PREFLIGHT_SYSTEM_GAS
+        );
+        assert!(
+            executor.sweep_session.remaining_system_gas() < PREFLIGHT_SYSTEM_GAS,
+            "the residual budget must be too small for another preflight"
+        );
 
         let exhausted = executor
-            .execute_transaction_without_commit(l1_message(EMITTER_16, 5))
+            .execute_transaction_without_commit(l1_message(EMITTER_16, 99))
             .unwrap();
-        assert_eq!(exhausted.sweep.checked_candidates, 0);
-        assert_eq!(exhausted.sweep.system_gas_used, 0);
+        assert_eq!(exhausted.sweep.block_effect.preflighted_candidates(), 0);
+        assert_eq!(exhausted.sweep.block_effect.checked_candidates(), 0);
+        assert_eq!(exhausted.sweep.block_effect.system_gas_used(), 0);
+    }
+
+    #[test]
+    fn block_deduplicates_requests_without_suppressing_later_transfers() {
+        let request_pair = morph_revm::SweepCandidate {
+            token: EMITTER_10,
+            deposit: Address::with_last_byte(1),
+        };
+        let mut executor = test_executor_with_request_emitter(request_pair);
+
+        let discarded_request = executor
+            .execute_transaction_with_commit_condition(l1_message(REGISTRY, 0), |output| {
+                assert_eq!(
+                    output.sweep.block_effect.seen_registry_requests(),
+                    &[request_pair]
+                );
+                CommitChanges::No
+            })
+            .unwrap();
+        assert!(discarded_request.is_none());
+
+        let first_request = executor
+            .execute_transaction_without_commit(l1_message(REGISTRY, 1))
+            .unwrap();
+        assert_eq!(first_request.sweep.block_effect.preflighted_candidates(), 1);
+        assert_eq!(first_request.sweep.block_effect.checked_candidates(), 0);
+        assert_eq!(
+            first_request.sweep.block_effect.seen_registry_requests(),
+            &[request_pair]
+        );
+        executor.commit_transaction(first_request);
+
+        let duplicate_request = executor
+            .execute_transaction_without_commit(l1_message(REGISTRY, 2))
+            .unwrap();
+        assert_eq!(duplicate_request.sweep.block_effect.checked_candidates(), 0);
+        executor.commit_transaction(duplicate_request);
+
+        let later_transfer = executor
+            .execute_transaction_without_commit(l1_message(EMITTER_10, 3))
+            .unwrap();
+        assert_eq!(
+            later_transfer.sweep.block_effect.preflighted_candidates(),
+            10
+        );
+        assert_eq!(later_transfer.sweep.block_effect.checked_candidates(), 0);
     }
 
     #[test]
@@ -608,7 +688,10 @@ mod tests {
             .unwrap();
         let main_gas_used = output.result.result.gas().tx_gas_used();
 
-        assert_eq!(output.sweep.system_gas_used, 16 * CANDIDATE_SYSTEM_GAS);
+        assert_eq!(
+            output.sweep.block_effect.system_gas_used(),
+            16 * PREFLIGHT_SYSTEM_GAS
+        );
         let gas_output = executor.commit_transaction(output);
         assert_eq!(gas_output.tx_gas_used(), main_gas_used);
 
@@ -629,8 +712,8 @@ mod tests {
 
         assert!(!output.result.result.is_success());
         assert!(output.result.result.logs().is_empty());
-        assert_eq!(output.sweep.checked_candidates, 0);
-        assert_eq!(output.sweep.system_gas_used, 0);
+        assert_eq!(output.sweep.block_effect.checked_candidates(), 0);
+        assert_eq!(output.sweep.block_effect.system_gas_used(), 0);
         assert!(output.sweep.logs.is_empty());
         assert!(output.sweep.successes.is_empty());
         assert!(output.sweep.failures.is_empty());
@@ -641,8 +724,14 @@ mod tests {
 
         executor.commit_transaction(output);
 
-        assert_eq!(executor.committed_sweep_candidates, 0);
-        assert_eq!(executor.committed_sweep_system_gas, 0);
+        assert_eq!(
+            executor.sweep_session.remaining_candidates(),
+            MAX_CANDIDATES_PER_BLOCK
+        );
+        assert_eq!(
+            executor.sweep_session.remaining_system_gas(),
+            BLOCK_SYSTEM_GAS
+        );
         let receipt = &executor.receipts[0];
         assert!(!receipt.status());
         assert!(receipt.logs().is_empty());

@@ -1,3 +1,5 @@
+//! Morph-compatible Ethereum state-test parsing and execution.
+
 pub mod runner;
 pub mod schema;
 

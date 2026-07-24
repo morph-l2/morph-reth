@@ -284,6 +284,35 @@ impl TestNodeBuilder {
         self
     }
 
+    /// Override the consensus-pinned Onyx sweep deployment tuple.
+    pub fn with_sweep_config(
+        mut self,
+        registry: Address,
+        delegate: Address,
+        delegate_code_hash: B256,
+    ) -> Self {
+        let morph = self
+            .genesis_json
+            .get_mut("config")
+            .and_then(serde_json::Value::as_object_mut)
+            .and_then(|config| config.get_mut("morph"))
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("test genesis config.morph must be an object");
+        morph.insert(
+            "sweepRegistryAddress".to_string(),
+            serde_json::json!(registry.to_string()),
+        );
+        morph.insert(
+            "sweepDepositDelegateAddress".to_string(),
+            serde_json::json!(delegate.to_string()),
+        );
+        morph.insert(
+            "sweepDepositDelegateCodeHash".to_string(),
+            serde_json::json!(delegate_code_hash.to_string()),
+        );
+        self
+    }
+
     /// Override an account's runtime bytecode in the test genesis.
     pub fn with_account_code(mut self, address: Address, code: impl Into<String>) -> Self {
         let alloc = self
@@ -299,6 +328,29 @@ impl TestNodeBuilder {
             .as_object_mut()
             .expect("test genesis account entry must be an object");
         entry.insert("code".to_string(), serde_json::json!(code.into()));
+        self
+    }
+
+    /// Override one account storage slot in the test genesis.
+    pub fn with_account_storage(mut self, address: Address, slot: B256, value: B256) -> Self {
+        let alloc = self
+            .genesis_json
+            .get_mut("alloc")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("test genesis alloc must be an object");
+        let address = address.to_string().to_ascii_lowercase();
+        let entry = alloc
+            .entry(address)
+            .or_insert_with(|| serde_json::json!({ "balance": "0x0" }));
+        let entry = entry
+            .as_object_mut()
+            .expect("test genesis account entry must be an object");
+        let storage = entry
+            .entry("storage")
+            .or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()
+            .expect("test genesis account storage must be an object");
+        storage.insert(slot.to_string(), serde_json::json!(value.to_string()));
         self
     }
 
@@ -566,6 +618,51 @@ pub fn make_eip7702_tx(chain_id: u64, signer: PrivateKeySigner, nonce: u64) -> e
     Ok(envelope.encoded_2718().into())
 }
 
+/// Creates a sponsored EIP-7702 call whose authorization is signed by a
+/// different, potentially zero-balance authority account.
+#[expect(clippy::too_many_arguments)]
+pub fn make_sponsored_eip7702_call(
+    chain_id: u64,
+    tx_signer: PrivateKeySigner,
+    tx_nonce: u64,
+    authority_signer: PrivateKeySigner,
+    authority_nonce: u64,
+    delegate_to: Address,
+    to: Address,
+    input: impl Into<Bytes>,
+) -> eyre::Result<Bytes> {
+    use alloy_consensus::{SignableTransaction, TxEip7702};
+    use alloy_eips::eip7702::Authorization;
+    use alloy_signer::SignerSync;
+
+    let authorization = Authorization {
+        chain_id: U256::from(chain_id),
+        address: delegate_to,
+        nonce: authority_nonce,
+    };
+    let authorization_signature = authority_signer
+        .sign_hash_sync(&authorization.signature_hash())
+        .map_err(|error| eyre::eyre!("authorization signing failed: {error}"))?;
+
+    let tx = TxEip7702 {
+        chain_id,
+        nonce: tx_nonce,
+        gas_limit: 5_000_000,
+        max_fee_per_gas: 20_000_000_000u128,
+        max_priority_fee_per_gas: 20_000_000_000u128,
+        to,
+        value: U256::ZERO,
+        access_list: Default::default(),
+        authorization_list: vec![authorization.into_signed(authorization_signature)],
+        input: input.into(),
+    };
+    let tx_signature = tx_signer
+        .sign_hash_sync(&tx.signature_hash())
+        .map_err(|error| eyre::eyre!("transaction signing failed: {error}"))?;
+    let envelope = MorphTxEnvelope::Eip7702(tx.into_signed(tx_signature));
+    Ok(envelope.encoded_2718().into())
+}
+
 /// Creates a signed EIP-1559 contract deployment transaction (CREATE).
 ///
 /// The returned bytes can be injected into the pool via `node.rpc.inject_tx()`.
@@ -617,7 +714,7 @@ async fn transfer_tx_with_nonce(chain_id: u64, signer: PrivateKeySigner, nonce: 
 ///
 /// The attributes generator function passed to reth's E2E test framework.
 /// Creates minimal attributes with no L1 messages, suitable for basic tests.
-/// Use [`L1MessageBuilder`] + [`advance_block_with_l1_messages`] (in
+/// Use [`L1MessageBuilder`] + `advance_block_with_l1_messages` (in
 /// `tests/it/helpers.rs`) for tests that need L1 messages.
 pub fn morph_payload_attributes(timestamp: u64) -> morph_payload_types::MorphPayloadAttributes {
     morph_payload_types::MorphPayloadAttributes {

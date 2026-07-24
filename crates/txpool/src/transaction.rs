@@ -31,9 +31,22 @@ pub struct MorphPooledTransaction {
 
 impl MorphPooledTransaction {
     /// Create a new instance of [`MorphPooledTransaction`].
+    ///
+    /// Morph transactions with a non-zero fee-token ID pay execution fees in ERC-20, so their
+    /// native pool cost is only the transaction value. All other transactions retain the standard
+    /// gas-plus-value cost calculated by [`EthPooledTransaction`].
     pub fn new(transaction: Recovered<MorphTxEnvelope>, encoded_length: usize) -> Self {
+        let token_fee_native_cost = match transaction.inner() {
+            MorphTxEnvelope::Morph(tx) if tx.tx().fee_token_id > 0 => Some(tx.tx().value),
+            _ => None,
+        };
+        let mut inner = EthPooledTransaction::new(transaction, encoded_length);
+        if let Some(native_cost) = token_fee_native_cost {
+            inner.cost = native_cost;
+        }
+
         Self {
-            inner: EthPooledTransaction::new(transaction, encoded_length),
+            inner,
             encoded_2718: Default::default(),
         }
     }
@@ -258,6 +271,13 @@ mod tests {
     }
 
     fn create_morph_pooled_tx() -> MorphPooledTransaction {
+        create_morph_pooled_tx_with_fee_token(1, U256::ZERO)
+    }
+
+    fn create_morph_pooled_tx_with_fee_token(
+        fee_token_id: u16,
+        value: U256,
+    ) -> MorphPooledTransaction {
         use morph_primitives::TxMorph;
         let tx = TxMorph {
             chain_id: 1337,
@@ -266,11 +286,15 @@ mod tests {
             max_fee_per_gas: 2_000_000_000,
             max_priority_fee_per_gas: 1_000_000_000,
             to: TxKind::Call(Address::repeat_byte(0x02)),
-            value: U256::ZERO,
+            value,
             access_list: Default::default(),
-            version: 0,
-            fee_token_id: 1,
-            fee_limit: U256::from(1000u64),
+            version: u8::from(fee_token_id == 0),
+            fee_token_id,
+            fee_limit: if fee_token_id == 0 {
+                U256::ZERO
+            } else {
+                U256::from(1000u64)
+            },
             reference: None,
             memo: None,
             input: Bytes::new(),
@@ -300,6 +324,44 @@ mod tests {
 
         let legacy_tx = create_legacy_pooled_tx();
         assert!(!legacy_tx.is_morph_tx());
+    }
+
+    #[test]
+    fn test_token_fee_morph_transaction_native_cost_is_value_only() {
+        let value = U256::from(12_345u64);
+        let tx = create_morph_pooled_tx_with_fee_token(1, value);
+
+        assert_eq!(*tx.cost(), value);
+    }
+
+    #[test]
+    fn test_native_fee_transactions_keep_standard_pool_cost() {
+        let morph_tx = create_morph_pooled_tx_with_fee_token(0, U256::from(12_345u64));
+        assert_eq!(*morph_tx.cost(), U256::from(42_000_000_012_345u64));
+
+        let legacy_tx = create_legacy_pooled_tx();
+        assert_eq!(*legacy_tx.cost(), U256::from(21_000_000_000_100u64));
+    }
+
+    #[test]
+    fn test_token_fee_native_cost_survives_clone_and_consensus_roundtrips() {
+        let value = U256::from(12_345u64);
+        let original = create_morph_pooled_tx_with_fee_token(1, value);
+        let cloned = original.clone();
+        assert_eq!(*cloned.cost(), value);
+
+        let cloned_consensus = original.clone_into_consensus();
+        let recreated_from_clone = MorphPooledTransaction::from_pooled(cloned_consensus);
+        assert_eq!(*recreated_from_clone.cost(), value);
+
+        let cloned_into_consensus = cloned.into_consensus();
+        let recreated_from_cloned_owned =
+            MorphPooledTransaction::from_pooled(cloned_into_consensus);
+        assert_eq!(*recreated_from_cloned_owned.cost(), value);
+
+        let owned_consensus = original.into_consensus();
+        let recreated_from_owned = MorphPooledTransaction::from_pooled(owned_consensus);
+        assert_eq!(*recreated_from_owned.cost(), value);
     }
 
     #[test]

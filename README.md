@@ -13,7 +13,8 @@ Morph Reth is the next-generation execution client for [Morph](https://www.morph
 
 - **L1 Message Support**: Seamless bridging of assets and messages from Ethereum L1 to Morph L2
 - **Morph Transaction**: Versioned Morph EVM+ transaction with alternative fee-token support and Jade-era reference/memo fields
-- **Morph Hardforks**: Implements Morph hardfork logic through Jade, with bundled Mainnet and Hoodi chainspecs scheduled through Jade
+- **Morph Hardforks**: Implements Morph hardfork logic through Onyx, with bundled Mainnet and Hoodi chainspecs currently scheduled through Jade
+- **Recoverable Deposit Sweeping**: Onyx can settle approved ERC-20 inflows from EIP-7702 deposit EOAs to exchange master addresses
 - **Custom Engine API**: L2-specific Engine API for sequencer block building and validation
 - **L1 Fee Validation**: Transaction pool with L1 data fee affordability checks
 
@@ -172,11 +173,18 @@ Morph Transaction (`0x7f`) is a versioned custom transaction type that extends E
 | V0 | Always | Requires `fee_token_id > 0`, uses an active fee token from the L2 Token Registry, and does not support `reference` or `memo` |
 | V1 | Jade+ | Adds optional `reference` (32 bytes) and `memo` (max 64 bytes); `fee_token_id == 0` uses the normal ETH-fee path, while `fee_token_id > 0` uses an active registry token |
 
+### Onyx Recoverable Deposit Sweeping
+
+From Onyx onward, Morph can automatically and safely move approved ERC-20
+inflows from EIP-7702 exchange deposit EOAs to their registered master address,
+without pre-funding each deposit with native currency. See the
+[protocol, security, and operations guide](ONYX_SWEEP.md).
+
 ### Hardforks
 
-Bernoulli and Curie use block-based activation; Morph203, Viridian, Emerald, and Jade use timestamp-based activation.
+Bernoulli and Curie use block-based activation; Morph203, Viridian, Emerald, Jade, and Onyx use timestamp-based activation.
 
-The codebase implements hardfork logic through Jade, and the bundled Mainnet and Hoodi chainspecs include activation timestamps through Jade.
+The codebase implements hardfork logic through Onyx. The bundled Mainnet and Hoodi chainspecs currently include production activation timestamps through Jade; Onyx is intentionally unscheduled pending rollout.
 
 | Hardfork | Activation | Description |
 |----------|------------|-------------|
@@ -186,6 +194,7 @@ The codebase implements hardfork logic through Jade, and the bundled Mainnet and
 | Viridian | Timestamp | EIP-7702 EOA delegation support |
 | Emerald | Timestamp | BLS12-381 and P256verify precompiles |
 | Jade | Timestamp | MPT state root validation, MorphTx V1 with reference and memo fields |
+| Onyx | Timestamp | Recoverable, policy-gated ERC-20 deposit sweeping |
 
 Before Jade, Morph uses ZK-trie (Poseidon hash) state roots. morph-reth skips ZK-trie state-root validation pre-Jade and enables MPT state-root validation from Jade onward.
 
