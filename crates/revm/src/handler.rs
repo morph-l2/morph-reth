@@ -675,26 +675,24 @@ where
     }
 }
 
-/// Returns whether `caller` is already delegated to the block's pinned sweep implementation.
+/// Returns whether `caller` is a plain EOA that could be a sweep deposit.
 ///
-/// The caller account is loaded with code during transaction validation, so this is a
-/// journal-only liveness filter: ordinary fee-token traffic cannot consume sweep preflight
-/// budget, while every configured token-fee caller that could pass the later delegation
-/// preflight remains eligible even when its reimbursement is zero, a no-op, or fails.
+/// When Onyx is active and the MorphTx fee-token caller has no code, record it
+/// as a sweep candidate so any pre-existing balance left after the fee
+/// deduction and refund is swept at transaction end.
 fn is_configured_sweep_deposit<DB, I>(evm: &MorphEvm<DB, I>, caller: Address) -> bool
 where
     DB: alloy_evm::Database,
 {
-    let Some(config) = evm.ctx_ref().block().sweep else {
+    if evm.ctx_ref().block().sweep.is_none() {
         return false;
-    };
+    }
     evm.ctx_ref()
         .journal()
         .state
         .get(&caller)
         .and_then(|account| account.info.code.as_ref())
-        .and_then(revm::state::Bytecode::eip7702_address)
-        == Some(config.delegate_address)
+        .is_none_or(|code| code.is_empty())
 }
 
 /// Execute `f` within a journal checkpoint. Commits on `Ok`, reverts on `Err`.
@@ -1045,7 +1043,7 @@ fn calculate_caller_fee_with_l1_cost(
 mod tests {
     use super::*;
     use crate::MorphBlockEnv;
-    use alloy_primitives::{B256, Bytes, TxKind, address, keccak256};
+    use alloy_primitives::{Bytes, TxKind, address, keccak256};
     use morph_chainspec::hardfork::MorphHardfork;
     use morph_primitives::MORPH_TX_TYPE_ID;
     use revm::{
@@ -1277,21 +1275,16 @@ mod tests {
         let caller = address!("1000000000000000000000000000000000000001");
         let beneficiary = address!("2000000000000000000000000000000000000002");
         let token = address!("3000000000000000000000000000000000000003");
-        let sweep_delegate = address!("4000000000000000000000000000000000000004");
         let balance_slot = U256::from(7);
         let beneficiary_storage_slot = compute_mapping_slot_for_address(balance_slot, beneficiary);
         let caller_storage_slot = compute_mapping_slot_for_address(balance_slot, caller);
 
         let mut db = CacheDB::new(EmptyDB::default());
         db.insert_account_info(token, AccountInfo::default());
-        let designator = Bytecode::new_eip7702(sweep_delegate);
+        // Caller is a plain EOA (no code) — sweep-eligible.
         db.insert_account_info(
             caller,
-            AccountInfo {
-                code_hash: designator.hash_slow(),
-                code: Some(designator),
-                ..Default::default()
-            },
+            AccountInfo::default(),
         );
         db.insert_account_storage(token, beneficiary_storage_slot, U256::from(10))
             .unwrap();
@@ -1309,8 +1302,6 @@ mod tests {
             },
             sweep: Some(crate::SweepConfig {
                 registry_address: Address::ZERO,
-                delegate_address: sweep_delegate,
-                delegate_code_hash: B256::ZERO,
             }),
         };
         evm.tx = MorphTxEnv {
@@ -1357,14 +1348,16 @@ mod tests {
             U256::from(1)
         );
 
+        // Disable the sweep config entirely — a plain EOA without sweep enabled
+        // should not consume any preflight budget.
         evm.post_fee_sweep_candidate = None;
-        evm.block.sweep.as_mut().unwrap().delegate_address = Address::ZERO;
+        evm.block.sweep = None;
         handler
             .reimburse_caller_token_fee(&mut evm, &Gas::new(1))
             .unwrap();
         assert!(
             evm.post_fee_sweep_candidate.is_none(),
-            "ordinary fee-token callers must not consume sweep preflight budget"
+            "fee-token callers must not consume sweep preflight budget when sweep is disabled"
         );
         assert_eq!(
             *evm.ctx_mut()
@@ -1381,8 +1374,13 @@ mod tests {
             U256::from(2)
         );
 
-        evm.block.sweep.as_mut().unwrap().delegate_address = sweep_delegate;
+        // Re-enable sweep and test self-refund: a deposit that refunds to itself
+        // still produces a sweep candidate for any pre-existing balance.
+        evm.block.sweep = Some(crate::SweepConfig {
+            registry_address: Address::with_last_byte(0x42),
+        });
         evm.block.inner.beneficiary = caller;
+        evm.post_fee_sweep_candidate = None;
         handler
             .reimburse_caller_token_fee(&mut evm, &Gas::new(1))
             .unwrap();

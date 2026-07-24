@@ -27,10 +27,10 @@ pub(crate) struct SweepMetrics {
     sweeps_total: Counter,
     /// Checked candidates that did not sweep, across every classified reason.
     failures_total: Counter,
-    /// Deposits skipped because their EIP-7702 delegation did not match policy.
+    /// Deposits skipped because they have ordinary code (not a plain EOA).
     ///
     /// Broken out separately from [`Self::failures_total`] because a rising
-    /// value is an operational signal (misconfigured deposit or 7702 abuse),
+    /// value is an operational signal (misconfigured deposit or code deployment),
     /// not just a benign no-op.
     code_skipped_total: Counter,
     /// Fixed sweep system gas committed to blocks. Its rate against
@@ -59,7 +59,7 @@ impl SweepMetrics {
         for failure in failures {
             if matches!(
                 failure.reason,
-                SweepFailureReason::DepositDelegationMismatch
+                SweepFailureReason::DepositHasCode
             ) {
                 self.code_skipped_total.increment(1);
             }

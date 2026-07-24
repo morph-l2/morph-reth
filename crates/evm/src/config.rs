@@ -1,7 +1,7 @@
 use crate::{MorphBlockAssembler, MorphEvmConfig, MorphEvmError, MorphNextBlockEnvAttributes};
 use alloy_consensus::BlockHeader;
 use alloy_primitives::B256;
-use morph_chainspec::hardfork::{MorphHardfork, MorphHardforks};
+use morph_chainspec::{SWEEP_REGISTRY_ADDRESS, hardfork::{MorphHardfork, MorphHardforks}};
 use morph_primitives::Block;
 use morph_primitives::{MorphHeader, MorphPrimitives};
 use morph_revm::{MorphBlockEnv, SweepConfig};
@@ -18,46 +18,8 @@ impl MorphEvmConfig {
         if !hardfork.is_onyx() {
             return Ok(None);
         }
-
-        let registry_address = self.chain_spec().sweep_registry_address().ok_or_else(|| {
-            MorphEvmError::InvalidEvmConfig("Onyx requires a sweep registry address".to_string())
-        })?;
-        if registry_address.is_zero() {
-            return Err(MorphEvmError::InvalidEvmConfig(
-                "Onyx sweep registry address must be non-zero".to_string(),
-            ));
-        }
-        let delegate_address = self
-            .chain_spec()
-            .sweep_deposit_delegate_address()
-            .ok_or_else(|| {
-                MorphEvmError::InvalidEvmConfig(
-                    "Onyx requires a sweep deposit delegate address".to_string(),
-                )
-            })?;
-        if delegate_address.is_zero() {
-            return Err(MorphEvmError::InvalidEvmConfig(
-                "Onyx sweep deposit delegate address must be non-zero".to_string(),
-            ));
-        }
-        let delegate_code_hash = self
-            .chain_spec()
-            .sweep_deposit_delegate_code_hash()
-            .ok_or_else(|| {
-                MorphEvmError::InvalidEvmConfig(
-                    "Onyx requires a sweep deposit delegate code hash".to_string(),
-                )
-            })?;
-        if delegate_code_hash.is_zero() {
-            return Err(MorphEvmError::InvalidEvmConfig(
-                "Onyx sweep deposit delegate code hash must be non-zero".to_string(),
-            ));
-        }
-
         Ok(Some(SweepConfig {
-            registry_address,
-            delegate_address,
-            delegate_code_hash,
+            registry_address: SWEEP_REGISTRY_ADDRESS,
         }))
     }
 }
@@ -224,7 +186,7 @@ impl ConfigureEvm for MorphEvmConfig {
 mod tests {
     use super::*;
     use alloy_consensus::Header;
-    use alloy_primitives::{B256, Bytes, U256, address};
+    use alloy_primitives::{B256, Bytes, U256};
     use morph_chainspec::MorphChainSpec;
     use reth_evm::{ConfigureEvm, NextBlockEnvAttributes};
     use std::sync::Arc;
@@ -263,8 +225,6 @@ mod tests {
     fn create_onyx_chainspec(
         onyx_time: u64,
         registry_address: Option<alloy_primitives::Address>,
-        delegate_address: Option<alloy_primitives::Address>,
-        delegate_code_hash: Option<B256>,
     ) -> Arc<MorphChainSpec> {
         let mut genesis_json = serde_json::json!({
             "config": {
@@ -297,14 +257,6 @@ mod tests {
         });
         if let Some(address) = registry_address {
             genesis_json["config"]["morph"]["sweepRegistryAddress"] = serde_json::json!(address);
-        }
-        if let Some(address) = delegate_address {
-            genesis_json["config"]["morph"]["sweepDepositDelegateAddress"] =
-                serde_json::json!(address);
-        }
-        if let Some(code_hash) = delegate_code_hash {
-            genesis_json["config"]["morph"]["sweepDepositDelegateCodeHash"] =
-                serde_json::json!(code_hash);
         }
         let genesis: alloy_genesis::Genesis = serde_json::from_value(genesis_json).unwrap();
         Arc::new(MorphChainSpec::from(genesis))
@@ -391,15 +343,7 @@ mod tests {
 
     #[test]
     fn test_onyx_populates_sweep_config() {
-        let registry = address!("5300000000000000000000000000000000000023");
-        let delegate = address!("5300000000000000000000000000000000000024");
-        let delegate_code_hash = B256::repeat_byte(0x11);
-        let chain_spec = create_onyx_chainspec(
-            100,
-            Some(registry),
-            Some(delegate),
-            Some(delegate_code_hash),
-        );
+        let chain_spec = create_onyx_chainspec(100, None);
         let config = MorphEvmConfig::new_with_default_factory(chain_spec);
 
         let env = config.evm_env(&create_morph_header(100, 100)).unwrap();
@@ -408,21 +352,7 @@ mod tests {
                 .sweep
                 .expect("Onyx config must be populated")
                 .registry_address,
-            registry
-        );
-        assert_eq!(
-            env.block_env
-                .sweep
-                .expect("Onyx config must be populated")
-                .delegate_address,
-            delegate
-        );
-        assert_eq!(
-            env.block_env
-                .sweep
-                .expect("Onyx config must be populated")
-                .delegate_code_hash,
-            delegate_code_hash
+            SWEEP_REGISTRY_ADDRESS
         );
 
         let next_env = config
@@ -434,32 +364,13 @@ mod tests {
                 .sweep
                 .expect("Onyx config must be populated")
                 .registry_address,
-            registry
-        );
-        assert_eq!(
-            next_env
-                .block_env
-                .sweep
-                .expect("Onyx config must be populated")
-                .delegate_address,
-            delegate
-        );
-        assert_eq!(
-            next_env
-                .block_env
-                .sweep
-                .expect("Onyx config must be populated")
-                .delegate_code_hash,
-            delegate_code_hash
+            SWEEP_REGISTRY_ADDRESS
         );
     }
 
     #[test]
-    fn test_pre_onyx_ignores_sweep_address() {
-        let registry = address!("5300000000000000000000000000000000000023");
-        let delegate = address!("5300000000000000000000000000000000000024");
-        let chain_spec =
-            create_onyx_chainspec(100, Some(registry), Some(delegate), Some(B256::ZERO));
+    fn test_pre_onyx_ignores_sweep() {
+        let chain_spec = create_onyx_chainspec(100, None);
         let config = MorphEvmConfig::new_with_default_factory(chain_spec);
 
         let env = config.evm_env(&create_morph_header(99, 99)).unwrap();
@@ -469,99 +380,6 @@ mod tests {
             .next_evm_env(&create_morph_header(98, 98), &next_block_attributes(99))
             .unwrap();
         assert!(next_env.block_env.sweep.is_none());
-    }
-
-    #[test]
-    fn test_onyx_requires_sweep_address() {
-        let chain_spec = create_onyx_chainspec(100, None, None, None);
-        let config = MorphEvmConfig::new_with_default_factory(chain_spec);
-
-        assert!(matches!(
-            config.evm_env(&create_morph_header(100, 100)),
-            Err(MorphEvmError::InvalidEvmConfig(message))
-                if message.contains("sweep registry")
-        ));
-        assert!(matches!(
-            config.next_evm_env(
-                &create_morph_header(99, 99),
-                &next_block_attributes(100)
-            ),
-            Err(MorphEvmError::InvalidEvmConfig(message))
-                if message.contains("sweep registry")
-        ));
-    }
-
-    #[test]
-    fn test_onyx_requires_sweep_delegate_address() {
-        let registry = address!("5300000000000000000000000000000000000023");
-        let chain_spec = create_onyx_chainspec(100, Some(registry), None, None);
-        let config = MorphEvmConfig::new_with_default_factory(chain_spec);
-
-        assert!(matches!(
-            config.evm_env(&create_morph_header(100, 100)),
-            Err(MorphEvmError::InvalidEvmConfig(message))
-                if message.contains("sweep deposit delegate")
-        ));
-    }
-
-    #[test]
-    fn test_onyx_requires_sweep_delegate_code_hash() {
-        let registry = address!("5300000000000000000000000000000000000023");
-        let delegate = address!("5300000000000000000000000000000000000024");
-        let chain_spec = create_onyx_chainspec(100, Some(registry), Some(delegate), None);
-        let config = MorphEvmConfig::new_with_default_factory(chain_spec);
-
-        assert!(matches!(
-            config.evm_env(&create_morph_header(100, 100)),
-            Err(MorphEvmError::InvalidEvmConfig(message))
-                if message.contains("sweep deposit delegate code hash")
-        ));
-    }
-
-    #[test]
-    fn test_onyx_rejects_zero_sweep_configuration_values() {
-        let registry = address!("5300000000000000000000000000000000000023");
-        let delegate = address!("5300000000000000000000000000000000000024");
-        let delegate_code_hash = B256::repeat_byte(0x11);
-        let cases = [
-            (
-                Some(alloy_primitives::Address::ZERO),
-                Some(delegate),
-                Some(delegate_code_hash),
-                "sweep registry address must be non-zero",
-            ),
-            (
-                Some(registry),
-                Some(alloy_primitives::Address::ZERO),
-                Some(delegate_code_hash),
-                "sweep deposit delegate address must be non-zero",
-            ),
-            (
-                Some(registry),
-                Some(delegate),
-                Some(B256::ZERO),
-                "sweep deposit delegate code hash must be non-zero",
-            ),
-        ];
-
-        for (registry, delegate, delegate_code_hash, expected_message) in cases {
-            let chain_spec = create_onyx_chainspec(100, registry, delegate, delegate_code_hash);
-            let config = MorphEvmConfig::new_with_default_factory(chain_spec);
-
-            assert!(matches!(
-                config.evm_env(&create_morph_header(100, 100)),
-                Err(MorphEvmError::InvalidEvmConfig(message))
-                    if message.contains(expected_message)
-            ));
-            assert!(matches!(
-                config.next_evm_env(
-                    &create_morph_header(99, 99),
-                    &next_block_attributes(100)
-                ),
-                Err(MorphEvmError::InvalidEvmConfig(message))
-                    if message.contains(expected_message)
-            ));
-        }
     }
 
     #[test]

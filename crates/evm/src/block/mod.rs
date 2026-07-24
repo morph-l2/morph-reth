@@ -508,8 +508,6 @@ mod tests {
                     },
                     sweep: Some(SweepConfig {
                         registry_address: REGISTRY,
-                        delegate_address: Address::with_last_byte(0x24),
-                        delegate_code_hash: B256::ZERO,
                     }),
                 },
             },

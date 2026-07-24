@@ -308,23 +308,6 @@ impl MorphChainSpec {
         self.info.morph_chain_info.max_tx_payload_bytes_per_block
     }
 
-    /// Returns the sweep registry address.
-    pub fn sweep_registry_address(&self) -> Option<Address> {
-        self.info.morph_chain_info.sweep_registry_address()
-    }
-
-    /// Returns the fixed EIP-7702 implementation for sweep deposits.
-    pub fn sweep_deposit_delegate_address(&self) -> Option<Address> {
-        self.info.morph_chain_info.sweep_deposit_delegate_address()
-    }
-
-    /// Returns the expected sweep-deposit implementation runtime code hash.
-    pub fn sweep_deposit_delegate_code_hash(&self) -> Option<B256> {
-        self.info
-            .morph_chain_info
-            .sweep_deposit_delegate_code_hash()
-    }
-
     /// Checks if the given block size (in bytes) is valid for this chain.
     pub fn is_valid_block_size(&self, size: usize) -> bool {
         self.info.morph_chain_info.is_valid_block_size(size)
@@ -495,8 +478,7 @@ mod tests {
                 "jadeForkTime": 0,
                 "onyxTime": 0,
                 "morph": {
-                    "feeVaultAddress": "0x530000000000000000000000000000000000000a",
-                    "sweepRegistryAddress": "0x5300000000000000000000000000000000000023"
+                    "feeVaultAddress": "0x530000000000000000000000000000000000000a"
                 }
             },
             "alloc": {}
@@ -702,8 +684,7 @@ mod tests {
                 "onyxTime": 0,
                 "morph": {
                     "feeVaultAddress": "0x530000000000000000000000000000000000000a",
-                    "maxTxPayloadBytesPerBlock": 122880,
-                    "sweepRegistryAddress": "0x5300000000000000000000000000000000000023"
+                    "maxTxPayloadBytesPerBlock": 122880
                 }
             },
             "alloc": {}
@@ -723,10 +704,6 @@ mod tests {
 
         // Config should be extracted from genesis
         assert!(chainspec.is_fee_vault_enabled());
-        assert_eq!(
-            chainspec.sweep_registry_address(),
-            Some(address!("5300000000000000000000000000000000000023"))
-        );
     }
 
     #[test]
@@ -748,8 +725,7 @@ mod tests {
                 "curieBlock": 0,
                 "morph": {
                     "feeVaultAddress": "0x530000000000000000000000000000000000000a",
-                    "maxTxPayloadBytesPerBlock": 122880,
-                    "sweepRegistryAddress": "0x5300000000000000000000000000000000000023"
+                    "maxTxPayloadBytesPerBlock": 122880
                 }
             },
             "alloc": {}
@@ -760,10 +736,6 @@ mod tests {
 
         assert!(chainspec.is_fee_vault_enabled());
         assert_eq!(chainspec.max_tx_payload_bytes_per_block(), Some(122880));
-        assert_eq!(
-            chainspec.sweep_registry_address(),
-            Some(address!("5300000000000000000000000000000000000023"))
-        );
         assert!(chainspec.is_valid_block_size(100000));
         assert!(!chainspec.is_valid_block_size(200000));
     }

@@ -284,12 +284,10 @@ impl TestNodeBuilder {
         self
     }
 
-    /// Override the consensus-pinned Onyx sweep deployment tuple.
+    /// Override the consensus-pinned Onyx sweep registry address.
     pub fn with_sweep_config(
         mut self,
         registry: Address,
-        delegate: Address,
-        delegate_code_hash: B256,
     ) -> Self {
         let morph = self
             .genesis_json
@@ -301,14 +299,6 @@ impl TestNodeBuilder {
         morph.insert(
             "sweepRegistryAddress".to_string(),
             serde_json::json!(registry.to_string()),
-        );
-        morph.insert(
-            "sweepDepositDelegateAddress".to_string(),
-            serde_json::json!(delegate.to_string()),
-        );
-        morph.insert(
-            "sweepDepositDelegateCodeHash".to_string(),
-            serde_json::json!(delegate_code_hash.to_string()),
         );
         self
     }

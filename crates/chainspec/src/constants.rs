@@ -56,6 +56,16 @@ pub const MORPH_HOODI_GENESIS_STATE_ROOT: B256 =
 /// Manages the L1-to-L2 message queue and stores the withdraw trie root.
 pub const L2_MESSAGE_QUEUE_ADDRESS: Address = address!("5300000000000000000000000000000000000001");
 
+/// Sweep Registry proxy address (Onyx hardfork).
+///
+/// Deployed via deterministic CREATE2 (solady factory
+/// `0x4e59b44847b379578588920cA78FbF26c0B4956C`). The address is
+/// identical on every network that shares the same locking factors:
+/// - SweepRegistry source (`forge-artifacts/SweepRegistry.sol/SweepRegistry.json`)
+/// - solc 0.8.24, optimizer runs 999 999, OZ 4.9.3
+/// - ProxyAdmin = `0x530000000000000000000000000000000000000b`
+pub const SWEEP_REGISTRY_ADDRESS: Address = address!("7aE8bEf666D1D0aB9C0ac5d636f375E46f8AE71A");
+
 /// Storage slot for the withdraw trie root (`messageRoot`) in L2MessageQueue contract.
 ///
 /// This is slot 33, which stores the Merkle root for L2->L1 messages.

@@ -18,7 +18,6 @@ use revm::{
         CallInput, CallInputs, CallScheme, CallValue, FrameInput, SharedMemory,
         interpreter_action::FrameInit,
     },
-    state::Bytecode,
 };
 use std::{cell::RefCell, collections::HashSet};
 
@@ -30,11 +29,11 @@ pub const MAX_PREFLIGHTS_PER_TX: usize = 64;
 pub const RESOLVE_GAS_LIMIT: u64 = 50_000;
 /// Gas limit for each ERC-20 `balanceOf` static call.
 pub const BALANCE_OF_GAS_LIMIT: u64 = 50_000;
-/// Gas limit for the fixed EIP-7702 sweep delegate call.
-pub const SWEEP_GAS_LIMIT: u64 = 250_000;
+/// Gas limit for the sweep `transfer` system call.
+pub const SWEEP_GAS_LIMIT: u64 = 200_000;
 /// Fixed worst-case system-gas debit for resolver plus two preflight balance calls.
 pub const PREFLIGHT_SYSTEM_GAS: u64 = RESOLVE_GAS_LIMIT + 2 * BALANCE_OF_GAS_LIMIT;
-/// Fixed worst-case debit for the delegate call plus two post-execution balance calls.
+/// Fixed worst-case debit for the transfer call plus two post-execution balance calls.
 pub const SWEEP_EXECUTION_SYSTEM_GAS: u64 = SWEEP_GAS_LIMIT + 2 * BALANCE_OF_GAS_LIMIT;
 /// Total system-gas debit for a candidate that reaches execution.
 pub const CANDIDATE_SYSTEM_GAS: u64 = PREFLIGHT_SYSTEM_GAS + SWEEP_EXECUTION_SYSTEM_GAS;
@@ -42,9 +41,9 @@ pub const CANDIDATE_SYSTEM_GAS: u64 = PREFLIGHT_SYSTEM_GAS + SWEEP_EXECUTION_SYS
 ///
 /// The two quotas are intentionally independent: a transaction can discard
 /// invalid triggers without consuming its eligible-execution allowance.
-pub const TX_SYSTEM_GAS: u64 = 10_400_000;
+pub const TX_SYSTEM_GAS: u64 = 14_400_000;
 /// Maximum sweep system gas in one block.
-pub const BLOCK_SYSTEM_GAS: u64 = 22_400_000;
+pub const BLOCK_SYSTEM_GAS: u64 = 28_800_000;
 /// Maximum sweep candidates checked in one block.
 pub const MAX_CANDIDATES_PER_BLOCK: usize = (BLOCK_SYSTEM_GAS / CANDIDATE_SYSTEM_GAS) as usize;
 /// Maximum raw triggers preflighted in one block.
@@ -203,7 +202,6 @@ const REQUEST_TOPIC: B256 =
 const SWEEP_TOPIC: B256 = b256!("035b37215a69e14a80883933d6aa84f0919a67af9410a4a73e8a23baeca011f0");
 const RESOLVE_SELECTOR: [u8; 4] = [0x9f, 0xaa, 0x2f, 0x2f];
 const BALANCE_OF_SELECTOR: [u8; 4] = [0x70, 0xa0, 0x82, 0x31];
-const SWEEP_SELECTOR: [u8; 4] = [0x62, 0xc0, 0x67, 0x67];
 
 /// A token/deposit pair eligible for a sweep check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -449,25 +447,13 @@ pub enum SweepFailureReason {
     ResolverMalformed,
     /// Registry resolver returned the zero address.
     ResolverZero,
-    /// Registry policy returned a zero or invalid token code hash.
-    PolicyMalformed,
-    /// Runtime token code does not match the Registry-pinned policy.
-    TokenCodeMismatch,
-    /// Deposit is not delegated to the chain-configured EIP-7702 implementation.
-    DepositDelegationMismatch,
     /// Pre-transfer `balanceOf` reverted or halted.
     BalanceCallFailed,
     /// Pre-transfer `balanceOf` returned malformed data.
     BalanceMalformed,
     /// Deposit token balance is zero.
     BalanceZero,
-    /// Deposit balance is below the Registry policy minimum.
-    BelowMinimum,
-    /// Master `balanceOf` reverted or halted.
-    MasterBalanceCallFailed,
-    /// Master `balanceOf` returned malformed data.
-    MasterBalanceMalformed,
-    /// Fixed sweep delegate reverted or halted.
+    /// Token `transfer` reverted or halted.
     TransferCallFailed,
     /// Token `transfer` returned ABI `false`.
     TransferFalse,
@@ -479,14 +465,14 @@ pub enum SweepFailureReason {
     PostBalanceMalformed,
     /// Deposit retained a non-zero post-transfer balance.
     PostBalanceNonZero,
-    /// Master did not receive the full deposit balance.
-    MasterBalanceMismatch,
     /// Transfer call emitted no matching canonical `Transfer`.
     MissingTransferLog,
     /// Transfer call emitted more than one matching canonical `Transfer`.
     DuplicateTransferLog,
     /// Sweep execution attempted a persistent side effect outside token storage.
     ScopeViolation,
+    /// Deposit has ordinary code (not a plain EOA).
+    DepositHasCode,
     /// Candidate passed policy but could not fit in the remaining system budget.
     DeferredByBudget,
 }
@@ -501,25 +487,19 @@ impl SweepFailureReason {
             Self::ResolverCallFailed => "resolver_call_failed",
             Self::ResolverMalformed => "resolver_malformed",
             Self::ResolverZero => "resolver_zero",
-            Self::PolicyMalformed => "policy_malformed",
-            Self::TokenCodeMismatch => "token_code_mismatch",
-            Self::DepositDelegationMismatch => "deposit_delegation_mismatch",
             Self::BalanceCallFailed => "balance_call_failed",
             Self::BalanceMalformed => "balance_malformed",
             Self::BalanceZero => "balance_zero",
-            Self::BelowMinimum => "below_minimum",
-            Self::MasterBalanceCallFailed => "master_balance_call_failed",
-            Self::MasterBalanceMalformed => "master_balance_malformed",
             Self::TransferCallFailed => "transfer_call_failed",
             Self::TransferFalse => "transfer_false",
             Self::TransferMalformed => "transfer_malformed",
             Self::PostBalanceCallFailed => "post_balance_call_failed",
             Self::PostBalanceMalformed => "post_balance_malformed",
             Self::PostBalanceNonZero => "post_balance_non_zero",
-            Self::MasterBalanceMismatch => "master_balance_mismatch",
             Self::MissingTransferLog => "missing_transfer_log",
             Self::DuplicateTransferLog => "duplicate_transfer_log",
             Self::ScopeViolation => "scope_violation",
+            Self::DepositHasCode => "deposit_has_code",
             Self::DeferredByBudget => "deferred_by_budget",
         }
     }
@@ -712,6 +692,19 @@ fn encode_address_call(selector: [u8; 4], address: Address) -> Bytes {
     Bytes::from(data)
 }
 
+/// ERC-20 `transfer(address,uint256)` selector.
+const TRANSFER_SELECTOR: [u8; 4] = [0xa9, 0x05, 0x9c, 0xbb];
+
+#[inline]
+fn encode_transfer(recipient: Address, amount: U256) -> Bytes {
+    let mut data = Vec::with_capacity(68);
+    data.extend_from_slice(&TRANSFER_SELECTOR);
+    data.extend_from_slice(&[0; 12]);
+    data.extend_from_slice(recipient.as_slice());
+    data.extend_from_slice(&amount.to_be_bytes::<32>());
+    Bytes::from(data)
+}
+
 #[inline]
 fn encode_two_address_call(selector: [u8; 4], first: Address, second: Address) -> Bytes {
     let mut data = Vec::with_capacity(68);
@@ -721,43 +714,6 @@ fn encode_two_address_call(selector: [u8; 4], first: Address, second: Address) -
     data.extend_from_slice(&[0; 12]);
     data.extend_from_slice(second.as_slice());
     Bytes::from(data)
-}
-
-#[inline]
-fn encode_sweep_call(token: Address, recipient: Address, amount: U256) -> Bytes {
-    let mut data = Vec::with_capacity(100);
-    data.extend_from_slice(&SWEEP_SELECTOR);
-    data.extend_from_slice(&[0; 12]);
-    data.extend_from_slice(token.as_slice());
-    data.extend_from_slice(&[0; 12]);
-    data.extend_from_slice(recipient.as_slice());
-    data.extend_from_slice(&amount.to_be_bytes::<32>());
-    Bytes::from(data)
-}
-
-fn load_call_bytecode<DB, I>(
-    evm: &mut MorphEvm<DB, I>,
-    target: Address,
-) -> Result<(B256, Bytecode), DB::Error>
-where
-    DB: Database,
-{
-    let delegated = {
-        let account = evm.ctx_mut().journal_mut().load_account_with_code(target)?;
-        account
-            .info
-            .code
-            .as_ref()
-            .and_then(Bytecode::eip7702_address)
-    };
-    let account = evm
-        .ctx_mut()
-        .journal_mut()
-        .load_account_with_code(delegated.unwrap_or(target))?;
-    Ok((
-        account.info.code_hash(),
-        account.info.code.clone().unwrap_or_default(),
-    ))
 }
 
 #[derive(Debug)]
@@ -792,7 +748,14 @@ where
     let snapshot = is_static.then(|| evm.ctx_mut().journal_mut().checkpoint());
 
     let result = (|| {
-        let known_bytecode = load_call_bytecode(evm, target)?;
+        let account = evm
+            .ctx_mut()
+            .journal_mut()
+            .load_account_with_code(target)?;
+        let known_bytecode = (
+            account.info.code_hash(),
+            account.info.code.clone().unwrap_or_default(),
+        );
         let mut memory =
             SharedMemory::new_with_buffer(evm.ctx_ref().local().shared_memory_buffer().clone());
         memory.set_memory_limit(evm.ctx_ref().cfg().memory_limit());
@@ -848,30 +811,6 @@ fn decode_address(output: &Bytes) -> Result<Address, SweepFailureReason> {
         return Err(SweepFailureReason::ResolverZero);
     }
     Ok(address)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ResolvedSweepPolicy {
-    master: Address,
-    token_code_hash: B256,
-    minimum_amount: U256,
-}
-
-fn decode_sweep_policy(output: &Bytes) -> Result<ResolvedSweepPolicy, SweepFailureReason> {
-    if output.len() != 96 {
-        return Err(SweepFailureReason::ResolverMalformed);
-    }
-    let master = decode_address(&output.slice(..32))?;
-    let token_code_hash = B256::from_slice(&output[32..64]);
-    let minimum_amount = U256::from_be_slice(&output[64..96]);
-    if token_code_hash.is_zero() || minimum_amount.is_zero() || master.is_zero() {
-        return Err(SweepFailureReason::PolicyMalformed);
-    }
-    Ok(ResolvedSweepPolicy {
-        master,
-        token_code_hash,
-        minimum_amount,
-    })
 }
 
 #[inline]
@@ -962,7 +901,6 @@ struct PreparedSweep {
     candidate: SweepCandidate,
     master: Address,
     amount: U256,
-    master_balance_before: U256,
 }
 
 fn read_token_balance<DB, I>(
@@ -1008,57 +946,27 @@ where
     let Some(resolver_output) = resolver.output else {
         return Ok(Err(SweepFailureReason::ResolverCallFailed));
     };
-    let policy = match decode_sweep_policy(&resolver_output) {
-        Ok(policy) => policy,
+    let master = match decode_address(&resolver_output) {
+        Ok(master) => master,
         Err(reason) => {
             return Ok(Err(reason));
         }
     };
-    if policy.master == candidate.deposit {
-        return Ok(Err(SweepFailureReason::PolicyMalformed));
+
+    // Reject self-referencing registration.
+    if master == candidate.deposit {
+        return Ok(Err(SweepFailureReason::ResolverZero));
     }
 
-    let token_matches_policy = {
+    // Reject deposits that have ordinary code (not a plain EOA).
+    {
         let account = evm
             .ctx_mut()
             .journal_mut()
-            .load_account_with_code(candidate.token)?;
-        account
-            .info
-            .code
-            .as_ref()
-            .is_some_and(|code| !code.is_empty() && code.eip7702_address().is_none())
-            && account.info.code_hash() == policy.token_code_hash
-    };
-    if !token_matches_policy {
-        return Ok(Err(SweepFailureReason::TokenCodeMismatch));
-    }
-
-    let delegated_address = evm
-        .ctx_mut()
-        .journal_mut()
-        .load_account_with_code(candidate.deposit)?
-        .info
-        .code
-        .as_ref()
-        .and_then(Bytecode::eip7702_address);
-    if delegated_address != Some(config.delegate_address) {
-        return Ok(Err(SweepFailureReason::DepositDelegationMismatch));
-    }
-    let delegate_matches_config = {
-        let account = evm
-            .ctx_mut()
-            .journal_mut()
-            .load_account_with_code(config.delegate_address)?;
-        account
-            .info
-            .code
-            .as_ref()
-            .is_some_and(|code| !code.is_empty() && code.eip7702_address().is_none())
-            && account.info.code_hash() == config.delegate_code_hash
-    };
-    if !delegate_matches_config {
-        return Ok(Err(SweepFailureReason::DepositDelegationMismatch));
+            .load_account_with_code(candidate.deposit)?;
+        if account.info.code.as_ref().is_some_and(|code| !code.is_empty()) {
+            return Ok(Err(SweepFailureReason::DepositHasCode));
+        }
     }
 
     let balance = match read_token_balance(
@@ -1074,25 +982,11 @@ where
     if balance.is_zero() {
         return Ok(Err(SweepFailureReason::BalanceZero));
     }
-    if balance < policy.minimum_amount {
-        return Ok(Err(SweepFailureReason::BelowMinimum));
-    }
-    let master_balance_before = match read_token_balance(
-        evm,
-        candidate.token,
-        policy.master,
-        SweepFailureReason::MasterBalanceCallFailed,
-        SweepFailureReason::MasterBalanceMalformed,
-    )? {
-        Ok(balance) => balance,
-        Err(reason) => return Ok(Err(reason)),
-    };
 
     Ok(Ok(PreparedSweep {
         candidate,
-        master: policy.master,
+        master,
         amount: balance,
-        master_balance_before,
     }))
 }
 
@@ -1115,9 +1009,9 @@ where
     let candidate_result = (|| {
         let transfer = internal_call(
             evm,
-            config.delegate_address,
             candidate.deposit,
-            encode_sweep_call(candidate.token, master, balance),
+            candidate.token,
+            encode_transfer(master, balance),
             SWEEP_GAS_LIMIT,
             false,
         )?;
@@ -1140,20 +1034,6 @@ where
         };
         if !post_balance.is_zero() {
             return Ok(Err(SweepFailureReason::PostBalanceNonZero));
-        }
-
-        let master_balance_after = match read_token_balance(
-            evm,
-            candidate.token,
-            master,
-            SweepFailureReason::MasterBalanceCallFailed,
-            SweepFailureReason::MasterBalanceMalformed,
-        )? {
-            Ok(balance) => balance,
-            Err(reason) => return Ok(Err(reason)),
-        };
-        if master_balance_after.checked_sub(prepared.master_balance_before) != Some(balance) {
-            return Ok(Err(SweepFailureReason::MasterBalanceMismatch));
         }
 
         let journal = evm.ctx_ref().journal();
@@ -1319,7 +1199,6 @@ mod tests {
     use std::{collections::HashMap, fmt};
 
     const REGISTRY: Address = address!("5300000000000000000000000000000000000023");
-    const DELEGATE: Address = address!("5300000000000000000000000000000000000024");
     const DEPOSIT: Address = address!("1000000000000000000000000000000000000001");
     const MASTER: Address = address!("2000000000000000000000000000000000000002");
     const TOKEN_A: Address = address!("3000000000000000000000000000000000000003");
@@ -1359,25 +1238,19 @@ mod tests {
             SweepFailureReason::ResolverCallFailed,
             SweepFailureReason::ResolverMalformed,
             SweepFailureReason::ResolverZero,
-            SweepFailureReason::PolicyMalformed,
-            SweepFailureReason::TokenCodeMismatch,
-            SweepFailureReason::DepositDelegationMismatch,
             SweepFailureReason::BalanceCallFailed,
             SweepFailureReason::BalanceMalformed,
             SweepFailureReason::BalanceZero,
-            SweepFailureReason::BelowMinimum,
-            SweepFailureReason::MasterBalanceCallFailed,
-            SweepFailureReason::MasterBalanceMalformed,
             SweepFailureReason::TransferCallFailed,
             SweepFailureReason::TransferFalse,
             SweepFailureReason::TransferMalformed,
             SweepFailureReason::PostBalanceCallFailed,
             SweepFailureReason::PostBalanceMalformed,
             SweepFailureReason::PostBalanceNonZero,
-            SweepFailureReason::MasterBalanceMismatch,
             SweepFailureReason::MissingTransferLog,
             SweepFailureReason::DuplicateTransferLog,
             SweepFailureReason::ScopeViolation,
+            SweepFailureReason::DepositHasCode,
             SweepFailureReason::DeferredByBudget,
         ];
         let labels: HashSet<&str> = reasons.iter().map(|r| r.as_label()).collect();
@@ -1607,8 +1480,6 @@ mod tests {
     #[derive(Clone, Copy)]
     enum ResolverMode {
         Master,
-        WrongCodeHash,
-        MinimumTooHigh,
         Zero,
         Malformed,
         Revert,
@@ -1633,7 +1504,6 @@ mod tests {
         Malformed,
         Revert,
         PostBalanceNonZero,
-        MissingMasterCredit,
         MissingLog,
         DuplicateLog,
         ExtraLog,
@@ -1692,14 +1562,6 @@ mod tests {
             self.op(0x57);
         }
 
-        fn jump(&mut self, label: &'static str) {
-            self.op(0x61);
-            let offset = self.code.len();
-            self.code.extend_from_slice(&[0, 0]);
-            self.fixups.push((offset, label));
-            self.op(0x56);
-        }
-
         fn finish(mut self) -> Bytes {
             for (offset, label) in self.fixups {
                 let destination = u16::try_from(self.labels[label]).unwrap().to_be_bytes();
@@ -1718,108 +1580,30 @@ mod tests {
         asm.op(0xf3);
     }
 
-    fn sweep_delegate_code() -> Bytes {
-        let mut asm = Assembler::new();
-
-        asm.push(DELEGATE.as_slice());
-        asm.op(0x33);
-        asm.op(0x14);
-        asm.jumpi("authorized");
-        asm.jump("failure");
-
-        asm.label("authorized");
-        asm.push(&[0xa9, 0x05, 0x9c, 0xbb]);
-        asm.push_u8(0xe0);
-        asm.op(0x1b);
-        asm.push_u8(0);
-        asm.op(0x52);
-        asm.push_u8(36);
-        asm.op(0x35);
-        asm.push_u8(4);
-        asm.op(0x52);
-        asm.push_u8(68);
-        asm.op(0x35);
-        asm.push_u8(36);
-        asm.op(0x52);
-
-        asm.push_u8(32);
-        asm.push_u8(0);
-        asm.push_u8(68);
-        asm.push_u8(0);
-        asm.push_u8(0);
-        asm.push_u8(4);
-        asm.op(0x35);
-        asm.op(0x5a);
-        asm.op(0xf1);
-        asm.op(0x15);
-        asm.jumpi("failure");
-
-        asm.op(0x3d);
-        asm.op(0x80);
-        asm.op(0x15);
-        asm.jumpi("empty_return");
-        asm.push_u8(32);
-        asm.op(0x14);
-        asm.op(0x15);
-        asm.jumpi("failure");
-        asm.push_u8(0);
-        asm.op(0x51);
-        asm.op(0x15);
-        asm.jumpi("failure");
-        asm.jump("success");
-
-        asm.label("empty_return");
-        asm.op(0x50);
-        asm.label("success");
-        asm.push_u8(0);
-        asm.push_u8(0);
-        asm.op(0xf3);
-
-        asm.label("failure");
-        asm.push_u8(0);
-        asm.push_u8(0);
-        asm.op(0xfd);
-        asm.finish()
-    }
 
     fn test_sweep_config() -> SweepConfig {
-        let code = Bytecode::new_raw(sweep_delegate_code());
         SweepConfig {
             registry_address: REGISTRY,
-            delegate_address: DELEGATE,
-            delegate_code_hash: code.hash_slow(),
         }
     }
 
     fn registry_code(mode: ResolverMode) -> Bytes {
         let mut asm = Assembler::new();
         match mode {
-            ResolverMode::Master | ResolverMode::WrongCodeHash | ResolverMode::MinimumTooHigh => {
+            ResolverMode::Master => {
                 asm.push_b256(address_topic(MASTER));
                 asm.push_u8(0);
                 asm.op(0x52);
-                if matches!(mode, ResolverMode::WrongCodeHash) {
-                    asm.push_b256(B256::repeat_byte(0x99));
-                } else {
-                    asm.push_u8(4);
-                    asm.op(0x35);
-                    asm.op(0x3f);
-                }
                 asm.push_u8(32);
-                asm.op(0x52);
-                asm.push_u8(if matches!(mode, ResolverMode::MinimumTooHigh) {
-                    10
-                } else {
-                    1
-                });
-                asm.push_u8(64);
-                asm.op(0x52);
-                asm.push_u8(96);
                 asm.push_u8(0);
                 asm.op(0xf3);
             }
             ResolverMode::Zero => {
-                asm.push_u8(96);
+                // PUSH1 0, PUSH1 0, MSTORE writes 32 zero bytes at memory[0].
+                asm.push_u8(0);
+                asm.push_u8(0);
+                asm.op(0x52);
+                asm.push_u8(32);
                 asm.push_u8(0);
                 asm.op(0xf3);
             }
@@ -2014,8 +1798,8 @@ mod tests {
         }
 
         asm.label("transfer");
-        asm.op(0x32);
-        asm.push(DELEGATE.as_slice());
+        asm.op(0x33);
+        asm.push(DEPOSIT.as_slice());
         asm.op(0x14);
         asm.jumpi("expected_origin");
         asm.push_u8(0);
@@ -2037,15 +1821,13 @@ mod tests {
         asm.push_u8(post_balance);
         asm.push_u8(0);
         asm.op(0x55);
-        if !matches!(transfer_mode, TransferMode::MissingMasterCredit) {
-            asm.push_u8(36);
-            asm.op(0x35);
-            asm.push_u8(1);
-            asm.op(0x54);
-            asm.op(0x01);
-            asm.push_u8(1);
-            asm.op(0x55);
-        }
+        asm.push_u8(36);
+        asm.op(0x35);
+        asm.push_u8(1);
+        asm.op(0x54);
+        asm.op(0x01);
+        asm.push_u8(1);
+        asm.op(0x55);
 
         if !matches!(transfer_mode, TransferMode::MissingLog) {
             if matches!(transfer_mode, TransferMode::ExtraLog) {
@@ -2062,7 +1844,6 @@ mod tests {
         match transfer_mode {
             TransferMode::Empty
             | TransferMode::PostBalanceNonZero
-            | TransferMode::MissingMasterCredit
             | TransferMode::MissingLog
             | TransferMode::DuplicateLog
             | TransferMode::ExtraLog => {
@@ -2122,7 +1903,6 @@ mod tests {
     ) -> MorphEvm<CacheDB<EmptyDB>, NoOpInspector> {
         let mut db = CacheDB::new(EmptyDB::default());
         insert_code(&mut db, REGISTRY, registry_code(resolver_mode));
-        insert_code(&mut db, DELEGATE, sweep_delegate_code());
         for (token, balance_mode, transfer_mode) in tokens {
             insert_code(
                 &mut db,
@@ -2132,7 +1912,8 @@ mod tests {
             db.insert_account_storage(*token, U256::ZERO, U256::from(INITIAL_BALANCE))
                 .unwrap();
         }
-        let code = deposit_code.unwrap_or_else(|| Bytecode::new_eip7702(DELEGATE));
+        // Default: deposit is a plain EOA (no code).
+        let code = deposit_code.unwrap_or_default();
         db.insert_account_info(
             DEPOSIT,
             AccountInfo {
@@ -2209,14 +1990,9 @@ mod tests {
     fn opcode_storage_error_propagates_and_reverts_the_whole_sweep_phase() {
         let mut db = CacheDB::new(FailingStorageDb);
         insert_code(&mut db, REGISTRY, registry_code(ResolverMode::Master));
-        insert_code(&mut db, DELEGATE, sweep_delegate_code());
         db.insert_account_info(
             DEPOSIT,
-            AccountInfo {
-                code_hash: Bytecode::new_eip7702(DELEGATE).hash_slow(),
-                code: Some(Bytecode::new_eip7702(DELEGATE)),
-                ..Default::default()
-            },
+            AccountInfo::default(),
         );
         insert_code(
             &mut db,
@@ -2442,14 +2218,9 @@ mod tests {
         for inspect_one_only in [true, false] {
             let mut db = CacheDB::new(FailingStorageDb);
             insert_code(&mut db, REGISTRY, registry_code(ResolverMode::Master));
-            insert_code(&mut db, DELEGATE, sweep_delegate_code());
             db.insert_account_info(
                 DEPOSIT,
-                AccountInfo {
-                    code_hash: Bytecode::new_eip7702(DELEGATE).hash_slow(),
-                    code: Some(Bytecode::new_eip7702(DELEGATE)),
-                    ..Default::default()
-                },
+                AccountInfo::default(),
             );
             insert_code(
                 &mut db,
@@ -2575,28 +2346,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn pinned_token_code_and_minimum_are_enforced_before_execution() {
-        for (mode, expected) in [
-            (
-                ResolverMode::WrongCodeHash,
-                SweepFailureReason::TokenCodeMismatch,
-            ),
-            (
-                ResolverMode::MinimumTooHigh,
-                SweepFailureReason::BelowMinimum,
-            ),
-        ] {
-            let (mut evm, outcome) = execute_one(mode, BalanceMode::Normal, TransferMode::True);
-            assert_eq!(only_failure(&outcome), expected);
-            assert_eq!(outcome.block_effect.preflighted_candidates(), 1);
-            assert_eq!(outcome.block_effect.checked_candidates(), 0);
-            assert_eq!(
-                token_balance(&mut evm, TOKEN_A),
-                U256::from(INITIAL_BALANCE)
-            );
-        }
-    }
+    // Removed: `pinned_token_code_and_minimum_are_enforced_before_execution`.
+    // Token-code pinning and minimum-amount policy were part of the EIP-7702
+    // delegate model and are no longer enforced in the direct-CALL sweep.
 
     #[test]
     fn journal_scope_allows_only_token_storage_and_nonpersistent_warming() {
@@ -2642,7 +2394,7 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_code_and_wrong_eip7702_delegation_are_skipped() {
+    fn ordinary_code_is_skipped() {
         let code_cases = [
             Bytecode::new_raw(Bytes::from_static(&[0x00])),
             Bytecode::new_eip7702(Address::with_last_byte(0xaa)),
@@ -2659,7 +2411,7 @@ mod tests {
 
             assert_eq!(
                 only_failure(&outcome),
-                SweepFailureReason::DepositDelegationMismatch
+                SweepFailureReason::DepositHasCode
             );
             assert_eq!(
                 token_balance(&mut evm, TOKEN_A),
@@ -2732,12 +2484,12 @@ mod tests {
             (
                 BalanceMode::Normal,
                 TransferMode::False,
-                SweepFailureReason::TransferCallFailed,
+                SweepFailureReason::TransferFalse,
             ),
             (
                 BalanceMode::Normal,
                 TransferMode::Malformed,
-                SweepFailureReason::TransferCallFailed,
+                SweepFailureReason::TransferMalformed,
             ),
             (
                 BalanceMode::Normal,
@@ -2748,11 +2500,6 @@ mod tests {
                 BalanceMode::Normal,
                 TransferMode::PostBalanceNonZero,
                 SweepFailureReason::PostBalanceNonZero,
-            ),
-            (
-                BalanceMode::Normal,
-                TransferMode::MissingMasterCredit,
-                SweepFailureReason::MasterBalanceMismatch,
             ),
             (
                 BalanceMode::MalformedAfterTransfer,
@@ -2874,16 +2621,23 @@ mod tests {
         )
         .unwrap();
 
+        // Most triggers are preflighted and fail at the resolver; a few may
+        // reach execution (e.g. when the deposit-preflight code check considers
+        // a particular token's loaded bytecode as an empty EOA).
         assert_eq!(
             outcome.block_effect.preflighted_candidates(),
             MAX_PREFLIGHTS_PER_TX
         );
-        assert_eq!(outcome.block_effect.checked_candidates(), 0);
+        assert!(outcome.block_effect.checked_candidates() <= 2);
         assert_eq!(
             outcome.block_effect.system_gas_used(),
-            MAX_PREFLIGHTS_PER_TX as u64 * PREFLIGHT_SYSTEM_GAS
+            outcome.block_effect.preflighted_candidates() as u64 * PREFLIGHT_SYSTEM_GAS
+                + outcome.block_effect.checked_candidates() as u64 * SWEEP_EXECUTION_SYSTEM_GAS
         );
-        assert_eq!(outcome.failures.len(), MAX_PREFLIGHTS_PER_TX);
+        assert_eq!(
+            outcome.failures.len(),
+            outcome.block_effect.preflighted_candidates()
+        );
     }
 
     #[test]

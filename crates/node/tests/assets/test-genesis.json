@@ -23,9 +23,7 @@
     "onyxTime": 0,
     "morph": {
       "feeVaultAddress": "0x530000000000000000000000000000000000000a",
-      "sweepRegistryAddress": "0x5300000000000000000000000000000000000023",
-      "sweepDepositDelegateAddress": "0x5300000000000000000000000000000000000024",
-      "sweepDepositDelegateCodeHash": "0xa3d7ce37754038b8bc7dc02bbe2ac1618612ee29a3305c1e316479267cead85d"
+      "sweepRegistryAddress": "0x5300000000000000000000000000000000000023"
     }
   },
   "nonce": "0x0",
