@@ -14,7 +14,7 @@ Morph Reth is the next-generation execution client for [Morph](https://www.morph
 - **L1 Message Support**: Seamless bridging of assets and messages from Ethereum L1 to Morph L2
 - **Morph Transaction**: Versioned Morph EVM+ transaction with alternative fee-token support and Jade-era reference/memo fields
 - **Morph Hardforks**: Implements Morph hardfork logic through Onyx, with bundled Mainnet and Hoodi chainspecs currently scheduled through Jade
-- **Recoverable Deposit Sweeping**: Onyx can settle approved ERC-20 inflows from EIP-7702 deposit EOAs to exchange master addresses
+- **Recoverable Deposit Sweeping**: Onyx can settle approved ERC-20 inflows from plain exchange deposit EOAs to their registered master addresses
 - **Custom Engine API**: L2-specific Engine API for sequencer block building and validation
 - **L1 Fee Validation**: Transaction pool with L1 data fee affordability checks
 
@@ -176,9 +176,9 @@ Morph Transaction (`0x7f`) is a versioned custom transaction type that extends E
 ### Onyx Recoverable Deposit Sweeping
 
 From Onyx onward, Morph can automatically and safely move approved ERC-20
-inflows from EIP-7702 exchange deposit EOAs to their registered master address,
-without pre-funding each deposit with native currency. See the
-[protocol, security, and operations guide](ONYX_SWEEP.md).
+inflows from plain exchange deposit EOAs to their registered master address,
+without pre-funding each deposit with native currency. Only plain EOAs are
+swept; any deposit that carries code is skipped.
 
 ### Hardforks
 

@@ -37,12 +37,6 @@ pub struct MorphTestUnit {
     /// `pre` state actually deploys a registry there.
     #[serde(default, rename = "sweepRegistry")]
     pub sweep_registry: Option<Address>,
-    /// Optional fixed EIP-7702 sweep-deposit implementation for Onyx vectors.
-    #[serde(default, rename = "sweepDelegate")]
-    pub sweep_delegate: Option<Address>,
-    /// Optional expected runtime code hash of the sweep-deposit implementation.
-    #[serde(default, rename = "sweepDelegateCodeHash")]
-    pub sweep_delegate_code_hash: Option<B256>,
 }
 
 #[derive(Debug, Error)]

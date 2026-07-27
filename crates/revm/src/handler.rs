@@ -389,7 +389,7 @@ where
     ) -> Result<(), EVMError<DB::Error, MorphInvalidTransaction>> {
         let caller = evm.ctx_ref().tx().caller();
         let beneficiary = evm.ctx_ref().block().beneficiary();
-        let caller_can_trigger_sweep = is_configured_sweep_deposit(evm, caller);
+        let caller_can_trigger_sweep = caller_is_sweepable_eoa(evm, caller);
         let basefee = evm.ctx.block().basefee() as u128;
         let effective_gas_price = evm.ctx.tx().effective_gas_price(basefee);
 
@@ -405,8 +405,9 @@ where
         // This trigger belongs to the successful token-fee transaction, not to
         // the refund transfer. Even a zero/no-op/failed refund can leave an
         // existing deposit balance behind. apply_sweep later filters out failed
-        // main execution, and the exact EIP-7702 designator gate keeps ordinary
-        // fee-token traffic from consuming sweep preflight budget.
+        // main execution, and the plain-EOA gate (Onyx active and the fee-token
+        // payer carries no code) keeps ordinary contract fee-token traffic from
+        // consuming sweep preflight budget.
         if caller_can_trigger_sweep {
             evm.post_fee_sweep_candidate = Some(SweepCandidate {
                 token: token_fee_info.token_address,
@@ -680,7 +681,7 @@ where
 /// When Onyx is active and the MorphTx fee-token caller has no code, record it
 /// as a sweep candidate so any pre-existing balance left after the fee
 /// deduction and refund is swept at transaction end.
-fn is_configured_sweep_deposit<DB, I>(evm: &MorphEvm<DB, I>, caller: Address) -> bool
+fn caller_is_sweepable_eoa<DB, I>(evm: &MorphEvm<DB, I>, caller: Address) -> bool
 where
     DB: alloy_evm::Database,
 {
