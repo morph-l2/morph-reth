@@ -1,5 +1,8 @@
 target/
-.git/
+# NOTE: .git is intentionally NOT excluded. vergen-git2 (crates/node/build.rs)
+# discovers it at build time to embed the commit SHA / describe into the binary
+# version. Excluding it makes those VERGEN_GIT_* + readback env vars unset and the
+# build fails with `Error: NotPresent`. This matches upstream reth's `!/.git`.
 .github/
 .claude/
 .worktrees/
