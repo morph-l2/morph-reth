@@ -64,7 +64,7 @@ pub const L2_MESSAGE_QUEUE_ADDRESS: Address = address!("530000000000000000000000
 /// - SweepRegistry source (`forge-artifacts/SweepRegistry.sol/SweepRegistry.json`)
 /// - solc 0.8.24, optimizer runs 999 999, OZ 4.9.3
 /// - ProxyAdmin = `0x530000000000000000000000000000000000000b`
-pub const SWEEP_REGISTRY_ADDRESS: Address = address!("7aE8bEf666D1D0aB9C0ac5d636f375E46f8AE71A");
+pub const SWEEP_REGISTRY_ADDRESS: Address = address!("Ddb0b56D29D121aD0FEFfb10395FC34b4eeA0692");
 
 /// Storage slot for the withdraw trie root (`messageRoot`) in L2MessageQueue contract.
 ///

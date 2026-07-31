@@ -1,7 +1,10 @@
 use crate::{MorphBlockAssembler, MorphEvmConfig, MorphEvmError, MorphNextBlockEnvAttributes};
 use alloy_consensus::BlockHeader;
 use alloy_primitives::B256;
-use morph_chainspec::{SWEEP_REGISTRY_ADDRESS, hardfork::{MorphHardfork, MorphHardforks}};
+use morph_chainspec::{
+    SWEEP_REGISTRY_ADDRESS,
+    hardfork::{MorphHardfork, MorphHardforks},
+};
 use morph_primitives::Block;
 use morph_primitives::{MorphHeader, MorphPrimitives};
 use morph_revm::{MorphBlockEnv, SweepConfig};

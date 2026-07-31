@@ -378,7 +378,7 @@ where
     ///
     /// Uses the cached `TokenFeeInfo` from the deduction phase to ensure
     /// consistent price_ratio/scale, matching go-ethereum's `st.feeRate`/`st.tokenScale`.
-    /// A configured sweep deposit is also recorded as a candidate independently
+    /// A configured sweep source is also recorded as a candidate independently
     /// of whether the refund is zero, a self-transfer, or fails: the successful
     /// transaction may still leave a pre-existing token balance to settle.
     #[inline]
@@ -404,14 +404,14 @@ where
 
         // This trigger belongs to the successful token-fee transaction, not to
         // the refund transfer. Even a zero/no-op/failed refund can leave an
-        // existing deposit balance behind. apply_sweep later filters out failed
+        // existing source balance behind. apply_sweep later filters out failed
         // main execution, and the plain-EOA gate (Onyx active and the fee-token
         // payer carries no code) keeps ordinary contract fee-token traffic from
         // consuming sweep preflight budget.
         if caller_can_trigger_sweep {
             evm.post_fee_sweep_candidate = Some(SweepCandidate {
                 token: token_fee_info.token_address,
-                deposit: caller,
+                source: caller,
             });
         }
 
@@ -676,7 +676,7 @@ where
     }
 }
 
-/// Returns whether `caller` is a plain EOA that could be a sweep deposit.
+/// Returns whether `caller` is a plain EOA that could be a sweep source.
 ///
 /// When Onyx is active and the MorphTx fee-token caller has no code, record it
 /// as a sweep candidate so any pre-existing balance left after the fee
@@ -1272,7 +1272,7 @@ mod tests {
     }
 
     #[test]
-    fn slot_fee_transaction_records_configured_deposit_for_every_refund_outcome() {
+    fn slot_fee_transaction_records_configured_source_for_every_refund_outcome() {
         let caller = address!("1000000000000000000000000000000000000001");
         let beneficiary = address!("2000000000000000000000000000000000000002");
         let token = address!("3000000000000000000000000000000000000003");
@@ -1283,10 +1283,7 @@ mod tests {
         let mut db = CacheDB::new(EmptyDB::default());
         db.insert_account_info(token, AccountInfo::default());
         // Caller is a plain EOA (no code) — sweep-eligible.
-        db.insert_account_info(
-            caller,
-            AccountInfo::default(),
-        );
+        db.insert_account_info(caller, AccountInfo::default());
         db.insert_account_storage(token, beneficiary_storage_slot, U256::from(10))
             .unwrap();
         db.insert_account_storage(token, caller_storage_slot, U256::ZERO)
@@ -1338,7 +1335,7 @@ mod tests {
             evm.post_fee_sweep_candidate,
             Some(crate::SweepCandidate {
                 token,
-                deposit: caller,
+                source: caller,
             })
         );
         assert_eq!(
@@ -1375,7 +1372,7 @@ mod tests {
             U256::from(2)
         );
 
-        // Re-enable sweep and test self-refund: a deposit that refunds to itself
+        // Re-enable sweep and test self-refund: a source that refunds to itself
         // still produces a sweep candidate for any pre-existing balance.
         evm.block.sweep = Some(crate::SweepConfig {
             registry_address: Address::with_last_byte(0x42),
@@ -1389,7 +1386,7 @@ mod tests {
             evm.post_fee_sweep_candidate,
             Some(crate::SweepCandidate {
                 token,
-                deposit: caller,
+                source: caller,
             }),
             "a self-refund can still leave a pre-existing balance to sweep"
         );
@@ -1410,7 +1407,7 @@ mod tests {
             evm.post_fee_sweep_candidate,
             Some(crate::SweepCandidate {
                 token,
-                deposit: caller,
+                source: caller,
             }),
             "a failed refund can still leave a pre-existing balance to sweep"
         );
@@ -1437,9 +1434,9 @@ mod tests {
             evm.post_fee_sweep_candidate,
             Some(crate::SweepCandidate {
                 token,
-                deposit: caller,
+                source: caller,
             }),
-            "zero reimbursement must still settle a configured deposit"
+            "zero reimbursement must still settle a configured source"
         );
     }
 

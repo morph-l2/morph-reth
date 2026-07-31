@@ -285,10 +285,7 @@ impl TestNodeBuilder {
     }
 
     /// Override the consensus-pinned Onyx sweep registry address.
-    pub fn with_sweep_config(
-        mut self,
-        registry: Address,
-    ) -> Self {
+    pub fn with_sweep_config(mut self, registry: Address) -> Self {
         let morph = self
             .genesis_json
             .get_mut("config")

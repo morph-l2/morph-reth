@@ -325,6 +325,7 @@ where
             checked_candidates,
             sweep.successes.len(),
             &sweep.failures,
+            sweep.triggers_dropped,
             sweep.block_effect.system_gas_used(),
         );
 
@@ -436,8 +437,8 @@ mod tests {
             0x52, // MSTORE
         ];
         for index in 0..candidate_count {
-            let deposit = Address::with_last_byte(u8::try_from(index + 1).unwrap());
-            push32(&mut code, B256::left_padding_from(deposit.as_slice()));
+            let source = Address::with_last_byte(u8::try_from(index + 1).unwrap());
+            push32(&mut code, B256::left_padding_from(source.as_slice()));
             push32(&mut code, B256::ZERO);
             push32(&mut code, TRANSFER_TOPIC);
             code.extend_from_slice(&[
@@ -462,7 +463,7 @@ mod tests {
         let mut code = Vec::new();
         push32(
             &mut code,
-            B256::left_padding_from(candidate.deposit.as_slice()),
+            B256::left_padding_from(candidate.source.as_slice()),
         );
         push32(
             &mut code,
@@ -636,7 +637,7 @@ mod tests {
     fn block_deduplicates_requests_without_suppressing_later_transfers() {
         let request_pair = morph_revm::SweepCandidate {
             token: EMITTER_10,
-            deposit: Address::with_last_byte(1),
+            source: Address::with_last_byte(1),
         };
         let mut executor = test_executor_with_request_emitter(request_pair);
 

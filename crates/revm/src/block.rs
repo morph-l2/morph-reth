@@ -5,7 +5,7 @@ use revm::{
     context_interface::block::BlobExcessGasAndPrice,
 };
 
-/// Configuration for deposit sweeping.
+/// Configuration for sweep resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SweepConfig {
     /// Address of the sweep registry.

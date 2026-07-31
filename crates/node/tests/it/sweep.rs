@@ -1,4 +1,4 @@
-//! Deposit sweep integration tests.
+//! Source sweep integration tests.
 
 use alloy_consensus::{BlockHeader, TxReceipt, transaction::TxHashRef};
 use alloy_primitives::{Address, B256, Bytes, U256, address, b256, logs_bloom};
@@ -17,16 +17,16 @@ use reth_provider::{HeaderProvider, ReceiptProvider, StateProviderFactory};
 
 use super::helpers::advance_block_with_l1_messages;
 
-const REGISTRY: Address = address!("7aE8bEf666D1D0aB9C0ac5d636f375E46f8AE71A");
-const DEPOSIT: Address = address!("1000000000000000000000000000000000000001");
-const DEPOSIT_TWO: Address = address!("1000000000000000000000000000000000000002");
-const MASTER: Address = address!("2000000000000000000000000000000000000002");
+const REGISTRY: Address = address!("Ddb0b56D29D121aD0FEFfb10395FC34b4eeA0692");
+const SOURCE: Address = address!("1000000000000000000000000000000000000001");
+const SOURCE_TWO: Address = address!("1000000000000000000000000000000000000002");
+const DESTINATION: Address = address!("2000000000000000000000000000000000000002");
 const RECIPIENT: Address = address!("3000000000000000000000000000000000000003");
 const ROUTER: Address = address!("4000000000000000000000000000000000000004");
 const CANDIDATE_EMITTER: Address = address!("5000000000000000000000000000000000000005");
 const SENDER: Address = address!("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
 const AMOUNT: u64 = 123;
-const PROD_REGISTRY: Address = address!("7aE8bEf666D1D0aB9C0ac5d636f375E46f8AE71A");
+const PROD_REGISTRY: Address = address!("Ddb0b56D29D121aD0FEFfb10395FC34b4eeA0692");
 const SLOT1_ERC20_CODE_HASH: B256 =
     b256!("e71da1ef1d982047e78309f44c426e0870ac83a406380f3a2251d64d8cec943e");
 const TRANSFER_TOPIC: B256 =
@@ -34,21 +34,27 @@ const TRANSFER_TOPIC: B256 =
 const REQUEST_TOPIC: B256 =
     b256!("24e3f180db341974dcd99a5e223d9d944422e303230ddde6659302f8620bbcff");
 const SWEEP_TOPIC: B256 = b256!("035b37215a69e14a80883933d6aa84f0919a67af9410a4a73e8a23baeca011f0");
+const SWEEP_FAILED_TOPIC: B256 =
+    b256!("0f64fa58e4261d8832b5ea6c262c691ef36e73cb21998c4fb01a83997940797c");
 
 /// Runtime produced by solc 0.8.30 (optimizer runs=200, metadata disabled) from
 /// `tests/assets/SweepFixtures.sol::TestSweepRegistry`.
 ///
 /// It is a deterministic test double, not production Registry bytecode.
-const TEST_REGISTRY_RUNTIME: &str = "0x608060405234801561000f575f5ffd5b506004361061004a575f3560e01c8063663a375c1461004e578063753d7563146100635780639faa2f2f1461009a578063ba1b6c84146100c5575b5f5ffd5b61006161005c3660046101d4565b610122565b005b610085610071366004610205565b60016020525f908152604090205460ff1681565b60405190151581526020015b60405180910390f35b6100ad6100a83660046101d4565b610166565b6040516001600160a01b039091168152602001610091565b6100616100d3366004610225565b6001600160a01b039283165f908152600160208181526040808420805460ff19169093179092558281528183209486168352939093529190912080546001600160a01b03191691909216179055565b806001600160a01b0316826001600160a01b03167f24e3f180db341974dcd99a5e223d9d944422e303230ddde6659302f8620bbcff60405160405180910390a35050565b6001600160a01b0382165f9081526001602052604081205460ff1661018c57505f6101b3565b506001600160a01b038083165f908152602081815260408083208585168452909152902054165b92915050565b80356001600160a01b03811681146101cf575f5ffd5b919050565b5f5f604083850312156101e5575f5ffd5b6101ee836101b9565b91506101fc602084016101b9565b90509250929050565b5f60208284031215610215575f5ffd5b61021e826101b9565b9392505050565b5f5f5f60608486031215610237575f5ffd5b610240846101b9565b925061024e602085016101b9565b915061025c604085016101b9565b9050925092509256";
-
+/// Runtime of `MockSweepRegistryEL` (morph repo:
+/// `contracts/contracts/test/MockSweepRegistryEL.sol`). Its storage layout is
+/// deliberately identical to the production `SweepRegistry` — `sources` on slot
+/// 253, `tokenWhitelist` on 254 — because the EL resolves candidates by reading
+/// those slots directly. Regenerate with:
+///   jq -r '.deployedBytecode.object' \
+///     forge-artifacts/MockSweepRegistryEL.sol/MockSweepRegistryEL.json
+const TEST_REGISTRY_RUNTIME: &str = "0x608060405234801561000f575f80fd5b5060043610610064575f3560e01c80639faa2f2f1161004d5780639faa2f2f146100b4578063b750bdde146100ec578063ba1b6c8414610178575f80fd5b8063663a375c14610068578063753d75631461007d575b5f80fd5b61007b610076366004610366565b610230565b005b61009f61008b366004610397565b60fe6020525f908152604090205460ff1681565b60405190151581526020015b60405180910390f35b6100c76100c2366004610366565b61028e565b60405173ffffffffffffffffffffffffffffffffffffffff90911681526020016100ab565b6101466100fa366004610397565b60fd6020525f90815260409020805460019091015473ffffffffffffffffffffffffffffffffffffffff82169174010000000000000000000000000000000000000000900460ff169083565b6040805173ffffffffffffffffffffffffffffffffffffffff90941684529115156020840152908201526060016100ab565b61007b6101863660046103b7565b73ffffffffffffffffffffffffffffffffffffffff9283165f90815260fe60209081526040808320805460017fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff00909116179055938516825260fd90529190912080547fffffffffffffffffffffff00000000000000000000000000000000000000000016919092169081179015157401000000000000000000000000000000000000000002179055565b8073ffffffffffffffffffffffffffffffffffffffff168273ffffffffffffffffffffffffffffffffffffffff167f24e3f180db341974dcd99a5e223d9d944422e303230ddde6659302f8620bbcff60405160405180910390a35050565b73ffffffffffffffffffffffffffffffffffffffff8082165f90815260fd60209081526040808320938616835260fe90915281205490919060ff1680156102ee5750805474010000000000000000000000000000000000000000900460ff165b80156103105750805473ffffffffffffffffffffffffffffffffffffffff1615155b15610333575473ffffffffffffffffffffffffffffffffffffffff169050610338565b5f9150505b92915050565b803573ffffffffffffffffffffffffffffffffffffffff81168114610361575f80fd5b919050565b5f8060408385031215610377575f80fd5b6103808361033e565b915061038e6020840161033e565b90509250929050565b5f602082840312156103a7575f80fd5b6103b08261033e565b9392505050565b5f805f606084860312156103c9575f80fd5b6103d28461033e565b92506103e06020850161033e565b91506103ee6040850161033e565b9050925092509256fea164736f6c6343000818000a";
 
 /// Runtime for `SweepFixtures.sol::TestSweepRouter`.
-const TEST_ROUTER_RUNTIME: &str = "0x608060405234801561000f575f5ffd5b5060043610610034575f3560e01c806341f47c231461003857806393d1fef41461004d575b5f5ffd5b61004b610046366004610264565b610060565b005b61004b61005b3660046102ac565b610156565b604051632e86db2160e21b81526001600160a01b038086166004830152808516602483015283166044820152737ae8bef666d1d0ab9c0ac5d636f375e46f8ae71a9063ba1b6c84906064015f604051808303815f87803b1580156100c2575f5ffd5b505af11580156100d4573d5f5f3e3d5ffd5b505060405163a9059cbb60e01b81526001600160a01b038681166004830152602482018590528716925063a9059cbb91506044016020604051808303815f875af1158015610124573d5f5f3e3d5ffd5b505050506040513d601f19601f8201168201806040525081019061014891906102e6565b610150575f5ffd5b50505050565b60405163a9059cbb60e01b81526001600160a01b0383811660048301526024820183905284169063a9059cbb906044016020604051808303815f875af11580156101a2573d5f5f3e3d5ffd5b505050506040513d601f19601f820116820180604052508101906101c691906102e6565b6101ce575f5ffd5b604051632e86db2160e21b81526001600160a01b038085166004830152831660248201525f6044820152737ae8bef666d1d0ab9c0ac5d636f375e46f8ae71a9063ba1b6c84906064015f604051808303815f87803b15801561022e575f5ffd5b505af1158015610240573d5f5f3e3d5ffd5b50505050505050565b80356001600160a01b038116811461025f575f5ffd5b919050565b5f5f5f5f60808587031215610277575f5ffd5b61028085610249565b935061028e60208601610249565b925061029c60408601610249565b9396929550929360600135925050565b5f5f5f606084860312156102be575f5ffd5b6102c784610249565b92506102d560208501610249565b929592945050506040919091013590565b5f602082840312156102f6575f5ffd5b81518015158114610305575f5ffd5b939250505056";
-
+const TEST_ROUTER_RUNTIME: &str = "0x608060405234801561000f575f5ffd5b5060043610610034575f3560e01c806341f47c231461003857806393d1fef41461004d575b5f5ffd5b61004b610046366004610264565b610060565b005b61004b61005b3660046102ac565b610156565b604051632e86db2160e21b81526001600160a01b03808616600483015280851660248301528316604482015273ddb0b56d29d121ad0feffb10395fc34b4eea06929063ba1b6c84906064015f604051808303815f87803b1580156100c2575f5ffd5b505af11580156100d4573d5f5f3e3d5ffd5b505060405163a9059cbb60e01b81526001600160a01b038681166004830152602482018590528716925063a9059cbb91506044016020604051808303815f875af1158015610124573d5f5f3e3d5ffd5b505050506040513d601f19601f8201168201806040525081019061014891906102e6565b610150575f5ffd5b50505050565b60405163a9059cbb60e01b81526001600160a01b0383811660048301526024820183905284169063a9059cbb906044016020604051808303815f875af11580156101a2573d5f5f3e3d5ffd5b505050506040513d601f19601f820116820180604052508101906101c691906102e6565b6101ce575f5ffd5b604051632e86db2160e21b81526001600160a01b038085166004830152831660248201525f604482015273ddb0b56d29d121ad0feffb10395fc34b4eea06929063ba1b6c84906064015f604051808303815f87803b15801561022e575f5ffd5b505af1158015610240573d5f5f3e3d5ffd5b50505050505050565b80356001600160a01b038116811461025f575f5ffd5b919050565b5f5f5f5f60808587031215610277575f5ffd5b61028085610249565b935061028e60208601610249565b925061029c60408601610249565b9396929550929360600135925050565b5f5f5f606084860312156102be575f5ffd5b6102c784610249565b92506102d560208501610249565b929592945050506040919091013590565b5f602082840312156102f6575f5ffd5b81518015158114610305575f5ffd5b939250505056";
 
 /// Runtime for `SweepFixtures.sol::TestCandidateEmitter`.
 const TEST_CANDIDATE_EMITTER_RUNTIME: &str = "0x6080604052348015600e575f5ffd5b5060015b6010816001600160a01b031611607057604051600181526001600160a01b0382169033907fddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef9060200160405180910390a3606a816072565b90506012565b005b5f6001600160a01b0382166002600160a01b03198101609f57634e487b7160e01b5f52601160045260245ffd5b6001019291505056";
-
 
 /// Exact production-tuple runtime of `SweepRegistry`.
 ///
@@ -128,7 +134,7 @@ async fn import_payload(node: &MorphTestNode, payload: &MorphBuiltPayload) -> ey
     Ok(())
 }
 
-async fn transfer_to_deposit(schedule: HardforkSchedule) -> eyre::Result<(U256, U256, usize)> {
+async fn transfer_to_source(schedule: HardforkSchedule) -> eyre::Result<(U256, U256, usize)> {
     let (mut nodes, wallet) = stateful_builder().with_schedule(schedule).build().await?;
     let mut node = nodes.pop().unwrap();
 
@@ -137,7 +143,7 @@ async fn transfer_to_deposit(schedule: HardforkSchedule) -> eyre::Result<(U256, 
         .with_to(REGISTRY)
         .with_data(encode_address_args(
             [0xba, 0x1b, 0x6c, 0x84],
-            &[TEST_TOKEN_ADDRESS, DEPOSIT, MASTER],
+            &[TEST_TOKEN_ADDRESS, SOURCE, DESTINATION],
         ))
         .build_signed()?;
     node.rpc.inject_tx(register).await?;
@@ -146,7 +152,7 @@ async fn transfer_to_deposit(schedule: HardforkSchedule) -> eyre::Result<(U256, 
     let transaction = MorphTxBuilder::new(wallet.chain_id, wallet.inner, 1)
         .with_v1_eth_fee()
         .with_to(TEST_TOKEN_ADDRESS)
-        .with_data(transfer_calldata(DEPOSIT, U256::from(AMOUNT)))
+        .with_data(transfer_calldata(SOURCE, U256::from(AMOUNT)))
         .build_signed()?;
     node.rpc.inject_tx(transaction).await?;
     let payload = node.advance_block().await?;
@@ -159,30 +165,30 @@ async fn transfer_to_deposit(schedule: HardforkSchedule) -> eyre::Result<(U256, 
     assert!(receipt.status());
 
     let state = node.inner.provider.latest()?;
-    let deposit = state
-        .storage(TEST_TOKEN_ADDRESS, token_balance_slot(DEPOSIT))?
+    let source = state
+        .storage(TEST_TOKEN_ADDRESS, token_balance_slot(SOURCE))?
         .unwrap_or_default();
-    let master = state
-        .storage(TEST_TOKEN_ADDRESS, token_balance_slot(MASTER))?
+    let destination = state
+        .storage(TEST_TOKEN_ADDRESS, token_balance_slot(DESTINATION))?
         .unwrap_or_default();
-    Ok((deposit, master, receipt.logs().len()))
+    Ok((source, destination, receipt.logs().len()))
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn onyx_activation_gates_sweep() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (deposit, master, log_count) = transfer_to_deposit(HardforkSchedule::PreOnyx).await?;
-    assert_eq!(deposit, U256::from(AMOUNT));
-    assert_eq!(master, U256::ZERO);
+    let (source, destination, log_count) = transfer_to_source(HardforkSchedule::PreOnyx).await?;
+    assert_eq!(source, U256::from(AMOUNT));
+    assert_eq!(destination, U256::ZERO);
     assert_eq!(
         log_count, 1,
         "pre-Onyx receipt contains only inflow Transfer"
     );
 
-    let (deposit, master, log_count) = transfer_to_deposit(HardforkSchedule::AllActive).await?;
-    assert_eq!(deposit, U256::ZERO);
-    assert_eq!(master, U256::from(AMOUNT));
+    let (source, destination, log_count) = transfer_to_source(HardforkSchedule::AllActive).await?;
+    assert_eq!(source, U256::ZERO);
+    assert_eq!(destination, U256::from(AMOUNT));
     assert_eq!(
         log_count, 3,
         "Onyx receipt contains inflow, sweep, and settlement logs"
@@ -203,7 +209,7 @@ async fn l1_message_token_inflow_triggers_sweep() -> eyre::Result<()> {
         .with_to(REGISTRY)
         .with_data(encode_address_args(
             [0xba, 0x1b, 0x6c, 0x84],
-            &[TEST_TOKEN_ADDRESS, DEPOSIT, MASTER],
+            &[TEST_TOKEN_ADDRESS, SOURCE, DESTINATION],
         ))
         .build_signed()?;
     node.rpc.inject_tx(register).await?;
@@ -212,7 +218,7 @@ async fn l1_message_token_inflow_triggers_sweep() -> eyre::Result<()> {
     let message = L1MessageBuilder::new(0)
         .with_sender(SENDER)
         .with_target(TEST_TOKEN_ADDRESS)
-        .with_data(transfer_calldata(DEPOSIT, U256::from(AMOUNT)))
+        .with_data(transfer_calldata(SOURCE, U256::from(AMOUNT)))
         .with_gas_limit(100_000)
         .build_encoded();
     let payload = advance_block_with_l1_messages(&mut node, vec![message]).await?;
@@ -229,13 +235,13 @@ async fn l1_message_token_inflow_triggers_sweep() -> eyre::Result<()> {
     let state = node.inner.provider.latest()?;
     assert_eq!(
         state
-            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(DEPOSIT))?
+            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(SOURCE))?
             .unwrap_or_default(),
         U256::ZERO
     );
     assert_eq!(
         state
-            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(MASTER))?
+            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(DESTINATION))?
             .unwrap_or_default(),
         U256::from(AMOUNT)
     );
@@ -253,7 +259,7 @@ async fn poke_sweeps_historical_balance_and_attaches_all_logs() -> eyre::Result<
     let historical_inflow = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
         .with_v1_eth_fee()
         .with_to(TEST_TOKEN_ADDRESS)
-        .with_data(transfer_calldata(DEPOSIT, U256::from(AMOUNT)))
+        .with_data(transfer_calldata(SOURCE, U256::from(AMOUNT)))
         .build_signed()?;
     node.rpc.inject_tx(historical_inflow).await?;
     let inflow_payload = node.advance_block().await?;
@@ -270,7 +276,7 @@ async fn poke_sweeps_historical_balance_and_attaches_all_logs() -> eyre::Result<
         .with_to(REGISTRY)
         .with_data(encode_address_args(
             [0xba, 0x1b, 0x6c, 0x84],
-            &[TEST_TOKEN_ADDRESS, DEPOSIT, MASTER],
+            &[TEST_TOKEN_ADDRESS, SOURCE, DESTINATION],
         ))
         .build_signed()?;
     node.rpc.inject_tx(register).await?;
@@ -281,7 +287,7 @@ async fn poke_sweeps_historical_balance_and_attaches_all_logs() -> eyre::Result<
         .with_to(REGISTRY)
         .with_data(encode_address_args(
             [0x66, 0x3a, 0x37, 0x5c],
-            &[TEST_TOKEN_ADDRESS, DEPOSIT],
+            &[TEST_TOKEN_ADDRESS, SOURCE],
         ))
         .build_signed()?;
     node.rpc.inject_tx(poke).await?;
@@ -302,7 +308,7 @@ async fn poke_sweeps_historical_balance_and_attaches_all_logs() -> eyre::Result<
         &[
             REQUEST_TOPIC,
             address_topic(TEST_TOKEN_ADDRESS),
-            address_topic(DEPOSIT)
+            address_topic(SOURCE)
         ]
     );
     assert!(logs[0].data.data.is_empty());
@@ -310,8 +316,8 @@ async fn poke_sweeps_historical_balance_and_attaches_all_logs() -> eyre::Result<
         logs[1].topics(),
         &[
             TRANSFER_TOPIC,
-            address_topic(DEPOSIT),
-            address_topic(MASTER)
+            address_topic(SOURCE),
+            address_topic(DESTINATION)
         ]
     );
     assert_eq!(U256::from_be_slice(&logs[1].data.data), U256::from(AMOUNT));
@@ -324,13 +330,13 @@ async fn poke_sweeps_historical_balance_and_attaches_all_logs() -> eyre::Result<
     let state = node.inner.provider.latest()?;
     assert_eq!(
         state
-            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(DEPOSIT))?
+            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(SOURCE))?
             .unwrap_or_default(),
         U256::ZERO
     );
     assert_eq!(
         state
-            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(MASTER))?
+            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(DESTINATION))?
             .unwrap_or_default(),
         U256::from(AMOUNT)
     );
@@ -361,7 +367,7 @@ async fn post_main_registry_state_controls_same_transaction_sweep() -> eyre::Res
         .with_to(ROUTER)
         .with_data(encode_address_and_uint_args(
             [0x41, 0xf4, 0x7c, 0x23],
-            &[TEST_TOKEN_ADDRESS, DEPOSIT, MASTER],
+            &[TEST_TOKEN_ADDRESS, SOURCE, DESTINATION],
             &[U256::from(AMOUNT)],
         ))
         .with_gas_limit(200_000)
@@ -383,7 +389,7 @@ async fn post_main_registry_state_controls_same_transaction_sweep() -> eyre::Res
         .with_to(REGISTRY)
         .with_data(encode_address_args(
             [0xba, 0x1b, 0x6c, 0x84],
-            &[TEST_TOKEN_ADDRESS, DEPOSIT_TWO, MASTER],
+            &[TEST_TOKEN_ADDRESS, SOURCE_TWO, DESTINATION],
         ))
         .build_signed()?;
     node.rpc.inject_tx(register_second).await?;
@@ -394,7 +400,7 @@ async fn post_main_registry_state_controls_same_transaction_sweep() -> eyre::Res
         .with_to(ROUTER)
         .with_data(encode_address_and_uint_args(
             [0x93, 0xd1, 0xfe, 0xf4],
-            &[TEST_TOKEN_ADDRESS, DEPOSIT_TWO],
+            &[TEST_TOKEN_ADDRESS, SOURCE_TWO],
             &[U256::from(AMOUNT)],
         ))
         .with_gas_limit(200_000)
@@ -417,19 +423,19 @@ async fn post_main_registry_state_controls_same_transaction_sweep() -> eyre::Res
     let state = node.inner.provider.latest()?;
     assert_eq!(
         state
-            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(DEPOSIT))?
+            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(SOURCE))?
             .unwrap_or_default(),
         U256::ZERO
     );
     assert_eq!(
         state
-            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(DEPOSIT_TWO))?
+            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(SOURCE_TWO))?
             .unwrap_or_default(),
         U256::from(AMOUNT)
     );
     assert_eq!(
         state
-            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(MASTER))?
+            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(DESTINATION))?
             .unwrap_or_default(),
         U256::from(AMOUNT)
     );
@@ -438,11 +444,11 @@ async fn post_main_registry_state_controls_same_transaction_sweep() -> eyre::Res
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn zero_resolver_and_code_present_deposit_leave_balance_unswept() -> eyre::Result<()> {
+async fn zero_resolver_and_code_present_source_leave_balance_unswept() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let (mut nodes, wallet) = stateful_builder()
-        .with_account_code(DEPOSIT, "0x00")
+        .with_account_code(SOURCE, "0x00")
         .build()
         .await?;
     let mut node = nodes.pop().unwrap();
@@ -450,7 +456,7 @@ async fn zero_resolver_and_code_present_deposit_leave_balance_unswept() -> eyre:
     let disabled_inflow = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
         .with_v1_eth_fee()
         .with_to(TEST_TOKEN_ADDRESS)
-        .with_data(transfer_calldata(DEPOSIT_TWO, U256::from(AMOUNT)))
+        .with_data(transfer_calldata(SOURCE_TWO, U256::from(AMOUNT)))
         .build_signed()?;
     node.rpc.inject_tx(disabled_inflow).await?;
     let disabled_payload = node.advance_block().await?;
@@ -472,7 +478,7 @@ async fn zero_resolver_and_code_present_deposit_leave_balance_unswept() -> eyre:
         .with_to(REGISTRY)
         .with_data(encode_address_args(
             [0xba, 0x1b, 0x6c, 0x84],
-            &[TEST_TOKEN_ADDRESS, DEPOSIT, MASTER],
+            &[TEST_TOKEN_ADDRESS, SOURCE, DESTINATION],
         ))
         .build_signed()?;
     node.rpc.inject_tx(register).await?;
@@ -481,7 +487,7 @@ async fn zero_resolver_and_code_present_deposit_leave_balance_unswept() -> eyre:
     let inflow = MorphTxBuilder::new(wallet.chain_id, wallet.inner, 2)
         .with_v1_eth_fee()
         .with_to(TEST_TOKEN_ADDRESS)
-        .with_data(transfer_calldata(DEPOSIT, U256::from(AMOUNT)))
+        .with_data(transfer_calldata(SOURCE, U256::from(AMOUNT)))
         .build_signed()?;
     node.rpc.inject_tx(inflow).await?;
     let payload = node.advance_block().await?;
@@ -493,12 +499,30 @@ async fn zero_resolver_and_code_present_deposit_leave_balance_unswept() -> eyre:
         .expect("code-present receipt");
 
     assert!(receipt.status());
-    assert_eq!(receipt.logs().len(), 1);
+    // The Transfer, plus the protocol failure record: the Registry resolved a
+    // destination, so the skip is attributable and reported on-chain.
+    assert_eq!(receipt.logs().len(), 2);
+    let failure = &receipt.logs()[1];
+    assert_eq!(failure.address, REGISTRY);
+    assert_eq!(
+        failure.topics(),
+        [
+            SWEEP_FAILED_TOPIC,
+            address_topic(TEST_TOKEN_ADDRESS),
+            address_topic(SOURCE),
+            address_topic(DESTINATION),
+        ]
+    );
+    assert_eq!(
+        &failure.data.data[..],
+        &alloy_primitives::keccak256("source_has_code")[..],
+        "failure reason must be the hashed metrics label"
+    );
     assert_eq!(
         node.inner
             .provider
             .latest()?
-            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(DEPOSIT))?
+            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(SOURCE))?
             .unwrap_or_default(),
         U256::from(AMOUNT)
     );
@@ -506,7 +530,7 @@ async fn zero_resolver_and_code_present_deposit_leave_balance_unswept() -> eyre:
         node.inner
             .provider
             .latest()?
-            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(DEPOSIT_TWO))?
+            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(SOURCE_TWO))?
             .unwrap_or_default(),
         U256::from(AMOUNT)
     );
@@ -514,7 +538,7 @@ async fn zero_resolver_and_code_present_deposit_leave_balance_unswept() -> eyre:
         node.inner
             .provider
             .latest()?
-            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(MASTER))?
+            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(DESTINATION))?
             .unwrap_or_default(),
         U256::ZERO
     );
@@ -537,7 +561,7 @@ async fn builder_and_engine_replay_match_and_trace_preserves_canonical_sweep_sta
         .with_to(REGISTRY)
         .with_data(encode_address_args(
             [0xba, 0x1b, 0x6c, 0x84],
-            &[TEST_TOKEN_ADDRESS, DEPOSIT, MASTER],
+            &[TEST_TOKEN_ADDRESS, SOURCE, DESTINATION],
         ))
         .build_signed()?;
     source.rpc.inject_tx(register).await?;
@@ -547,7 +571,7 @@ async fn builder_and_engine_replay_match_and_trace_preserves_canonical_sweep_sta
     let inflow = MorphTxBuilder::new(wallet.chain_id, wallet.inner, 1)
         .with_v1_eth_fee()
         .with_to(TEST_TOKEN_ADDRESS)
-        .with_data(transfer_calldata(DEPOSIT, U256::from(AMOUNT)))
+        .with_data(transfer_calldata(SOURCE, U256::from(AMOUNT)))
         .build_signed()?;
     source.rpc.inject_tx(inflow).await?;
     let built = source.advance_block().await?;
@@ -586,7 +610,7 @@ async fn builder_and_engine_replay_match_and_trace_preserves_canonical_sweep_sta
         .inner
         .provider
         .latest()?
-        .storage(TEST_TOKEN_ADDRESS, token_balance_slot(MASTER))?
+        .storage(TEST_TOKEN_ADDRESS, token_balance_slot(DESTINATION))?
         .unwrap_or_default();
     let rpc = replay
         .rpc_client()
@@ -604,17 +628,17 @@ async fn builder_and_engine_replay_match_and_trace_preserves_canonical_sweep_sta
         )
         .await?;
     let token_key = TEST_TOKEN_ADDRESS.to_string();
-    let master_slot = token_balance_slot(MASTER).to_string();
-    let master_value = B256::from(U256::from(AMOUNT).to_be_bytes::<32>()).to_string();
+    let destination_slot = token_balance_slot(DESTINATION).to_string();
+    let destination_value = B256::from(U256::from(AMOUNT).to_be_bytes::<32>()).to_string();
     assert_eq!(
-        trace["post"][&token_key]["storage"][&master_slot],
-        serde_json::Value::String(master_value),
+        trace["post"][&token_key]["storage"][&destination_slot],
+        serde_json::Value::String(destination_value),
         "prestate trace post-state must include the hidden sweep credit"
     );
-    let deposit_slot = token_balance_slot(DEPOSIT).to_string();
+    let source_slot = token_balance_slot(SOURCE).to_string();
     assert!(
-        trace["post"][&token_key]["storage"][&deposit_slot].is_null(),
-        "diff tracer omits the deposit slot because it starts and ends at zero"
+        trace["post"][&token_key]["storage"][&source_slot].is_null(),
+        "diff tracer omits the source slot because it starts and ends at zero"
     );
     let parity_trace = replay
         .rpc
@@ -627,7 +651,7 @@ async fn builder_and_engine_replay_match_and_trace_preserves_canonical_sweep_sta
         .inner
         .provider
         .latest()?
-        .storage(TEST_TOKEN_ADDRESS, token_balance_slot(MASTER))?
+        .storage(TEST_TOKEN_ADDRESS, token_balance_slot(DESTINATION))?
         .unwrap_or_default();
     assert_eq!(balance_before_trace, U256::from(AMOUNT));
     assert_eq!(balance_after_trace, balance_before_trace);
@@ -647,7 +671,7 @@ async fn reorg_removes_sweep_receipt_logs_and_state() -> eyre::Result<()> {
         .with_to(REGISTRY)
         .with_data(encode_address_args(
             [0xba, 0x1b, 0x6c, 0x84],
-            &[TEST_TOKEN_ADDRESS, DEPOSIT, MASTER],
+            &[TEST_TOKEN_ADDRESS, SOURCE, DESTINATION],
         ))
         .build_signed()?;
     node.rpc.inject_tx(register).await?;
@@ -657,7 +681,7 @@ async fn reorg_removes_sweep_receipt_logs_and_state() -> eyre::Result<()> {
     let sweep_tx = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 1)
         .with_v1_eth_fee()
         .with_to(TEST_TOKEN_ADDRESS)
-        .with_data(transfer_calldata(DEPOSIT, U256::from(AMOUNT)))
+        .with_data(transfer_calldata(SOURCE, U256::from(AMOUNT)))
         .build_signed()?;
     let canonical_sweep_tx_hash = alloy_primitives::keccak256(sweep_tx.as_ref());
     let replacement_tx = MorphTxBuilder::new(wallet.chain_id, wallet.inner, 1)
@@ -707,13 +731,13 @@ async fn reorg_removes_sweep_receipt_logs_and_state() -> eyre::Result<()> {
     let state = node.inner.provider.latest()?;
     assert_eq!(
         state
-            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(MASTER))?
+            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(DESTINATION))?
             .unwrap_or_default(),
         U256::ZERO
     );
     assert_eq!(
         state
-            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(DEPOSIT))?
+            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(SOURCE))?
             .unwrap_or_default(),
         U256::ZERO
     );
@@ -741,7 +765,7 @@ async fn unwhitelisted_fake_logs_do_not_exhaust_the_execution_quota() -> eyre::R
         .with_to(REGISTRY)
         .with_data(encode_address_args(
             [0xba, 0x1b, 0x6c, 0x84],
-            &[TEST_TOKEN_ADDRESS, DEPOSIT, MASTER],
+            &[TEST_TOKEN_ADDRESS, SOURCE, DESTINATION],
         ))
         .build_signed()?;
     node.rpc.inject_tx(register).await?;
@@ -758,7 +782,7 @@ async fn unwhitelisted_fake_logs_do_not_exhaust_the_execution_quota() -> eyre::R
     let final_tx = MorphTxBuilder::new(wallet.chain_id, wallet.inner, 5)
         .with_v1_eth_fee()
         .with_to(TEST_TOKEN_ADDRESS)
-        .with_data(transfer_calldata(DEPOSIT, U256::from(AMOUNT)))
+        .with_data(transfer_calldata(SOURCE, U256::from(AMOUNT)))
         .build_signed()?;
     let final_hash = node.rpc.inject_tx(final_tx).await?;
     let payload = node.advance_block().await?;
@@ -796,11 +820,7 @@ async fn unwhitelisted_fake_logs_do_not_exhaust_the_execution_quota() -> eyre::R
     );
     assert_eq!(
         receipt.logs()[0].topics(),
-        &[
-            TRANSFER_TOPIC,
-            address_topic(SENDER),
-            address_topic(DEPOSIT)
-        ]
+        &[TRANSFER_TOPIC, address_topic(SENDER), address_topic(SOURCE)]
     );
     assert_eq!(receipt.logs()[0].address, TEST_TOKEN_ADDRESS);
     assert_eq!(
@@ -810,13 +830,13 @@ async fn unwhitelisted_fake_logs_do_not_exhaust_the_execution_quota() -> eyre::R
     let state = node.inner.provider.latest()?;
     assert_eq!(
         state
-            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(DEPOSIT))?
+            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(SOURCE))?
             .unwrap_or_default(),
         U256::ZERO
     );
     assert_eq!(
         state
-            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(MASTER))?
+            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(DESTINATION))?
             .unwrap_or_default(),
         U256::from(AMOUNT)
     );
@@ -835,15 +855,15 @@ async fn unwhitelisted_fake_logs_do_not_exhaust_the_execution_quota() -> eyre::R
         )
         .await?;
     let token_key = TEST_TOKEN_ADDRESS.to_string();
-    let deposit_slot = token_balance_slot(DEPOSIT).to_string();
-    let master_slot = token_balance_slot(MASTER).to_string();
+    let source_slot = token_balance_slot(SOURCE).to_string();
+    let destination_slot = token_balance_slot(DESTINATION).to_string();
     let amount_word = B256::from(U256::from(AMOUNT).to_be_bytes::<32>()).to_string();
     assert!(
-        trace["post"][&token_key]["storage"][&deposit_slot].is_null(),
-        "net-zero deposit storage should be omitted from the target diff"
+        trace["post"][&token_key]["storage"][&source_slot].is_null(),
+        "net-zero source storage should be omitted from the target diff"
     );
     assert_eq!(
-        trace["post"][&token_key]["storage"][&master_slot],
+        trace["post"][&token_key]["storage"][&destination_slot],
         serde_json::Value::String(amount_word.clone()),
         "target transaction trace must include the eligible sweep"
     );
@@ -855,11 +875,11 @@ async fn unwhitelisted_fake_logs_do_not_exhaust_the_execution_quota() -> eyre::R
         )
         .await?;
     assert!(
-        block_trace[4]["result"]["post"][&token_key]["storage"][&deposit_slot].is_null(),
-        "full debug replay should omit the net-zero deposit slot"
+        block_trace[4]["result"]["post"][&token_key]["storage"][&source_slot].is_null(),
+        "full debug replay should omit the net-zero source slot"
     );
     assert_eq!(
-        block_trace[4]["result"]["post"][&token_key]["storage"][&master_slot],
+        block_trace[4]["result"]["post"][&token_key]["storage"][&destination_slot],
         serde_json::Value::String(amount_word),
         "full debug block replay must include the eligible sweep"
     );
@@ -878,11 +898,11 @@ async fn unwhitelisted_fake_logs_do_not_exhaust_the_execution_quota() -> eyre::R
         )
         .await?;
     assert!(
-        parity_replay[4]["stateDiff"][&token_key]["storage"][&deposit_slot].is_null(),
-        "parity replay should omit the net-zero deposit slot"
+        parity_replay[4]["stateDiff"][&token_key]["storage"][&source_slot].is_null(),
+        "parity replay should omit the net-zero source slot"
     );
     assert!(
-        !parity_replay[4]["stateDiff"][&token_key]["storage"][&master_slot].is_null(),
+        !parity_replay[4]["stateDiff"][&token_key]["storage"][&destination_slot].is_null(),
         "parity block replay must include the eligible sweep"
     );
 
@@ -900,7 +920,7 @@ async fn synthetic_trace_calls_do_not_run_sweep() -> eyre::Result<()> {
         .with_to(REGISTRY)
         .with_data(encode_address_args(
             [0xba, 0x1b, 0x6c, 0x84],
-            &[TEST_TOKEN_ADDRESS, DEPOSIT, MASTER],
+            &[TEST_TOKEN_ADDRESS, SOURCE, DESTINATION],
         ))
         .build_signed()?;
     node.rpc.inject_tx(register).await?;
@@ -911,7 +931,7 @@ async fn synthetic_trace_calls_do_not_run_sweep() -> eyre::Result<()> {
         "to": TEST_TOKEN_ADDRESS,
         "gas": "0x30d40",
         "gasPrice": "0x4a817c800",
-        "data": transfer_calldata(DEPOSIT, U256::from(AMOUNT)),
+        "data": transfer_calldata(SOURCE, U256::from(AMOUNT)),
     });
     let rpc = node
         .rpc_client()
@@ -930,16 +950,16 @@ async fn synthetic_trace_calls_do_not_run_sweep() -> eyre::Result<()> {
         )
         .await?;
     let token_key = TEST_TOKEN_ADDRESS.to_string();
-    let deposit_slot = token_balance_slot(DEPOSIT).to_string();
-    let master_slot = token_balance_slot(MASTER).to_string();
+    let source_slot = token_balance_slot(SOURCE).to_string();
+    let destination_slot = token_balance_slot(DESTINATION).to_string();
     let amount_word = B256::from(U256::from(AMOUNT).to_be_bytes::<32>()).to_string();
     assert_eq!(
-        debug_trace["post"][&token_key]["storage"][&deposit_slot],
+        debug_trace["post"][&token_key]["storage"][&source_slot],
         serde_json::Value::String(amount_word),
-        "debug_traceCall must retain the synthetic inflow at the deposit"
+        "debug_traceCall must retain the synthetic inflow at the source"
     );
     assert!(
-        debug_trace["post"][&token_key]["storage"][&master_slot].is_null(),
+        debug_trace["post"][&token_key]["storage"][&destination_slot].is_null(),
         "debug_traceCall must not execute the canonical-only sweep hook"
     );
 
@@ -947,24 +967,24 @@ async fn synthetic_trace_calls_do_not_run_sweep() -> eyre::Result<()> {
         .request("trace_call", (call, vec!["stateDiff"], "latest"))
         .await?;
     assert!(
-        !parity_trace["stateDiff"][&token_key]["storage"][&deposit_slot].is_null(),
+        !parity_trace["stateDiff"][&token_key]["storage"][&source_slot].is_null(),
         "trace_call state diff must retain the synthetic inflow"
     );
     assert!(
-        parity_trace["stateDiff"][&token_key]["storage"][&master_slot].is_null(),
+        parity_trace["stateDiff"][&token_key]["storage"][&destination_slot].is_null(),
         "trace_call must not execute the canonical-only sweep hook"
     );
 
     let state = node.inner.provider.latest()?;
     assert_eq!(
         state
-            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(DEPOSIT))?
+            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(SOURCE))?
             .unwrap_or_default(),
         U256::ZERO
     );
     assert_eq!(
         state
-            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(MASTER))?
+            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(DESTINATION))?
             .unwrap_or_default(),
         U256::ZERO
     );
@@ -984,7 +1004,7 @@ async fn successful_onyx_receipt_commits_sweep_roots_bloom_and_user_gas() -> eyr
         .with_to(REGISTRY)
         .with_data(encode_address_args(
             [0xba, 0x1b, 0x6c, 0x84],
-            &[TEST_TOKEN_ADDRESS, DEPOSIT, MASTER],
+            &[TEST_TOKEN_ADDRESS, SOURCE, DESTINATION],
         ))
         .build_signed()?;
     node.rpc.inject_tx(register).await?;
@@ -993,7 +1013,7 @@ async fn successful_onyx_receipt_commits_sweep_roots_bloom_and_user_gas() -> eyr
     let inflow = MorphTxBuilder::new(wallet.chain_id, wallet.inner, 1)
         .with_v1_eth_fee()
         .with_to(TEST_TOKEN_ADDRESS)
-        .with_data(transfer_calldata(DEPOSIT, U256::from(AMOUNT)))
+        .with_data(transfer_calldata(SOURCE, U256::from(AMOUNT)))
         .build_signed()?;
     node.rpc.inject_tx(inflow).await?;
     let payload = node.advance_block().await?;
@@ -1011,11 +1031,7 @@ async fn successful_onyx_receipt_commits_sweep_roots_bloom_and_user_gas() -> eyr
     assert_eq!(logs[0].address, TEST_TOKEN_ADDRESS);
     assert_eq!(
         logs[0].topics(),
-        &[
-            TRANSFER_TOPIC,
-            address_topic(SENDER),
-            address_topic(DEPOSIT)
-        ]
+        &[TRANSFER_TOPIC, address_topic(SENDER), address_topic(SOURCE)]
     );
     assert_eq!(U256::from_be_slice(&logs[0].data.data), U256::from(AMOUNT));
     assert_eq!(logs[1].address, TEST_TOKEN_ADDRESS);
@@ -1023,8 +1039,8 @@ async fn successful_onyx_receipt_commits_sweep_roots_bloom_and_user_gas() -> eyr
         logs[1].topics(),
         &[
             TRANSFER_TOPIC,
-            address_topic(DEPOSIT),
-            address_topic(MASTER)
+            address_topic(SOURCE),
+            address_topic(DESTINATION)
         ]
     );
     assert_eq!(U256::from_be_slice(&logs[1].data.data), U256::from(AMOUNT));
@@ -1034,8 +1050,8 @@ async fn successful_onyx_receipt_commits_sweep_roots_bloom_and_user_gas() -> eyr
         &[
             SWEEP_TOPIC,
             address_topic(TEST_TOKEN_ADDRESS),
-            address_topic(DEPOSIT),
-            address_topic(MASTER)
+            address_topic(SOURCE),
+            address_topic(DESTINATION)
         ]
     );
     assert_eq!(
@@ -1073,13 +1089,13 @@ async fn successful_onyx_receipt_commits_sweep_roots_bloom_and_user_gas() -> eyr
     let state = node.inner.provider.latest()?;
     assert_eq!(
         state
-            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(DEPOSIT))?
+            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(SOURCE))?
             .unwrap_or_default(),
         U256::ZERO
     );
     assert_eq!(
         state
-            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(MASTER))?
+            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(DESTINATION))?
             .unwrap_or_default(),
         U256::from(AMOUNT)
     );
@@ -1094,28 +1110,28 @@ fn addr_word(a: Address) -> [u8; 32] {
     w
 }
 
-/// Produces the deposit's EIP-712 `SweepAuthorization` signature
+/// Produces the source's EIP-712 `SweepAuthorization` signature
 /// (65-byte r||s||v) exactly as the production Registry verifies it (§5.3).
 #[derive(Debug, Clone, Copy)]
-struct DepositAuthorization {
-    deposit: Address,
-    master: Address,
+struct SourceAuthorization {
+    source: Address,
+    destination: Address,
     registry: Address,
     chain_id: u64,
     nonce: u64,
     deadline: u64,
 }
 
-fn sign_deposit_auth(
-    deposit_signer: &alloy_signer_local::PrivateKeySigner,
-    authorization: DepositAuthorization,
+fn sign_source_auth(
+    source_signer: &alloy_signer_local::PrivateKeySigner,
+    authorization: SourceAuthorization,
 ) -> eyre::Result<Vec<u8>> {
     use alloy_primitives::keccak256;
     use alloy_signer::SignerSync;
 
-    let DepositAuthorization {
-        deposit,
-        master,
+    let SourceAuthorization {
+        source,
+        destination,
         registry,
         chain_id,
         nonce,
@@ -1126,10 +1142,10 @@ fn sign_deposit_auth(
         "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)",
     );
     let auth_typehash = keccak256(
-        "SweepAuthorization(address deposit,address master,address registry,uint256 chainId,uint256 nonce,uint64 deadline,bytes32 mode,bytes32 sweepScope)",
+        "SweepAuthorization(address source,address destination,address registry,uint256 chainId,uint256 nonce,uint64 deadline,bytes32 mode,bytes32 sweepScope)",
     );
     let mode = keccak256("MORPH_SWEEP_V1");
-    let sweep_scope = keccak256("WHITELISTED_ERC20_TO_MASTER_ONLY");
+    let sweep_scope = keccak256("WHITELISTED_ERC20_TO_DESTINATION_ONLY");
 
     let mut dom = Vec::new();
     dom.extend_from_slice(domain_typehash.as_slice());
@@ -1141,8 +1157,8 @@ fn sign_deposit_auth(
 
     let mut sh = Vec::new();
     sh.extend_from_slice(auth_typehash.as_slice());
-    sh.extend_from_slice(&addr_word(deposit));
-    sh.extend_from_slice(&addr_word(master));
+    sh.extend_from_slice(&addr_word(source));
+    sh.extend_from_slice(&addr_word(destination));
     sh.extend_from_slice(&addr_word(registry));
     sh.extend_from_slice(&U256::from(chain_id).to_be_bytes::<32>());
     sh.extend_from_slice(&U256::from(nonce).to_be_bytes::<32>());
@@ -1158,7 +1174,7 @@ fn sign_deposit_auth(
     let digest = keccak256(&pre);
 
     // OZ ECDSA.recover expects v in {27,28}; alloy may return y_parity {0,1}.
-    let mut bytes = deposit_signer.sign_hash_sync(&digest)?.as_bytes().to_vec();
+    let mut bytes = source_signer.sign_hash_sync(&digest)?.as_bytes().to_vec();
     if bytes.len() == 65 && bytes[64] < 27 {
         bytes[64] += 27;
     }
@@ -1167,15 +1183,15 @@ fn sign_deposit_auth(
 
 /// ABI-encodes `registerSweep(address,address,uint256,uint64,bytes)`.
 fn register_calldata(
-    deposit: Address,
-    master: Address,
+    source: Address,
+    destination: Address,
     nonce: u64,
     deadline: u64,
     sig: &[u8],
 ) -> Bytes {
     let mut data = vec![0xd7, 0x1b, 0x77, 0xe8];
-    data.extend_from_slice(&addr_word(deposit));
-    data.extend_from_slice(&addr_word(master));
+    data.extend_from_slice(&addr_word(source));
+    data.extend_from_slice(&addr_word(destination));
     data.extend_from_slice(&U256::from(nonce).to_be_bytes::<32>());
     data.extend_from_slice(&U256::from(deadline).to_be_bytes::<32>());
     data.extend_from_slice(&U256::from(160u64).to_be_bytes::<32>()); // offset to bytes arg
@@ -1191,7 +1207,7 @@ fn register_calldata(
 /// TODO(onyx-v1): this test still targets the removed V2 registry — it deploys the
 /// V2 `SweepRegistry.deployed.hex`, calls the V2-only `setMasterApproval` /
 /// `setTokenPolicy(token, bool, codehash, minimum)` ABI, and registers a
-/// 7702-delegated (code-bearing) fee deposit that V1 rejects. Re-enable once the
+/// 7702-delegated (code-bearing) fee source that V1 rejects. Re-enable once the
 /// V1 production `SweepRegistry` runtime is regenerated and the flow is ported to
 /// the V1 ABI (`registerSweep` / `setTokenWhitelist` / `setSweepOperator`).
 #[tokio::test(flavor = "multi_thread")]
@@ -1200,10 +1216,10 @@ async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     const PRELOADED_FEE_BALANCE: u128 = 100_000_000_000_000_000_000;
-    let deposit_signer = morph_node::test_utils::wallet_at_index(9, 2910);
-    let deposit = deposit_signer.address();
-    let fee_deposit_signer = morph_node::test_utils::wallet_at_index(8, 2910);
-    let fee_deposit = fee_deposit_signer.address();
+    let source_signer = morph_node::test_utils::wallet_at_index(9, 2910);
+    let source = source_signer.address();
+    let fee_source_signer = morph_node::test_utils::wallet_at_index(8, 2910);
+    let fee_source = fee_source_signer.address();
     let (mut nodes, wallet) = TestNodeBuilder::new()
         .with_sweep_config(PROD_REGISTRY)
         .with_account_code(TEST_TOKEN_ADDRESS, SLOT1_ERC20_RUNTIME_CODE)
@@ -1211,7 +1227,7 @@ async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
         .with_account_storage(PROD_REGISTRY, B256::ZERO, address_topic(SENDER))
         .with_account_storage(
             TEST_TOKEN_ADDRESS,
-            token_balance_slot(fee_deposit),
+            token_balance_slot(fee_source),
             B256::from(U256::from(PRELOADED_FEE_BALANCE).to_be_bytes::<32>()),
         )
         .build()
@@ -1220,34 +1236,34 @@ async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
 
     let owner = wallet.inner.address();
     assert_eq!(owner, SENDER);
-    let master = owner;
+    let destination = owner;
     let deadline = u64::MAX;
-    let deposit_before = node.inner.provider.latest()?.basic_account(&deposit)?;
+    let source_before = node.inner.provider.latest()?.basic_account(&source)?;
     assert_eq!(
-        deposit_before
+        source_before
             .as_ref()
             .map(|account| account.balance)
             .unwrap_or_default(),
         U256::ZERO,
-        "sponsored deposit must start with no native balance"
+        "sponsored source must start with no native balance"
     );
     assert_eq!(
-        deposit_before
+        source_before
             .map(|account| account.nonce)
             .unwrap_or_default(),
         0,
-        "sponsored deposit authorization nonce must start at zero"
+        "sponsored source authorization nonce must start at zero"
     );
 
-    // setMasterApproval(master, true)
-    let mut master_approval = vec![0x80, 0x53, 0xd0, 0xca];
-    master_approval.extend_from_slice(&addr_word(master));
-    master_approval.extend_from_slice(&U256::from(1).to_be_bytes::<32>());
+    // setMasterApproval(destination, true)
+    let mut destination_approval = vec![0x80, 0x53, 0xd0, 0xca];
+    destination_approval.extend_from_slice(&addr_word(destination));
+    destination_approval.extend_from_slice(&U256::from(1).to_be_bytes::<32>());
     let tx0 = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
         .with_v1_eth_fee()
         .with_gas_limit(5_000_000)
         .with_to(PROD_REGISTRY)
-        .with_data(master_approval)
+        .with_data(destination_approval)
         .build_signed()?;
     node.rpc.inject_tx(tx0).await?;
     let approval_payload = node.advance_block().await?;
@@ -1256,7 +1272,7 @@ async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
         node.inner
             .provider
             .receipt_by_hash(approval_hash)?
-            .expect("master approval receipt")
+            .expect("destination approval receipt")
             .status(),
         "setMasterApproval must succeed"
     );
@@ -1285,14 +1301,14 @@ async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
         "setTokenPolicy must succeed"
     );
 
-    // Register a second, genesis-delegated zero-native deposit. Keeping this
+    // Register a second, genesis-delegated zero-native source. Keeping this
     // authority out of the preceding Type-4 authorization transaction isolates
     // fee-refund sweeping from txpool authority-reservation timing.
-    let fee_deposit_sig = sign_deposit_auth(
-        &fee_deposit_signer,
-        DepositAuthorization {
-            deposit: fee_deposit,
-            master,
+    let fee_source_sig = sign_source_auth(
+        &fee_source_signer,
+        SourceAuthorization {
+            source: fee_source,
+            destination,
             registry: PROD_REGISTRY,
             chain_id: wallet.chain_id,
             nonce: 0,
@@ -1304,11 +1320,11 @@ async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
         .with_gas_limit(5_000_000)
         .with_to(PROD_REGISTRY)
         .with_data(register_calldata(
-            fee_deposit,
-            master,
+            fee_source,
+            destination,
             0,
             deadline,
-            &fee_deposit_sig,
+            &fee_source_sig,
         ))
         .build_signed()?;
     node.rpc.inject_tx(fee_registration).await?;
@@ -1318,12 +1334,12 @@ async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
         node.inner
             .provider
             .receipt_by_hash(fee_registration_hash)?
-            .expect("fee deposit registration receipt")
+            .expect("fee source registration receipt")
             .status(),
-        "genesis-delegated fee deposit registration must succeed"
+        "genesis-delegated fee source registration must succeed"
     );
 
-    // The registered zero-native deposit pays for a successful MorphTx with
+    // The registered zero-native source pays for a successful MorphTx with
     // the storage-slot fee token. An intrinsic-only gas limit leaves no unused
     // gas to reimburse, so the configured token-fee caller itself must trigger
     // settlement of the balance left after the maximum fee deduction.
@@ -1331,11 +1347,11 @@ async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
         node.inner
             .provider
             .latest()?
-            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(fee_deposit))?
+            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(fee_source))?
             .unwrap_or_default(),
         U256::from(PRELOADED_FEE_BALANCE)
     );
-    let fee_tx = MorphTxBuilder::new(wallet.chain_id, fee_deposit_signer, 0)
+    let fee_tx = MorphTxBuilder::new(wallet.chain_id, fee_source_signer, 0)
         .with_v0_token_fee(TEST_TOKEN_ID)
         .with_gas_limit(21_000)
         .with_to(RECIPIENT)
@@ -1363,8 +1379,8 @@ async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
         fee_receipt.logs()[0].topics(),
         &[
             TRANSFER_TOPIC,
-            address_topic(fee_deposit),
-            address_topic(master)
+            address_topic(fee_source),
+            address_topic(destination)
         ]
     );
     let post_fee_sweep_amount = U256::from_be_slice(&fee_receipt.logs()[0].data.data);
@@ -1378,26 +1394,26 @@ async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
     let state_after_fee_sweep = node.inner.provider.latest()?;
     assert_eq!(
         state_after_fee_sweep
-            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(fee_deposit))?
+            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(fee_source))?
             .unwrap_or_default(),
         U256::ZERO,
         "post-fee balance must be swept to zero even when reimbursement is zero"
     );
     assert_eq!(
         state_after_fee_sweep
-            .basic_account(&fee_deposit)?
-            .expect("delegated fee deposit account")
+            .basic_account(&fee_source)?
+            .expect("delegated fee source account")
             .balance,
         U256::ZERO,
         "fee-token execution must not require native balance"
     );
 
-    // registerSweep with the deposit's real EIP-712 signature
-    let sig = sign_deposit_auth(
-        &deposit_signer,
-        DepositAuthorization {
-            deposit,
-            master,
+    // registerSweep with the source's real EIP-712 signature
+    let sig = sign_source_auth(
+        &source_signer,
+        SourceAuthorization {
+            source,
+            destination,
             registry: PROD_REGISTRY,
             chain_id: wallet.chain_id,
             nonce: 0,
@@ -1408,11 +1424,11 @@ async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
         wallet.chain_id,
         wallet.inner.clone(),
         3,
-        deposit_signer,
+        source_signer,
         0,
         PROD_REGISTRY,
         PROD_REGISTRY,
-        register_calldata(deposit, master, 0, deadline, &sig),
+        register_calldata(source, destination, 0, deadline, &sig),
     )?;
     node.rpc.inject_tx(tx3).await?;
     let reg_payload = node.advance_block().await?;
@@ -1424,7 +1440,7 @@ async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
         .expect("register receipt");
     assert!(
         reg_receipt.status(),
-        "registerSweep must succeed with a valid EIP-712 deposit signature"
+        "registerSweep must succeed with a valid EIP-712 source signature"
     );
     assert!(
         reg_receipt
@@ -1433,27 +1449,27 @@ async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
             .any(|l| l.address == PROD_REGISTRY),
         "registration must emit a SweepRegistered event from the Registry"
     );
-    let deposit_after_registration = node
+    let source_after_registration = node
         .inner
         .provider
         .latest()?
-        .basic_account(&deposit)?
-        .expect("EIP-7702 authorization must create the deposit account");
+        .basic_account(&source)?
+        .expect("EIP-7702 authorization must create the source account");
     assert_eq!(
-        deposit_after_registration.balance,
+        source_after_registration.balance,
         U256::ZERO,
-        "sponsored onboarding must not pre-fund the deposit"
+        "sponsored onboarding must not pre-fund the source"
     );
     assert_eq!(
-        deposit_after_registration.nonce, 1,
-        "authorization must consume the deposit EOA nonce"
+        source_after_registration.nonce, 1,
+        "authorization must consume the source EOA nonce"
     );
 
     // Pinned-codehash inflow -> EL sweeps via the real resolveSweep.
     let tx4 = MorphTxBuilder::new(wallet.chain_id, wallet.inner, 4)
         .with_v1_eth_fee()
         .with_to(TEST_TOKEN_ADDRESS)
-        .with_data(transfer_calldata(deposit, U256::from(AMOUNT)))
+        .with_data(transfer_calldata(source, U256::from(AMOUNT)))
         .build_signed()?;
     node.rpc.inject_tx(tx4).await?;
     let payload = node.advance_block().await?;
@@ -1466,7 +1482,7 @@ async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
     assert!(receipt.status());
     let logs = receipt.logs();
 
-    // [main Transfer(owner->deposit)] ... [sweep Transfer(deposit->master)] [Swept]
+    // [main Transfer(owner->source)] ... [sweep Transfer(source->destination)] [Swept]
     assert!(
         logs.len() >= 3,
         "expected main + sweep + Swept logs, got {}",
@@ -1474,15 +1490,15 @@ async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
     );
     assert_eq!(
         logs[0].topics(),
-        &[TRANSFER_TOPIC, address_topic(owner), address_topic(deposit)]
+        &[TRANSFER_TOPIC, address_topic(owner), address_topic(source)]
     );
     let sweep_transfer = &logs[logs.len() - 2];
     assert_eq!(
         sweep_transfer.topics(),
         &[
             TRANSFER_TOPIC,
-            address_topic(deposit),
-            address_topic(master)
+            address_topic(source),
+            address_topic(destination)
         ]
     );
     assert_eq!(
@@ -1496,19 +1512,19 @@ async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
         &[
             SWEEP_TOPIC,
             address_topic(TEST_TOKEN_ADDRESS),
-            address_topic(deposit),
-            address_topic(master)
+            address_topic(source),
+            address_topic(destination)
         ]
     );
 
-    // Deposit fully drained through the production atomic policy path.
+    // Source fully drained through the production atomic policy path.
     let state = node.inner.provider.latest()?;
     assert_eq!(
         state
-            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(deposit))?
+            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(source))?
             .unwrap_or_default(),
         U256::ZERO,
-        "deposit must be swept to zero via the production Registry resolveSweep"
+        "source must be swept to zero via the production Registry resolveSweep"
     );
 
     Ok(())
