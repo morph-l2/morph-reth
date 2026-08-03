@@ -7,10 +7,7 @@
 //! while only committed [`SweepBlockEffect`] values advance block budget and Registry
 //! request deduplication state.
 
-use crate::{
-    MorphEvm, MorphInvalidTransaction, MorphTxEnv, SweepConfig, handler::MorphEvmHandler,
-    token_fee::compute_mapping_slot_for_address,
-};
+use crate::{MorphEvm, MorphInvalidTransaction, MorphTxEnv, SweepConfig, handler::MorphEvmHandler};
 use alloy_evm::Database;
 use alloy_primitives::{Address, B256, Bytes, Log, U256, b256};
 use revm::{
@@ -28,11 +25,8 @@ use std::{cell::RefCell, collections::HashSet};
 pub const MAX_CANDIDATES_PER_TX: usize = 16;
 /// Maximum raw Registry/Transfer triggers preflighted after one transaction.
 pub const MAX_PREFLIGHTS_PER_TX: usize = 64;
-/// Fixed system-gas debit for resolving a candidate out of Registry storage.
-///
-/// The resolver is two cold `SLOAD`s (~4,200 gas) rather than a `STATICCALL`,
-/// so this limit keeps better than 2x headroom over the real cost.
-pub const REGISTRY_SLOT_READ_GAS: u64 = 10_000;
+/// Gas limit for the Registry resolver static call.
+pub const RESOLVE_GAS_LIMIT: u64 = 50_000;
 /// Gas limit for each ERC-20 `balanceOf` static call.
 pub const BALANCE_OF_GAS_LIMIT: u64 = 50_000;
 /// Gas limit for the sweep `transfer` system call.
@@ -42,9 +36,9 @@ pub const BALANCE_OF_GAS_LIMIT: u64 = 50_000;
 /// ~60-70k. Admitting a token to the whitelist REQUIRES measuring its worst-case
 /// `transfer` cost and confirming it stays under this limit.
 pub const SWEEP_GAS_LIMIT: u64 = 100_000;
-/// Fixed worst-case system-gas debit for the registry read plus the single
+/// Fixed worst-case system-gas debit for the resolver plus the single
 /// preflight balance call.
-pub const PREFLIGHT_SYSTEM_GAS: u64 = REGISTRY_SLOT_READ_GAS + BALANCE_OF_GAS_LIMIT;
+pub const PREFLIGHT_SYSTEM_GAS: u64 = RESOLVE_GAS_LIMIT + BALANCE_OF_GAS_LIMIT;
 /// Fixed worst-case debit for the transfer call plus the single post-execution
 /// balance call.
 pub const SWEEP_EXECUTION_SYSTEM_GAS: u64 = SWEEP_GAS_LIMIT + BALANCE_OF_GAS_LIMIT;
@@ -56,11 +50,15 @@ pub const CANDIDATE_SYSTEM_GAS: u64 = PREFLIGHT_SYSTEM_GAS + SWEEP_EXECUTION_SYS
 /// of which 16 reach execution. The two quotas are intentionally independent — a
 /// transaction can discard invalid triggers without consuming its
 /// eligible-execution allowance.
-pub const TX_SYSTEM_GAS: u64 = 6_240_000;
+pub const TX_SYSTEM_GAS: u64 = 8_800_000;
 /// Maximum sweep system gas in one block.
-pub const BLOCK_SYSTEM_GAS: u64 = 28_800_000;
+///
+/// Onyx fixes this independently from the header gas limit so a future block
+/// gas-limit increase cannot silently widen the prover's sweep workload. The
+/// value matches Morph's 45M production block gas limit at activation.
+pub const BLOCK_SYSTEM_GAS: u64 = 45_000_000;
 /// Maximum sweep candidates checked in one block.
-pub const MAX_CANDIDATES_PER_BLOCK: usize = 137;
+pub const MAX_CANDIDATES_PER_BLOCK: usize = 180;
 /// Maximum raw triggers preflighted in one block.
 ///
 /// Deliberately an explicit constant rather than `BLOCK_SYSTEM_GAS /
@@ -68,10 +66,10 @@ pub const MAX_CANDIDATES_PER_BLOCK: usize = 137;
 /// silently widens the allowance for junk triggers; keeping it explicit forces
 /// that widening to be a reviewable change of its own. The assertions below keep
 /// it inside the block budget.
-pub const MAX_PREFLIGHTS_PER_BLOCK: usize = 480;
+pub const MAX_PREFLIGHTS_PER_BLOCK: usize = 450;
 
 const _: () = {
-    assert!(PREFLIGHT_SYSTEM_GAS == REGISTRY_SLOT_READ_GAS + BALANCE_OF_GAS_LIMIT);
+    assert!(PREFLIGHT_SYSTEM_GAS == RESOLVE_GAS_LIMIT + BALANCE_OF_GAS_LIMIT);
     assert!(SWEEP_EXECUTION_SYSTEM_GAS == SWEEP_GAS_LIMIT + BALANCE_OF_GAS_LIMIT);
     assert!(CANDIDATE_SYSTEM_GAS == PREFLIGHT_SYSTEM_GAS + SWEEP_EXECUTION_SYSTEM_GAS);
     // The per-transaction gas budget is exactly the worst case its count caps
@@ -235,22 +233,8 @@ const SWEEP_TOPIC: B256 = b256!("035b37215a69e14a80883933d6aa84f0919a67af9410a4a
 /// `keccak256("SweepFailed(address,address,address,bytes32)")`.
 const SWEEP_FAILED_TOPIC: B256 =
     b256!("0f64fa58e4261d8832b5ea6c262c691ef36e73cb21998c4fb01a83997940797c");
+const RESOLVE_SELECTOR: [u8; 4] = [0x9f, 0xaa, 0x2f, 0x2f];
 const BALANCE_OF_SELECTOR: [u8; 4] = [0x70, 0xa0, 0x82, 0x31];
-
-/// Storage slot of `SweepRegistry.sources`.
-///
-/// CONSENSUS SURFACE. The resolver reads Registry storage directly instead of
-/// calling `resolveSweep`, so this slot number and the packing of `SourceRecord`
-/// are frozen: `base + 0` holds `destination` in its low 20 bytes and `enabled`
-/// at byte offset 20, `base + 1` holds `nonce`. The Registry sits behind a proxy,
-/// so an upgrade that moves either mapping is a hardfork — the contracts repo
-/// pins the layout in `SweepRegistry.t.sol::test_storage_layout_frozen_for_el`.
-const REGISTRY_SOURCES_SLOT: U256 = U256::from_limbs([253, 0, 0, 0]);
-/// Storage slot of `SweepRegistry.tokenWhitelist`. See [`REGISTRY_SOURCES_SLOT`].
-const REGISTRY_TOKEN_WHITELIST_SLOT: U256 = U256::from_limbs([254, 0, 0, 0]);
-/// Byte offset of `SourceRecord.enabled` within its first storage word, counted
-/// from the least significant byte (Solidity packing order).
-const SOURCE_RECORD_ENABLED_OFFSET: usize = 20;
 
 /// A token/source pair eligible for a sweep check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -389,10 +373,7 @@ impl SweepBlockSession {
     /// Builds the immutable plan for the next speculative transaction.
     pub fn plan(&self) -> SweepTxPlan {
         let gas_allowance = self.remaining_system_gas.min(TX_SYSTEM_GAS);
-        let candidate_allowance = self.remaining_candidates.min(MAX_CANDIDATES_PER_TX).min(
-            usize::try_from(gas_allowance / CANDIDATE_SYSTEM_GAS)
-                .expect("sweep candidate allowance must fit in usize"),
-        );
+        let candidate_allowance = self.remaining_candidates.min(MAX_CANDIDATES_PER_TX);
         let preflight_allowance = self.remaining_preflights.min(MAX_PREFLIGHTS_PER_TX).min(
             usize::try_from(gas_allowance / PREFLIGHT_SYSTEM_GAS)
                 .expect("sweep preflight allowance must fit in usize"),
@@ -490,6 +471,10 @@ pub(crate) struct SweepTrigger {
 /// Classification for a sweep business failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SweepFailureReason {
+    /// Registry resolver reverted or halted.
+    ResolverCallFailed,
+    /// Registry resolver returned a malformed address word.
+    ResolverMalformed,
     /// Registry resolved the source to the zero address: the source is not
     /// registered, is disabled, or the token is not whitelisted.
     ResolverZero,
@@ -533,6 +518,8 @@ impl SweepFailureReason {
     /// stable so dashboards and alerts survive refactors.
     pub const fn as_label(self) -> &'static str {
         match self {
+            Self::ResolverCallFailed => "resolver_call_failed",
+            Self::ResolverMalformed => "resolver_malformed",
             Self::ResolverZero => "resolver_zero",
             Self::SelfReference => "self_reference",
             Self::BalanceCallFailed => "balance_call_failed",
@@ -618,14 +605,12 @@ pub struct SweepOutcome {
     pub successes: Vec<SweepSuccess>,
     /// Classified business failures.
     pub failures: Vec<SweepFailure>,
-    /// Triggers dropped before preflight because a quota was already exhausted.
+    /// Whether at least one trigger was truncated before preflight.
     ///
-    /// NOT attributable to a source: learning whether a dropped trigger pointed
-    /// at a registered source would cost the very Registry read the quota exists
-    /// to bound. So these cannot be reported on-chain and cannot be classified —
-    /// which is exactly why off-chain balance reconciliation is mandatory rather
-    /// than optional.
-    pub triggers_dropped: usize,
+    /// This deliberately records a boolean rather than an exact count: one
+    /// additional unique trigger is enough to prove that the bounded batch was
+    /// truncated, without scanning and retaining every remaining candidate.
+    pub trigger_batch_truncated: bool,
 }
 
 #[inline]
@@ -684,7 +669,13 @@ pub(crate) fn collect_sweep_triggers(
     registry: Address,
     plan: &SweepTxPlan,
 ) -> Vec<SweepTrigger> {
-    collect_transaction_sweep_triggers(main_logs, None, registry, plan)
+    collect_transaction_sweep_triggers(main_logs, None, registry, plan).triggers
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct CollectedSweepTriggers {
+    pub(crate) triggers: Vec<SweepTrigger>,
+    pub(crate) truncated: bool,
 }
 
 pub(crate) fn collect_transaction_sweep_triggers(
@@ -692,42 +683,53 @@ pub(crate) fn collect_transaction_sweep_triggers(
     post_fee_candidate: Option<SweepCandidate>,
     registry: Address,
     plan: &SweepTxPlan,
-) -> Vec<SweepTrigger> {
+) -> CollectedSweepTriggers {
+    let allowance = plan.preflight_allowance();
     let mut seen = HashSet::with_capacity(plan.preflight_allowance());
     let mut triggers = Vec::with_capacity(plan.preflight_allowance());
+    let mut truncated = false;
 
     for log in main_logs {
-        if triggers.len() == plan.preflight_allowance() {
-            break;
-        }
         let Some(candidate) = parse_registry_request(log, registry) else {
             continue;
         };
         if !plan.has_seen_registry_request(candidate) && seen.insert(candidate) {
-            triggers.push(SweepTrigger {
-                candidate,
-                kind: SweepTriggerKind::RegistryRequest,
-            });
+            if triggers.len() < allowance {
+                triggers.push(SweepTrigger {
+                    candidate,
+                    kind: SweepTriggerKind::RegistryRequest,
+                });
+            } else {
+                truncated = true;
+                break;
+            }
         }
     }
 
-    let transfers = main_logs
-        .iter()
-        .filter_map(parse_transfer_candidate)
-        .chain(post_fee_candidate);
-    for candidate in transfers {
-        if triggers.len() == plan.preflight_allowance() {
-            break;
-        }
-        if seen.insert(candidate) {
-            triggers.push(SweepTrigger {
-                candidate,
-                kind: SweepTriggerKind::TokenTransfer,
-            });
+    if !truncated {
+        let transfers = main_logs
+            .iter()
+            .filter_map(parse_transfer_candidate)
+            .chain(post_fee_candidate);
+        for candidate in transfers {
+            if seen.insert(candidate) {
+                if triggers.len() < allowance {
+                    triggers.push(SweepTrigger {
+                        candidate,
+                        kind: SweepTriggerKind::TokenTransfer,
+                    });
+                } else {
+                    truncated = true;
+                    break;
+                }
+            }
         }
     }
 
-    triggers
+    CollectedSweepTriggers {
+        triggers,
+        truncated,
+    }
 }
 
 /// Collects first-seen, deduplicated sweep candidates with Registry requests first.
@@ -791,6 +793,17 @@ fn encode_address_call(selector: [u8; 4], address: Address) -> Bytes {
     data.extend_from_slice(&selector);
     data.extend_from_slice(&[0; 12]);
     data.extend_from_slice(address.as_slice());
+    Bytes::from(data)
+}
+
+#[inline]
+fn encode_two_address_call(selector: [u8; 4], first: Address, second: Address) -> Bytes {
+    let mut data = Vec::with_capacity(68);
+    data.extend_from_slice(&selector);
+    data.extend_from_slice(&[0; 12]);
+    data.extend_from_slice(first.as_slice());
+    data.extend_from_slice(&[0; 12]);
+    data.extend_from_slice(second.as_slice());
     Bytes::from(data)
 }
 
@@ -898,6 +911,18 @@ fn decode_balance(
         return Err(malformed);
     }
     Ok(U256::from_be_slice(output))
+}
+
+#[inline]
+fn decode_address(output: &Bytes) -> Result<Address, SweepFailureReason> {
+    if output.len() != 32 || output[..12] != [0; 12] {
+        return Err(SweepFailureReason::ResolverMalformed);
+    }
+    let address = Address::from_slice(&output[12..]);
+    if address.is_zero() {
+        return Err(SweepFailureReason::ResolverZero);
+    }
+    Ok(address)
 }
 
 #[inline]
@@ -1052,48 +1077,26 @@ where
     Ok(decode_balance(&output, malformed))
 }
 
-/// Resolves a candidate straight out of the Registry's storage.
-///
-/// Mirrors `SweepRegistry.resolveSweep` exactly: a non-zero destination requires
-/// the record to be enabled, its destination to be non-zero, AND the token to be
-/// whitelisted. Reads go through the journal rather than the raw database, so a
-/// registration performed earlier in the same transaction is visible.
-///
-/// The source record is read first and short-circuits. An unregistered source is
-/// the overwhelmingly common case — every ERC-20 `Transfer` on the chain reaches
-/// here — so it must cost one `SLOAD`, not two. System-gas accounting is a fixed
-/// worst case either way, so the short circuit cannot affect consensus.
 fn resolve_destination<DB, I>(
     evm: &mut MorphEvm<DB, I>,
     config: SweepConfig,
     candidate: SweepCandidate,
-) -> Result<Address, EVMError<DB::Error, MorphInvalidTransaction>>
+) -> Result<Result<Address, SweepFailureReason>, EVMError<DB::Error, MorphInvalidTransaction>>
 where
     DB: Database,
 {
-    let record_base = compute_mapping_slot_for_address(REGISTRY_SOURCES_SLOT, candidate.source);
-    let whitelist_slot =
-        compute_mapping_slot_for_address(REGISTRY_TOKEN_WHITELIST_SLOT, candidate.token);
-    let registry = config.registry_address;
-    let journal = evm.ctx_mut().journal_mut();
-
-    // `sload` assumes the account is already in journal state. Load without
-    // touching: the resolver only reads, and touching would put the Registry in
-    // the state diff.
-    let _ = journal.load_account(registry)?;
-
-    let record_word = B256::from(*journal.sload(registry, record_base)?);
-    let destination = Address::from_word(record_word);
-    let enabled = record_word[31 - SOURCE_RECORD_ENABLED_OFFSET] != 0;
-    if !enabled || destination.is_zero() {
-        return Ok(Address::ZERO);
-    }
-
-    if journal.sload(registry, whitelist_slot)?.is_zero() {
-        return Ok(Address::ZERO);
-    }
-
-    Ok(destination)
+    let resolver = internal_call(
+        evm,
+        Address::ZERO,
+        config.registry_address,
+        encode_two_address_call(RESOLVE_SELECTOR, candidate.token, candidate.source),
+        RESOLVE_GAS_LIMIT,
+        true,
+    )?;
+    let Some(output) = resolver.output else {
+        return Ok(Err(SweepFailureReason::ResolverCallFailed));
+    };
+    Ok(decode_address(&output))
 }
 
 fn preflight_candidate<DB, I>(
@@ -1104,12 +1107,10 @@ fn preflight_candidate<DB, I>(
 where
     DB: Database,
 {
-    let destination = resolve_destination(evm, config, candidate)?;
-    if destination.is_zero() {
-        return Ok(Err(PreflightFailure::unresolved(
-            SweepFailureReason::ResolverZero,
-        )));
-    }
+    let destination = match resolve_destination(evm, config, candidate)? {
+        Ok(destination) => destination,
+        Err(reason) => return Ok(Err(PreflightFailure::unresolved(reason))),
+    };
 
     // Defence in depth: the Registry refuses self-referencing registrations, so
     // this can only fire on a record written before that check existed. Sweeping
@@ -1319,10 +1320,9 @@ where
 {
     let mut outcome = SweepOutcome::default();
     let registry = config.registry_address;
-    // Counted so that quota exhaustion is never silent. The two `break`s below
-    // and `take` above all discard triggers that were never looked at, and
-    // whether any of them pointed at a registered source is unknowable without
-    // spending the budget that just ran out.
+    // Track whether execution stopped before all collected triggers were
+    // preflighted. Candidate collection separately records truncation at its
+    // own bounded allowance.
     let mut preflighted = 0usize;
     for trigger in triggers.iter().copied().take(plan.preflight_allowance()) {
         if outcome.block_effect.checked_candidates() == plan.candidate_allowance() {
@@ -1369,7 +1369,7 @@ where
         outcome.block_effect.record_execution();
         execute_prepared_sweep(evm, config, prepared, receipt_prefix_logs, &mut outcome)?;
     }
-    outcome.triggers_dropped = triggers.len().saturating_sub(preflighted);
+    outcome.trigger_batch_truncated = preflighted < triggers.len();
     Ok(outcome)
 }
 
@@ -1594,10 +1594,11 @@ mod tests {
         ];
         let plan = SweepBlockSession::default().plan();
 
-        let triggers = collect_transaction_sweep_triggers(&logs, Some(refund), REGISTRY, &plan);
+        let collected = collect_transaction_sweep_triggers(&logs, Some(refund), REGISTRY, &plan);
 
+        assert!(!collected.truncated);
         assert_eq!(
-            triggers,
+            collected.triggers,
             vec![
                 SweepTrigger {
                     candidate: requested,
@@ -1613,10 +1614,38 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(
-            collect_transaction_sweep_triggers(&logs, Some(main_transfer), REGISTRY, &plan),
-            triggers[..2]
+        let deduplicated =
+            collect_transaction_sweep_triggers(&logs, Some(main_transfer), REGISTRY, &plan);
+        assert!(!deduplicated.truncated);
+        assert_eq!(deduplicated.triggers, collected.triggers[..2]);
+    }
+
+    #[test]
+    fn collection_reports_truncation_at_and_after_zero_allowance() {
+        let logs = (1..=MAX_PREFLIGHTS_PER_TX + 1)
+            .map(|index| {
+                transfer_log(
+                    Address::with_last_byte(u8::try_from(index).unwrap()),
+                    Address::ZERO,
+                    SOURCE,
+                    U256::from(1),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let bounded = collect_transaction_sweep_triggers(
+            &logs,
+            None,
+            REGISTRY,
+            &SweepBlockSession::default().plan(),
         );
+        assert_eq!(bounded.triggers.len(), MAX_PREFLIGHTS_PER_TX);
+        assert!(bounded.truncated);
+
+        let exhausted =
+            collect_transaction_sweep_triggers(&logs[..1], None, REGISTRY, &SweepTxPlan::default());
+        assert!(exhausted.triggers.is_empty());
+        assert!(exhausted.truncated);
     }
 
     #[test]
@@ -1653,13 +1682,7 @@ mod tests {
         assert_eq!(&log.data.data[60..], &0x0102_0304_u32.to_be_bytes());
     }
 
-    /// Registry states the resolver must distinguish.
-    ///
-    /// The resolver reads Registry storage with `SLOAD` instead of calling
-    /// `resolveSweep`, so these configure storage, not bytecode. The call-shaped
-    /// failure modes the old `STATICCALL` needed (`Malformed`, `Revert`,
-    /// `Mutating`) are gone: with no call there is no malformed return value, no
-    /// resolver revert, and no way for the Registry to mutate state mid-resolve.
+    /// Registry resolver behaviors the preflight must distinguish.
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     enum ResolverMode {
         /// Source registered and enabled, token whitelisted.
@@ -1672,6 +1695,10 @@ mod tests {
         TokenNotWhitelisted,
         /// Record whose destination is the source itself.
         SelfReference,
+        /// Resolver returns a non-ABI address value.
+        Malformed,
+        /// Resolver reverts.
+        Revert,
     }
 
     #[derive(Clone, Copy)]
@@ -1768,51 +1795,50 @@ mod tests {
         asm.op(0xf3);
     }
 
+    fn registry_code(mode: ResolverMode) -> Bytes {
+        let mut asm = Assembler::new();
+        match mode {
+            ResolverMode::Destination => {
+                return_word(&mut asm, B256::left_padding_from(DESTINATION.as_slice()))
+            }
+            ResolverMode::SelfReference => {
+                return_word(&mut asm, B256::left_padding_from(SOURCE.as_slice()))
+            }
+            ResolverMode::Unregistered
+            | ResolverMode::Disabled
+            | ResolverMode::TokenNotWhitelisted => return_word(&mut asm, B256::ZERO),
+            ResolverMode::Malformed => {
+                asm.push_u8(0);
+                asm.push_u8(0);
+                asm.op(0x52);
+                asm.push_u8(1);
+                asm.push_u8(0);
+                asm.op(0xf3);
+            }
+            ResolverMode::Revert => {
+                asm.push_u8(0);
+                asm.push_u8(0);
+                asm.op(0xfd);
+            }
+        }
+        asm.finish()
+    }
+
     fn test_sweep_config() -> SweepConfig {
         SweepConfig {
             registry_address: REGISTRY,
         }
     }
 
-    /// Writes the Registry account and the storage the resolver reads.
-    ///
-    /// Mirrors `SweepRegistry`'s frozen layout: `sources` at slot 253 with
-    /// `destination` in the low 20 bytes of `base + 0` and `enabled` at byte
-    /// offset 20, `tokenWhitelist` at slot 254. The Registry keeps code because
-    /// the real one has code — the resolver simply never calls it.
+    /// Installs a test Registry with the requested resolver behavior.
     fn insert_registry_state<ExtDB: DatabaseRef>(
         db: &mut CacheDB<ExtDB>,
         mode: ResolverMode,
-        tokens: &[Address],
+        _tokens: &[Address],
     ) where
         ExtDB::Error: std::fmt::Debug,
     {
-        insert_code(db, REGISTRY, Bytes::from_static(&[0x00]));
-
-        let (destination, enabled, whitelisted) = match mode {
-            ResolverMode::Destination => (Some(DESTINATION), true, true),
-            ResolverMode::Unregistered => (None, false, true),
-            ResolverMode::Disabled => (Some(DESTINATION), false, true),
-            ResolverMode::TokenNotWhitelisted => (Some(DESTINATION), true, false),
-            ResolverMode::SelfReference => (Some(SOURCE), true, true),
-        };
-
-        if let Some(destination) = destination {
-            let base = compute_mapping_slot_for_address(REGISTRY_SOURCES_SLOT, SOURCE);
-            let mut word = U256::from_be_slice(destination.as_slice());
-            if enabled {
-                word |= U256::from(1u64) << (8 * SOURCE_RECORD_ENABLED_OFFSET);
-            }
-            db.insert_account_storage(REGISTRY, base, word).unwrap();
-        }
-
-        if whitelisted {
-            for token in tokens {
-                let slot = compute_mapping_slot_for_address(REGISTRY_TOKEN_WHITELIST_SLOT, *token);
-                db.insert_account_storage(REGISTRY, slot, U256::from(1u64))
-                    .unwrap();
-            }
-        }
+        insert_code(db, REGISTRY, registry_code(mode));
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2169,8 +2195,10 @@ mod tests {
 
     /// Every classification, in declaration order. Adding a variant without
     /// adding it here makes the label/encoding tests fail to cover it.
-    const fn all_failure_reasons() -> [SweepFailureReason; 16] {
+    const fn all_failure_reasons() -> [SweepFailureReason; 18] {
         [
+            SweepFailureReason::ResolverCallFailed,
+            SweepFailureReason::ResolverMalformed,
             SweepFailureReason::ResolverZero,
             SweepFailureReason::SelfReference,
             SweepFailureReason::BalanceCallFailed,
@@ -2598,6 +2626,11 @@ mod tests {
     #[test]
     fn unresolved_and_empty_candidates_emit_no_failure_log() {
         for (mode, expected) in [
+            (ResolverMode::Revert, SweepFailureReason::ResolverCallFailed),
+            (
+                ResolverMode::Malformed,
+                SweepFailureReason::ResolverMalformed,
+            ),
             (ResolverMode::Unregistered, SweepFailureReason::ResolverZero),
             (ResolverMode::Destination, SweepFailureReason::BalanceZero),
         ] {
@@ -2659,10 +2692,10 @@ mod tests {
         );
     }
 
-    /// Quota exhaustion must never be silent. Triggers discarded before preflight
-    /// are unattributable, so the count is the only signal that work was dropped.
+    /// Quota exhaustion must never be silent. The outcome records that the batch
+    /// was truncated without claiming an exact number of unchecked triggers.
     #[test]
-    fn triggers_dropped_counts_quota_exhausted_triggers() {
+    fn execution_reports_a_truncated_trigger_batch() {
         const OVERFLOW: usize = 5;
         let mut evm = make_evm(ResolverMode::Unregistered, &[], None, true);
         let triggers = (1..=MAX_PREFLIGHTS_PER_TX + OVERFLOW)
@@ -2688,7 +2721,7 @@ mod tests {
             outcome.block_effect.preflighted_candidates(),
             MAX_PREFLIGHTS_PER_TX
         );
-        assert_eq!(outcome.triggers_dropped, OVERFLOW);
+        assert!(outcome.trigger_batch_truncated);
     }
 
     #[test]
@@ -2698,18 +2731,18 @@ mod tests {
             BalanceMode::Normal,
             TransferMode::True,
         );
-        assert_eq!(outcome.triggers_dropped, 0);
+        assert!(!outcome.trigger_batch_truncated);
     }
 
-    /// Every Registry state that must not produce a sweep, classified.
-    ///
-    /// The resolver is two `SLOAD`s, so the call-shaped failures the old
-    /// `STATICCALL` had to classify (`ResolverCallFailed`, `ResolverMalformed`)
-    /// are unreachable by construction and no longer exist. A read also cannot
-    /// mutate the Registry, so the former "mutating resolver" case is gone too.
+    /// Every Registry result that must not produce a sweep, classified.
     #[test]
     fn non_sweepable_registry_states_are_skipped_without_touching_balances() {
         for (mode, expected) in [
+            (ResolverMode::Revert, SweepFailureReason::ResolverCallFailed),
+            (
+                ResolverMode::Malformed,
+                SweepFailureReason::ResolverMalformed,
+            ),
             (ResolverMode::Unregistered, SweepFailureReason::ResolverZero),
             (ResolverMode::Disabled, SweepFailureReason::ResolverZero),
             (
@@ -2730,10 +2763,6 @@ mod tests {
             );
         }
     }
-
-    // Removed: `pinned_token_code_and_minimum_are_enforced_before_execution`.
-    // Token-code pinning and minimum-amount policy were part of the EIP-7702
-    // delegate model and are no longer enforced in the direct-CALL sweep.
 
     #[test]
     fn journal_scope_allows_only_token_storage_and_nonpersistent_warming() {
@@ -3209,7 +3238,12 @@ mod tests {
         let mut tx = main_tx();
         tx.rlp_bytes = Some(raw);
         assert!(evm.transact_one(tx).unwrap().is_success());
-        assert_eq!(evm.take_sweep_outcome().unwrap(), SweepOutcome::default());
+        let outcome = evm.take_sweep_outcome().unwrap();
+        assert!(outcome.trigger_batch_truncated);
+        assert_eq!(outcome.block_effect, SweepBlockEffect::default());
+        assert!(outcome.logs.is_empty());
+        assert!(outcome.successes.is_empty());
+        assert!(outcome.failures.is_empty());
         assert_eq!(
             token_balance(&mut evm, TOKEN_A),
             U256::from(INITIAL_BALANCE)

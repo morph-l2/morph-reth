@@ -38,14 +38,11 @@ const SWEEP_FAILED_TOPIC: B256 =
     b256!("0f64fa58e4261d8832b5ea6c262c691ef36e73cb21998c4fb01a83997940797c");
 
 /// Runtime produced by solc 0.8.30 (optimizer runs=200, metadata disabled) from
-/// `tests/assets/SweepFixtures.sol::TestSweepRegistry`.
+/// `contracts/contracts/test/MockSweepRegistryEL.sol` in the morph repository.
 ///
-/// It is a deterministic test double, not production Registry bytecode.
-/// Runtime of `MockSweepRegistryEL` (morph repo:
-/// `contracts/contracts/test/MockSweepRegistryEL.sol`). Its storage layout is
-/// deliberately identical to the production `SweepRegistry` — `sources` on slot
-/// 253, `tokenWhitelist` on 254 — because the EL resolves candidates by reading
-/// those slots directly. Regenerate with:
+/// It is a deterministic test double, not production Registry bytecode. The EL
+/// resolves candidates through the production `resolveSweep(address,address)` ABI.
+/// Regenerate with:
 ///   jq -r '.deployedBytecode.object' \
 ///     forge-artifacts/MockSweepRegistryEL.sol/MockSweepRegistryEL.json
 const TEST_REGISTRY_RUNTIME: &str = "0x608060405234801561000f575f80fd5b5060043610610064575f3560e01c80639faa2f2f1161004d5780639faa2f2f146100b4578063b750bdde146100ec578063ba1b6c8414610178575f80fd5b8063663a375c14610068578063753d75631461007d575b5f80fd5b61007b610076366004610366565b610230565b005b61009f61008b366004610397565b60fe6020525f908152604090205460ff1681565b60405190151581526020015b60405180910390f35b6100c76100c2366004610366565b61028e565b60405173ffffffffffffffffffffffffffffffffffffffff90911681526020016100ab565b6101466100fa366004610397565b60fd6020525f90815260409020805460019091015473ffffffffffffffffffffffffffffffffffffffff82169174010000000000000000000000000000000000000000900460ff169083565b6040805173ffffffffffffffffffffffffffffffffffffffff90941684529115156020840152908201526060016100ab565b61007b6101863660046103b7565b73ffffffffffffffffffffffffffffffffffffffff9283165f90815260fe60209081526040808320805460017fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff00909116179055938516825260fd90529190912080547fffffffffffffffffffffff00000000000000000000000000000000000000000016919092169081179015157401000000000000000000000000000000000000000002179055565b8073ffffffffffffffffffffffffffffffffffffffff168273ffffffffffffffffffffffffffffffffffffffff167f24e3f180db341974dcd99a5e223d9d944422e303230ddde6659302f8620bbcff60405160405180910390a35050565b73ffffffffffffffffffffffffffffffffffffffff8082165f90815260fd60209081526040808320938616835260fe90915281205490919060ff1680156102ee5750805474010000000000000000000000000000000000000000900460ff165b80156103105750805473ffffffffffffffffffffffffffffffffffffffff1615155b15610333575473ffffffffffffffffffffffffffffffffffffffff169050610338565b5f9150505b92915050565b803573ffffffffffffffffffffffffffffffffffffffff81168114610361575f80fd5b919050565b5f8060408385031215610377575f80fd5b6103808361033e565b915061038e6020840161033e565b90509250929050565b5f602082840312156103a7575f80fd5b6103b08261033e565b9392505050565b5f805f606084860312156103c9575f80fd5b6103d28461033e565b92506103e06020850161033e565b91506103ee6040850161033e565b9050925092509256fea164736f6c6343000818000a";
@@ -1111,7 +1108,7 @@ fn addr_word(a: Address) -> [u8; 32] {
 }
 
 /// Produces the source's EIP-712 `SweepAuthorization` signature
-/// (65-byte r||s||v) exactly as the production Registry verifies it (§5.3).
+/// (65-byte r||s||v) exactly as the production Registry verifies it.
 #[derive(Debug, Clone, Copy)]
 struct SourceAuthorization {
     source: Address,

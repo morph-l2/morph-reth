@@ -58,12 +58,10 @@ pub const L2_MESSAGE_QUEUE_ADDRESS: Address = address!("530000000000000000000000
 
 /// Sweep Registry proxy address (Onyx hardfork).
 ///
-/// Deployed via deterministic CREATE2 (solady factory
-/// `0x4e59b44847b379578588920cA78FbF26c0B4956C`). The address is
-/// identical on every network that shares the same locking factors:
-/// - SweepRegistry source (`forge-artifacts/SweepRegistry.sol/SweepRegistry.json`)
-/// - solc 0.8.24, optimizer runs 999 999, OZ 4.9.3
-/// - ProxyAdmin = `0x530000000000000000000000000000000000000b`
+/// The address is derived from the production Registry deployment inputs:
+/// the deployed `SweepRegistry` implementation, solc 0.8.24 with optimizer
+/// runs 999_999, OZ 4.9.3, and ProxyAdmin =
+/// `0x530000000000000000000000000000000000000b`.
 pub const SWEEP_REGISTRY_ADDRESS: Address = address!("Ddb0b56D29D121aD0FEFfb10395FC34b4eeA0692");
 
 /// Storage slot for the withdraw trie root (`messageRoot`) in L2MessageQueue contract.
