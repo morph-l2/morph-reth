@@ -2,7 +2,7 @@ use crate::schema::{MorphTestSuite, MorphTestUnit, SchemaError, parse_fork};
 use alloy_evm::{Evm, EvmEnv};
 use alloy_primitives::{B256, Bytes};
 use alloy_trie::{HashBuilder, Nibbles, TrieAccount, root::storage_root_unhashed};
-use morph_chainspec::hardfork::MorphHardfork;
+use morph_chainspec::{constants::SWEEP_REGISTRY_ADDRESS, hardfork::MorphHardfork};
 use morph_evm::{MorphBlockEnv, evm::MorphEvm};
 use morph_revm::{MAX_CANDIDATES_PER_TX, SweepConfig, SweepExecutionMode, SweepTxPlan};
 use revm::{
@@ -17,16 +17,12 @@ use std::{fs, io::stderr, path::Path};
 use thiserror::Error;
 
 const MORPH_STATE_TEST_FEE_VAULT_ADDRESS: Address =
-    address!("48442aa154897eef141df231cc1517fc8c1d170f");
+    address!("530000000000000000000000000000000000000a");
 
-/// Canonical sweep registry address for Onyx statetest vectors.
-///
-/// Mirrors the `sweepRegistryAddress` used by the test chain
-/// config and the morph-node e2e suite, so the same fixtures resolve against a
-/// registry the `pre` state deploys at this address. A fixture may override it
-/// via `sweepRegistry`.
-const MORPH_STATE_TEST_SWEEP_REGISTRY: Address =
-    address!("5300000000000000000000000000000000000023");
+/// Default Registry address for Onyx statetest vectors. Fixtures may override it
+/// with `sweepRegistry`; the embedded Registry below remains a test double for
+/// the production `resolveSweep(address,address)` ABI.
+const MORPH_STATE_TEST_SWEEP_REGISTRY: Address = SWEEP_REGISTRY_ADDRESS;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RunnerOptions {
@@ -152,7 +148,7 @@ fn execute_case(
         Err(error) => return Err(error.into()),
     };
     // From Onyx onward the EL sweeps whitelisted ERC-20 inflows to the
-    // registered master after the main transaction. A single statetest runs one
+    // registered destination after the main transaction. A single statetest runs one
     // transaction, so the per-transaction candidate cap is the whole allowance.
     let sweep = fork.is_onyx().then(|| SweepConfig {
         registry_address: unit
@@ -383,8 +379,8 @@ mod tests {
 
     const SENDER: Address = address!("a94f5374fce5edbc8e2a8697c15331677e6ebf0b");
     const TOKEN: Address = address!("00000000000000000000000000000000000000aa");
-    const DEPOSIT: Address = address!("00000000000000000000000000000000000000d0");
-    const MASTER: Address = address!("00000000000000000000000000000000000000e0");
+    const SOURCE: Address = address!("00000000000000000000000000000000000000d0");
+    const DESTINATION: Address = address!("00000000000000000000000000000000000000e0");
     const AMOUNT: u64 = 1000;
 
     fn erc20_balance_slot(account: Address) -> B256 {
@@ -394,17 +390,17 @@ mod tests {
         keccak256(preimage)
     }
 
-    fn registry_master_slot(token: Address, deposit: Address) -> B256 {
+    fn mock_registry_destination_slot(token: Address, source: Address) -> B256 {
         let mut inner_preimage = [0u8; 64];
         inner_preimage[12..32].copy_from_slice(token.as_slice());
         let inner = keccak256(inner_preimage);
         let mut outer_preimage = [0u8; 64];
-        outer_preimage[12..32].copy_from_slice(deposit.as_slice());
+        outer_preimage[12..32].copy_from_slice(source.as_slice());
         outer_preimage[32..64].copy_from_slice(inner.as_slice());
         keccak256(outer_preimage)
     }
 
-    fn registry_whitelist_slot(token: Address) -> B256 {
+    fn mock_registry_token_whitelist_slot(token: Address) -> B256 {
         let mut preimage = [0u8; 64];
         preimage[12..32].copy_from_slice(token.as_slice());
         preimage[63] = 1;
@@ -415,14 +411,14 @@ mod tests {
         hex::encode_prefixed(value)
     }
 
-    /// A `transfer(deposit, AMOUNT)` inflow triggers the EL sweep only under
-    /// Onyx: the deposit balance is swept to master and extra logs are appended,
-    /// so both the state root and the logs root diverge from the Jade run.
+    /// A `transfer(source, AMOUNT)` inflow triggers the EL sweep only under
+    /// Onyx: the source balance is swept to destination and extra logs are
+    /// appended, so both the state root and logs root diverge from the Jade run.
     #[test]
-    fn onyx_sweeps_inflow_to_master_and_diverges_from_jade() {
+    fn onyx_sweeps_inflow_to_destination_and_diverges_from_jade() {
         let transfer_data = {
             let mut data = vec![0xa9, 0x05, 0x9c, 0xbb];
-            data.extend_from_slice(B256::left_padding_from(DEPOSIT.as_slice()).as_slice());
+            data.extend_from_slice(B256::left_padding_from(SOURCE.as_slice()).as_slice());
             data.extend_from_slice(&U256::from(AMOUNT).to_be_bytes::<32>());
             hex::encode_prefixed(data)
         };
@@ -441,8 +437,8 @@ mod tests {
                 "pre": {{
                   "{sender}": {{ "balance": "0x3635c9adc5dea00000", "nonce": "0x0", "code": "0x", "storage": {{}} }},
                   "{token}": {{ "balance": "0x0", "nonce": "0x0", "code": "{erc20}", "storage": {{ "{sender_bal_slot}": "{amount_word}" }} }},
-                  "{deposit}": {{ "balance": "0x0", "nonce": "0x0", "code": "0x", "storage": {{}} }},
-                  "{registry}": {{ "balance": "0x0", "nonce": "0x0", "code": "{registry_code}", "storage": {{ "{master_slot}": "{master_word}", "{whitelist_slot}": "0x01" }} }}
+                  "{source}": {{ "balance": "0x0", "nonce": "0x0", "code": "0x", "storage": {{}} }},
+                  "{registry}": {{ "balance": "0x0", "nonce": "0x0", "code": "{registry_code}", "storage": {{ "{destination_slot}": "{destination_word}", "{whitelist_slot}": "0x01" }} }}
                 }},
                 "transaction": {{
                   "nonce": "0x0",
@@ -462,15 +458,15 @@ mod tests {
             }}"#,
             sender = hex::encode_prefixed(SENDER),
             token = hex::encode_prefixed(TOKEN),
-            deposit = hex::encode_prefixed(DEPOSIT),
+            source = hex::encode_prefixed(SOURCE),
             registry = hex::encode_prefixed(MORPH_STATE_TEST_SWEEP_REGISTRY),
             erc20 = SLOT1_ERC20_RUNTIME,
             registry_code = TEST_REGISTRY_RUNTIME,
             sender_bal_slot = word(erc20_balance_slot(SENDER)),
             amount_word = word(B256::from(U256::from(AMOUNT).to_be_bytes())),
-            master_slot = word(registry_master_slot(TOKEN, DEPOSIT)),
-            whitelist_slot = word(registry_whitelist_slot(TOKEN)),
-            master_word = word(B256::left_padding_from(MASTER.as_slice())),
+            destination_slot = word(mock_registry_destination_slot(TOKEN, SOURCE)),
+            whitelist_slot = word(mock_registry_token_whitelist_slot(TOKEN)),
+            destination_word = word(B256::left_padding_from(DESTINATION.as_slice())),
             data = transfer_data,
         );
 
@@ -496,7 +492,7 @@ mod tests {
         );
         assert_ne!(
             jade.state_root, onyx.state_root,
-            "Onyx sweep must move the deposit balance to master and change the state root"
+            "Onyx sweep must move the source balance to the destination and change the state root"
         );
         assert_ne!(
             jade.logs_root, onyx.logs_root,
@@ -510,7 +506,7 @@ mod tests {
     fn onyx_without_registry_matches_jade() {
         let transfer_data = {
             let mut data = vec![0xa9, 0x05, 0x9c, 0xbb];
-            data.extend_from_slice(B256::left_padding_from(DEPOSIT.as_slice()).as_slice());
+            data.extend_from_slice(B256::left_padding_from(SOURCE.as_slice()).as_slice());
             data.extend_from_slice(&U256::from(AMOUNT).to_be_bytes::<32>());
             hex::encode_prefixed(data)
         };

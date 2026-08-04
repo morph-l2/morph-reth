@@ -30,11 +30,10 @@ pub struct MorphTestUnit {
     pub transaction: MorphTransactionParts,
     #[serde(default)]
     pub out: Option<Bytes>,
-    /// Optional sweep registry address for Onyx sweep vectors.
-    ///
-    /// When a fixture omits it, the runner falls back to the canonical
-    /// statetest registry address so existing suites stay a no-op unless the
-    /// `pre` state actually deploys a registry there.
+    /// Optional Registry address for this statetest fixture only. It selects
+    /// the address whose pre-state contains the test double; it does not alter
+    /// the chain specification or production Registry deployment. Onyx cases
+    /// without this field use the canonical chainspec address.
     #[serde(default, rename = "sweepRegistry")]
     pub sweep_registry: Option<Address>,
 }

@@ -1394,7 +1394,7 @@ mod tests {
     };
     use std::{collections::HashMap, fmt};
 
-    const REGISTRY: Address = address!("5300000000000000000000000000000000000023");
+    const REGISTRY: Address = address!("0000000000000000000000000000000000009001");
     const SOURCE: Address = address!("1000000000000000000000000000000000000001");
     const DESTINATION: Address = address!("2000000000000000000000000000000000000002");
     const TOKEN_A: Address = address!("3000000000000000000000000000000000000003");
