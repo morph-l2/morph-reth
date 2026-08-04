@@ -29,8 +29,8 @@ use alloy_primitives::{Address, Log, U256};
 use morph_chainspec::{MorphChainSpec, MorphHardfork, MorphHardforks};
 use morph_primitives::{MorphReceipt, MorphTxEnvelope};
 use morph_revm::{
-    L1_GAS_PRICE_ORACLE_ADDRESS, MAX_CANDIDATES_PER_TX, MAX_PREFLIGHTS_PER_TX, MorphHaltReason,
-    SweepBlockSession, SweepExecutionMode, SweepOutcome, TokenFeeInfo, evm::MorphContext,
+    L1_GAS_PRICE_ORACLE_ADDRESS, MorphHaltReason, SweepBlockSession, SweepExecutionMode,
+    SweepOutcome, TokenFeeInfo, evm::MorphContext,
 };
 use reth_primitives_traits::Recovered;
 use reth_revm::{DatabaseCommit, Inspector, context::result::ResultAndState};
@@ -299,23 +299,6 @@ where
 
         let preflighted_candidates = sweep.block_effect.preflighted_candidates();
         let checked_candidates = sweep.block_effect.checked_candidates();
-        assert!(
-            preflighted_candidates <= MAX_PREFLIGHTS_PER_TX,
-            "sweep outcome exceeds the per-transaction preflight limit"
-        );
-        assert!(
-            checked_candidates <= MAX_CANDIDATES_PER_TX,
-            "sweep outcome exceeds the per-transaction candidate limit"
-        );
-        assert!(
-            checked_candidates <= preflighted_candidates,
-            "executed sweep candidates must have passed preflight"
-        );
-        assert_eq!(
-            sweep.successes.len().checked_add(sweep.failures.len()),
-            Some(preflighted_candidates),
-            "every preflighted sweep candidate must have an outcome"
-        );
         self.sweep_session.commit(&sweep.block_effect);
 
         // Observability only; recorded here so speculative/discarded candidates

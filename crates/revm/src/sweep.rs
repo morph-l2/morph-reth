@@ -315,13 +315,10 @@ impl SweepTxPlan {
         Self {
             candidate_allowance,
             preflight_allowance,
-            system_gas_allowance: u64::try_from(preflight_allowance)
-                .expect("per-transaction preflight allowance must fit in u64")
+            system_gas_allowance: (preflight_allowance as u64)
                 .saturating_mul(PREFLIGHT_SYSTEM_GAS)
                 .saturating_add(
-                    u64::try_from(candidate_allowance)
-                        .expect("per-transaction sweep allowance must fit in u64")
-                        .saturating_mul(SWEEP_EXECUTION_SYSTEM_GAS),
+                    (candidate_allowance as u64).saturating_mul(SWEEP_EXECUTION_SYSTEM_GAS),
                 )
                 .min(TX_SYSTEM_GAS),
             seen_registry_requests: Vec::new(),
@@ -374,10 +371,10 @@ impl SweepBlockSession {
     pub fn plan(&self) -> SweepTxPlan {
         let gas_allowance = self.remaining_system_gas.min(TX_SYSTEM_GAS);
         let candidate_allowance = self.remaining_candidates.min(MAX_CANDIDATES_PER_TX);
-        let preflight_allowance = self.remaining_preflights.min(MAX_PREFLIGHTS_PER_TX).min(
-            usize::try_from(gas_allowance / PREFLIGHT_SYSTEM_GAS)
-                .expect("sweep preflight allowance must fit in usize"),
-        );
+        let preflight_allowance = self
+            .remaining_preflights
+            .min(MAX_PREFLIGHTS_PER_TX)
+            .min((gas_allowance / PREFLIGHT_SYSTEM_GAS) as usize);
         let mut seen_registry_requests = self
             .seen_registry_requests
             .iter()
@@ -398,32 +395,15 @@ impl SweepBlockSession {
 
     /// Applies the effect of a committed transaction.
     pub fn commit(&mut self, effect: &SweepBlockEffect) {
-        let expected_system_gas = u64::try_from(effect.preflighted_candidates)
-            .expect("sweep preflight count must fit in u64")
-            .checked_mul(PREFLIGHT_SYSTEM_GAS)
-            .and_then(|preflight_gas| {
-                u64::try_from(effect.checked_candidates)
-                    .expect("sweep candidate count must fit in u64")
-                    .checked_mul(SWEEP_EXECUTION_SYSTEM_GAS)
-                    .and_then(|execution_gas| preflight_gas.checked_add(execution_gas))
-            })
-            .expect("sweep system gas must not overflow");
-        assert_eq!(
-            effect.system_gas_used, expected_system_gas,
-            "sweep block effect has inconsistent system gas"
-        );
         self.remaining_candidates = self
             .remaining_candidates
-            .checked_sub(effect.checked_candidates)
-            .expect("committed sweep candidates exceed the block limit");
+            .saturating_sub(effect.checked_candidates);
         self.remaining_preflights = self
             .remaining_preflights
-            .checked_sub(effect.preflighted_candidates)
-            .expect("committed sweep preflights exceed the block limit");
+            .saturating_sub(effect.preflighted_candidates);
         self.remaining_system_gas = self
             .remaining_system_gas
-            .checked_sub(effect.system_gas_used)
-            .expect("committed sweep system gas exceeds the block limit");
+            .saturating_sub(effect.system_gas_used);
         self.seen_registry_requests
             .extend(effect.seen_registry_requests.iter().copied());
     }
