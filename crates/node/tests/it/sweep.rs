@@ -1218,7 +1218,6 @@ async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
     let fee_source_signer = morph_node::test_utils::wallet_at_index(8, 2910);
     let fee_source = fee_source_signer.address();
     let (mut nodes, wallet) = TestNodeBuilder::new()
-        .with_sweep_config(PROD_REGISTRY)
         .with_account_code(TEST_TOKEN_ADDRESS, SLOT1_ERC20_RUNTIME_CODE)
         .with_account_code(PROD_REGISTRY, PROD_REGISTRY_RUNTIME.trim())
         .with_account_storage(PROD_REGISTRY, B256::ZERO, address_topic(SENDER))

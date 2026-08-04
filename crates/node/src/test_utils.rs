@@ -284,22 +284,6 @@ impl TestNodeBuilder {
         self
     }
 
-    /// Override the consensus-pinned Onyx sweep registry address.
-    pub fn with_sweep_config(mut self, registry: Address) -> Self {
-        let morph = self
-            .genesis_json
-            .get_mut("config")
-            .and_then(serde_json::Value::as_object_mut)
-            .and_then(|config| config.get_mut("morph"))
-            .and_then(serde_json::Value::as_object_mut)
-            .expect("test genesis config.morph must be an object");
-        morph.insert(
-            "sweepRegistryAddress".to_string(),
-            serde_json::json!(registry.to_string()),
-        );
-        self
-    }
-
     /// Override an account's runtime bytecode in the test genesis.
     pub fn with_account_code(mut self, address: Address, code: impl Into<String>) -> Self {
         let alloc = self

@@ -225,11 +225,8 @@ mod tests {
         Arc::new(MorphChainSpec::from(genesis))
     }
 
-    fn create_onyx_chainspec(
-        onyx_time: u64,
-        registry_address: Option<alloy_primitives::Address>,
-    ) -> Arc<MorphChainSpec> {
-        let mut genesis_json = serde_json::json!({
+    fn create_onyx_chainspec(onyx_time: u64) -> Arc<MorphChainSpec> {
+        let genesis_json = serde_json::json!({
             "config": {
                 "chainId": 1337,
                 "homesteadBlock": 0,
@@ -258,9 +255,6 @@ mod tests {
             },
             "alloc": {}
         });
-        if let Some(address) = registry_address {
-            genesis_json["config"]["morph"]["sweepRegistryAddress"] = serde_json::json!(address);
-        }
         let genesis: alloy_genesis::Genesis = serde_json::from_value(genesis_json).unwrap();
         Arc::new(MorphChainSpec::from(genesis))
     }
@@ -346,7 +340,7 @@ mod tests {
 
     #[test]
     fn test_onyx_populates_sweep_config() {
-        let chain_spec = create_onyx_chainspec(100, None);
+        let chain_spec = create_onyx_chainspec(100);
         let config = MorphEvmConfig::new_with_default_factory(chain_spec);
 
         let env = config.evm_env(&create_morph_header(100, 100)).unwrap();
@@ -373,7 +367,7 @@ mod tests {
 
     #[test]
     fn test_pre_onyx_ignores_sweep() {
-        let chain_spec = create_onyx_chainspec(100, None);
+        let chain_spec = create_onyx_chainspec(100);
         let config = MorphEvmConfig::new_with_default_factory(chain_spec);
 
         let env = config.evm_env(&create_morph_header(99, 99)).unwrap();

@@ -22,8 +22,7 @@
     "jadeForkTime": 0,
     "onyxTime": 0,
     "morph": {
-      "feeVaultAddress": "0x530000000000000000000000000000000000000a",
-      "sweepRegistryAddress": "0x5300000000000000000000000000000000000023"
+      "feeVaultAddress": "0x530000000000000000000000000000000000000a"
     }
   },
   "nonce": "0x0",
