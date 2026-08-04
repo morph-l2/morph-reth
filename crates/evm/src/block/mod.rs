@@ -325,7 +325,7 @@ where
             checked_candidates,
             sweep.successes.len(),
             &sweep.failures,
-            sweep.triggers_dropped,
+            sweep.trigger_batch_truncated,
             sweep.block_effect.system_gas_used(),
         );
 

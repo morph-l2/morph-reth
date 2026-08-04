@@ -33,15 +33,13 @@ pub(crate) struct SweepMetrics {
     /// value is an operational signal (misconfigured source or code deployment),
     /// not just a benign no-op.
     code_skipped_total: Counter,
-    /// Triggers discarded before preflight because a quota was already spent.
+    /// Committed transactions whose trigger batch was truncated before preflight.
     ///
-    /// The only signal that quota exhaustion dropped work: these triggers are
-    /// not attributable to a source and produce no `SweepFailed` log, so a
-    /// rising value means "some inflows may not have been swept and we cannot
-    /// say which" — it must be alarmed and reconciled against an off-chain
-    /// balance scan. `deferred_by_budget` covers only the narrower case where a
+    /// This is intentionally a batch count, not a trigger count: it signals that
+    /// at least one candidate-shaped log was left unchecked without scanning the
+    /// entire overflow. `deferred_by_budget` covers the narrower case where a
     /// candidate already passed preflight.
-    triggers_dropped_total: Counter,
+    trigger_batches_truncated_total: Counter,
     /// Fixed sweep system gas committed to blocks. Its rate against
     /// the per-block budget shows how close blocks run to the sweep cap.
     system_gas_total: Counter,
@@ -55,7 +53,7 @@ impl SweepMetrics {
         checked_candidates: usize,
         successes: usize,
         failures: &[SweepFailure],
-        triggers_dropped: usize,
+        trigger_batch_truncated: bool,
         system_gas_used: u64,
     ) {
         self.preflights_total
@@ -64,8 +62,8 @@ impl SweepMetrics {
             .increment(checked_candidates as u64);
         self.sweeps_total.increment(successes as u64);
         self.failures_total.increment(failures.len() as u64);
-        self.triggers_dropped_total
-            .increment(triggers_dropped as u64);
+        self.trigger_batches_truncated_total
+            .increment(u64::from(trigger_batch_truncated));
         self.system_gas_total.increment(system_gas_used);
 
         for failure in failures {

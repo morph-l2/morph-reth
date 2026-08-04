@@ -422,9 +422,9 @@ impl<DB: Database, I> MorphEvm<DB, I> {
         result: &ExecutionResult<MorphHaltReason>,
     ) -> Result<(), EVMError<DB::Error, MorphInvalidTransaction>> {
         let mode = std::mem::take(&mut self.sweep_execution_mode);
-        let (plan, trace_transaction) = match mode {
-            SweepExecutionMode::Disabled => (Default::default(), None),
-            SweepExecutionMode::Canonical(plan) => (plan, None),
+        let (plan, trace_transaction, authorized) = match mode {
+            SweepExecutionMode::Disabled => (Default::default(), None, false),
+            SweepExecutionMode::Canonical(plan) => (plan, None, true),
             SweepExecutionMode::TraceReplay => {
                 self.sweep_execution_mode = SweepExecutionMode::TraceReplay;
                 let transaction = sweep_trace_replay_transaction(self.tx.rlp_bytes.as_ref());
@@ -432,7 +432,8 @@ impl<DB: Database, I> MorphEvm<DB, I> {
                     .as_ref()
                     .map(|transaction| transaction.plan.clone())
                     .unwrap_or_default();
-                (plan, transaction)
+                let authorized = transaction.is_some();
+                (plan, transaction, authorized)
             }
         };
         self.sweep_outcome = Some(SweepOutcome::default());
@@ -445,11 +446,10 @@ impl<DB: Database, I> MorphEvm<DB, I> {
             finish_sweep_trace_replay_transaction(trace_transaction, &SweepBlockEffect::default());
             return Ok(());
         };
-        if plan.candidate_allowance() == 0 {
+        if !authorized {
             finish_sweep_trace_replay_transaction(trace_transaction, &SweepBlockEffect::default());
             return Ok(());
         }
-
         let Some(receipt_prefix_logs) = self
             .pre_fee_logs
             .len()
@@ -461,15 +461,22 @@ impl<DB: Database, I> MorphEvm<DB, I> {
                 SweepInvariantError::TransferLogOffsetOverflow.to_string(),
             ));
         };
-        let triggers = collect_transaction_sweep_triggers(
+        let collected = collect_transaction_sweep_triggers(
             logs,
             self.post_fee_sweep_candidate,
             config.registry_address,
             &plan,
         );
         let checkpoint = self.ctx_mut().journal_mut().checkpoint();
-        match execute_sweep_triggers(self, config, &triggers, receipt_prefix_logs, &plan) {
-            Ok(outcome) => {
+        match execute_sweep_triggers(
+            self,
+            config,
+            &collected.triggers,
+            receipt_prefix_logs,
+            &plan,
+        ) {
+            Ok(mut outcome) => {
+                outcome.trigger_batch_truncated |= collected.truncated;
                 self.ctx_mut().journal_mut().checkpoint_commit();
                 // Sweep logs are already cached in `outcome`; close this implicit
                 // transaction so a later discard cannot revert successful sweep state.
