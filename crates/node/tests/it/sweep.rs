@@ -5,7 +5,7 @@ use alloy_primitives::{Address, B256, Bytes, U256, address, b256, logs_bloom};
 use jsonrpsee::core::client::ClientT;
 use morph_node::test_utils::{
     HardforkSchedule, L1MessageBuilder, MorphTestNode, MorphTxBuilder, SLOT1_ERC20_RUNTIME_CODE,
-    TEST_TOKEN_ADDRESS, TEST_TOKEN_ID, TestNodeBuilder, make_sponsored_eip7702_call,
+    TEST_TOKEN_ADDRESS, TEST_TOKEN_ID, TestNodeBuilder,
 };
 use morph_payload_types::{
     AssembleL2BlockV2Params, ExecutableL2Data, MorphBuiltPayload, MorphPayloadTypes,
@@ -27,8 +27,6 @@ const CANDIDATE_EMITTER: Address = address!("50000000000000000000000000000000000
 const SENDER: Address = address!("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
 const AMOUNT: u64 = 123;
 const PROD_REGISTRY: Address = address!("Ddb0b56D29D121aD0FEFfb10395FC34b4eeA0692");
-const SLOT1_ERC20_CODE_HASH: B256 =
-    b256!("e71da1ef1d982047e78309f44c426e0870ac83a406380f3a2251d64d8cec943e");
 const TRANSFER_TOPIC: B256 =
     b256!("ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef");
 const REQUEST_TOPIC: B256 =
@@ -1147,7 +1145,7 @@ fn sign_source_auth(
     let mut dom = Vec::new();
     dom.extend_from_slice(domain_typehash.as_slice());
     dom.extend_from_slice(keccak256("SweepRegistry").as_slice());
-    dom.extend_from_slice(keccak256("2").as_slice());
+    dom.extend_from_slice(keccak256("1").as_slice());
     dom.extend_from_slice(&U256::from(chain_id).to_be_bytes::<32>());
     dom.extend_from_slice(&addr_word(registry));
     let domain_sep = keccak256(&dom);
@@ -1201,14 +1199,9 @@ fn register_calldata(
 
 /// Drives the EL against the production `SweepRegistry` (not the test double).
 ///
-/// TODO(onyx-v1): this test still targets the removed V2 registry — it deploys the
-/// V2 `SweepRegistry.deployed.hex`, calls the V2-only `setMasterApproval` /
-/// `setTokenPolicy(token, bool, codehash, minimum)` ABI, and registers a
-/// 7702-delegated (code-bearing) fee source that V1 rejects. Re-enable once the
-/// V1 production `SweepRegistry` runtime is regenerated and the flow is ported to
-/// the V1 ABI (`registerSweep` / `setTokenWhitelist` / `setSweepOperator`).
+/// The source accounts only sign EIP-712 authorizations; the destination submits
+/// ordinary `registerSweep` transactions, so neither source needs native ETH.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "V2 production-registry test; pending V1 rewrite (see TODO(onyx-v1) above)"]
 async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
@@ -1220,7 +1213,6 @@ async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
     let (mut nodes, wallet) = TestNodeBuilder::new()
         .with_account_code(TEST_TOKEN_ADDRESS, SLOT1_ERC20_RUNTIME_CODE)
         .with_account_code(PROD_REGISTRY, PROD_REGISTRY_RUNTIME.trim())
-        .with_account_storage(PROD_REGISTRY, B256::ZERO, address_topic(SENDER))
         .with_account_storage(
             TEST_TOKEN_ADDRESS,
             token_balance_slot(fee_source),
@@ -1234,6 +1226,28 @@ async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
     assert_eq!(owner, SENDER);
     let destination = owner;
     let deadline = u64::MAX;
+
+    // Initialize the directly injected production runtime before using its
+    // OwnableUpgradeable and EIP-712 state.
+    let mut init = vec![0xc4, 0xd6, 0x6d, 0xe8];
+    init.extend_from_slice(&addr_word(owner));
+    let init_tx = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
+        .with_v1_eth_fee()
+        .with_gas_limit(5_000_000)
+        .with_to(PROD_REGISTRY)
+        .with_data(init)
+        .build_signed()?;
+    node.rpc.inject_tx(init_tx).await?;
+    let init_payload = node.advance_block().await?;
+    let init_hash = *init_payload.block().body().transactions[0].tx_hash();
+    assert!(
+        node.inner
+            .provider
+            .receipt_by_hash(init_hash)?
+            .expect("init receipt")
+            .status(),
+        "initialize(owner) must succeed"
+    );
     let source_before = node.inner.provider.latest()?.basic_account(&source)?;
     assert_eq!(
         source_before
@@ -1241,65 +1255,43 @@ async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
             .map(|account| account.balance)
             .unwrap_or_default(),
         U256::ZERO,
-        "sponsored source must start with no native balance"
+        "source must start with no native balance"
     );
     assert_eq!(
         source_before
+            .as_ref()
             .map(|account| account.nonce)
             .unwrap_or_default(),
         0,
-        "sponsored source authorization nonce must start at zero"
+        "source must not send a registration transaction"
     );
 
-    // setMasterApproval(destination, true)
-    let mut destination_approval = vec![0x80, 0x53, 0xd0, 0xca];
-    destination_approval.extend_from_slice(&addr_word(destination));
-    destination_approval.extend_from_slice(&U256::from(1).to_be_bytes::<32>());
-    let tx0 = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
+    // Enable the token in the V1 Registry. The destination itself submits
+    // registerSweep below, so no EIP-7702 transaction or operator is needed.
+    let mut token_whitelist = vec![0xc9, 0xbc, 0xc9, 0x7e];
+    token_whitelist.extend_from_slice(&addr_word(TEST_TOKEN_ADDRESS));
+    token_whitelist.extend_from_slice(&U256::from(1).to_be_bytes::<32>());
+    let whitelist_tx = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 1)
         .with_v1_eth_fee()
         .with_gas_limit(5_000_000)
         .with_to(PROD_REGISTRY)
-        .with_data(destination_approval)
+        .with_data(token_whitelist)
         .build_signed()?;
-    node.rpc.inject_tx(tx0).await?;
-    let approval_payload = node.advance_block().await?;
-    let approval_hash = *approval_payload.block().body().transactions[0].tx_hash();
+    node.rpc.inject_tx(whitelist_tx).await?;
+    let whitelist_payload = node.advance_block().await?;
+    let whitelist_hash = *whitelist_payload.block().body().transactions[0].tx_hash();
+    let whitelist_receipt = node
+        .inner
+        .provider
+        .receipt_by_hash(whitelist_hash)?
+        .expect("token whitelist receipt");
     assert!(
-        node.inner
-            .provider
-            .receipt_by_hash(approval_hash)?
-            .expect("destination approval receipt")
-            .status(),
-        "setMasterApproval must succeed"
+        whitelist_receipt.status(),
+        "setTokenWhitelist must succeed: {whitelist_receipt:?}"
     );
 
-    // setTokenPolicy(token, true, token.codehash, minimumAmount)
-    let mut token_policy = vec![0x6c, 0x8c, 0x33, 0xf4];
-    token_policy.extend_from_slice(&addr_word(TEST_TOKEN_ADDRESS));
-    token_policy.extend_from_slice(&U256::from(1).to_be_bytes::<32>());
-    token_policy.extend_from_slice(SLOT1_ERC20_CODE_HASH.as_slice());
-    token_policy.extend_from_slice(&U256::from(1).to_be_bytes::<32>());
-    let tx1 = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 1)
-        .with_v1_eth_fee()
-        .with_gas_limit(5_000_000)
-        .with_to(PROD_REGISTRY)
-        .with_data(token_policy)
-        .build_signed()?;
-    node.rpc.inject_tx(tx1).await?;
-    let policy_payload = node.advance_block().await?;
-    let policy_hash = *policy_payload.block().body().transactions[0].tx_hash();
-    assert!(
-        node.inner
-            .provider
-            .receipt_by_hash(policy_hash)?
-            .expect("token policy receipt")
-            .status(),
-        "setTokenPolicy must succeed"
-    );
-
-    // Register a second, genesis-delegated zero-native source. Keeping this
-    // authority out of the preceding Type-4 authorization transaction isolates
-    // fee-refund sweeping from txpool authority-reservation timing.
+    // A source only signs the authorization. The destination submits the
+    // ordinary V1 registration transaction and pays its gas.
     let fee_source_sig = sign_source_auth(
         &fee_source_signer,
         SourceAuthorization {
@@ -1332,7 +1324,7 @@ async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
             .receipt_by_hash(fee_registration_hash)?
             .expect("fee source registration receipt")
             .status(),
-        "genesis-delegated fee source registration must succeed"
+        "registerSweep must succeed for a plain zero-native source"
     );
 
     // The registered zero-native source pays for a successful MorphTx with
@@ -1401,10 +1393,10 @@ async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
             .expect("delegated fee source account")
             .balance,
         U256::ZERO,
-        "fee-token execution must not require native balance"
+        "source token-fee execution must not require native balance"
     );
 
-    // registerSweep with the source's real EIP-712 signature
+    // Register the plain-EOA source with the destination's authorization.
     let sig = sign_source_auth(
         &source_signer,
         SourceAuthorization {
@@ -1416,16 +1408,13 @@ async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
             deadline,
         },
     )?;
-    let tx3 = make_sponsored_eip7702_call(
-        wallet.chain_id,
-        wallet.inner.clone(),
-        3,
-        source_signer,
-        0,
-        PROD_REGISTRY,
-        PROD_REGISTRY,
-        register_calldata(source, destination, 0, deadline, &sig),
-    )?;
+    // The destination submits the registration; the source remains a plain EOA.
+    let tx3 = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 3)
+        .with_v1_eth_fee()
+        .with_gas_limit(5_000_000)
+        .with_to(PROD_REGISTRY)
+        .with_data(register_calldata(source, destination, 0, deadline, &sig))
+        .build_signed()?;
     node.rpc.inject_tx(tx3).await?;
     let reg_payload = node.advance_block().await?;
     let reg_hash = *reg_payload.block().body().transactions[0].tx_hash();
@@ -1445,20 +1434,22 @@ async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
             .any(|l| l.address == PROD_REGISTRY),
         "registration must emit a SweepRegistered event from the Registry"
     );
-    let source_after_registration = node
-        .inner
-        .provider
-        .latest()?
-        .basic_account(&source)?
-        .expect("EIP-7702 authorization must create the source account");
+    let source_after_registration = node.inner.provider.latest()?.basic_account(&source)?;
     assert_eq!(
-        source_after_registration.balance,
+        source_after_registration
+            .as_ref()
+            .map(|account| account.balance)
+            .unwrap_or_default(),
         U256::ZERO,
-        "sponsored onboarding must not pre-fund the source"
+        "registration must not require native balance from the source"
     );
     assert_eq!(
-        source_after_registration.nonce, 1,
-        "authorization must consume the source EOA nonce"
+        source_after_registration
+            .as_ref()
+            .map(|account| account.nonce)
+            .unwrap_or_default(),
+        0,
+        "source must not send a registration transaction"
     );
 
     // Pinned-codehash inflow -> EL sweeps via the real resolveSweep.
