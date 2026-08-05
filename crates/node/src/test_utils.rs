@@ -589,51 +589,6 @@ pub fn make_eip7702_tx(chain_id: u64, signer: PrivateKeySigner, nonce: u64) -> e
     Ok(envelope.encoded_2718().into())
 }
 
-/// Creates a sponsored EIP-7702 call whose authorization is signed by a
-/// different, potentially zero-balance authority account.
-#[expect(clippy::too_many_arguments)]
-pub fn make_sponsored_eip7702_call(
-    chain_id: u64,
-    tx_signer: PrivateKeySigner,
-    tx_nonce: u64,
-    authority_signer: PrivateKeySigner,
-    authority_nonce: u64,
-    delegate_to: Address,
-    to: Address,
-    input: impl Into<Bytes>,
-) -> eyre::Result<Bytes> {
-    use alloy_consensus::{SignableTransaction, TxEip7702};
-    use alloy_eips::eip7702::Authorization;
-    use alloy_signer::SignerSync;
-
-    let authorization = Authorization {
-        chain_id: U256::from(chain_id),
-        address: delegate_to,
-        nonce: authority_nonce,
-    };
-    let authorization_signature = authority_signer
-        .sign_hash_sync(&authorization.signature_hash())
-        .map_err(|error| eyre::eyre!("authorization signing failed: {error}"))?;
-
-    let tx = TxEip7702 {
-        chain_id,
-        nonce: tx_nonce,
-        gas_limit: 5_000_000,
-        max_fee_per_gas: 20_000_000_000u128,
-        max_priority_fee_per_gas: 20_000_000_000u128,
-        to,
-        value: U256::ZERO,
-        access_list: Default::default(),
-        authorization_list: vec![authorization.into_signed(authorization_signature)],
-        input: input.into(),
-    };
-    let tx_signature = tx_signer
-        .sign_hash_sync(&tx.signature_hash())
-        .map_err(|error| eyre::eyre!("transaction signing failed: {error}"))?;
-    let envelope = MorphTxEnvelope::Eip7702(tx.into_signed(tx_signature));
-    Ok(envelope.encoded_2718().into())
-}
-
 /// Creates a signed EIP-1559 contract deployment transaction (CREATE).
 ///
 /// The returned bytes can be injected into the pool via `node.rpc.inject_tx()`.
