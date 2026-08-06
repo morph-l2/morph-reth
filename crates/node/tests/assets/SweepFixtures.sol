@@ -35,8 +35,14 @@ interface ITestErc20 {
 }
 
 /// Test-only router used to mutate Registry state and emit an inflow in one transaction.
+///
+/// The pinned REGISTRY address must equal the morph-reth SWEEP_REGISTRY_ADDRESS
+/// constant (crates/chainspec/src/constants.rs) — it is the address the EL test
+/// deploys the fixture to. Re-derived for the controller model; see
+/// contracts/scripts/lib/onyx-sweep-common.sh (ONYX_EXPECTED_REGISTRY).
 contract TestSweepRouter {
-    ITestSweepRegistry private constant REGISTRY = ITestSweepRegistry(0x7aE8bEf666D1D0aB9C0ac5d636f375E46f8AE71A);
+    ITestSweepRegistry private constant REGISTRY =
+        ITestSweepRegistry(0x0fF2Ea62eBca29E70aE2b0551a54eFFa4ea7DeEa);
 
     function enableThenTransfer(address token, address deposit, address master, uint256 amount) external {
         REGISTRY.setSweep(token, deposit, master);

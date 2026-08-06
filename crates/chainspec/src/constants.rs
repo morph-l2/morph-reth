@@ -62,7 +62,14 @@ pub const L2_MESSAGE_QUEUE_ADDRESS: Address = address!("530000000000000000000000
 /// the deployed `SweepRegistry` implementation, solc 0.8.24 with optimizer
 /// runs 999_999, OZ 4.9.3, and ProxyAdmin =
 /// `0x530000000000000000000000000000000000000b`.
-pub const SWEEP_REGISTRY_ADDRESS: Address = address!("Ddb0b56D29D121aD0FEFfb10395FC34b4eeA0692");
+///
+/// Re-derived for the controller model with the sticky everDestination flag
+/// (SweepRegistry storage/bytecode changed → impl CREATE2 address changed →
+/// proxy address changed). MUST match
+/// `contracts/scripts/lib/onyx-sweep-common.sh` (ONYX_EXPECTED_REGISTRY) and
+/// `contracts/scripts/deploy-sweep-registry.ts` (EXPECTED_REGISTRY). Any future
+/// SweepRegistry bytecode change requires re-syncing all of these (Onyx spec §3.2).
+pub const SWEEP_REGISTRY_ADDRESS: Address = address!("0fF2Ea62eBca29E70aE2b0551a54eFFa4ea7DeEa");
 
 /// Storage slot for the withdraw trie root (`messageRoot`) in L2MessageQueue contract.
 ///

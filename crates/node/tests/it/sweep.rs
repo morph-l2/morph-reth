@@ -17,7 +17,7 @@ use reth_provider::{HeaderProvider, ReceiptProvider, StateProviderFactory};
 
 use super::helpers::advance_block_with_l1_messages;
 
-const REGISTRY: Address = address!("Ddb0b56D29D121aD0FEFfb10395FC34b4eeA0692");
+const REGISTRY: Address = address!("0fF2Ea62eBca29E70aE2b0551a54eFFa4ea7DeEa");
 const SOURCE: Address = address!("1000000000000000000000000000000000000001");
 const SOURCE_TWO: Address = address!("1000000000000000000000000000000000000002");
 const DESTINATION: Address = address!("2000000000000000000000000000000000000002");
@@ -26,7 +26,7 @@ const ROUTER: Address = address!("4000000000000000000000000000000000000004");
 const CANDIDATE_EMITTER: Address = address!("5000000000000000000000000000000000000005");
 const SENDER: Address = address!("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
 const AMOUNT: u64 = 123;
-const PROD_REGISTRY: Address = address!("Ddb0b56D29D121aD0FEFfb10395FC34b4eeA0692");
+const PROD_REGISTRY: Address = address!("0fF2Ea62eBca29E70aE2b0551a54eFFa4ea7DeEa");
 const TRANSFER_TOPIC: B256 =
     b256!("ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef");
 const REQUEST_TOPIC: B256 =
@@ -46,7 +46,7 @@ const SWEEP_FAILED_TOPIC: B256 =
 const TEST_REGISTRY_RUNTIME: &str = "0x608060405234801561000f575f80fd5b5060043610610064575f3560e01c80639faa2f2f1161004d5780639faa2f2f146100b4578063b750bdde146100ec578063ba1b6c8414610178575f80fd5b8063663a375c14610068578063753d75631461007d575b5f80fd5b61007b610076366004610366565b610230565b005b61009f61008b366004610397565b60fe6020525f908152604090205460ff1681565b60405190151581526020015b60405180910390f35b6100c76100c2366004610366565b61028e565b60405173ffffffffffffffffffffffffffffffffffffffff90911681526020016100ab565b6101466100fa366004610397565b60fd6020525f90815260409020805460019091015473ffffffffffffffffffffffffffffffffffffffff82169174010000000000000000000000000000000000000000900460ff169083565b6040805173ffffffffffffffffffffffffffffffffffffffff90941684529115156020840152908201526060016100ab565b61007b6101863660046103b7565b73ffffffffffffffffffffffffffffffffffffffff9283165f90815260fe60209081526040808320805460017fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff00909116179055938516825260fd90529190912080547fffffffffffffffffffffff00000000000000000000000000000000000000000016919092169081179015157401000000000000000000000000000000000000000002179055565b8073ffffffffffffffffffffffffffffffffffffffff168273ffffffffffffffffffffffffffffffffffffffff167f24e3f180db341974dcd99a5e223d9d944422e303230ddde6659302f8620bbcff60405160405180910390a35050565b73ffffffffffffffffffffffffffffffffffffffff8082165f90815260fd60209081526040808320938616835260fe90915281205490919060ff1680156102ee5750805474010000000000000000000000000000000000000000900460ff165b80156103105750805473ffffffffffffffffffffffffffffffffffffffff1615155b15610333575473ffffffffffffffffffffffffffffffffffffffff169050610338565b5f9150505b92915050565b803573ffffffffffffffffffffffffffffffffffffffff81168114610361575f80fd5b919050565b5f8060408385031215610377575f80fd5b6103808361033e565b915061038e6020840161033e565b90509250929050565b5f602082840312156103a7575f80fd5b6103b08261033e565b9392505050565b5f805f606084860312156103c9575f80fd5b6103d28461033e565b92506103e06020850161033e565b91506103ee6040850161033e565b9050925092509256fea164736f6c6343000818000a";
 
 /// Runtime for `SweepFixtures.sol::TestSweepRouter`.
-const TEST_ROUTER_RUNTIME: &str = "0x608060405234801561000f575f5ffd5b5060043610610034575f3560e01c806341f47c231461003857806393d1fef41461004d575b5f5ffd5b61004b610046366004610264565b610060565b005b61004b61005b3660046102ac565b610156565b604051632e86db2160e21b81526001600160a01b03808616600483015280851660248301528316604482015273ddb0b56d29d121ad0feffb10395fc34b4eea06929063ba1b6c84906064015f604051808303815f87803b1580156100c2575f5ffd5b505af11580156100d4573d5f5f3e3d5ffd5b505060405163a9059cbb60e01b81526001600160a01b038681166004830152602482018590528716925063a9059cbb91506044016020604051808303815f875af1158015610124573d5f5f3e3d5ffd5b505050506040513d601f19601f8201168201806040525081019061014891906102e6565b610150575f5ffd5b50505050565b60405163a9059cbb60e01b81526001600160a01b0383811660048301526024820183905284169063a9059cbb906044016020604051808303815f875af11580156101a2573d5f5f3e3d5ffd5b505050506040513d601f19601f820116820180604052508101906101c691906102e6565b6101ce575f5ffd5b604051632e86db2160e21b81526001600160a01b038085166004830152831660248201525f604482015273ddb0b56d29d121ad0feffb10395fc34b4eea06929063ba1b6c84906064015f604051808303815f87803b15801561022e575f5ffd5b505af1158015610240573d5f5f3e3d5ffd5b50505050505050565b80356001600160a01b038116811461025f575f5ffd5b919050565b5f5f5f5f60808587031215610277575f5ffd5b61028085610249565b935061028e60208601610249565b925061029c60408601610249565b9396929550929360600135925050565b5f5f5f606084860312156102be575f5ffd5b6102c784610249565b92506102d560208501610249565b929592945050506040919091013590565b5f602082840312156102f6575f5ffd5b81518015158114610305575f5ffd5b939250505056";
+const TEST_ROUTER_RUNTIME: &str = "0x608060405234801561000f575f5ffd5b5060043610610034575f3560e01c806341f47c231461003857806393d1fef41461004d575b5f5ffd5b61004b610046366004610264565b610060565b005b61004b61005b3660046102ac565b610156565b604051632e86db2160e21b81526001600160a01b038086166004830152808516602483015283166044820152730ff2ea62ebca29e70ae2b0551a54effa4ea7deea9063ba1b6c84906064015f604051808303815f87803b1580156100c2575f5ffd5b505af11580156100d4573d5f5f3e3d5ffd5b505060405163a9059cbb60e01b81526001600160a01b038681166004830152602482018590528716925063a9059cbb91506044016020604051808303815f875af1158015610124573d5f5f3e3d5ffd5b505050506040513d601f19601f8201168201806040525081019061014891906102e6565b610150575f5ffd5b50505050565b60405163a9059cbb60e01b81526001600160a01b0383811660048301526024820183905284169063a9059cbb906044016020604051808303815f875af11580156101a2573d5f5f3e3d5ffd5b505050506040513d601f19601f820116820180604052508101906101c691906102e6565b6101ce575f5ffd5b604051632e86db2160e21b81526001600160a01b038085166004830152831660248201525f6044820152730ff2ea62ebca29e70ae2b0551a54effa4ea7deea9063ba1b6c84906064015f604051808303815f87803b15801561022e575f5ffd5b505af1158015610240573d5f5f3e3d5ffd5b50505050505050565b80356001600160a01b038116811461025f575f5ffd5b919050565b5f5f5f5f60808587031215610277575f5ffd5b61028085610249565b935061028e60208601610249565b925061029c60408601610249565b9396929550929360600135925050565b5f5f5f606084860312156102be575f5ffd5b6102c784610249565b92506102d560208501610249565b929592945050506040919091013590565b5f602082840312156102f6575f5ffd5b81518015158114610305575f5ffd5b939250505056";
 
 /// Runtime for `SweepFixtures.sol::TestCandidateEmitter`.
 const TEST_CANDIDATE_EMITTER_RUNTIME: &str = "0x6080604052348015600e575f5ffd5b5060015b6010816001600160a01b031611607057604051600181526001600160a01b0382169033907fddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef9060200160405180910390a3606a816072565b90506012565b005b5f6001600160a01b0382166002600160a01b03198101609f57634e487b7160e01b5f52601160045260245ffd5b6001019291505056";
@@ -1107,13 +1107,16 @@ fn addr_word(a: Address) -> [u8; 32] {
 
 /// Produces the source's EIP-712 `SweepAuthorization` signature
 /// (65-byte r||s||v) exactly as the production Registry verifies it.
+///
+/// The v1 message struct is frozen as `SweepAuthorization(address source,
+/// address controller, uint64 deadline)`; `registry` and `chain_id` are part of
+/// the EIP-712 domain separator, not the message.
 #[derive(Debug, Clone, Copy)]
 struct SourceAuthorization {
     source: Address,
-    destination: Address,
+    controller: Address,
     registry: Address,
     chain_id: u64,
-    nonce: u64,
     deadline: u64,
 }
 
@@ -1126,21 +1129,17 @@ fn sign_source_auth(
 
     let SourceAuthorization {
         source,
-        destination,
+        controller,
         registry,
         chain_id,
-        nonce,
         deadline,
     } = authorization;
 
     let domain_typehash = keccak256(
         "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)",
     );
-    let auth_typehash = keccak256(
-        "SweepAuthorization(address source,address destination,address registry,uint256 chainId,uint256 nonce,uint64 deadline,bytes32 mode,bytes32 sweepScope)",
-    );
-    let mode = keccak256("MORPH_SWEEP_V1");
-    let sweep_scope = keccak256("WHITELISTED_ERC20_TO_DESTINATION_ONLY");
+    let auth_typehash =
+        keccak256("SweepAuthorization(address source,address controller,uint64 deadline)");
 
     let mut dom = Vec::new();
     dom.extend_from_slice(domain_typehash.as_slice());
@@ -1153,13 +1152,8 @@ fn sign_source_auth(
     let mut sh = Vec::new();
     sh.extend_from_slice(auth_typehash.as_slice());
     sh.extend_from_slice(&addr_word(source));
-    sh.extend_from_slice(&addr_word(destination));
-    sh.extend_from_slice(&addr_word(registry));
-    sh.extend_from_slice(&U256::from(chain_id).to_be_bytes::<32>());
-    sh.extend_from_slice(&U256::from(nonce).to_be_bytes::<32>());
+    sh.extend_from_slice(&addr_word(controller));
     sh.extend_from_slice(&U256::from(deadline).to_be_bytes::<32>());
-    sh.extend_from_slice(mode.as_slice());
-    sh.extend_from_slice(sweep_scope.as_slice());
     let struct_hash = keccak256(&sh);
 
     let mut pre = Vec::with_capacity(66);
@@ -1176,18 +1170,11 @@ fn sign_source_auth(
     Ok(bytes)
 }
 
-/// ABI-encodes `registerSweep(address,address,uint256,uint64,bytes)`.
-fn register_calldata(
-    source: Address,
-    destination: Address,
-    nonce: u64,
-    deadline: u64,
-    sig: &[u8],
-) -> Bytes {
-    let mut data = vec![0xd7, 0x1b, 0x77, 0xe8];
+/// ABI-encodes `registerSweep(address,address,uint64,bytes)`.
+fn register_calldata(source: Address, controller: Address, deadline: u64, sig: &[u8]) -> Bytes {
+    let mut data = vec![0x47, 0x58, 0x0c, 0xee];
     data.extend_from_slice(&addr_word(source));
-    data.extend_from_slice(&addr_word(destination));
-    data.extend_from_slice(&U256::from(nonce).to_be_bytes::<32>());
+    data.extend_from_slice(&addr_word(controller));
     data.extend_from_slice(&U256::from(deadline).to_be_bytes::<32>());
     data.extend_from_slice(&U256::from(160u64).to_be_bytes::<32>()); // offset to bytes arg
     data.extend_from_slice(&U256::from(sig.len()).to_be_bytes::<32>());
@@ -1266,12 +1253,36 @@ async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
         "source must not send a registration transaction"
     );
 
-    // Enable the token in the V1 Registry. The destination itself submits
-    // registerSweep below, so no EIP-7702 transaction or operator is needed.
+    // Establish the route: the controller (the destination/owner here) points its
+    // single destination pointer at the recipient. Every registerSweep below
+    // requires a configured route, or it reverts with DestinationNotConfigured.
+    let mut route = vec![0xf0, 0x47, 0x57, 0x91];
+    route.extend_from_slice(&addr_word(destination));
+    let route_tx = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 1)
+        .with_v1_eth_fee()
+        .with_gas_limit(5_000_000)
+        .with_to(PROD_REGISTRY)
+        .with_data(route)
+        .build_signed()?;
+    node.rpc.inject_tx(route_tx).await?;
+    let route_payload = node.advance_block().await?;
+    let route_hash = *route_payload.block().body().transactions[0].tx_hash();
+    assert!(
+        node.inner
+            .provider
+            .receipt_by_hash(route_hash)?
+            .expect("route receipt")
+            .status(),
+        "setSweepDestination must succeed"
+    );
+
+    // Enable the token in the V1 Registry. The controller (the destination/owner)
+    // submits every registerSweep below, so no EIP-7702 transaction or operator
+    // is needed.
     let mut token_whitelist = vec![0xc9, 0xbc, 0xc9, 0x7e];
     token_whitelist.extend_from_slice(&addr_word(TEST_TOKEN_ADDRESS));
     token_whitelist.extend_from_slice(&U256::from(1).to_be_bytes::<32>());
-    let whitelist_tx = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 1)
+    let whitelist_tx = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 2)
         .with_v1_eth_fee()
         .with_gas_limit(5_000_000)
         .with_to(PROD_REGISTRY)
@@ -1290,27 +1301,25 @@ async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
         "setTokenWhitelist must succeed: {whitelist_receipt:?}"
     );
 
-    // A source only signs the authorization. The destination submits the
-    // ordinary V1 registration transaction and pays its gas.
+    // A source only signs the authorization. The controller (the destination /
+    // owner here) submits the ordinary V1 registration transaction and pays gas.
     let fee_source_sig = sign_source_auth(
         &fee_source_signer,
         SourceAuthorization {
             source: fee_source,
-            destination,
+            controller: destination,
             registry: PROD_REGISTRY,
             chain_id: wallet.chain_id,
-            nonce: 0,
             deadline,
         },
     )?;
-    let fee_registration = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 2)
+    let fee_registration = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 3)
         .with_v1_eth_fee()
         .with_gas_limit(5_000_000)
         .with_to(PROD_REGISTRY)
         .with_data(register_calldata(
             fee_source,
             destination,
-            0,
             deadline,
             &fee_source_sig,
         ))
@@ -1396,24 +1405,24 @@ async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
         "source token-fee execution must not require native balance"
     );
 
-    // Register the plain-EOA source with the destination's authorization.
+    // Register the plain-EOA source with the controller's authorization.
     let sig = sign_source_auth(
         &source_signer,
         SourceAuthorization {
             source,
-            destination,
+            controller: destination,
             registry: PROD_REGISTRY,
             chain_id: wallet.chain_id,
-            nonce: 0,
             deadline,
         },
     )?;
-    // The destination submits the registration; the source remains a plain EOA.
-    let tx3 = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 3)
+    // The controller (the destination/owner here) submits the registration; the
+    // source remains a plain EOA.
+    let tx3 = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 4)
         .with_v1_eth_fee()
         .with_gas_limit(5_000_000)
         .with_to(PROD_REGISTRY)
-        .with_data(register_calldata(source, destination, 0, deadline, &sig))
+        .with_data(register_calldata(source, destination, deadline, &sig))
         .build_signed()?;
     node.rpc.inject_tx(tx3).await?;
     let reg_payload = node.advance_block().await?;
