@@ -18,14 +18,9 @@ const FAILURES_BY_REASON: &str = "morph.sweep.failures_by_reason";
 #[derive(Metrics, Clone)]
 #[metrics(scope = "morph.sweep")]
 pub(crate) struct SweepMetrics {
-    /// Raw Registry/Transfer triggers that consumed bounded policy preflight.
-    preflights_total: Counter,
-    /// Candidates checked after committed transactions; each is charged a fixed
-    /// system-gas debit regardless of outcome.
-    candidates_checked_total: Counter,
-    /// Candidates that swept a source balance to its registered destination.
+    /// Successful sweeps after committed transactions.
     sweeps_total: Counter,
-    /// Checked candidates that did not sweep, across every classified reason.
+    /// Checked candidates that did not settle, across every classified reason.
     failures_total: Counter,
     /// Sources skipped because they have ordinary code (not a plain EOA).
     ///
@@ -33,38 +28,28 @@ pub(crate) struct SweepMetrics {
     /// value is an operational signal (misconfigured source or code deployment),
     /// not just a benign no-op.
     code_skipped_total: Counter,
-    /// Committed transactions whose trigger batch was truncated before preflight.
-    ///
-    /// This is intentionally a batch count, not a trigger count: it signals that
-    /// at least one candidate-shaped log was left unchecked without scanning the
-    /// entire overflow. `deferred_by_budget` covers the narrower case where a
-    /// candidate already passed preflight.
-    trigger_batches_truncated_total: Counter,
-    /// Fixed sweep system gas committed to blocks. Its rate against
-    /// the per-block budget shows how close blocks run to the sweep cap.
-    system_gas_total: Counter,
+    /// Actual `transfer` gas consumed by committed sweeps. Its rate against the
+    /// per-block budget shows how close blocks run to the sweep cap.
+    tx_transfer_gas_total: Counter,
+    /// Transactions that failed with `SweepOutOfGas` (cumulative `transfer` gas
+    /// hit `TX_SWEEP_GAS_LIMIT`).
+    tx_out_of_gas_total: Counter,
 }
 
 impl SweepMetrics {
     /// Records one committed transaction's sweep outcome.
     pub(crate) fn record(
         &self,
-        preflighted_candidates: usize,
-        checked_candidates: usize,
         successes: usize,
         failures: &[SweepFailure],
-        trigger_batch_truncated: bool,
-        system_gas_used: u64,
+        transfer_gas_used: u64,
+        tx_out_of_gas: bool,
     ) {
-        self.preflights_total
-            .increment(preflighted_candidates as u64);
-        self.candidates_checked_total
-            .increment(checked_candidates as u64);
         self.sweeps_total.increment(successes as u64);
         self.failures_total.increment(failures.len() as u64);
-        self.trigger_batches_truncated_total
-            .increment(u64::from(trigger_batch_truncated));
-        self.system_gas_total.increment(system_gas_used);
+        self.tx_transfer_gas_total.increment(transfer_gas_used);
+        self.tx_out_of_gas_total
+            .increment(u64::from(tx_out_of_gas));
 
         for failure in failures {
             if matches!(failure.reason, SweepFailureReason::SourceHasCode) {

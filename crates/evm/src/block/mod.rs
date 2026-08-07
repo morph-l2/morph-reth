@@ -297,19 +297,16 @@ where
             sweep,
         } = output;
 
-        let preflighted_candidates = sweep.block_effect.preflighted_candidates();
-        let checked_candidates = sweep.block_effect.checked_candidates();
+        let transfer_gas_used = sweep.block_effect.transfer_gas_used();
         self.sweep_session.commit(&sweep.block_effect);
 
         // Observability only; recorded here so speculative/discarded candidates
         // never move the counters (this runs solely on committed transactions).
         self.sweep_metrics.record(
-            preflighted_candidates,
-            checked_candidates,
             sweep.successes.len(),
             &sweep.failures,
-            sweep.trigger_batch_truncated,
-            sweep.block_effect.system_gas_used(),
+            transfer_gas_used,
+            sweep.tx_out_of_gas,
         );
 
         // EIP-8037 separates regular and state gas; pre-Amsterdam morph treats
@@ -389,8 +386,7 @@ mod tests {
     use morph_chainspec::MORPH_MAINNET;
     use morph_primitives::transaction::TxL1Msg;
     use morph_revm::{
-        BLOCK_SYSTEM_GAS, MAX_CANDIDATES_PER_BLOCK, MAX_PREFLIGHTS_PER_BLOCK, PREFLIGHT_SYSTEM_GAS,
-        SweepConfig,
+        BLOCK_SWEEP_GAS_LIMIT, SweepConfig,
     };
     use revm::{
         context::{BlockEnv, CfgEnv},
@@ -525,95 +521,59 @@ mod tests {
     }
 
     #[test]
-    fn discarded_speculative_output_does_not_consume_sweep_budget() {
+    fn discarded_speculative_output_does_not_consume_sweep_transfer_gas() {
         let mut executor = test_executor();
-        let mut discarded_preflighted = 0;
+        let mut discarded_seen_requests = 0;
 
         let discarded = executor
             .execute_transaction_with_commit_condition(l1_message(EMITTER_16, 0), |output| {
-                discarded_preflighted = output.sweep.block_effect.preflighted_candidates();
+                discarded_seen_requests = output.sweep.block_effect.seen_registry_requests().len();
                 CommitChanges::No
             })
             .unwrap();
 
         assert!(discarded.is_none());
-        assert_eq!(discarded_preflighted, 16);
+        assert_eq!(discarded_seen_requests, 0);
         assert_eq!(
-            executor.sweep_session.remaining_candidates(),
-            MAX_CANDIDATES_PER_BLOCK
-        );
-        assert_eq!(
-            executor.sweep_session.remaining_system_gas(),
-            BLOCK_SYSTEM_GAS
+            executor.sweep_session.remaining_transfer_gas(),
+            BLOCK_SWEEP_GAS_LIMIT
         );
 
         let output = executor
             .execute_transaction_without_commit(l1_message(EMITTER_16, 0))
             .unwrap();
-        assert_eq!(output.sweep.block_effect.preflighted_candidates(), 16);
-        assert_eq!(output.sweep.block_effect.checked_candidates(), 0);
+        // Emitter Transfer logs are candidates, but none are whitelisted /
+        // registered, so no transfer gas is consumed and no sweep settles.
+        assert_eq!(output.sweep.block_effect.transfer_gas_used(), 0);
+        assert!(output.sweep.successes.is_empty());
         executor.commit_transaction(output);
 
         assert_eq!(
-            executor.sweep_session.remaining_candidates(),
-            MAX_CANDIDATES_PER_BLOCK
-        );
-        assert_eq!(
-            executor.sweep_session.remaining_preflights(),
-            MAX_PREFLIGHTS_PER_BLOCK - 16
-        );
-        assert_eq!(
-            executor.sweep_session.remaining_system_gas(),
-            BLOCK_SYSTEM_GAS - 16 * PREFLIGHT_SYSTEM_GAS
+            executor.sweep_session.remaining_transfer_gas(),
+            BLOCK_SWEEP_GAS_LIMIT
         );
     }
 
     #[test]
-    fn invalid_triggers_are_bounded_by_the_block_preflight_budget() {
+    fn unwhitelisted_candidates_do_not_consume_sweep_transfer_gas() {
         let mut executor = test_executor();
-        for queue_index in 0..(MAX_PREFLIGHTS_PER_BLOCK / 16) {
+        for queue_index in 0..4 {
             let output = executor
                 .execute_transaction_without_commit(l1_message(EMITTER_16, queue_index as u64))
                 .unwrap();
-            assert_eq!(
-                output.sweep.block_effect.preflighted_candidates(),
-                16,
-                "unexpected preflight allowance for transaction {queue_index}"
+            assert_eq!(output.sweep.block_effect.transfer_gas_used(), 0);
+            assert!(output.sweep.successes.is_empty());
+            assert!(
+                !output.sweep.failures.is_empty(),
+                "each unwhitelisted candidate resolves to zero and is a no-op failure"
             );
-            assert_eq!(output.sweep.block_effect.checked_candidates(), 0);
             executor.commit_transaction(output);
         }
-        let tail = MAX_PREFLIGHTS_PER_BLOCK % 16;
-        let tail_output = executor
-            .execute_transaction_without_commit(l1_message(EMITTER_16, 98))
-            .unwrap();
-        assert_eq!(
-            tail_output.sweep.block_effect.preflighted_candidates(),
-            tail
-        );
-        assert_eq!(tail_output.sweep.block_effect.checked_candidates(), 0);
-        executor.commit_transaction(tail_output);
 
         assert_eq!(
-            executor.sweep_session.remaining_candidates(),
-            MAX_CANDIDATES_PER_BLOCK
+            executor.sweep_session.remaining_transfer_gas(),
+            BLOCK_SWEEP_GAS_LIMIT
         );
-        assert_eq!(executor.sweep_session.remaining_preflights(), 0);
-        assert_eq!(
-            executor.sweep_session.remaining_system_gas(),
-            BLOCK_SYSTEM_GAS - MAX_PREFLIGHTS_PER_BLOCK as u64 * PREFLIGHT_SYSTEM_GAS
-        );
-        assert!(
-            executor.sweep_session.remaining_system_gas() < PREFLIGHT_SYSTEM_GAS,
-            "the residual budget must be too small for another preflight"
-        );
-
-        let exhausted = executor
-            .execute_transaction_without_commit(l1_message(EMITTER_16, 99))
-            .unwrap();
-        assert_eq!(exhausted.sweep.block_effect.preflighted_candidates(), 0);
-        assert_eq!(exhausted.sweep.block_effect.checked_candidates(), 0);
-        assert_eq!(exhausted.sweep.block_effect.system_gas_used(), 0);
     }
 
     #[test]
@@ -638,8 +598,6 @@ mod tests {
         let first_request = executor
             .execute_transaction_without_commit(l1_message(REGISTRY, 1))
             .unwrap();
-        assert_eq!(first_request.sweep.block_effect.preflighted_candidates(), 1);
-        assert_eq!(first_request.sweep.block_effect.checked_candidates(), 0);
         assert_eq!(
             first_request.sweep.block_effect.seen_registry_requests(),
             &[request_pair]
@@ -649,31 +607,29 @@ mod tests {
         let duplicate_request = executor
             .execute_transaction_without_commit(l1_message(REGISTRY, 2))
             .unwrap();
-        assert_eq!(duplicate_request.sweep.block_effect.checked_candidates(), 0);
+        // The duplicate request was already resolved this block; it is skipped
+        // entirely and produces no failure record.
+        assert!(duplicate_request.sweep.failures.is_empty());
         executor.commit_transaction(duplicate_request);
 
         let later_transfer = executor
             .execute_transaction_without_commit(l1_message(EMITTER_10, 3))
             .unwrap();
-        assert_eq!(
-            later_transfer.sweep.block_effect.preflighted_candidates(),
-            10
-        );
-        assert_eq!(later_transfer.sweep.block_effect.checked_candidates(), 0);
+        // A Transfer candidate for the same (token, source) pair remains
+        // eligible — Transfer candidates do not participate in block-level dedup.
+        assert!(!later_transfer.sweep.failures.is_empty());
     }
 
     #[test]
-    fn block_execution_gas_excludes_sweep_system_gas() {
+    fn block_execution_gas_excludes_sweep_transfer_gas() {
         let mut executor = test_executor();
         let output = executor
             .execute_transaction_without_commit(l1_message(EMITTER_16, 0))
             .unwrap();
         let main_gas_used = output.result.result.gas().tx_gas_used();
 
-        assert_eq!(
-            output.sweep.block_effect.system_gas_used(),
-            16 * PREFLIGHT_SYSTEM_GAS
-        );
+        // No whitelisted/registered candidate here, so no transfer gas is metered.
+        assert_eq!(output.sweep.block_effect.transfer_gas_used(), 0);
         let gas_output = executor.commit_transaction(output);
         assert_eq!(gas_output.tx_gas_used(), main_gas_used);
 
@@ -694,8 +650,7 @@ mod tests {
 
         assert!(!output.result.result.is_success());
         assert!(output.result.result.logs().is_empty());
-        assert_eq!(output.sweep.block_effect.checked_candidates(), 0);
-        assert_eq!(output.sweep.block_effect.system_gas_used(), 0);
+        assert_eq!(output.sweep.block_effect.transfer_gas_used(), 0);
         assert!(output.sweep.logs.is_empty());
         assert!(output.sweep.successes.is_empty());
         assert!(output.sweep.failures.is_empty());
@@ -707,12 +662,8 @@ mod tests {
         executor.commit_transaction(output);
 
         assert_eq!(
-            executor.sweep_session.remaining_candidates(),
-            MAX_CANDIDATES_PER_BLOCK
-        );
-        assert_eq!(
-            executor.sweep_session.remaining_system_gas(),
-            BLOCK_SYSTEM_GAS
+            executor.sweep_session.remaining_transfer_gas(),
+            BLOCK_SWEEP_GAS_LIMIT
         );
         let receipt = &executor.receipts[0];
         assert!(!receipt.status());

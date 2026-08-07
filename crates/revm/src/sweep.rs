@@ -11,82 +11,50 @@ use crate::{MorphEvm, MorphInvalidTransaction, MorphTxEnv, SweepConfig, handler:
 use alloy_evm::Database;
 use alloy_primitives::{Address, B256, Bytes, Log, U256, b256};
 use revm::{
-    context::{JournalEntry, TxEnv, result::EVMError},
+    context::{TxEnv, result::EVMError},
     context_interface::{Cfg, ContextTr, JournalTr, LocalContextTr, context::take_error},
     handler::{EvmTr, Handler},
     interpreter::{
         CallInput, CallInputs, CallScheme, CallValue, FrameInput, SharedMemory,
-        interpreter_action::FrameInit,
+        InstructionResult, interpreter_action::FrameInit,
     },
 };
 use std::{cell::RefCell, collections::HashSet};
 
-/// Maximum sweep candidates checked after one transaction.
-pub const MAX_CANDIDATES_PER_TX: usize = 16;
-/// Maximum raw Registry/Transfer triggers preflighted after one transaction.
-pub const MAX_PREFLIGHTS_PER_TX: usize = 64;
 /// Gas limit for the Registry resolver static call.
+///
+/// Fixed per Onyx spec §5.4. Its actual consumption is NEVER metered: it does
+/// not enter the transaction allowance, the block allowance, or the user's
+/// `gasUsed`. Only the limit is consensus — it decides whether the call
+/// succeeds, and success decides state.
 pub const RESOLVE_GAS_LIMIT: u64 = 50_000;
 /// Gas limit for each ERC-20 `balanceOf` static call.
+///
+/// Same metering rule as [`RESOLVE_GAS_LIMIT`] (Onyx spec §5.4): fixed limit,
+/// consumption never metered.
 pub const BALANCE_OF_GAS_LIMIT: u64 = 50_000;
-/// Gas limit for the sweep `transfer` system call.
+/// Maximum accumulated `transfer` gas for one transaction.
 ///
-/// Sized against the governed token whitelist: a standard ERC-20 cold-writes two
-/// slots for ~50k and USDC (`FiatTokenV2_2`, blacklist checks included) costs
-/// ~60-70k. Admitting a token to the whitelist REQUIRES measuring its worst-case
-/// `transfer` cost and confirming it stays under this limit.
-pub const SWEEP_GAS_LIMIT: u64 = 100_000;
-/// Fixed worst-case system-gas debit for the resolver plus the single
-/// preflight balance call.
-pub const PREFLIGHT_SYSTEM_GAS: u64 = RESOLVE_GAS_LIMIT + BALANCE_OF_GAS_LIMIT;
-/// Fixed worst-case debit for the transfer call plus the single post-execution
-/// balance call.
-pub const SWEEP_EXECUTION_SYSTEM_GAS: u64 = SWEEP_GAS_LIMIT + BALANCE_OF_GAS_LIMIT;
-/// Total system-gas debit for a candidate that reaches execution.
-pub const CANDIDATE_SYSTEM_GAS: u64 = PREFLIGHT_SYSTEM_GAS + SWEEP_EXECUTION_SYSTEM_GAS;
-/// Maximum combined preflight and execution debit for one transaction.
+/// Only the sweep `transfer` call's ACTUAL gas counts toward this meter (Onyx
+/// spec §5.4). When the cumulative transfer gas reaches this limit the next
+/// transfer runs out of gas, classifying the whole transaction as
+/// `SweepOutOfGas`: the transaction-level checkpoint reverts the main call and
+/// every sweep, while the nonce increment and fee pre-deduction survive.
+pub const TX_SWEEP_GAS_LIMIT: u64 = 1_000_000;
+/// Maximum accumulated `transfer` gas in one block.
 ///
-/// Exactly the worst case the two per-transaction count caps allow: 64 preflights
-/// of which 16 reach execution. The two quotas are intentionally independent — a
-/// transaction can discard invalid triggers without consuming its
-/// eligible-execution allowance.
-pub const TX_SYSTEM_GAS: u64 = 8_800_000;
-/// Maximum sweep system gas in one block.
-///
-/// Onyx fixes this independently from the header gas limit so a future block
-/// gas-limit increase cannot silently widen the prover's sweep workload. The
-/// value matches Morph's 45M production block gas limit at activation.
-pub const BLOCK_SYSTEM_GAS: u64 = 45_000_000;
-/// Maximum sweep candidates checked in one block.
-pub const MAX_CANDIDATES_PER_BLOCK: usize = 180;
-/// Maximum raw triggers preflighted in one block.
-///
-/// Deliberately an explicit constant rather than `BLOCK_SYSTEM_GAS /
-/// PREFLIGHT_SYSTEM_GAS`. Deriving it means any reduction in per-candidate cost
-/// silently widens the allowance for junk triggers; keeping it explicit forces
-/// that widening to be a reviewable change of its own. The assertions below keep
-/// it inside the block budget.
-pub const MAX_PREFLIGHTS_PER_BLOCK: usize = 450;
+/// Only actual `transfer` gas counts toward this meter (Onyx spec §5.4). The
+/// builder defers transactions that would exceed it; an already-produced block
+/// whose transfer total exceeds it is invalid.
+pub const BLOCK_SWEEP_GAS_LIMIT: u64 = 20_000_000;
 
 const _: () = {
-    assert!(PREFLIGHT_SYSTEM_GAS == RESOLVE_GAS_LIMIT + BALANCE_OF_GAS_LIMIT);
-    assert!(SWEEP_EXECUTION_SYSTEM_GAS == SWEEP_GAS_LIMIT + BALANCE_OF_GAS_LIMIT);
-    assert!(CANDIDATE_SYSTEM_GAS == PREFLIGHT_SYSTEM_GAS + SWEEP_EXECUTION_SYSTEM_GAS);
-    // The per-transaction gas budget is exactly the worst case its count caps
-    // allow, so neither quota can be reached without the other binding first.
-    assert!(
-        TX_SYSTEM_GAS
-            == MAX_PREFLIGHTS_PER_TX as u64 * PREFLIGHT_SYSTEM_GAS
-                + MAX_CANDIDATES_PER_TX as u64 * SWEEP_EXECUTION_SYSTEM_GAS
-    );
-    assert!(MAX_CANDIDATES_PER_TX as u64 * CANDIDATE_SYSTEM_GAS <= TX_SYSTEM_GAS);
-    assert!(TX_SYSTEM_GAS <= BLOCK_SYSTEM_GAS);
-    // Explicit block caps must still fit the block budget.
-    assert!(MAX_CANDIDATES_PER_BLOCK as u64 * CANDIDATE_SYSTEM_GAS <= BLOCK_SYSTEM_GAS);
-    assert!(MAX_PREFLIGHTS_PER_BLOCK as u64 * PREFLIGHT_SYSTEM_GAS <= BLOCK_SYSTEM_GAS);
-    // A single transaction must never be able to exceed a block-level cap.
-    assert!(MAX_CANDIDATES_PER_BLOCK >= MAX_CANDIDATES_PER_TX);
-    assert!(MAX_PREFLIGHTS_PER_BLOCK >= MAX_PREFLIGHTS_PER_TX);
+    // Capacity derivation per Onyx spec §5.4: 1M / 20M transaction / block
+    // allowances with 33.3k–42.8k measured transfer costs imply ~23–30 sweeps
+    // per transaction and ~467–600 per block. These are capacity estimates, not
+    // consensus quotas — the protocol deliberately imposes NO candidate count
+    // ceiling, NO preflight ceiling, NO fixed per-phase debit, and NO truncation.
+    assert!(BLOCK_SWEEP_GAS_LIMIT > TX_SWEEP_GAS_LIMIT);
 };
 
 #[derive(Debug)]
@@ -246,98 +214,71 @@ pub struct SweepCandidate {
 }
 
 /// Opaque block-level accounting produced by one sweep phase.
+///
+/// Only the actual `transfer` gas is metered (Onyx spec §5.4). The resolver and
+/// `balanceOf` queries have fixed gas limits but their consumption is never
+/// recorded here — not into the transaction allowance, the block allowance, or
+/// the user's `gasUsed`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SweepBlockEffect {
-    preflighted_candidates: usize,
-    checked_candidates: usize,
-    system_gas_used: u64,
+    /// Actual `transfer` gas consumed by this transaction's sweeps.
+    transfer_gas_used: u64,
+    /// Newly seen Registry requests, in deterministic receipt order.
     seen_registry_requests: Vec<SweepCandidate>,
 }
 
 impl SweepBlockEffect {
-    /// Number of raw triggers that consumed policy preflight resources.
-    pub const fn preflighted_candidates(&self) -> usize {
-        self.preflighted_candidates
+    /// Actual `transfer` gas consumed by this transaction's sweeps.
+    pub const fn transfer_gas_used(&self) -> u64 {
+        self.transfer_gas_used
     }
 
-    /// Number of policy-eligible candidates that consumed execution resources.
-    pub const fn checked_candidates(&self) -> usize {
-        self.checked_candidates
-    }
-
-    /// Fixed system-gas debit for preflight and execution.
-    pub const fn system_gas_used(&self) -> u64 {
-        self.system_gas_used
-    }
-
-    /// Newly preflighted Registry requests, in deterministic receipt order.
+    /// Newly seen Registry requests, in deterministic receipt order.
     pub fn seen_registry_requests(&self) -> &[SweepCandidate] {
         &self.seen_registry_requests
     }
 
-    fn record_preflight(&mut self, trigger: SweepTrigger) {
-        self.preflighted_candidates += 1;
-        self.system_gas_used = self.system_gas_used.saturating_add(PREFLIGHT_SYSTEM_GAS);
-        if trigger.kind == SweepTriggerKind::RegistryRequest {
-            self.seen_registry_requests.push(trigger.candidate);
-        }
+    /// Records a Registry request entering resolver resolution.
+    pub(crate) fn record_seen_registry_request(&mut self, candidate: SweepCandidate) {
+        self.seen_registry_requests.push(candidate);
     }
 
-    fn record_execution(&mut self) {
-        self.checked_candidates += 1;
-        self.system_gas_used = self
-            .system_gas_used
-            .saturating_add(SWEEP_EXECUTION_SYSTEM_GAS);
+    /// Adds actual `transfer` gas to the block meter.
+    pub(crate) fn add_transfer_gas(&mut self, gas: u64) {
+        self.transfer_gas_used = self.transfer_gas_used.saturating_add(gas);
     }
 }
 
 /// Explicit sweep authority and block state supplied to one transaction.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SweepTxPlan {
-    candidate_allowance: usize,
-    preflight_allowance: usize,
-    system_gas_allowance: u64,
+    /// Remaining `transfer` gas this transaction may still consume.
+    ///
+    /// Starts at `TX_SWEEP_GAS_LIMIT` for canonical execution and only decreases
+    /// by each sweep transfer's actual gas. Speculative calls (eth_call /
+    /// estimateGas) receive a fresh full allowance.
+    remaining_transfer_gas: u64,
+    /// Registry requests already resolved earlier in this block.
     seen_registry_requests: Vec<SweepCandidate>,
 }
 
 impl SweepTxPlan {
-    /// Builds an isolated plan with no prior block-level request history.
+    /// Builds an isolated plan with a fresh full transfer allowance and no
+    /// prior block-level request history.
     ///
-    /// This is intended for single-transaction state tests. Canonical block
-    /// execution should obtain plans from [`SweepBlockSession::plan`].
-    pub fn single_transaction(candidate_allowance: usize) -> Self {
-        let candidate_allowance = candidate_allowance.min(MAX_CANDIDATES_PER_TX);
-        let preflight_allowance = if candidate_allowance == 0 {
-            0
-        } else {
-            MAX_PREFLIGHTS_PER_TX
-        };
+    /// This is intended for single-transaction state tests and speculative RPC
+    /// calls (eth_call / eth_estimateGas / createAccessList), which use an empty
+    /// seen set and a new 1M transaction transfer meter (Onyx spec §8).
+    pub fn single_transaction() -> Self {
         Self {
-            candidate_allowance,
-            preflight_allowance,
-            system_gas_allowance: (preflight_allowance as u64)
-                .saturating_mul(PREFLIGHT_SYSTEM_GAS)
-                .saturating_add(
-                    (candidate_allowance as u64).saturating_mul(SWEEP_EXECUTION_SYSTEM_GAS),
-                )
-                .min(TX_SYSTEM_GAS),
+            remaining_transfer_gas: TX_SWEEP_GAS_LIMIT,
             seen_registry_requests: Vec::new(),
         }
     }
 
-    /// Maximum candidates that this transaction may check.
-    pub const fn candidate_allowance(&self) -> usize {
-        self.candidate_allowance
-    }
-
-    /// Maximum raw triggers that this transaction may preflight.
-    pub const fn preflight_allowance(&self) -> usize {
-        self.preflight_allowance
-    }
-
-    /// Maximum fixed system gas that this transaction may consume.
-    pub const fn system_gas_allowance(&self) -> u64 {
-        self.system_gas_allowance
+    /// Remaining `transfer` gas this transaction may still consume.
+    pub const fn remaining_transfer_gas(&self) -> u64 {
+        self.remaining_transfer_gas
     }
 
     /// Returns whether this Registry request was already consumed in the block.
@@ -346,22 +287,18 @@ impl SweepTxPlan {
     }
 }
 
-/// Canonical sweep budget and request deduplication state for one block.
+/// Canonical block transfer-gas budget and request deduplication state.
 #[derive(Debug, Clone)]
 pub struct SweepBlockSession {
-    remaining_candidates: usize,
-    remaining_preflights: usize,
-    remaining_system_gas: u64,
+    remaining_transfer_gas: u64,
     seen_registry_requests: HashSet<SweepCandidate>,
 }
 
 impl Default for SweepBlockSession {
     fn default() -> Self {
         Self {
-            remaining_candidates: MAX_CANDIDATES_PER_BLOCK,
-            remaining_preflights: MAX_PREFLIGHTS_PER_BLOCK,
-            remaining_system_gas: BLOCK_SYSTEM_GAS,
-            seen_registry_requests: HashSet::with_capacity(MAX_CANDIDATES_PER_BLOCK),
+            remaining_transfer_gas: BLOCK_SWEEP_GAS_LIMIT,
+            seen_registry_requests: HashSet::new(),
         }
     }
 }
@@ -369,12 +306,6 @@ impl Default for SweepBlockSession {
 impl SweepBlockSession {
     /// Builds the immutable plan for the next speculative transaction.
     pub fn plan(&self) -> SweepTxPlan {
-        let gas_allowance = self.remaining_system_gas.min(TX_SYSTEM_GAS);
-        let candidate_allowance = self.remaining_candidates.min(MAX_CANDIDATES_PER_TX);
-        let preflight_allowance = self
-            .remaining_preflights
-            .min(MAX_PREFLIGHTS_PER_TX)
-            .min((gas_allowance / PREFLIGHT_SYSTEM_GAS) as usize);
         let mut seen_registry_requests = self
             .seen_registry_requests
             .iter()
@@ -386,41 +317,23 @@ impl SweepBlockSession {
                 .then_with(|| left.source.cmp(&right.source))
         });
         SweepTxPlan {
-            candidate_allowance,
-            preflight_allowance,
-            system_gas_allowance: gas_allowance,
+            remaining_transfer_gas: self.remaining_transfer_gas.min(TX_SWEEP_GAS_LIMIT),
             seen_registry_requests,
         }
     }
 
     /// Applies the effect of a committed transaction.
     pub fn commit(&mut self, effect: &SweepBlockEffect) {
-        self.remaining_candidates = self
-            .remaining_candidates
-            .saturating_sub(effect.checked_candidates);
-        self.remaining_preflights = self
-            .remaining_preflights
-            .saturating_sub(effect.preflighted_candidates);
-        self.remaining_system_gas = self
-            .remaining_system_gas
-            .saturating_sub(effect.system_gas_used);
+        self.remaining_transfer_gas = self
+            .remaining_transfer_gas
+            .saturating_sub(effect.transfer_gas_used);
         self.seen_registry_requests
             .extend(effect.seen_registry_requests.iter().copied());
     }
 
-    /// Remaining candidate checks in the block.
-    pub const fn remaining_candidates(&self) -> usize {
-        self.remaining_candidates
-    }
-
-    /// Remaining trigger preflights in the block.
-    pub const fn remaining_preflights(&self) -> usize {
-        self.remaining_preflights
-    }
-
-    /// Remaining fixed system gas in the block.
-    pub const fn remaining_system_gas(&self) -> u64 {
-        self.remaining_system_gas
+    /// Remaining `transfer` gas in the block.
+    pub const fn remaining_transfer_gas(&self) -> u64 {
+        self.remaining_transfer_gas
     }
 }
 
@@ -473,22 +386,15 @@ pub enum SweepFailureReason {
     TransferFalse,
     /// Token `transfer` returned malformed data.
     TransferMalformed,
-    /// Post-transfer `balanceOf` reverted or halted.
-    PostBalanceCallFailed,
-    /// Post-transfer `balanceOf` returned malformed data.
-    PostBalanceMalformed,
-    /// Source retained a non-zero post-transfer balance.
-    PostBalanceNonZero,
     /// Transfer call emitted no matching canonical `Transfer`.
     MissingTransferLog,
     /// Transfer call emitted more than one matching canonical `Transfer`.
     DuplicateTransferLog,
-    /// Sweep execution attempted a persistent side effect outside token storage.
+    /// The transfer call produced more logs than the single canonical
+    /// `Transfer`, or a malformed ABI / log shape was observed.
     ScopeViolation,
     /// Source has ordinary code (not a plain EOA).
     SourceHasCode,
-    /// Candidate passed policy but could not fit in the remaining system budget.
-    DeferredByBudget,
 }
 
 impl SweepFailureReason {
@@ -508,14 +414,10 @@ impl SweepFailureReason {
             Self::TransferCallFailed => "transfer_call_failed",
             Self::TransferFalse => "transfer_false",
             Self::TransferMalformed => "transfer_malformed",
-            Self::PostBalanceCallFailed => "post_balance_call_failed",
-            Self::PostBalanceMalformed => "post_balance_malformed",
-            Self::PostBalanceNonZero => "post_balance_non_zero",
             Self::MissingTransferLog => "missing_transfer_log",
             Self::DuplicateTransferLog => "duplicate_transfer_log",
             Self::ScopeViolation => "scope_violation",
             Self::SourceHasCode => "source_has_code",
-            Self::DeferredByBudget => "deferred_by_budget",
         }
     }
 
@@ -579,18 +481,18 @@ pub enum SweepInvariantError {
 pub struct SweepOutcome {
     /// Token call logs and EL-synthesized `Swept` logs.
     pub logs: Vec<Log>,
-    /// Block-level budget and request-deduplication effect.
+    /// Block-level transfer-gas and request-deduplication effect.
     pub block_effect: SweepBlockEffect,
     /// Successful sweeps.
     pub successes: Vec<SweepSuccess>,
     /// Classified business failures.
     pub failures: Vec<SweepFailure>,
-    /// Whether at least one trigger was truncated before preflight.
+    /// The transaction's cumulative `transfer` gas hit `TX_SWEEP_GAS_LIMIT`,
+    /// forcing the whole transaction to fail (`SweepOutOfGas`).
     ///
-    /// This deliberately records a boolean rather than an exact count: one
-    /// additional unique trigger is enough to prove that the bounded batch was
-    /// truncated, without scanning and retaining every remaining candidate.
-    pub trigger_batch_truncated: bool,
+    /// When set, the main call and every earlier sweep must be reverted via the
+    /// transaction-level checkpoint, and fees re-settled.
+    pub tx_out_of_gas: bool,
 }
 
 #[inline]
@@ -649,67 +551,51 @@ pub(crate) fn collect_sweep_triggers(
     registry: Address,
     plan: &SweepTxPlan,
 ) -> Vec<SweepTrigger> {
-    collect_transaction_sweep_triggers(main_logs, None, registry, plan).triggers
+    collect_transaction_sweep_triggers(main_logs, registry, plan).triggers
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct CollectedSweepTriggers {
     pub(crate) triggers: Vec<SweepTrigger>,
-    pub(crate) truncated: bool,
 }
 
 pub(crate) fn collect_transaction_sweep_triggers(
     main_logs: &[Log],
-    post_fee_candidate: Option<SweepCandidate>,
     registry: Address,
     plan: &SweepTxPlan,
 ) -> CollectedSweepTriggers {
-    let allowance = plan.preflight_allowance();
-    let mut seen = HashSet::with_capacity(plan.preflight_allowance());
-    let mut triggers = Vec::with_capacity(plan.preflight_allowance());
-    let mut truncated = false;
+    let mut seen = HashSet::new();
+    let mut triggers = Vec::new();
 
+    // Registry `SweepRequested` logs first, in receipt order. They are the only
+    // candidates subject to block-level dedup: the seen set records the point a
+    // request enters resolver resolution, independent of resolution or sweep
+    // outcome, and only advances on committed transactions.
     for log in main_logs {
         let Some(candidate) = parse_registry_request(log, registry) else {
             continue;
         };
         if !plan.has_seen_registry_request(candidate) && seen.insert(candidate) {
-            if triggers.len() < allowance {
-                triggers.push(SweepTrigger {
-                    candidate,
-                    kind: SweepTriggerKind::RegistryRequest,
-                });
-            } else {
-                truncated = true;
-                break;
-            }
+            triggers.push(SweepTrigger {
+                candidate,
+                kind: SweepTriggerKind::RegistryRequest,
+            });
         }
     }
 
-    if !truncated {
-        let transfers = main_logs
-            .iter()
-            .filter_map(parse_transfer_candidate)
-            .chain(post_fee_candidate);
-        for candidate in transfers {
-            if seen.insert(candidate) {
-                if triggers.len() < allowance {
-                    triggers.push(SweepTrigger {
-                        candidate,
-                        kind: SweepTriggerKind::TokenTransfer,
-                    });
-                } else {
-                    truncated = true;
-                    break;
-                }
-            }
+    // ERC-20 `Transfer` logs after Registry requests, in receipt order.
+    // Transaction-local dedup only — Transfer candidates never participate in
+    // block-level dedup (Onyx spec §5.1).
+    for candidate in main_logs.iter().filter_map(parse_transfer_candidate) {
+        if seen.insert(candidate) {
+            triggers.push(SweepTrigger {
+                candidate,
+                kind: SweepTriggerKind::TokenTransfer,
+            });
         }
     }
 
-    CollectedSweepTriggers {
-        triggers,
-        truncated,
-    }
+    CollectedSweepTriggers { triggers }
 }
 
 /// Collects first-seen, deduplicated sweep candidates with Registry requests first.
@@ -717,7 +603,6 @@ pub fn collect_sweep_candidates(main_logs: &[Log], registry: Address) -> Vec<Swe
     collect_sweep_triggers(main_logs, registry, &SweepBlockSession::default().plan())
         .into_iter()
         .map(|trigger| trigger.candidate)
-        .take(MAX_CANDIDATES_PER_TX)
         .collect()
 }
 
@@ -803,6 +688,11 @@ fn encode_transfer(recipient: Address, amount: U256) -> Bytes {
 #[derive(Debug)]
 struct InternalCall {
     output: Option<Bytes>,
+    /// Actual gas consumed by the call frame, measured from the frame's own
+    /// gas tracker (`gas_limit - remaining`). Used to meter the sweep transfer.
+    actual_gas_used: u64,
+    /// Whether the call frame halted with out-of-gas.
+    out_of_gas: bool,
 }
 
 fn internal_call<DB, I>(
@@ -865,11 +755,13 @@ where
         let mut handler = MorphEvmHandler::<DB, I>::new();
         let frame_result = handler.run_exec_loop(evm, frame_init)?;
         take_error::<EVMError<DB::Error, MorphInvalidTransaction>, _>(evm.ctx().error())?;
+        let instruction_result = frame_result.instruction_result();
         Ok(InternalCall {
-            output: frame_result
-                .instruction_result()
+            output: instruction_result
                 .is_ok()
                 .then(|| frame_result.interpreter_result().output.clone()),
+            actual_gas_used: gas_limit.saturating_sub(frame_result.gas().remaining()),
+            out_of_gas: matches!(instruction_result, InstructionResult::OutOfGas),
         })
     })();
 
@@ -918,24 +810,6 @@ fn classify_transfer_output(output: &Bytes) -> Result<(), SweepFailureReason> {
         value if value == U256::from(1) => Ok(()),
         _ => Err(SweepFailureReason::TransferMalformed),
     }
-}
-
-fn journal_is_within_sweep_scope(entries: &[JournalEntry], candidate: SweepCandidate) -> bool {
-    entries.iter().all(|entry| match entry {
-        JournalEntry::AccountWarmed { .. } | JournalEntry::StorageWarmed { .. } => true,
-        JournalEntry::AccountTouched { address } => {
-            *address == candidate.source || *address == candidate.token
-        }
-        JournalEntry::StorageChanged { address, .. } => *address == candidate.token,
-        JournalEntry::AccountDestroyed { .. }
-        | JournalEntry::BalanceChange { .. }
-        | JournalEntry::BalanceTransfer { .. }
-        | JournalEntry::NonceChange { .. }
-        | JournalEntry::NonceBump { .. }
-        | JournalEntry::AccountCreated { .. }
-        | JournalEntry::TransientStorageChange { .. }
-        | JournalEntry::CodeChange { .. } => false,
-    })
 }
 
 #[inline]
@@ -1079,6 +953,13 @@ where
     Ok(decode_address(&output))
 }
 
+/// Executes the resolver and pre-transfer checks for one candidate.
+///
+/// The resolver and `balanceOf` calls use their fixed gas limits and their
+/// consumption is NEVER metered — not into the transaction allowance, the block
+/// allowance, or the user's `gasUsed` (Onyx spec §5.4). On `Ok` a candidate is
+/// ready to transfer; on `Err(PreflightFailure)` it is a candidate-level
+/// business failure.
 fn preflight_candidate<DB, I>(
     evm: &mut MorphEvm<DB, I>,
     config: SweepConfig,
@@ -1145,13 +1026,39 @@ where
     }))
 }
 
+/// Outcome of a single candidate's `transfer`.
+enum TransferOutcome {
+    /// The transfer settled; the candidate succeeded.
+    Success {
+        /// Actual gas consumed by the `transfer` call.
+        actual_gas_used: u64,
+    },
+    /// The transfer was a candidate-level business failure.
+    Failure {
+        reason: SweepFailureReason,
+        /// Actual gas consumed by the `transfer` call before the failure.
+        actual_gas_used: u64,
+    },
+    /// The transfer exhausted the transaction transfer allowance. The whole
+    /// transaction fails. The gas consumed up to the OOG is already counted in
+    /// the block meter by the caller.
+    TxOutOfGas,
+}
+
+/// Executes the sweep `transfer` for one prepared candidate.
+///
+/// The transfer is the ONLY call whose actual gas is metered: it is forwarded
+/// the remaining transaction transfer allowance, its consumed gas is deducted
+/// from that allowance, and it is the only call that can fail the whole
+/// transaction (via `SweepOutOfGas`).
 fn execute_prepared_sweep<DB, I>(
     evm: &mut MorphEvm<DB, I>,
     config: SweepConfig,
     prepared: PreparedSweep,
+    transfer_gas_limit: u64,
     receipt_prefix_logs: usize,
     outcome: &mut SweepOutcome,
-) -> Result<(), EVMError<DB::Error, MorphInvalidTransaction>>
+) -> Result<TransferOutcome, EVMError<DB::Error, MorphInvalidTransaction>>
 where
     DB: Database,
 {
@@ -1161,107 +1068,107 @@ where
 
     let checkpoint = evm.ctx_mut().journal_mut().checkpoint();
     let log_start = checkpoint.log_i;
-    let candidate_result = (|| {
-        let transfer = internal_call(
-            evm,
-            candidate.source,
-            candidate.token,
-            encode_transfer(destination, balance),
-            SWEEP_GAS_LIMIT,
-            false,
-        )?;
-        let Some(transfer_output) = transfer.output else {
-            return Ok(Err(SweepFailureReason::TransferCallFailed));
-        };
-        if let Err(reason) = classify_transfer_output(&transfer_output) {
-            return Ok(Err(reason));
-        }
+    let transfer = internal_call(
+        evm,
+        candidate.source,
+        candidate.token,
+        encode_transfer(destination, balance),
+        transfer_gas_limit,
+        false,
+    )?;
+    let actual_gas_used = transfer.actual_gas_used;
+    outcome.block_effect.add_transfer_gas(actual_gas_used);
 
-        let post_balance = match read_token_balance(
-            evm,
-            candidate.token,
-            candidate.source,
-            SweepFailureReason::PostBalanceCallFailed,
-            SweepFailureReason::PostBalanceMalformed,
-        )? {
-            Ok(balance) => balance,
-            Err(reason) => return Ok(Err(reason)),
-        };
-        if !post_balance.is_zero() {
-            return Ok(Err(SweepFailureReason::PostBalanceNonZero));
-        }
-
-        let journal = evm.ctx_ref().journal();
-        if !journal_is_within_sweep_scope(&journal.journal[checkpoint.journal_i..], candidate) {
-            return Ok(Err(SweepFailureReason::ScopeViolation));
-        }
-
-        let call_logs = &journal.logs[log_start..];
-        let mut matching_logs = call_logs
-            .iter()
-            .enumerate()
-            .filter(|(_, log)| is_matching_transfer(log, candidate, destination, balance));
-        let Some((matching_log_offset, _)) = matching_logs.next() else {
-            return Ok(Err(SweepFailureReason::MissingTransferLog));
-        };
-        if matching_logs.next().is_some() {
-            return Ok(Err(SweepFailureReason::DuplicateTransferLog));
-        }
-        if call_logs.len() != 1 {
-            return Ok(Err(SweepFailureReason::ScopeViolation));
-        }
-        Ok(Ok(matching_log_offset))
-    })();
-
-    match candidate_result {
-        Err(error) => {
-            evm.ctx_mut().journal_mut().checkpoint_revert(checkpoint);
-            Err(error)
-        }
-        Ok(Err(reason)) => {
-            evm.ctx_mut().journal_mut().checkpoint_revert(checkpoint);
-            push_failure(
-                outcome,
-                config.registry_address,
-                candidate,
-                Some(destination),
-                reason,
-            );
-            Ok(())
-        }
-        Ok(Ok(matching_log_offset)) => {
-            let transfer_log_offset = match checked_transfer_log_offset(
-                receipt_prefix_logs,
-                outcome.logs.len(),
-                matching_log_offset,
-            ) {
-                Ok(offset) => offset,
-                Err(error) => {
-                    evm.ctx_mut().journal_mut().checkpoint_revert(checkpoint);
-                    return Err(EVMError::Custom(error.to_string()));
-                }
-            };
-            let call_logs = evm.ctx_ref().journal().logs[log_start..].to_vec();
-            evm.ctx_mut().journal_mut().logs.truncate(log_start);
-            evm.ctx_mut().journal_mut().checkpoint_commit();
-
-            outcome.logs.extend(call_logs);
-            outcome.logs.push(build_sweep_log(
-                config.registry_address,
-                candidate,
-                destination,
-                balance,
-                transfer_log_offset,
-            ));
-            outcome.successes.push(SweepSuccess {
-                candidate,
-                destination,
-                amount: balance,
-                transfer_log_offset,
-            });
-            Ok(())
-        }
+    if transfer.out_of_gas {
+        // The transfer used up the remaining transaction allowance. This is the
+        // one sweep outcome that fails the whole transaction; revert the
+        // candidate and signal it upward.
+        evm.ctx_mut().journal_mut().checkpoint_revert(checkpoint);
+        return Ok(TransferOutcome::TxOutOfGas);
     }
+    let Some(transfer_output) = transfer.output else {
+        evm.ctx_mut().journal_mut().checkpoint_revert(checkpoint);
+        return Ok(TransferOutcome::Failure {
+            reason: SweepFailureReason::TransferCallFailed,
+            actual_gas_used,
+        });
+    };
+    if let Err(reason) = classify_transfer_output(&transfer_output) {
+        evm.ctx_mut().journal_mut().checkpoint_revert(checkpoint);
+        return Ok(TransferOutcome::Failure {
+            reason,
+            actual_gas_used,
+        });
+    }
+
+    let journal = evm.ctx_ref().journal();
+    let call_logs = &journal.logs[log_start..];
+    let mut matching_logs = call_logs
+        .iter()
+        .enumerate()
+        .filter(|(_, log)| is_matching_transfer(log, candidate, destination, balance));
+    let Some((matching_log_offset, _)) = matching_logs.next() else {
+        drop(matching_logs);
+        evm.ctx_mut().journal_mut().checkpoint_revert(checkpoint);
+        return Ok(TransferOutcome::Failure {
+            reason: SweepFailureReason::MissingTransferLog,
+            actual_gas_used,
+        });
+    };
+    if matching_logs.next().is_some() {
+        drop(matching_logs);
+        evm.ctx_mut().journal_mut().checkpoint_revert(checkpoint);
+        return Ok(TransferOutcome::Failure {
+            reason: SweepFailureReason::DuplicateTransferLog,
+            actual_gas_used,
+        });
+    }
+    drop(matching_logs);
+    // Scope: the call produced exactly one log. The protocol does NOT scan the
+    // journal — the "log count is exactly one" rule plus whitelist admission
+    // together constrain scope (Onyx spec §5.2 / §9).
+    if call_logs.len() != 1 {
+        evm.ctx_mut().journal_mut().checkpoint_revert(checkpoint);
+        return Ok(TransferOutcome::Failure {
+            reason: SweepFailureReason::ScopeViolation,
+            actual_gas_used,
+        });
+    }
+
+    let transfer_log_offset = match checked_transfer_log_offset(
+        receipt_prefix_logs,
+        outcome.logs.len(),
+        matching_log_offset,
+    ) {
+        Ok(offset) => offset,
+        Err(error) => {
+            // Receipt-relative offset exceeds u32: the receipt would need more
+            // than 4 billion preceding logs. This is an internal invariant
+            // violation, not a token misbehavior — surface it as a hard error
+            // rather than a misleading `SweepFailed`.
+            evm.ctx_mut().journal_mut().checkpoint_revert(checkpoint);
+            return Err(EVMError::Custom(error.to_string()));
+        }
+    };
+    let call_logs = evm.ctx_ref().journal().logs[log_start..].to_vec();
+    evm.ctx_mut().journal_mut().logs.truncate(log_start);
+    evm.ctx_mut().journal_mut().checkpoint_commit();
+
+    outcome.logs.extend(call_logs);
+    outcome.logs.push(build_sweep_log(
+        config.registry_address,
+        candidate,
+        destination,
+        balance,
+        transfer_log_offset,
+    ));
+    outcome.successes.push(SweepSuccess {
+        candidate,
+        destination,
+        amount: balance,
+        transfer_log_offset,
+    });
+    Ok(TransferOutcome::Success { actual_gas_used })
 }
 
 /// Executes independent sweep candidates against the post-main state.
@@ -1271,7 +1178,6 @@ pub(crate) fn execute_sweeps<DB, I>(
     config: SweepConfig,
     candidates: &[SweepCandidate],
     receipt_prefix_logs: usize,
-    allowance: usize,
 ) -> Result<SweepOutcome, EVMError<DB::Error, MorphInvalidTransaction>>
 where
     DB: Database,
@@ -1284,7 +1190,7 @@ where
             kind: SweepTriggerKind::TokenTransfer,
         })
         .collect::<Vec<_>>();
-    let plan = SweepTxPlan::single_transaction(allowance);
+    let plan = SweepTxPlan::single_transaction();
     execute_sweep_triggers(evm, config, &triggers, receipt_prefix_logs, &plan)
 }
 
@@ -1300,23 +1206,21 @@ where
 {
     let mut outcome = SweepOutcome::default();
     let registry = config.registry_address;
-    // Track whether execution stopped before all collected triggers were
-    // preflighted. Candidate collection separately records truncation at its
-    // own bounded allowance.
-    let mut preflighted = 0usize;
-    for trigger in triggers.iter().copied().take(plan.preflight_allowance()) {
-        if outcome.block_effect.checked_candidates() == plan.candidate_allowance() {
+    let mut remaining_transfer_gas = plan.remaining_transfer_gas();
+
+    for trigger in triggers.iter().copied() {
+        if remaining_transfer_gas == 0 {
+            outcome.tx_out_of_gas = true;
             break;
         }
-        let next_preflight_gas = outcome
-            .block_effect
-            .system_gas_used()
-            .saturating_add(PREFLIGHT_SYSTEM_GAS);
-        if next_preflight_gas > plan.system_gas_allowance() {
-            break;
+        // A Registry request entering resolver resolution is recorded in the
+        // block-level seen set, independent of resolution or sweep outcome
+        // (Onyx spec §5.1).
+        if trigger.kind == SweepTriggerKind::RegistryRequest {
+            outcome
+                .block_effect
+                .record_seen_registry_request(trigger.candidate);
         }
-        outcome.block_effect.record_preflight(trigger);
-        preflighted += 1;
 
         let prepared = match preflight_candidate(evm, config, trigger.candidate)? {
             Ok(prepared) => prepared,
@@ -1332,24 +1236,41 @@ where
             }
         };
 
-        let next_execution_gas = outcome
-            .block_effect
-            .system_gas_used()
-            .saturating_add(SWEEP_EXECUTION_SYSTEM_GAS);
-        if next_execution_gas > plan.system_gas_allowance() {
-            push_failure(
-                &mut outcome,
-                registry,
-                trigger.candidate,
-                Some(prepared.destination),
-                SweepFailureReason::DeferredByBudget,
-            );
-            break;
+        let transfer_gas_limit = remaining_transfer_gas;
+        match execute_prepared_sweep(
+            evm,
+            config,
+            prepared,
+            transfer_gas_limit,
+            receipt_prefix_logs,
+            &mut outcome,
+        )? {
+            TransferOutcome::Success {
+                actual_gas_used,
+            } => {
+                remaining_transfer_gas =
+                    remaining_transfer_gas.saturating_sub(actual_gas_used);
+            }
+            TransferOutcome::Failure {
+                reason,
+                actual_gas_used,
+            } => {
+                remaining_transfer_gas =
+                    remaining_transfer_gas.saturating_sub(actual_gas_used);
+                push_failure(
+                    &mut outcome,
+                    registry,
+                    prepared.candidate,
+                    Some(prepared.destination),
+                    reason,
+                );
+            }
+            TransferOutcome::TxOutOfGas => {
+                outcome.tx_out_of_gas = true;
+                break;
+            }
         }
-        outcome.block_effect.record_execution();
-        execute_prepared_sweep(evm, config, prepared, receipt_prefix_logs, &mut outcome)?;
     }
-    outcome.trigger_batch_truncated = preflighted < triggers.len();
     Ok(outcome)
 }
 
@@ -1493,7 +1414,7 @@ mod tests {
     }
 
     #[test]
-    fn candidates_preserve_order_deduplicate_and_cap_at_sixteen() {
+    fn candidates_preserve_order_and_deduplicate_without_a_cap() {
         let mut logs = vec![
             transfer_log(TOKEN_A, Address::ZERO, SOURCE, U256::from(1)),
             request_log(TOKEN_A, SOURCE),
@@ -1507,7 +1428,10 @@ mod tests {
 
         let candidates = collect_sweep_candidates(&logs, REGISTRY);
 
-        assert_eq!(candidates.len(), MAX_CANDIDATES_PER_TX);
+        // The Onyx v1 model has NO candidate count ceiling: every first-seen
+        // candidate is returned (3 seed logs, minus the TOKEN_A pair already
+        // seen as a Registry request, plus 20 transfers = 22).
+        assert_eq!(candidates.len(), 22);
         assert_eq!(
             candidates[0],
             SweepCandidate {
@@ -1529,6 +1453,7 @@ mod tests {
                 source: Address::with_last_byte(100),
             }
         );
+        assert_eq!(candidates[21].source, Address::with_last_byte(119));
     }
 
     #[test]
@@ -1537,7 +1462,7 @@ mod tests {
             token: TOKEN_B,
             source: SOURCE,
         };
-        let mut logs = (0_u8..MAX_CANDIDATES_PER_TX as u8)
+        let mut logs = (0_u8..20)
             .map(|index| {
                 transfer_log(
                     Address::with_last_byte(index.saturating_add(10)),
@@ -1551,18 +1476,14 @@ mod tests {
 
         let candidates = collect_sweep_candidates(&logs, REGISTRY);
 
-        assert_eq!(candidates.len(), MAX_CANDIDATES_PER_TX);
+        assert_eq!(candidates.len(), 21);
         assert_eq!(candidates[0], requested);
     }
 
     #[test]
-    fn refund_candidate_follows_main_transfers_and_shares_deduplication() {
+    fn collection_deduplicates_locally_and_prioritizes_registry_requests() {
         let requested = candidate(TOKEN_B);
         let main_transfer = candidate(TOKEN_A);
-        let refund = SweepCandidate {
-            token: Address::with_last_byte(5),
-            source: SOURCE,
-        };
         let logs = vec![
             transfer_log(
                 main_transfer.token,
@@ -1571,12 +1492,21 @@ mod tests {
                 U256::from(1),
             ),
             request_log(requested.token, requested.source),
+            transfer_log(
+                requested.token,
+                Address::ZERO,
+                requested.source,
+                U256::from(1),
+            ),
         ];
         let plan = SweepBlockSession::default().plan();
 
-        let collected = collect_transaction_sweep_triggers(&logs, Some(refund), REGISTRY, &plan);
+        let collected = collect_transaction_sweep_triggers(&logs, REGISTRY, &plan);
 
-        assert!(!collected.truncated);
+        // The TOKEN_B pair is seen first as a Registry request, so its later
+        // Transfer is transaction-locally deduplicated; Registry requests still
+        // sort ahead of Transfer candidates. There is no `truncated` flag in the
+        // v1 model.
         assert_eq!(
             collected.triggers,
             vec![
@@ -1588,44 +1518,8 @@ mod tests {
                     candidate: main_transfer,
                     kind: SweepTriggerKind::TokenTransfer,
                 },
-                SweepTrigger {
-                    candidate: refund,
-                    kind: SweepTriggerKind::TokenTransfer,
-                },
             ]
         );
-        let deduplicated =
-            collect_transaction_sweep_triggers(&logs, Some(main_transfer), REGISTRY, &plan);
-        assert!(!deduplicated.truncated);
-        assert_eq!(deduplicated.triggers, collected.triggers[..2]);
-    }
-
-    #[test]
-    fn collection_reports_truncation_at_and_after_zero_allowance() {
-        let logs = (1..=MAX_PREFLIGHTS_PER_TX + 1)
-            .map(|index| {
-                transfer_log(
-                    Address::with_last_byte(u8::try_from(index).unwrap()),
-                    Address::ZERO,
-                    SOURCE,
-                    U256::from(1),
-                )
-            })
-            .collect::<Vec<_>>();
-
-        let bounded = collect_transaction_sweep_triggers(
-            &logs,
-            None,
-            REGISTRY,
-            &SweepBlockSession::default().plan(),
-        );
-        assert_eq!(bounded.triggers.len(), MAX_PREFLIGHTS_PER_TX);
-        assert!(bounded.truncated);
-
-        let exhausted =
-            collect_transaction_sweep_triggers(&logs[..1], None, REGISTRY, &SweepTxPlan::default());
-        assert!(exhausted.triggers.is_empty());
-        assert!(exhausted.truncated);
     }
 
     #[test]
@@ -1679,6 +1573,9 @@ mod tests {
         Malformed,
         /// Resolver reverts.
         Revert,
+        /// Resolver burns a large bounded amount of gas before returning a
+        /// destination, to prove query consumption is never metered.
+        GasBurning,
     }
 
     #[derive(Clone, Copy)]
@@ -1687,8 +1584,9 @@ mod tests {
         Zero,
         Malformed,
         Revert,
-        MalformedAfterTransfer,
-        RevertAfterTransfer,
+        /// Burns a large bounded amount of gas before returning the balance,
+        /// to prove `balanceOf` consumption is never metered.
+        GasBurning,
     }
 
     #[derive(Clone, Copy)]
@@ -1698,7 +1596,6 @@ mod tests {
         False,
         Malformed,
         Revert,
-        PostBalanceNonZero,
         MissingLog,
         DuplicateLog,
         ExtraLog,
@@ -1775,10 +1672,26 @@ mod tests {
         asm.op(0xf3);
     }
 
+    /// Burns a large bounded amount of gas with a single expensive memory
+    /// expansion, without touching state. Used to prove that resolver and
+    /// `balanceOf` query consumption is never metered into the sweep transfer
+    /// budget: the burn stays under the fixed 50k query limit but dwarfs the
+    /// frame overhead.
+    fn burn_gas(asm: &mut Assembler) {
+        // MSTORE at offset 0x1C000 forces ~35.8k gas of memory expansion.
+        asm.push(&[0x01, 0xc0, 0x00]);
+        asm.push_u8(0);
+        asm.op(0x52);
+    }
+
     fn registry_code(mode: ResolverMode) -> Bytes {
         let mut asm = Assembler::new();
         match mode {
             ResolverMode::Destination => {
+                return_word(&mut asm, B256::left_padding_from(DESTINATION.as_slice()))
+            }
+            ResolverMode::GasBurning => {
+                burn_gas(&mut asm);
                 return_word(&mut asm, B256::left_padding_from(DESTINATION.as_slice()))
             }
             ResolverMode::SelfReference => {
@@ -1948,6 +1861,16 @@ mod tests {
                 asm.op(0xf3);
             }
             BalanceMode::Zero => return_word(&mut asm, B256::ZERO),
+            BalanceMode::GasBurning => {
+                burn_gas(&mut asm);
+                asm.push_u8(0);
+                asm.op(0x54);
+                asm.push_u8(0);
+                asm.op(0x52);
+                asm.push_u8(32);
+                asm.push_u8(0);
+                asm.op(0xf3);
+            }
             BalanceMode::Malformed => {
                 asm.push_u8(0);
                 asm.push_u8(0);
@@ -1960,31 +1883,6 @@ mod tests {
                 asm.push_u8(0);
                 asm.push_u8(0);
                 asm.op(0xfd);
-            }
-            BalanceMode::MalformedAfterTransfer | BalanceMode::RevertAfterTransfer => {
-                asm.push_u8(0);
-                asm.op(0x54);
-                asm.op(0x80);
-                asm.op(0x15);
-                asm.jumpi("post_balance_failure");
-                asm.push_u8(0);
-                asm.op(0x52);
-                asm.push_u8(32);
-                asm.push_u8(0);
-                asm.op(0xf3);
-                asm.label("post_balance_failure");
-                if matches!(balance_mode, BalanceMode::MalformedAfterTransfer) {
-                    asm.push_u8(0);
-                    asm.push_u8(0);
-                    asm.op(0x52);
-                    asm.push_u8(1);
-                    asm.push_u8(0);
-                    asm.op(0xf3);
-                } else {
-                    asm.push_u8(0);
-                    asm.push_u8(0);
-                    asm.op(0xfd);
-                }
             }
         }
 
@@ -2008,8 +1906,7 @@ mod tests {
         asm.op(0x35);
         asm.push_u8(0);
         asm.op(0x52);
-        let post_balance = u8::from(matches!(transfer_mode, TransferMode::PostBalanceNonZero));
-        asm.push_u8(post_balance);
+        asm.push_u8(0);
         asm.push_u8(0);
         asm.op(0x55);
         asm.push_u8(36);
@@ -2034,7 +1931,6 @@ mod tests {
 
         match transfer_mode {
             TransferMode::Empty
-            | TransferMode::PostBalanceNonZero
             | TransferMode::MissingLog
             | TransferMode::DuplicateLog
             | TransferMode::ExtraLog => {
@@ -2142,6 +2038,15 @@ mod tests {
         }
     }
 
+    /// A distinct token address outside the low precompile range (0x01..=0x0a),
+    /// for batches that must be executable rather than just collectible.
+    fn batch_token(index: u8) -> Address {
+        let mut bytes = [0_u8; 20];
+        bytes[0] = 0x30;
+        bytes[19] = index;
+        Address::from(bytes)
+    }
+
     fn execute_one(
         resolver_mode: ResolverMode,
         balance_mode: BalanceMode,
@@ -2154,7 +2059,7 @@ mod tests {
             true,
         );
         let outcome =
-            execute_sweeps(&mut evm, test_sweep_config(), &[candidate(TOKEN_A)], 0, 1).unwrap();
+            execute_sweeps(&mut evm, test_sweep_config(), &[candidate(TOKEN_A)], 0).unwrap();
         (evm, outcome)
     }
 
@@ -2174,8 +2079,10 @@ mod tests {
     }
 
     /// Every classification, in declaration order. Adding a variant without
-    /// adding it here makes the label/encoding tests fail to cover it.
-    const fn all_failure_reasons() -> [SweepFailureReason; 18] {
+    /// adding it here makes the label/encoding tests fail to cover it. After
+    /// Onyx spec v1 removed the post-transfer balance checks and budget
+    /// deferral, this is the 14-classification set.
+    const fn all_failure_reasons() -> [SweepFailureReason; 14] {
         [
             SweepFailureReason::ResolverCallFailed,
             SweepFailureReason::ResolverMalformed,
@@ -2187,14 +2094,10 @@ mod tests {
             SweepFailureReason::TransferCallFailed,
             SweepFailureReason::TransferFalse,
             SweepFailureReason::TransferMalformed,
-            SweepFailureReason::PostBalanceCallFailed,
-            SweepFailureReason::PostBalanceMalformed,
-            SweepFailureReason::PostBalanceNonZero,
             SweepFailureReason::MissingTransferLog,
             SweepFailureReason::DuplicateTransferLog,
             SweepFailureReason::ScopeViolation,
             SweepFailureReason::SourceHasCode,
-            SweepFailureReason::DeferredByBudget,
         ]
     }
 
@@ -2264,7 +2167,7 @@ mod tests {
         evm.tx.inner.caller = Address::with_last_byte(0xee);
         evm.tx.inner.gas_limit = 777;
         evm.set_sweep_execution_mode(SweepExecutionMode::Canonical(
-            SweepTxPlan::single_transaction(2),
+            SweepTxPlan::single_transaction(),
         ));
         let result: ExecutionResult<crate::MorphHaltReason> = ExecutionResult::Success {
             reason: SuccessReason::Stop,
@@ -2297,7 +2200,7 @@ mod tests {
     }
 
     #[test]
-    fn onyx_allowance_and_success_result_gate_the_hook() {
+    fn canonical_execution_mode_and_success_result_gate_the_hook() {
         let mut disabled = make_evm(
             ResolverMode::Destination,
             &[(TOKEN_A, BalanceMode::Normal, TransferMode::True)],
@@ -2305,7 +2208,7 @@ mod tests {
             false,
         );
         disabled.set_sweep_execution_mode(SweepExecutionMode::Canonical(
-            SweepTxPlan::single_transaction(1),
+            SweepTxPlan::single_transaction(),
         ));
         assert!(disabled.transact_one(main_tx()).unwrap().is_success());
         assert_eq!(
@@ -2333,7 +2236,7 @@ mod tests {
             MainMode::Revert,
         );
         reverted.set_sweep_execution_mode(SweepExecutionMode::Canonical(
-            SweepTxPlan::single_transaction(1),
+            SweepTxPlan::single_transaction(),
         ));
         assert!(!reverted.transact_one(main_tx()).unwrap().is_success());
         assert_eq!(
@@ -2348,7 +2251,7 @@ mod tests {
             true,
         );
         enabled.set_sweep_execution_mode(SweepExecutionMode::Canonical(
-            SweepTxPlan::single_transaction(1),
+            SweepTxPlan::single_transaction(),
         ));
         let result = enabled.transact_one(main_tx()).unwrap();
         let outcome = enabled.take_sweep_outcome().unwrap();
@@ -2360,55 +2263,17 @@ mod tests {
     }
 
     #[test]
-    fn fee_logs_are_receipt_only_and_refund_candidate_preserves_offsets() {
+    fn fee_logs_are_receipt_only_and_do_not_trigger_sweeps() {
         let mut evm = make_evm(
             ResolverMode::Destination,
-            &[
-                (TOKEN_A, BalanceMode::Normal, TransferMode::True),
-                (TOKEN_B, BalanceMode::Normal, TransferMode::True),
-            ],
+            &[(TOKEN_A, BalanceMode::Normal, TransferMode::True)],
             None,
             true,
         );
         evm.pre_fee_logs = vec![transfer_log(TOKEN_A, Address::ZERO, SOURCE, U256::from(1))];
         evm.post_fee_logs = vec![transfer_log(TOKEN_A, Address::ZERO, SOURCE, U256::from(1))];
-        evm.post_fee_sweep_candidate = Some(candidate(TOKEN_B));
         evm.set_sweep_execution_mode(SweepExecutionMode::Canonical(
-            SweepTxPlan::single_transaction(2),
-        ));
-        let result: ExecutionResult<crate::MorphHaltReason> = ExecutionResult::Success {
-            reason: SuccessReason::Stop,
-            gas: ResultGas::default(),
-            logs: Vec::new(),
-            output: Output::Call(Bytes::new()),
-        };
-
-        evm.apply_sweep(&result).unwrap();
-        let outcome = evm.take_sweep_outcome().unwrap();
-
-        assert_eq!(outcome.successes.len(), 1);
-        assert_eq!(outcome.successes[0].candidate, candidate(TOKEN_B));
-        assert_eq!(outcome.successes[0].transfer_log_offset, 2);
-        assert_eq!(
-            token_balance(&mut evm, TOKEN_A),
-            U256::from(INITIAL_BALANCE)
-        );
-    }
-
-    #[test]
-    fn main_log_and_slot_fee_refund_trigger_sweeps_in_order() {
-        let mut evm = make_evm(
-            ResolverMode::Destination,
-            &[
-                (TOKEN_A, BalanceMode::Normal, TransferMode::True),
-                (TOKEN_B, BalanceMode::Normal, TransferMode::True),
-            ],
-            None,
-            true,
-        );
-        evm.post_fee_sweep_candidate = Some(candidate(TOKEN_B));
-        evm.set_sweep_execution_mode(SweepExecutionMode::Canonical(
-            SweepTxPlan::single_transaction(2),
+            SweepTxPlan::single_transaction(),
         ));
         let result: ExecutionResult<crate::MorphHaltReason> = ExecutionResult::Success {
             reason: SuccessReason::Stop,
@@ -2420,11 +2285,49 @@ mod tests {
         evm.apply_sweep(&result).unwrap();
         let outcome = evm.take_sweep_outcome().unwrap();
 
+        // Pre- and post-fee logs occupy receipt slots but never trigger sweeps;
+        // only the main result logs do. The one sweep that runs is TOKEN_A, and
+        // its Transfer lands after pre(1) + main(1) + post(1) = 3 prefix logs.
+        assert_eq!(outcome.successes.len(), 1);
+        assert_eq!(outcome.successes[0].candidate, candidate(TOKEN_A));
+        assert_eq!(outcome.successes[0].transfer_log_offset, 3);
+        assert_eq!(token_balance(&mut evm, TOKEN_A), U256::ZERO);
+    }
+
+    #[test]
+    fn main_logs_trigger_sweeps_in_order() {
+        let mut evm = make_evm(
+            ResolverMode::Destination,
+            &[
+                (TOKEN_A, BalanceMode::Normal, TransferMode::True),
+                (TOKEN_B, BalanceMode::Normal, TransferMode::True),
+            ],
+            None,
+            true,
+        );
+        evm.set_sweep_execution_mode(SweepExecutionMode::Canonical(
+            SweepTxPlan::single_transaction(),
+        ));
+        let result: ExecutionResult<crate::MorphHaltReason> = ExecutionResult::Success {
+            reason: SuccessReason::Stop,
+            gas: ResultGas::default(),
+            logs: vec![
+                transfer_log(TOKEN_A, Address::ZERO, SOURCE, U256::from(1)),
+                transfer_log(TOKEN_B, Address::ZERO, SOURCE, U256::from(1)),
+            ],
+            output: Output::Call(Bytes::new()),
+        };
+
+        evm.apply_sweep(&result).unwrap();
+        let outcome = evm.take_sweep_outcome().unwrap();
+
+        // TOKEN_A sweeps first: its Transfer is at receipt index 2 (2 main
+        // prefix logs), then its Swept log. TOKEN_B's Transfer lands after.
         assert_eq!(outcome.successes.len(), 2);
         assert_eq!(outcome.successes[0].candidate, candidate(TOKEN_A));
-        assert_eq!(outcome.successes[0].transfer_log_offset, 1);
+        assert_eq!(outcome.successes[0].transfer_log_offset, 2);
         assert_eq!(outcome.successes[1].candidate, candidate(TOKEN_B));
-        assert_eq!(outcome.successes[1].transfer_log_offset, 3);
+        assert_eq!(outcome.successes[1].transfer_log_offset, 4);
     }
 
     #[test]
@@ -2437,7 +2340,7 @@ mod tests {
         );
         replay.tx = main_tx();
         replay.set_sweep_execution_mode(SweepExecutionMode::Canonical(
-            SweepTxPlan::single_transaction(1),
+            SweepTxPlan::single_transaction(),
         ));
         let replayed = replay.replay().unwrap();
         assert!(replayed.result.is_success());
@@ -2454,7 +2357,7 @@ mod tests {
             true,
         );
         inspected.set_sweep_execution_mode(SweepExecutionMode::Canonical(
-            SweepTxPlan::single_transaction(1),
+            SweepTxPlan::single_transaction(),
         ));
         let result = inspected.inspect_one_tx(main_tx()).unwrap();
         assert!(result.is_success());
@@ -2486,7 +2389,7 @@ mod tests {
                 sweep: Some(test_sweep_config()),
             };
             evm.set_sweep_execution_mode(SweepExecutionMode::Canonical(
-                SweepTxPlan::single_transaction(1),
+                SweepTxPlan::single_transaction(),
             ));
             let mut tx = main_tx();
             tx.inner.kind = TxKind::Call(TOKEN_B);
@@ -2501,7 +2404,6 @@ mod tests {
             assert_eq!(evm.sweep_execution_mode, SweepExecutionMode::Disabled);
             assert!(evm.pre_fee_logs.is_empty());
             assert!(evm.post_fee_logs.is_empty());
-            assert!(evm.post_fee_sweep_candidate.is_none());
             assert!(evm.frame_stack().index().is_none());
             assert!(
                 evm.ctx_ref()
@@ -2540,7 +2442,7 @@ mod tests {
             true,
         );
         evm.set_sweep_execution_mode(SweepExecutionMode::Canonical(
-            SweepTxPlan::single_transaction(1),
+            SweepTxPlan::single_transaction(),
         ));
         assert!(evm.transact_one(main_tx()).unwrap().is_success());
         let outcome = evm.take_sweep_outcome().unwrap();
@@ -2648,7 +2550,6 @@ mod tests {
             test_sweep_config(),
             &[candidate(TOKEN_A), candidate(TOKEN_B)],
             4,
-            2,
         )
         .unwrap();
 
@@ -2672,16 +2573,15 @@ mod tests {
         );
     }
 
-    /// Quota exhaustion must never be silent. The outcome records that the batch
-    /// was truncated without claiming an exact number of unchecked triggers.
+    /// The v1 model has no preflight quota and no batch-truncation flag: every
+    /// trigger is processed, and only `tx_out_of_gas` can interrupt the loop.
     #[test]
-    fn execution_reports_a_truncated_trigger_batch() {
-        const OVERFLOW: usize = 5;
+    fn execution_never_truncates_a_large_trigger_batch() {
         let mut evm = make_evm(ResolverMode::Unregistered, &[], None, true);
-        let triggers = (1..=MAX_PREFLIGHTS_PER_TX + OVERFLOW)
+        let triggers = (0_u8..70)
             .map(|index| SweepTrigger {
                 candidate: SweepCandidate {
-                    token: Address::with_last_byte(u8::try_from(index).unwrap()),
+                    token: Address::with_last_byte(index.saturating_add(10)),
                     source: SOURCE,
                 },
                 kind: SweepTriggerKind::TokenTransfer,
@@ -2697,21 +2597,25 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(
-            outcome.block_effect.preflighted_candidates(),
-            MAX_PREFLIGHTS_PER_TX
-        );
-        assert!(outcome.trigger_batch_truncated);
+        // All 70 unresolved triggers fail at the resolver; none is dropped.
+        assert_eq!(outcome.failures.len(), 70);
+        assert!(!outcome.tx_out_of_gas);
+        assert!(outcome.successes.is_empty());
+        // Unresolved candidates never reach a transfer, so no transfer gas is
+        // metered and no Registry request is recorded.
+        assert_eq!(outcome.block_effect.transfer_gas_used(), 0);
+        assert!(outcome.block_effect.seen_registry_requests().is_empty());
     }
 
     #[test]
-    fn no_triggers_are_dropped_when_the_quota_is_sufficient() {
+    fn successful_execution_does_not_flag_tx_out_of_gas() {
         let (_, outcome) = execute_one(
             ResolverMode::Destination,
             BalanceMode::Normal,
             TransferMode::True,
         );
-        assert!(!outcome.trigger_batch_truncated);
+        assert!(!outcome.tx_out_of_gas);
+        assert_eq!(outcome.successes.len(), 1);
     }
 
     /// Every Registry result that must not produce a sweep, classified.
@@ -2745,49 +2649,6 @@ mod tests {
     }
 
     #[test]
-    fn journal_scope_allows_only_token_storage_and_nonpersistent_warming() {
-        let candidate = candidate(TOKEN_A);
-        let allowed = vec![
-            JournalEntry::AccountWarmed {
-                address: Address::with_last_byte(0xfe),
-            },
-            JournalEntry::StorageWarmed {
-                address: Address::with_last_byte(0xfd),
-                key: U256::ZERO,
-            },
-            JournalEntry::AccountTouched { address: SOURCE },
-            JournalEntry::AccountTouched { address: TOKEN_A },
-            JournalEntry::StorageChanged {
-                address: TOKEN_A,
-                key: U256::ZERO,
-                had_value: U256::from(INITIAL_BALANCE),
-            },
-        ];
-        assert!(journal_is_within_sweep_scope(&allowed, candidate));
-
-        for forbidden in [
-            JournalEntry::StorageChanged {
-                address: DESTINATION,
-                key: U256::ZERO,
-                had_value: U256::ZERO,
-            },
-            JournalEntry::BalanceChange {
-                address: TOKEN_A,
-                old_balance: U256::ZERO,
-            },
-            JournalEntry::NonceBump { address: TOKEN_A },
-            JournalEntry::TransientStorageChange {
-                address: TOKEN_A,
-                key: U256::ZERO,
-                had_value: U256::ZERO,
-            },
-            JournalEntry::CodeChange { address: TOKEN_A },
-        ] {
-            assert!(!journal_is_within_sweep_scope(&[forbidden], candidate));
-        }
-    }
-
-    #[test]
     fn ordinary_code_is_skipped() {
         let code_cases = [
             Bytecode::new_raw(Bytes::from_static(&[0x00])),
@@ -2801,7 +2662,7 @@ mod tests {
                 true,
             );
             let outcome =
-                execute_sweeps(&mut evm, test_sweep_config(), &[candidate(TOKEN_A)], 0, 1).unwrap();
+                execute_sweeps(&mut evm, test_sweep_config(), &[candidate(TOKEN_A)], 0).unwrap();
 
             assert_eq!(only_failure(&outcome), SweepFailureReason::SourceHasCode);
             assert_eq!(
@@ -2839,6 +2700,141 @@ mod tests {
             assert_eq!(outcome.successes[0].amount, U256::from(INITIAL_BALANCE));
             assert_eq!(token_balance(&mut evm, TOKEN_A), U256::ZERO);
         }
+    }
+
+    /// The resolver and `balanceOf` queries have fixed 50k gas limits, but their
+    /// actual consumption is NEVER metered (Onyx spec §5.4). A query that burns
+    /// tens of thousands of gas must not move the transfer meter at all.
+    #[test]
+    fn query_gas_is_never_metered_into_transfer_budget() {
+        let (_, cheap_resolver) =
+            execute_one(ResolverMode::Destination, BalanceMode::Normal, TransferMode::True);
+        let (_, burning_resolver) =
+            execute_one(ResolverMode::GasBurning, BalanceMode::Normal, TransferMode::True);
+        assert_eq!(cheap_resolver.successes.len(), 1);
+        assert_eq!(burning_resolver.successes.len(), 1);
+        assert_eq!(
+            cheap_resolver.block_effect.transfer_gas_used(),
+            burning_resolver.block_effect.transfer_gas_used(),
+            "resolver gas consumption must not enter the transfer meter"
+        );
+        assert!(cheap_resolver.block_effect.transfer_gas_used() > 0);
+
+        let (_, cheap_balance) =
+            execute_one(ResolverMode::Destination, BalanceMode::Normal, TransferMode::True);
+        let (_, burning_balance) =
+            execute_one(ResolverMode::Destination, BalanceMode::GasBurning, TransferMode::True);
+        assert_eq!(burning_balance.successes.len(), 1);
+        assert_eq!(
+            cheap_balance.block_effect.transfer_gas_used(),
+            burning_balance.block_effect.transfer_gas_used(),
+            "balanceOf gas consumption must not enter the transfer meter"
+        );
+    }
+
+    /// Only the sweep `transfer`'s actual gas is metered into the block effect,
+    /// whether the transfer settles or fails at the business layer.
+    #[test]
+    fn transfer_actual_gas_is_metered_into_block_effect() {
+        let (mut evm, outcome) =
+            execute_one(ResolverMode::Destination, BalanceMode::Normal, TransferMode::True);
+        assert!(outcome.block_effect.transfer_gas_used() > 0);
+        assert_eq!(outcome.successes.len(), 1);
+        assert_eq!(token_balance(&mut evm, TOKEN_A), U256::ZERO);
+
+        let (_, failed) =
+            execute_one(ResolverMode::Destination, BalanceMode::Normal, TransferMode::False);
+        assert!(failed.block_effect.transfer_gas_used() > 0);
+        assert_eq!(only_failure(&failed), SweepFailureReason::TransferFalse);
+    }
+
+    /// The transaction-level transfer meter stops the loop: once the cumulative
+    /// actual transfer gas exhausts `remaining_transfer_gas`, the outcome is
+    /// flagged `tx_out_of_gas` and later candidates are not processed.
+    #[test]
+    fn transaction_level_oog_stops_the_sweep_loop() {
+        let tokens: Vec<(Address, BalanceMode, TransferMode)> = (0_u8..5)
+            .map(|index| (batch_token(index.saturating_add(10)), BalanceMode::Normal, TransferMode::True))
+            .collect();
+        let mut evm = make_evm(ResolverMode::Destination, &tokens, None, true);
+        let triggers = tokens
+            .iter()
+            .map(|(token, _, _)| SweepTrigger {
+                candidate: candidate(*token),
+                kind: SweepTriggerKind::TokenTransfer,
+            })
+            .collect::<Vec<_>>();
+        let plan = SweepTxPlan {
+            remaining_transfer_gas: 100_000,
+            seen_registry_requests: Vec::new(),
+        };
+
+        let outcome = execute_sweep_triggers(&mut evm, test_sweep_config(), &triggers, 0, &plan)
+            .unwrap();
+
+        assert!(outcome.tx_out_of_gas);
+        assert!(
+            outcome.successes.len() >= 1,
+            "the first transfer must fit inside the bounded allowance"
+        );
+        assert!(
+            outcome.successes.len() < triggers.len(),
+            "the loop must stop before processing every candidate"
+        );
+        assert!(outcome.failures.is_empty());
+        // The transfer gas spent before the OOG (including the aborted
+        // transfer's partial consumption) is recorded in the block meter.
+        assert!(outcome.block_effect.transfer_gas_used() > 0);
+        assert!(outcome.block_effect.transfer_gas_used() <= 100_000);
+    }
+
+    /// The v1 model imposes NO candidate count ceiling: batches far beyond the
+    /// old 16/64 quotas are collected and executed in full.
+    #[test]
+    fn large_candidate_batches_are_not_capped() {
+        // Distinct token addresses whose last byte stays clear of the 0x01-0x0a
+        // precompile range (0x0000...00XX collides with KZG/point evaluation).
+        let tokens: Vec<(Address, BalanceMode, TransferMode)> = (0_u8..20)
+            .map(|index| {
+                (
+                    Address::with_last_byte(0x50_u8.saturating_add(index)),
+                    BalanceMode::Normal,
+                    TransferMode::True,
+                )
+            })
+            .collect();
+        let mut evm = make_evm(ResolverMode::Destination, &tokens, None, true);
+        let candidates: Vec<SweepCandidate> =
+            tokens.iter().map(|(token, _, _)| candidate(*token)).collect();
+
+        let outcome = execute_sweeps(&mut evm, test_sweep_config(), &candidates, 0).unwrap();
+
+        assert_eq!(outcome.successes.len(), 20);
+        assert!(!outcome.tx_out_of_gas);
+    }
+
+    /// A Registry request enters the block-level seen set the moment it reaches
+    /// resolver resolution, independent of whether resolution or the sweep
+    /// succeeds — so a failing request still suppresses a later duplicate.
+    #[test]
+    fn registry_request_dedup_records_at_resolution_independent_of_outcome() {
+        let mut evm = make_evm(ResolverMode::Unregistered, &[], None, true);
+        let request = candidate(TOKEN_A);
+        let outcome = execute_sweep_triggers(
+            &mut evm,
+            test_sweep_config(),
+            &[SweepTrigger {
+                candidate: request,
+                kind: SweepTriggerKind::RegistryRequest,
+            }],
+            0,
+            &SweepBlockSession::default().plan(),
+        )
+        .unwrap();
+
+        assert_eq!(outcome.block_effect.seen_registry_requests(), &[request]);
+        assert_eq!(only_failure(&outcome), SweepFailureReason::ResolverZero);
+        assert_eq!(outcome.block_effect.transfer_gas_used(), 0);
     }
 
     #[test]
@@ -2901,21 +2897,6 @@ mod tests {
             ),
             (
                 BalanceMode::Normal,
-                TransferMode::PostBalanceNonZero,
-                SweepFailureReason::PostBalanceNonZero,
-            ),
-            (
-                BalanceMode::MalformedAfterTransfer,
-                TransferMode::True,
-                SweepFailureReason::PostBalanceMalformed,
-            ),
-            (
-                BalanceMode::RevertAfterTransfer,
-                TransferMode::True,
-                SweepFailureReason::PostBalanceCallFailed,
-            ),
-            (
-                BalanceMode::Normal,
                 TransferMode::MissingLog,
                 SweepFailureReason::MissingTransferLog,
             ),
@@ -2945,7 +2926,7 @@ mod tests {
     }
 
     #[test]
-    fn candidates_are_isolated_and_charge_fixed_budget() {
+    fn candidates_are_isolated_and_only_transfer_gas_is_metered() {
         let mut evm = make_evm(
             ResolverMode::Destination,
             &[
@@ -2960,15 +2941,12 @@ mod tests {
             test_sweep_config(),
             &[candidate(TOKEN_A), candidate(TOKEN_B)],
             4,
-            2,
         )
         .unwrap();
 
-        assert_eq!(outcome.block_effect.checked_candidates, 2);
-        assert_eq!(
-            outcome.block_effect.system_gas_used,
-            2 * CANDIDATE_SYSTEM_GAS
-        );
+        // TOKEN_A succeeds and its transfer's actual gas is metered; TOKEN_B
+        // fails at the transfer with its gas metered too.
+        assert!(outcome.block_effect.transfer_gas_used() > 0);
         assert_eq!(outcome.successes.len(), 1);
         assert_eq!(outcome.failures.len(), 1);
         assert_eq!(token_balance(&mut evm, TOKEN_A), U256::ZERO);
@@ -2988,87 +2966,56 @@ mod tests {
     }
 
     #[test]
-    fn block_session_commits_budget_and_only_deduplicates_registry_requests() {
+    fn block_session_starts_full_and_commit_subtracts_transfer_gas() {
         let request = candidate(TOKEN_A);
         let transfer = candidate(TOKEN_B);
         let mut session = SweepBlockSession::default();
 
+        assert_eq!(session.remaining_transfer_gas(), BLOCK_SWEEP_GAS_LIMIT);
         let first = session.plan();
-        assert_eq!(first.candidate_allowance(), MAX_CANDIDATES_PER_TX);
-        assert_eq!(first.preflight_allowance(), MAX_PREFLIGHTS_PER_TX);
-        assert_eq!(first.system_gas_allowance(), TX_SYSTEM_GAS);
+        // The plan exposes the per-transaction cap, not the block budget, while
+        // the block budget is above it.
+        assert_eq!(first.remaining_transfer_gas(), TX_SWEEP_GAS_LIMIT);
         assert!(!first.has_seen_registry_request(request));
         assert!(!first.has_seen_registry_request(transfer));
 
-        session.commit(&SweepBlockEffect {
-            preflighted_candidates: 2,
-            checked_candidates: 2,
-            system_gas_used: 2 * CANDIDATE_SYSTEM_GAS,
-            seen_registry_requests: vec![request],
-        });
+        let mut effect = SweepBlockEffect::default();
+        effect.add_transfer_gas(123_456);
+        effect.record_seen_registry_request(request);
+        session.commit(&effect);
 
+        assert_eq!(
+            session.remaining_transfer_gas(),
+            BLOCK_SWEEP_GAS_LIMIT - 123_456
+        );
         let next = session.plan();
-        assert_eq!(next.candidate_allowance(), MAX_CANDIDATES_PER_TX);
         assert!(next.has_seen_registry_request(request));
         assert!(!next.has_seen_registry_request(transfer));
-        assert_eq!(session.remaining_candidates(), MAX_CANDIDATES_PER_BLOCK - 2);
-        assert_eq!(
-            session.remaining_system_gas(),
-            BLOCK_SYSTEM_GAS - 2 * CANDIDATE_SYSTEM_GAS
-        );
+
+        // A second commit drags the block meter below the per-transaction cap,
+        // so the plan starts exposing the block budget directly. Drain down to
+        // 100_000 remaining.
+        let mut drain = SweepBlockEffect::default();
+        drain.add_transfer_gas(session.remaining_transfer_gas() - 100_000);
+        session.commit(&drain);
+        assert_eq!(session.remaining_transfer_gas(), 100_000);
+        assert_eq!(session.plan().remaining_transfer_gas(), 100_000);
     }
 
     #[test]
-    fn invalid_triggers_can_use_the_full_preflight_quota_without_execution_debits() {
-        let mut evm = make_evm(ResolverMode::Unregistered, &[], None, true);
-        let triggers = (1..=MAX_PREFLIGHTS_PER_TX)
-            .map(|index| SweepTrigger {
-                candidate: SweepCandidate {
-                    token: Address::with_last_byte(u8::try_from(index).unwrap()),
-                    source: SOURCE,
-                },
-                kind: SweepTriggerKind::TokenTransfer,
-            })
-            .collect::<Vec<_>>();
-
-        let outcome = execute_sweep_triggers(
-            &mut evm,
-            test_sweep_config(),
-            &triggers,
-            0,
-            &SweepBlockSession::default().plan(),
-        )
-        .unwrap();
-
-        // Most triggers are preflighted and fail at the resolver; a few may
-        // reach execution (e.g. when the source-preflight code check considers
-        // a particular token's loaded bytecode as an empty EOA).
-        assert_eq!(
-            outcome.block_effect.preflighted_candidates(),
-            MAX_PREFLIGHTS_PER_TX
-        );
-        assert!(outcome.block_effect.checked_candidates() <= 2);
-        assert_eq!(
-            outcome.block_effect.system_gas_used(),
-            outcome.block_effect.preflighted_candidates() as u64 * PREFLIGHT_SYSTEM_GAS
-                + outcome.block_effect.checked_candidates() as u64 * SWEEP_EXECUTION_SYSTEM_GAS
-        );
-        assert_eq!(
-            outcome.failures.len(),
-            outcome.block_effect.preflighted_candidates()
-        );
+    fn single_transaction_plan_starts_with_full_transfer_allowance() {
+        let plan = SweepTxPlan::single_transaction();
+        assert_eq!(plan.remaining_transfer_gas(), TX_SWEEP_GAS_LIMIT);
+        assert!(!plan.has_seen_registry_request(candidate(TOKEN_A)));
     }
 
     #[test]
     fn seen_request_is_skipped_but_a_later_transfer_for_the_pair_remains_eligible() {
         let pair = candidate(TOKEN_A);
         let mut session = SweepBlockSession::default();
-        session.commit(&SweepBlockEffect {
-            preflighted_candidates: 1,
-            checked_candidates: 1,
-            system_gas_used: CANDIDATE_SYSTEM_GAS,
-            seen_registry_requests: vec![pair],
-        });
+        let mut effect = SweepBlockEffect::default();
+        effect.record_seen_registry_request(pair);
+        session.commit(&effect);
         let logs = vec![
             request_log(pair.token, pair.source),
             transfer_log(pair.token, Address::ZERO, pair.source, U256::from(1)),
@@ -3086,7 +3033,7 @@ mod tests {
     }
 
     #[test]
-    fn sweep_outcome_effect_records_only_checked_registry_requests() {
+    fn sweep_outcome_effect_records_transfer_gas_and_registry_requests() {
         let mut evm = make_evm(
             ResolverMode::Destination,
             &[
@@ -3116,15 +3063,15 @@ mod tests {
         )
         .unwrap();
 
+        // Only the RegistryRequest trigger enters the block-level seen set; the
+        // TokenTransfer for the same block is not deduplicated. Both candidates
+        // succeed, and the block effect records the transfers' actual gas.
         assert_eq!(
-            outcome.block_effect,
-            SweepBlockEffect {
-                preflighted_candidates: 2,
-                checked_candidates: 2,
-                system_gas_used: 2 * CANDIDATE_SYSTEM_GAS,
-                seen_registry_requests: vec![request],
-            }
+            outcome.block_effect.seen_registry_requests(),
+            &[request]
         );
+        assert!(outcome.block_effect.transfer_gas_used() > 0);
+        assert_eq!(outcome.successes.len(), 2);
     }
 
     #[test]
@@ -3142,16 +3089,14 @@ mod tests {
         let first_transaction =
             sweep_trace_replay_transaction(Some(&first)).expect("first transaction");
         assert_eq!(
-            first_transaction.plan.candidate_allowance(),
-            MAX_CANDIDATES_PER_TX
+            first_transaction.plan.remaining_transfer_gas(),
+            TX_SWEEP_GAS_LIMIT
         );
         let request = candidate(TOKEN_A);
         finish_sweep_trace_replay_transaction(
             Some(first_transaction),
             &SweepBlockEffect {
-                preflighted_candidates: 16,
-                checked_candidates: 16,
-                system_gas_used: 16 * CANDIDATE_SYSTEM_GAS,
+                transfer_gas_used: BLOCK_SWEEP_GAS_LIMIT - 100_000,
                 seen_registry_requests: vec![request],
             },
         );
@@ -3159,9 +3104,11 @@ mod tests {
         set_sweep_trace_replay_target(second_hash);
         let second_transaction =
             sweep_trace_replay_transaction(Some(&second)).expect("second transaction");
+        // The block budget drains below the per-transaction cap, so the shared
+        // session exposes the remaining transfer gas in the plan.
         assert_eq!(
-            second_transaction.plan.candidate_allowance(),
-            MAX_CANDIDATES_PER_TX
+            second_transaction.plan.remaining_transfer_gas(),
+            100_000
         );
         assert!(second_transaction.plan.has_seen_registry_request(request));
         finish_sweep_trace_replay_transaction(
@@ -3201,7 +3148,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_zero_allowance_cannot_fall_back_to_trace_context() {
+    fn explicit_plan_authority_cannot_fall_back_to_trace_context() {
         let raw = Bytes::from_static(b"canonical-explicit-zero");
         begin_sweep_trace_replay(vec![alloy_primitives::keccak256(&raw)]);
         let mut evm = make_evm(
@@ -3210,16 +3157,17 @@ mod tests {
             None,
             true,
         );
-        evm.set_sweep_execution_mode(SweepExecutionMode::Canonical(
-            SweepTxPlan::single_transaction(0),
-        ));
+        evm.set_sweep_execution_mode(SweepExecutionMode::Canonical(SweepTxPlan {
+            remaining_transfer_gas: 0,
+            seen_registry_requests: Vec::new(),
+        }));
         TRACE_REPLAY_CONTEXT.with(|context| assert!(context.borrow().is_none()));
 
         let mut tx = main_tx();
         tx.rlp_bytes = Some(raw);
         assert!(evm.transact_one(tx).unwrap().is_success());
         let outcome = evm.take_sweep_outcome().unwrap();
-        assert!(outcome.trigger_batch_truncated);
+        assert!(outcome.tx_out_of_gas);
         assert_eq!(outcome.block_effect, SweepBlockEffect::default());
         assert!(outcome.logs.is_empty());
         assert!(outcome.successes.is_empty());

@@ -14,7 +14,7 @@ use revm::{
 };
 
 use crate::{
-    MorphEvm, MorphInvalidTransaction, MorphTxEnv, SweepCandidate,
+    MorphEvm, MorphInvalidTransaction, MorphTxEnv,
     error::MorphHaltReason,
     evm::MorphContext,
     l1block::L1BlockInfo,
@@ -101,7 +101,6 @@ where
         evm.cached_token_fee_info = None;
         evm.pre_fee_logs.clear();
         evm.post_fee_logs.clear();
-        evm.post_fee_sweep_candidate = None;
 
         let (_, tx, _, journal, _, _) = evm.ctx().all_mut();
 
@@ -389,7 +388,6 @@ where
     ) -> Result<(), EVMError<DB::Error, MorphInvalidTransaction>> {
         let caller = evm.ctx_ref().tx().caller();
         let beneficiary = evm.ctx_ref().block().beneficiary();
-        let caller_can_trigger_sweep = caller_is_sweepable_eoa(evm, caller);
         let basefee = evm.ctx.block().basefee() as u128;
         let effective_gas_price = evm.ctx.tx().effective_gas_price(basefee);
 
@@ -401,19 +399,6 @@ where
                 .ok_or(MorphInvalidTransaction::TokenTransferFailed {
                     reason: "cached_token_fee_info not set by validate_and_deduct_token_fee".into(),
                 })?;
-
-        // This trigger belongs to the successful token-fee transaction, not to
-        // the refund transfer. Even a zero/no-op/failed refund can leave an
-        // existing source balance behind. apply_sweep later filters out failed
-        // main execution, and the plain-EOA gate (Onyx active and the fee-token
-        // payer carries no code) keeps ordinary contract fee-token traffic from
-        // consuming sweep preflight budget.
-        if caller_can_trigger_sweep {
-            evm.post_fee_sweep_candidate = Some(SweepCandidate {
-                token: token_fee_info.token_address,
-                source: caller,
-            });
-        }
 
         let refunded = gas.refunded().max(0) as u64;
         let reimburse_eth = U256::from(
@@ -674,26 +659,6 @@ where
 
         Ok(())
     }
-}
-
-/// Returns whether `caller` is a plain EOA that could be a sweep source.
-///
-/// When Onyx is active and the MorphTx fee-token caller has no code, record it
-/// as a sweep candidate so any pre-existing balance left after the fee
-/// deduction and refund is swept at transaction end.
-fn caller_is_sweepable_eoa<DB, I>(evm: &MorphEvm<DB, I>, caller: Address) -> bool
-where
-    DB: alloy_evm::Database,
-{
-    if evm.ctx_ref().block().sweep.is_none() {
-        return false;
-    }
-    evm.ctx_ref()
-        .journal()
-        .state
-        .get(&caller)
-        .and_then(|account| account.info.code.as_ref())
-        .is_none_or(|code| code.is_empty())
 }
 
 /// Execute `f` within a journal checkpoint. Commits on `Ok`, reverts on `Err`.
@@ -1271,176 +1236,6 @@ mod tests {
         assert_eq!(from_balance_after, U256::from(10));
     }
 
-    #[test]
-    fn slot_fee_transaction_records_configured_source_for_every_refund_outcome() {
-        let caller = address!("1000000000000000000000000000000000000001");
-        let beneficiary = address!("2000000000000000000000000000000000000002");
-        let token = address!("3000000000000000000000000000000000000003");
-        let balance_slot = U256::from(7);
-        let beneficiary_storage_slot = compute_mapping_slot_for_address(balance_slot, beneficiary);
-        let caller_storage_slot = compute_mapping_slot_for_address(balance_slot, caller);
-
-        let mut db = CacheDB::new(EmptyDB::default());
-        db.insert_account_info(token, AccountInfo::default());
-        // Caller is a plain EOA (no code) — sweep-eligible.
-        db.insert_account_info(caller, AccountInfo::default());
-        db.insert_account_storage(token, beneficiary_storage_slot, U256::from(10))
-            .unwrap();
-        db.insert_account_storage(token, caller_storage_slot, U256::ZERO)
-            .unwrap();
-
-        let mut evm = MorphEvm::new(
-            MorphContext::new(db, MorphHardfork::default()),
-            NoOpInspector,
-        );
-        evm.block = MorphBlockEnv {
-            inner: BlockEnv {
-                beneficiary,
-                ..Default::default()
-            },
-            sweep: Some(crate::SweepConfig {
-                registry_address: Address::ZERO,
-            }),
-        };
-        evm.tx = MorphTxEnv {
-            inner: TxEnv {
-                caller,
-                gas_price: 1,
-                ..Default::default()
-            },
-            fee_token_id: Some(1),
-            ..Default::default()
-        };
-        evm.cached_token_fee_info = Some(TokenFeeInfo {
-            token_address: token,
-            is_active: true,
-            price_ratio: U256::from(1),
-            scale: U256::from(1),
-            caller,
-            balance: U256::ZERO,
-            balance_slot: Some(balance_slot),
-            ..Default::default()
-        });
-        let journal = evm.ctx_mut().journal_mut();
-        let _ = journal.load_account_with_code(caller).unwrap();
-        let _ = journal.load_account_mut(token).unwrap();
-        journal.touch(token);
-
-        let handler = MorphEvmHandler::default();
-        handler
-            .reimburse_caller_token_fee(&mut evm, &Gas::new(1))
-            .unwrap();
-
-        assert_eq!(
-            evm.post_fee_sweep_candidate,
-            Some(crate::SweepCandidate {
-                token,
-                source: caller,
-            })
-        );
-        assert_eq!(
-            *evm.ctx_mut()
-                .journal_mut()
-                .sload(token, caller_storage_slot)
-                .unwrap(),
-            U256::from(1)
-        );
-
-        // Disable the sweep config entirely — a plain EOA without sweep enabled
-        // should not consume any preflight budget.
-        evm.post_fee_sweep_candidate = None;
-        evm.block.sweep = None;
-        handler
-            .reimburse_caller_token_fee(&mut evm, &Gas::new(1))
-            .unwrap();
-        assert!(
-            evm.post_fee_sweep_candidate.is_none(),
-            "fee-token callers must not consume sweep preflight budget when sweep is disabled"
-        );
-        assert_eq!(
-            *evm.ctx_mut()
-                .journal_mut()
-                .sload(token, beneficiary_storage_slot)
-                .unwrap(),
-            U256::from(8)
-        );
-        assert_eq!(
-            *evm.ctx_mut()
-                .journal_mut()
-                .sload(token, caller_storage_slot)
-                .unwrap(),
-            U256::from(2)
-        );
-
-        // Re-enable sweep and test self-refund: a source that refunds to itself
-        // still produces a sweep candidate for any pre-existing balance.
-        evm.block.sweep = Some(crate::SweepConfig {
-            registry_address: Address::with_last_byte(0x42),
-        });
-        evm.block.inner.beneficiary = caller;
-        evm.post_fee_sweep_candidate = None;
-        handler
-            .reimburse_caller_token_fee(&mut evm, &Gas::new(1))
-            .unwrap();
-        assert_eq!(
-            evm.post_fee_sweep_candidate,
-            Some(crate::SweepCandidate {
-                token,
-                source: caller,
-            }),
-            "a self-refund can still leave a pre-existing balance to sweep"
-        );
-        assert_eq!(
-            *evm.ctx_mut()
-                .journal_mut()
-                .sload(token, caller_storage_slot)
-                .unwrap(),
-            U256::from(2)
-        );
-
-        evm.post_fee_sweep_candidate = None;
-        evm.block.inner.beneficiary = beneficiary;
-        handler
-            .reimburse_caller_token_fee(&mut evm, &Gas::new(9))
-            .unwrap();
-        assert_eq!(
-            evm.post_fee_sweep_candidate,
-            Some(crate::SweepCandidate {
-                token,
-                source: caller,
-            }),
-            "a failed refund can still leave a pre-existing balance to sweep"
-        );
-        assert_eq!(
-            *evm.ctx_mut()
-                .journal_mut()
-                .sload(token, beneficiary_storage_slot)
-                .unwrap(),
-            U256::from(8)
-        );
-        assert_eq!(
-            *evm.ctx_mut()
-                .journal_mut()
-                .sload(token, caller_storage_slot)
-                .unwrap(),
-            U256::from(2)
-        );
-
-        evm.post_fee_sweep_candidate = None;
-        handler
-            .reimburse_caller_token_fee(&mut evm, &Gas::new(0))
-            .unwrap();
-        assert_eq!(
-            evm.post_fee_sweep_candidate,
-            Some(crate::SweepCandidate {
-                token,
-                source: caller,
-            }),
-            "zero reimbursement must still settle a configured source"
-        );
-    }
-
-    #[test]
     fn evm_call_balance_of_is_read_only() {
         let token = address!("3000000000000000000000000000000000000003");
         let account = address!("1000000000000000000000000000000000000001");

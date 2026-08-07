@@ -5,7 +5,7 @@ use alloy_primitives::{Address, B256, Bytes, U256, address, b256, logs_bloom};
 use jsonrpsee::core::client::ClientT;
 use morph_node::test_utils::{
     HardforkSchedule, L1MessageBuilder, MorphTestNode, MorphTxBuilder, SLOT1_ERC20_RUNTIME_CODE,
-    TEST_TOKEN_ADDRESS, TEST_TOKEN_ID, TestNodeBuilder,
+    TEST_TOKEN_ADDRESS, TestNodeBuilder,
 };
 use morph_payload_types::{
     AssembleL2BlockV2Params, ExecutableL2Data, MorphBuiltPayload, MorphPayloadTypes,
@@ -746,7 +746,7 @@ async fn reorg_removes_sweep_receipt_logs_and_state() -> eyre::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn unwhitelisted_fake_logs_do_not_exhaust_the_execution_quota() -> eyre::Result<()> {
+async fn unwhitelisted_fake_logs_do_not_suppress_the_eligible_sweep() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let (mut nodes, wallet) = stateful_builder()
@@ -792,13 +792,23 @@ async fn unwhitelisted_fake_logs_do_not_exhaust_the_execution_quota() -> eyre::R
         assert_eq!(
             receipt.logs().len(),
             16,
-            "each leading transaction emits sixteen bounded preflight candidates"
+            "each leading transaction emits sixteen Transfer logs"
         );
         assert!(
             receipt
                 .logs()
                 .iter()
                 .all(|log| log.topics()[0] == TRANSFER_TOPIC)
+        );
+        // The fake Transfer logs are from an unwhitelisted token, so each
+        // resolves to zero. `resolver_zero` is deliberately NOT reported
+        // on-chain — no SweepFailed is appended (Onyx spec §6.3).
+        assert!(
+            receipt
+                .logs()
+                .iter()
+                .all(|log| log.topics()[0] != SWEEP_FAILED_TOPIC),
+            "unwhitelisted fake logs must not append SweepFailed"
         );
     }
 
@@ -1176,7 +1186,7 @@ fn register_calldata(source: Address, controller: Address, deadline: u64, sig: &
     data.extend_from_slice(&addr_word(source));
     data.extend_from_slice(&addr_word(controller));
     data.extend_from_slice(&U256::from(deadline).to_be_bytes::<32>());
-    data.extend_from_slice(&U256::from(160u64).to_be_bytes::<32>()); // offset to bytes arg
+    data.extend_from_slice(&U256::from(128u64).to_be_bytes::<32>()); // offset to bytes arg
     data.extend_from_slice(&U256::from(sig.len()).to_be_bytes::<32>());
     data.extend_from_slice(sig);
     let pad = (32 - sig.len() % 32) % 32;
@@ -1192,19 +1202,11 @@ fn register_calldata(source: Address, controller: Address, deadline: u64, sig: &
 async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    const PRELOADED_FEE_BALANCE: u128 = 100_000_000_000_000_000_000;
     let source_signer = morph_node::test_utils::wallet_at_index(9, 2910);
     let source = source_signer.address();
-    let fee_source_signer = morph_node::test_utils::wallet_at_index(8, 2910);
-    let fee_source = fee_source_signer.address();
     let (mut nodes, wallet) = TestNodeBuilder::new()
         .with_account_code(TEST_TOKEN_ADDRESS, SLOT1_ERC20_RUNTIME_CODE)
         .with_account_code(PROD_REGISTRY, PROD_REGISTRY_RUNTIME.trim())
-        .with_account_storage(
-            TEST_TOKEN_ADDRESS,
-            token_balance_slot(fee_source),
-            B256::from(U256::from(PRELOADED_FEE_BALANCE).to_be_bytes::<32>()),
-        )
         .build()
         .await?;
     let mut node = nodes.pop().unwrap();
@@ -1301,110 +1303,6 @@ async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
         "setTokenWhitelist must succeed: {whitelist_receipt:?}"
     );
 
-    // A source only signs the authorization. The controller (the destination /
-    // owner here) submits the ordinary V1 registration transaction and pays gas.
-    let fee_source_sig = sign_source_auth(
-        &fee_source_signer,
-        SourceAuthorization {
-            source: fee_source,
-            controller: destination,
-            registry: PROD_REGISTRY,
-            chain_id: wallet.chain_id,
-            deadline,
-        },
-    )?;
-    let fee_registration = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 3)
-        .with_v1_eth_fee()
-        .with_gas_limit(5_000_000)
-        .with_to(PROD_REGISTRY)
-        .with_data(register_calldata(
-            fee_source,
-            destination,
-            deadline,
-            &fee_source_sig,
-        ))
-        .build_signed()?;
-    node.rpc.inject_tx(fee_registration).await?;
-    let fee_registration_payload = node.advance_block().await?;
-    let fee_registration_hash = *fee_registration_payload.block().body().transactions[0].tx_hash();
-    assert!(
-        node.inner
-            .provider
-            .receipt_by_hash(fee_registration_hash)?
-            .expect("fee source registration receipt")
-            .status(),
-        "registerSweep must succeed for a plain zero-native source"
-    );
-
-    // The registered zero-native source pays for a successful MorphTx with
-    // the storage-slot fee token. An intrinsic-only gas limit leaves no unused
-    // gas to reimburse, so the configured token-fee caller itself must trigger
-    // settlement of the balance left after the maximum fee deduction.
-    assert_eq!(
-        node.inner
-            .provider
-            .latest()?
-            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(fee_source))?
-            .unwrap_or_default(),
-        U256::from(PRELOADED_FEE_BALANCE)
-    );
-    let fee_tx = MorphTxBuilder::new(wallet.chain_id, fee_source_signer, 0)
-        .with_v0_token_fee(TEST_TOKEN_ID)
-        .with_gas_limit(21_000)
-        .with_to(RECIPIENT)
-        .build_signed()?;
-    node.rpc.inject_tx(fee_tx).await?;
-    let fee_payload = node.advance_block().await?;
-    assert_eq!(
-        fee_payload.block().body().transactions.len(),
-        1,
-        "registered fee-token transaction must be executable"
-    );
-    let fee_tx_hash = *fee_payload.block().body().transactions[0].tx_hash();
-    let fee_receipt = node
-        .inner
-        .provider
-        .receipt_by_hash(fee_tx_hash)?
-        .expect("fee-token receipt");
-    assert!(fee_receipt.status(), "fee-token MorphTx must succeed");
-    assert_eq!(
-        fee_receipt.logs().len(),
-        2,
-        "slot fee accounting emits no receipt logs; only sweep settlement should remain"
-    );
-    assert_eq!(
-        fee_receipt.logs()[0].topics(),
-        &[
-            TRANSFER_TOPIC,
-            address_topic(fee_source),
-            address_topic(destination)
-        ]
-    );
-    let post_fee_sweep_amount = U256::from_be_slice(&fee_receipt.logs()[0].data.data);
-    assert!(
-        post_fee_sweep_amount > U256::ZERO
-            && post_fee_sweep_amount < U256::from(PRELOADED_FEE_BALANCE),
-        "sweep must settle the post-fee balance after retaining the charged fee"
-    );
-    assert_eq!(fee_receipt.logs()[1].address, PROD_REGISTRY);
-    assert_eq!(fee_receipt.logs()[1].topics()[0], SWEEP_TOPIC);
-    let state_after_fee_sweep = node.inner.provider.latest()?;
-    assert_eq!(
-        state_after_fee_sweep
-            .storage(TEST_TOKEN_ADDRESS, token_balance_slot(fee_source))?
-            .unwrap_or_default(),
-        U256::ZERO,
-        "post-fee balance must be swept to zero even when reimbursement is zero"
-    );
-    assert_eq!(
-        state_after_fee_sweep
-            .basic_account(&fee_source)?
-            .expect("delegated fee source account")
-            .balance,
-        U256::ZERO,
-        "source token-fee execution must not require native balance"
-    );
-
     // Register the plain-EOA source with the controller's authorization.
     let sig = sign_source_auth(
         &source_signer,
@@ -1418,7 +1316,7 @@ async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
     )?;
     // The controller (the destination/owner here) submits the registration; the
     // source remains a plain EOA.
-    let tx3 = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 4)
+    let tx3 = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 3)
         .with_v1_eth_fee()
         .with_gas_limit(5_000_000)
         .with_to(PROD_REGISTRY)
@@ -1434,7 +1332,7 @@ async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
         .expect("register receipt");
     assert!(
         reg_receipt.status(),
-        "registerSweep must succeed with a valid EIP-712 source signature"
+        "registerSweep must succeed with a valid EIP-712 source signature: {reg_receipt:?}"
     );
     assert!(
         reg_receipt

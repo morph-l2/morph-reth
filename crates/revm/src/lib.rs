@@ -74,12 +74,10 @@ pub use l1block::{
 };
 pub use precompiles::MorphPrecompiles;
 pub use sweep::{
-    BALANCE_OF_GAS_LIMIT, BLOCK_SYSTEM_GAS, CANDIDATE_SYSTEM_GAS, MAX_CANDIDATES_PER_BLOCK,
-    MAX_CANDIDATES_PER_TX, MAX_PREFLIGHTS_PER_BLOCK, MAX_PREFLIGHTS_PER_TX, PREFLIGHT_SYSTEM_GAS,
-    RESOLVE_GAS_LIMIT, SWEEP_EXECUTION_SYSTEM_GAS, SWEEP_GAS_LIMIT, SweepBlockEffect,
+    BALANCE_OF_GAS_LIMIT, BLOCK_SWEEP_GAS_LIMIT, RESOLVE_GAS_LIMIT, SweepBlockEffect,
     SweepBlockSession, SweepCandidate, SweepExecutionMode, SweepFailure, SweepFailureReason,
     SweepInvariantError, SweepOutcome, SweepSuccess, SweepTraceReplayScope, SweepTxPlan,
-    TX_SYSTEM_GAS, begin_sweep_trace_replay, clear_sweep_trace_replay,
+    TX_SWEEP_GAS_LIMIT, begin_sweep_trace_replay, clear_sweep_trace_replay,
     set_sweep_trace_replay_target, sweep_trace_replay_scope,
 };
 pub use token_fee::{

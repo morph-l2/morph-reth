@@ -3,7 +3,7 @@ use crate::{
     l1block::L1BlockInfo,
     precompiles::MorphPrecompiles,
     sweep::{
-        SweepBlockEffect, SweepCandidate, SweepExecutionMode, SweepInvariantError, SweepOutcome,
+        SweepBlockEffect, SweepExecutionMode, SweepInvariantError, SweepOutcome,
         clear_sweep_trace_replay, collect_transaction_sweep_triggers, execute_sweep_triggers,
         finish_sweep_trace_replay_transaction, initial_sweep_execution_mode,
         sweep_trace_replay_transaction,
@@ -280,8 +280,6 @@ pub struct MorphEvm<DB: Database, I> {
     pub(crate) pre_fee_logs: Vec<alloy_primitives::Log>,
     /// Transfer event logs from token fee reimbursement (post-execution phase).
     pub(crate) post_fee_logs: Vec<alloy_primitives::Log>,
-    /// Exact configured token-fee caller, independent of refund amount or log behavior.
-    pub(crate) post_fee_sweep_candidate: Option<SweepCandidate>,
     /// Explicit authority and immutable plan for the next sweep phase.
     pub(crate) sweep_execution_mode: SweepExecutionMode,
     /// Take-once sweep result for the latest transaction.
@@ -347,7 +345,6 @@ impl<DB: Database, I> MorphEvm<DB, I> {
             cached_l1_data_fee: U256::ZERO,
             pre_fee_logs: Vec::new(),
             post_fee_logs: Vec::new(),
-            post_fee_sweep_candidate: None,
             sweep_execution_mode: initial_sweep_execution_mode(),
             sweep_outcome: None,
         }
@@ -463,7 +460,6 @@ impl<DB: Database, I> MorphEvm<DB, I> {
         };
         let collected = collect_transaction_sweep_triggers(
             logs,
-            self.post_fee_sweep_candidate,
             config.registry_address,
             &plan,
         );
@@ -475,8 +471,20 @@ impl<DB: Database, I> MorphEvm<DB, I> {
             receipt_prefix_logs,
             &plan,
         ) {
-            Ok(mut outcome) => {
-                outcome.trigger_batch_truncated |= collected.truncated;
+            Ok(outcome) => {
+                if outcome.tx_out_of_gas {
+                    // `SweepOutOfGas`: the transaction's cumulative transfer gas
+                    // hit TX_SWEEP_GAS_LIMIT. This is handled at the transaction
+                    // level — see `MorphEvmHandler::execution_result`.
+                    self.ctx_mut().journal_mut().checkpoint_revert(checkpoint);
+                    self.set_sweep_execution_mode(SweepExecutionMode::Disabled);
+                    finish_sweep_trace_replay_transaction(
+                        trace_transaction,
+                        &outcome.block_effect,
+                    );
+                    self.sweep_outcome = Some(outcome);
+                    return Ok(());
+                }
                 self.ctx_mut().journal_mut().checkpoint_commit();
                 // Sweep logs are already cached in `outcome`; close this implicit
                 // transaction so a later discard cannot revert successful sweep state.

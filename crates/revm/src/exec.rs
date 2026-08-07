@@ -29,7 +29,6 @@ impl<DB: Database, I> MorphEvm<DB, I> {
         self.cached_l1_data_fee = Default::default();
         self.pre_fee_logs.clear();
         self.post_fee_logs.clear();
-        self.post_fee_sweep_candidate = None;
 
         // `InspectEvm::inspect_tx` only finalizes successful output. A sweep error
         // happens after the main transaction succeeded, so finalize and drop that

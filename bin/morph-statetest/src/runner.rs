@@ -4,7 +4,7 @@ use alloy_primitives::{B256, Bytes};
 use alloy_trie::{HashBuilder, Nibbles, TrieAccount, root::storage_root_unhashed};
 use morph_chainspec::{constants::SWEEP_REGISTRY_ADDRESS, hardfork::MorphHardfork};
 use morph_evm::{MorphBlockEnv, evm::MorphEvm};
-use morph_revm::{MAX_CANDIDATES_PER_TX, SweepConfig, SweepExecutionMode, SweepTxPlan};
+use morph_revm::{SweepConfig, SweepExecutionMode, SweepTxPlan};
 use revm::{
     context::{CfgEnv, result::ExecutionResult},
     database::{EmptyDB, PlainAccount, State},
@@ -168,7 +168,7 @@ fn execute_case(
             .with_inspector(TracerEip3155::buffered(stderr()).without_summary());
         evm.enable_inspector();
         evm.set_sweep_execution_mode(SweepExecutionMode::Canonical(
-            SweepTxPlan::single_transaction(MAX_CANDIDATES_PER_TX),
+            SweepTxPlan::single_transaction(),
         ));
         let exec_result = evm.transact_commit(tx);
         let receipt_logs = collect_receipt_logs(&mut evm, &exec_result);
@@ -185,7 +185,7 @@ fn execute_case(
 
     let mut evm = MorphEvm::new(&mut state, env);
     evm.set_sweep_execution_mode(SweepExecutionMode::Canonical(
-        SweepTxPlan::single_transaction(MAX_CANDIDATES_PER_TX),
+        SweepTxPlan::single_transaction(),
     ));
     let exec_result = evm.transact_commit(tx);
     let receipt_logs = collect_receipt_logs(&mut evm, &exec_result);
