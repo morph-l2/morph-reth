@@ -3,7 +3,7 @@ use crate::{
     l1block::L1BlockInfo,
     precompiles::MorphPrecompiles,
     sweep::{
-        SweepBlockEffect, SweepExecutionMode, SweepInvariantError, SweepOutcome,
+        SweepBlockEffect, SweepExecutionMode, SweepInvariantError, SweepOutcome, SweepTxPlan,
         clear_sweep_trace_replay, collect_transaction_sweep_triggers, execute_sweep_triggers,
         finish_sweep_trace_replay_transaction, initial_sweep_execution_mode,
         sweep_trace_replay_transaction,
@@ -413,13 +413,28 @@ impl<DB: Database, I> MorphEvm<DB, I> {
         std::mem::take(&mut self.post_fee_logs)
     }
 
-    /// Sets the sweep execution authority for the next transaction.
+    /// Sets the sweep execution authority.
+    ///
+    /// [`SweepExecutionMode::Canonical`] is consumed by the next transaction,
+    /// while [`SweepExecutionMode::Standalone`] persists across transactions so
+    /// a reused simulation EVM receives a fresh plan for every attempt.
     #[inline]
     pub fn set_sweep_execution_mode(&mut self, mode: SweepExecutionMode) {
         if !matches!(mode, SweepExecutionMode::TraceReplay) {
             clear_sweep_trace_replay();
         }
         self.sweep_execution_mode = mode;
+    }
+
+    /// Revokes one-shot sweep authority while preserving standalone RPC mode.
+    ///
+    /// A single EVM is reused across estimate-gas attempts. Rejecting one
+    /// attempt must not silently disable sweeps for every later attempt.
+    #[inline]
+    pub(crate) fn disable_sweep_execution_unless_standalone(&mut self) {
+        if !matches!(self.sweep_execution_mode, SweepExecutionMode::Standalone) {
+            self.set_sweep_execution_mode(SweepExecutionMode::Disabled);
+        }
     }
 
     /// Takes the sweep outcome produced by the latest transaction.
@@ -445,6 +460,10 @@ impl<DB: Database, I> MorphEvm<DB, I> {
         let mode = std::mem::take(&mut self.sweep_execution_mode);
         let (plan, trace_transaction, authorized) = match mode {
             SweepExecutionMode::Disabled => (Default::default(), None, false),
+            SweepExecutionMode::Standalone => {
+                self.sweep_execution_mode = SweepExecutionMode::Standalone;
+                (SweepTxPlan::single_transaction(), None, true)
+            }
             SweepExecutionMode::Canonical(plan) => (plan, None, true),
             SweepExecutionMode::TraceReplay => {
                 self.sweep_execution_mode = SweepExecutionMode::TraceReplay;
@@ -482,7 +501,7 @@ impl<DB: Database, I> MorphEvm<DB, I> {
             .checked_add(main_log_count)
             .and_then(|count| count.checked_add(self.post_fee_logs.len()))
         else {
-            self.set_sweep_execution_mode(SweepExecutionMode::Disabled);
+            self.disable_sweep_execution_unless_standalone();
             return Err(EVMError::Custom(
                 SweepInvariantError::TransferLogOffsetOverflow.to_string(),
             ));
@@ -507,7 +526,7 @@ impl<DB: Database, I> MorphEvm<DB, I> {
                 self.ctx_mut().journal_mut().checkpoint_commit();
                 let tx_out_of_gas = outcome.tx_out_of_gas;
                 if tx_out_of_gas {
-                    self.set_sweep_execution_mode(SweepExecutionMode::Disabled);
+                    self.disable_sweep_execution_unless_standalone();
                     // Every sweep of this transaction is about to be rolled back, so
                     // nothing settled: drop the logs and the classifications before
                     // they can reach the receipt or the metrics. The block effect
@@ -525,7 +544,7 @@ impl<DB: Database, I> MorphEvm<DB, I> {
             }
             Err(error) => {
                 self.ctx_mut().journal_mut().checkpoint_revert(checkpoint);
-                self.set_sweep_execution_mode(SweepExecutionMode::Disabled);
+                self.disable_sweep_execution_unless_standalone();
                 Err(error)
             }
         }

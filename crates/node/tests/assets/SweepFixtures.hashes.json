@@ -1,23 +1,82 @@
 {
-  "compiler": "0.8.30",
-  "settings": {
-    "optimizer": true,
-    "optimizer_runs": 200,
-    "metadata": false
+  "profiles": {
+    "local": {
+      "compiler": "0.8.30",
+      "contracts": "crates/node/tests/assets",
+      "optimizer_runs": 200,
+      "evm_version": "cancun",
+      "via_ir": false,
+      "revert_strings": "default",
+      "metadata": false
+    },
+    "morph": {
+      "compiler": "0.8.24",
+      "contracts": "contracts",
+      "optimizer_runs": 999999,
+      "evm_version": "cancun",
+      "via_ir": false,
+      "revert_strings": "default",
+      "bytecode_hash": "none",
+      "cbor_metadata": true
+    }
   },
-  "source_sha256": "c90a8643ba10c6150f700b85d7923b413b6252bc5a01efd84e186726ca8708b4",
+  "sources": {
+    "sweep_fixtures": {
+      "profile": "local",
+      "path": "crates/node/tests/assets/SweepFixtures.sol",
+      "sha256": "c90a8643ba10c6150f700b85d7923b413b6252bc5a01efd84e186726ca8708b4"
+    },
+    "mock_sweep_registry": {
+      "profile": "morph",
+      "path": "contracts/test/MockSweepRegistryEL.sol",
+      "sha256": "560b94953baa7e0bf44f50ff2a54fbd3ceb59006ff088aa1c88c9b6d69fbea42"
+    },
+    "production_sweep_registry": {
+      "profile": "morph",
+      "path": "contracts/l2/system/SweepRegistry.sol",
+      "sha256": "dbc5263c4ae004e397a7eff1054fb745fddbbeea2ab076d74a015cd43f7a0fd6"
+    },
+    "transparent_proxy": {
+      "profile": "morph",
+      "path": "node_modules/@openzeppelin/contracts/proxy/transparent/TransparentUpgradeableProxy.sol",
+      "sha256": "0096ba77d0ab032264ca69b5f05d1b21019f62fa0f3d77ba45fb82cd731fea16"
+    }
+  },
   "runtimes": {
     "TEST_REGISTRY_RUNTIME": {
-      "contract": "TestSweepRegistry",
-      "sha256": "ebac162daf9355e2993160605d9fe1b357417494be189c352913410e134d60c4"
+      "profile": "morph",
+      "source": "mock_sweep_registry",
+      "contract": "contracts/test/MockSweepRegistryEL.sol:MockSweepRegistryEL",
+      "rust_constant": "TEST_REGISTRY_RUNTIME",
+      "sha256": "3fc66c0b8ca4fa7000e39563860e7afd450f7a29dff934bbeca5eb0f6776911a"
     },
     "TEST_ROUTER_RUNTIME": {
-      "contract": "TestSweepRouter",
+      "profile": "local",
+      "source": "sweep_fixtures",
+      "contract": "crates/node/tests/assets/SweepFixtures.sol:TestSweepRouter",
+      "rust_constant": "TEST_ROUTER_RUNTIME",
       "sha256": "b88448023db93274a4acc14990e09dc815cff74d5c5e07e48075148bf85793f1"
     },
     "TEST_CANDIDATE_EMITTER_RUNTIME": {
-      "contract": "TestCandidateEmitter",
+      "profile": "local",
+      "source": "sweep_fixtures",
+      "contract": "crates/node/tests/assets/SweepFixtures.sol:TestCandidateEmitter",
+      "rust_constant": "TEST_CANDIDATE_EMITTER_RUNTIME",
       "sha256": "fcd8fbb856584a811249949e12c8c4deee436e4c0ff72e6b07bd2d0419ec055a"
+    },
+    "PROD_REGISTRY_IMPLEMENTATION_RUNTIME": {
+      "profile": "morph",
+      "source": "production_sweep_registry",
+      "contract": "contracts/l2/system/SweepRegistry.sol:SweepRegistry",
+      "asset": "SweepRegistry.deployed.hex",
+      "sha256": "8a652337bd7f70220271a5a8f2cfe341e74d0220b3dab97f1437ce820b5d2d7c"
+    },
+    "PROD_REGISTRY_PROXY_RUNTIME": {
+      "profile": "morph",
+      "source": "transparent_proxy",
+      "contract": "TransparentUpgradeableProxy",
+      "asset": "TransparentUpgradeableProxy.deployed.hex",
+      "sha256": "e177439966cec4dce0b6eaf8b3f8cf2579397d71632ace403c54c04550bc7715"
     }
   }
 }

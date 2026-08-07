@@ -28,7 +28,7 @@ impl<DB: Database, I> MorphEvm<DB, I> {
     /// and the local context, so only Morph's own side-channel caches — the fee
     /// logs and the sweep state that live outside the journal — are left to reset.
     fn discard_failed_transaction(&mut self) {
-        self.set_sweep_execution_mode(crate::sweep::SweepExecutionMode::Disabled);
+        self.disable_sweep_execution_unless_standalone();
         self.sweep_outcome = None;
         self.cached_token_fee_info = None;
         self.cached_l1_data_fee = Default::default();

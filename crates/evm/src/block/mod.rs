@@ -16,13 +16,14 @@ pub(crate) use receipt::{
     DefaultMorphReceiptBuilder, MorphReceiptBuilder, MorphReceiptBuilderCtx, MorphReceiptTxFields,
 };
 
-use crate::evm::MorphEvm;
+use crate::{BlockSweepGasLimitExceeded, evm::MorphEvm};
 use alloy_consensus::Transaction;
 use alloy_consensus::transaction::TxHashRef;
 use alloy_evm::{
     Database, Evm, RecoveredTx,
     block::{
-        BlockExecutionError, BlockExecutionResult, BlockExecutor, ExecutableTx, GasOutput, TxResult,
+        BlockExecutionError, BlockExecutionResult, BlockExecutor, BlockValidationError,
+        ExecutableTx, GasOutput, TxResult,
     },
 };
 use alloy_primitives::{Address, Log, U256};
@@ -35,6 +36,19 @@ use morph_revm::{
 use reth_primitives_traits::Recovered;
 use reth_revm::{DatabaseCommit, Inspector, context::result::ResultAndState};
 use revm::context::Block;
+
+/// Validates the consensus-level, post-hoc sweep transfer-gas sum.
+fn validate_block_sweep_gas_limit(transfer_gas_used: u64) -> Result<(), BlockExecutionError> {
+    if transfer_gas_used > BLOCK_SWEEP_GAS_LIMIT {
+        return Err(BlockValidationError::other(BlockSweepGasLimitExceeded {
+            transfer_gas_used,
+            limit: BLOCK_SWEEP_GAS_LIMIT,
+        })
+        .into());
+    }
+
+    Ok(())
+}
 
 /// The result of executing a Morph transaction.
 ///
@@ -352,13 +366,7 @@ where
         // once every transaction has run. A block that went over it is invalid as a
         // whole — verifiers must reject it rather than turn its last transaction
         // into a failure (Onyx spec §5.4.1).
-        if self.sweep_session.exceeds_block_limit() {
-            return Err(BlockExecutionError::msg(format!(
-                "block sweep transfer gas {} exceeds the {} limit",
-                self.sweep_session.transfer_gas_used(),
-                BLOCK_SWEEP_GAS_LIMIT,
-            )));
-        }
+        validate_block_sweep_gas_limit(self.sweep_session.transfer_gas_used())?;
 
         Ok((
             self.evm,
@@ -661,5 +669,35 @@ mod tests {
         let receipt = &executor.receipts[0];
         assert!(!receipt.status());
         assert!(receipt.logs().is_empty());
+    }
+
+    #[test]
+    fn block_sweep_gas_limit_overflow_is_a_validation_error() {
+        assert!(validate_block_sweep_gas_limit(BLOCK_SWEEP_GAS_LIMIT).is_ok());
+
+        let error = validate_block_sweep_gas_limit(BLOCK_SWEEP_GAS_LIMIT + 1).unwrap_err();
+
+        let validation = error
+            .as_validation()
+            .expect("block sweep overflow must be classified as validation");
+        assert!(error.as_internal().is_none());
+        let BlockValidationError::Other(source) = validation else {
+            panic!("expected a typed block validation error, got {validation:?}");
+        };
+        assert_eq!(
+            source.downcast_ref::<BlockSweepGasLimitExceeded>(),
+            Some(&BlockSweepGasLimitExceeded {
+                transfer_gas_used: BLOCK_SWEEP_GAS_LIMIT + 1,
+                limit: BLOCK_SWEEP_GAS_LIMIT,
+            })
+        );
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "block sweep transfer gas {} exceeds the {} limit",
+                BLOCK_SWEEP_GAS_LIMIT + 1,
+                BLOCK_SWEEP_GAS_LIMIT,
+            )
+        );
     }
 }

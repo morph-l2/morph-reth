@@ -27,6 +27,12 @@ const CANDIDATE_EMITTER: Address = address!("50000000000000000000000000000000000
 const SENDER: Address = address!("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
 const AMOUNT: u64 = 123;
 const PROD_REGISTRY: Address = address!("0fF2Ea62eBca29E70aE2b0551a54eFFa4ea7DeEa");
+const PROD_REGISTRY_IMPLEMENTATION: Address = address!("40005dCd5da43Aaf43a03780984c9f1B779C9Ec2");
+const PROD_PROXY_ADMIN: Address = address!("530000000000000000000000000000000000000b");
+const ERC1967_IMPLEMENTATION_SLOT: B256 =
+    b256!("360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc");
+const ERC1967_ADMIN_SLOT: B256 =
+    b256!("b53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103");
 const TRANSFER_TOPIC: B256 =
     b256!("ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef");
 const REQUEST_TOPIC: B256 =
@@ -35,7 +41,7 @@ const SWEEP_TOPIC: B256 = b256!("035b37215a69e14a80883933d6aa84f0919a67af9410a4a
 const SWEEP_FAILED_TOPIC: B256 =
     b256!("0f64fa58e4261d8832b5ea6c262c691ef36e73cb21998c4fb01a83997940797c");
 
-/// Runtime produced by solc 0.8.30 (optimizer runs=200, metadata disabled) from
+/// Runtime produced by solc 0.8.24 (optimizer runs=999999, bytecode hash none) from
 /// `contracts/contracts/test/MockSweepRegistryEL.sol` in the morph repository.
 ///
 /// It is a deterministic test double, not production Registry bytecode. The EL
@@ -51,12 +57,19 @@ const TEST_ROUTER_RUNTIME: &str = "0x608060405234801561000f575f5ffd5b50600436106
 /// Runtime for `SweepFixtures.sol::TestCandidateEmitter`.
 const TEST_CANDIDATE_EMITTER_RUNTIME: &str = "0x6080604052348015600e575f5ffd5b5060015b6010816001600160a01b031611607057604051600181526001600160a01b0382169033907fddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef9060200160405180910390a3606a816072565b90506012565b005b5f6001600160a01b0382166002600160a01b03198101609f57634e487b7160e01b5f52601160045260245ffd5b6001019291505056";
 
-/// Exact production-tuple runtime of `SweepRegistry`.
+/// Exact production implementation runtime of `SweepRegistry`.
 ///
-/// The constructor-set owner is restored in genesis storage. Source, compiler,
-/// immutable, file, and runtime hashes are enforced by
-/// `verify_sweep_fixtures.py` against the sibling `morph` checkout.
-const PROD_REGISTRY_RUNTIME: &str = include_str!("../assets/SweepRegistry.deployed.hex");
+/// The implementation's constructor guard is mirrored in genesis while owner
+/// initialization runs through the proxy below. Source, compiler settings, and
+/// runtime hashes are enforced by `verify_sweep_fixtures.py` against the sibling
+/// `morph` checkout.
+const PROD_REGISTRY_IMPLEMENTATION_RUNTIME: &str =
+    include_str!("../assets/SweepRegistry.deployed.hex");
+
+/// Exact OpenZeppelin v4.9 `TransparentUpgradeableProxy` runtime used by Morph.
+/// The verifier rebuilds it with the production Registry's pinned Forge profile.
+const PROD_REGISTRY_PROXY_RUNTIME: &str =
+    include_str!("../assets/TransparentUpgradeableProxy.deployed.hex");
 
 fn token_balance_slot(account: Address) -> B256 {
     let mut preimage = [0_u8; 64];
@@ -920,7 +933,7 @@ async fn synthetic_trace_calls_run_sweep_with_a_fresh_transaction_meter() -> eyr
 
     let (mut nodes, wallet) = stateful_builder().build().await?;
     let mut node = nodes.pop().unwrap();
-    let register = MorphTxBuilder::new(wallet.chain_id, wallet.inner, 0)
+    let register = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
         .with_v1_eth_fee()
         .with_to(REGISTRY)
         .with_data(encode_address_args(
@@ -928,8 +941,14 @@ async fn synthetic_trace_calls_run_sweep_with_a_fresh_transaction_meter() -> eyr
             &[TEST_TOKEN_ADDRESS, SOURCE, DESTINATION],
         ))
         .build_signed()?;
+    let replay_sentinel = MorphTxBuilder::new(wallet.chain_id, wallet.inner, 1)
+        .with_v1_eth_fee()
+        .with_to(RECIPIENT)
+        .build_signed()?;
     node.rpc.inject_tx(register).await?;
-    node.advance_block().await?;
+    node.rpc.inject_tx(replay_sentinel).await?;
+    let setup_payload = node.advance_block().await?;
+    assert_eq!(setup_payload.block().body().transactions.len(), 2);
 
     let call = serde_json::json!({
         "from": SENDER,
@@ -941,6 +960,22 @@ async fn synthetic_trace_calls_run_sweep_with_a_fresh_transaction_meter() -> eyr
     let rpc = node
         .rpc_client()
         .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
+    let partial_replay_trace: serde_json::Value = rpc
+        .request(
+            "debug_traceCall",
+            (
+                call.clone(),
+                setup_payload.block().hash(),
+                serde_json::json!({
+                    "tracer": "prestateTracer",
+                    "tracerConfig": { "diffMode": true },
+                    // Replay the registration at index 0, stop before the
+                    // sentinel at index 1, then execute this synthetic call.
+                    "txIndex": "0x1"
+                }),
+            ),
+        )
+        .await?;
     let debug_trace: serde_json::Value = rpc
         .request(
             "debug_traceCall",
@@ -957,6 +992,14 @@ async fn synthetic_trace_calls_run_sweep_with_a_fresh_transaction_meter() -> eyr
     let token_key = TEST_TOKEN_ADDRESS.to_string();
     let source_slot = token_balance_slot(SOURCE).to_string();
     let destination_slot = token_balance_slot(DESTINATION).to_string();
+    assert!(
+        partial_replay_trace["post"][&token_key]["storage"][&source_slot].is_null(),
+        "debug_traceCall with txIndex must not inherit canonical replay authority"
+    );
+    assert!(
+        !partial_replay_trace["post"][&token_key]["storage"][&destination_slot].is_null(),
+        "synthetic call after a partial canonical replay must still execute sweep"
+    );
     // Onyx spec §8: a standalone simulation runs the full sweep with a fresh 1M
     // transaction transfer meter and an empty seen set, so the simulated inflow is
     // swept onward exactly as it would be in a canonical block. The source slot goes
@@ -1198,7 +1241,8 @@ fn register_calldata(source: Address, controller: Address, deadline: u64, sig: &
     data.into()
 }
 
-/// Drives the EL against the production `SweepRegistry` (not the test double).
+/// Drives the EL against the production `SweepRegistry` through its real
+/// `TransparentUpgradeableProxy` runtime and ERC-1967 storage slots.
 ///
 /// The source accounts only sign EIP-712 authorizations; the destination submits
 /// ordinary `registerSweep` transactions, so neither source needs native ETH.
@@ -1210,18 +1254,64 @@ async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
     let source = source_signer.address();
     let (mut nodes, wallet) = TestNodeBuilder::new()
         .with_account_code(TEST_TOKEN_ADDRESS, SLOT1_ERC20_RUNTIME_CODE)
-        .with_account_code(PROD_REGISTRY, PROD_REGISTRY_RUNTIME.trim())
+        .with_account_code(
+            PROD_REGISTRY_IMPLEMENTATION,
+            PROD_REGISTRY_IMPLEMENTATION_RUNTIME.trim(),
+        )
+        // The implementation constructor calls `_disableInitializers()`. Genesis
+        // injects deployed runtime, so mirror that constructor-written slot.
+        .with_account_storage(
+            PROD_REGISTRY_IMPLEMENTATION,
+            B256::ZERO,
+            b256!("00000000000000000000000000000000000000000000000000000000000000ff"),
+        )
+        .with_account_code(PROD_REGISTRY, PROD_REGISTRY_PROXY_RUNTIME.trim())
+        .with_account_storage(
+            PROD_REGISTRY,
+            ERC1967_IMPLEMENTATION_SLOT,
+            B256::left_padding_from(PROD_REGISTRY_IMPLEMENTATION.as_slice()),
+        )
+        .with_account_storage(
+            PROD_REGISTRY,
+            ERC1967_ADMIN_SLOT,
+            B256::left_padding_from(PROD_PROXY_ADMIN.as_slice()),
+        )
         .build()
         .await?;
     let mut node = nodes.pop().unwrap();
+
+    // Assert the production proxy tuple before exercising it. The subsequent
+    // initialize call can only succeed by falling back and delegatecalling this
+    // implementation because the sender is deliberately not the proxy admin.
+    {
+        let state = node.inner.provider.latest()?;
+        assert_eq!(
+            state
+                .storage(PROD_REGISTRY, ERC1967_IMPLEMENTATION_SLOT)?
+                .unwrap_or_default(),
+            U256::from_be_slice(PROD_REGISTRY_IMPLEMENTATION.as_slice())
+        );
+        assert_eq!(
+            state
+                .storage(PROD_REGISTRY, ERC1967_ADMIN_SLOT)?
+                .unwrap_or_default(),
+            U256::from_be_slice(PROD_PROXY_ADMIN.as_slice())
+        );
+        assert_eq!(
+            state
+                .storage(PROD_REGISTRY_IMPLEMENTATION, B256::ZERO)?
+                .unwrap_or_default(),
+            U256::from(0xff)
+        );
+    }
 
     let owner = wallet.inner.address();
     assert_eq!(owner, SENDER);
     let destination = owner;
     let deadline = u64::MAX;
 
-    // Initialize the directly injected production runtime before using its
-    // OwnableUpgradeable and EIP-712 state.
+    // Initialize proxy storage through the transparent proxy delegatecall path
+    // before using the Registry's OwnableUpgradeable and EIP-712 state.
     let mut init = vec![0xc4, 0xd6, 0x6d, 0xe8];
     init.extend_from_slice(&addr_word(owner));
     let init_tx = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
@@ -1240,6 +1330,24 @@ async fn onyx_production_registry_resolves_and_sweeps() -> eyre::Result<()> {
             .expect("init receipt")
             .status(),
         "initialize(owner) must succeed"
+    );
+    assert_eq!(
+        node.inner
+            .provider
+            .latest()?
+            .storage(PROD_REGISTRY, B256::ZERO)?
+            .unwrap_or_default(),
+        U256::from(1),
+        "initializer state must be written to proxy storage by delegatecall"
+    );
+    assert_eq!(
+        node.inner
+            .provider
+            .latest()?
+            .storage(PROD_REGISTRY_IMPLEMENTATION, B256::ZERO)?
+            .unwrap_or_default(),
+        U256::from(0xff),
+        "proxy initialization must not mutate implementation storage"
     );
     let source_before = node.inner.provider.latest()?.basic_account(&source)?;
     assert_eq!(

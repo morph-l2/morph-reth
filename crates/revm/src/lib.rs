@@ -79,6 +79,7 @@ pub use sweep::{
     SweepInvariantError, SweepOutcome, SweepQueryStats, SweepSuccess, SweepTraceReplayScope,
     SweepTxPlan, TX_SWEEP_GAS_LIMIT, begin_sweep_trace_replay, clear_sweep_trace_replay,
     set_sweep_trace_replay_target, sweep_trace_replay_scope,
+    transition_sweep_trace_replay_to_standalone,
 };
 pub use token_fee::{
     L2_TOKEN_REGISTRY_ADDRESS, TokenFeeInfo, compute_mapping_slot,

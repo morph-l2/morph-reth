@@ -126,6 +126,16 @@ pub fn clear_sweep_trace_replay() {
     });
 }
 
+/// Ends canonical replay before executing a synthetic RPC call.
+///
+/// Partial-block trace methods first replay real block transactions and then
+/// build a synthetic call environment. That call is not a member of the block,
+/// so it must use a fresh standalone transaction budget instead of attempting
+/// to consume the replay coordinator's next canonical transaction.
+pub fn transition_sweep_trace_replay_to_standalone() {
+    clear_sweep_trace_replay();
+}
+
 /// RAII boundary for one synchronous state-at-block RPC replay closure.
 #[derive(Debug)]
 #[must_use = "the scope must live for the entire replay closure"]
@@ -211,7 +221,7 @@ pub(crate) fn initial_sweep_execution_mode() -> SweepExecutionMode {
         if context.borrow().is_some() {
             SweepExecutionMode::TraceReplay
         } else {
-            SweepExecutionMode::Canonical(SweepTxPlan::single_transaction())
+            SweepExecutionMode::Standalone
         }
     })
 }
@@ -386,13 +396,19 @@ impl SweepBlockSession {
     }
 }
 
-/// How the next EVM transaction is authorized to execute sweeps.
+/// The scope of an EVM's authority to execute sweeps.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum SweepExecutionMode {
     /// No sweep hook is allowed, including synthetic calls and estimates.
     #[default]
     Disabled,
-    /// Canonical block execution with an explicit speculative plan.
+    /// Standalone simulation with a fresh transaction plan for every call.
+    ///
+    /// RPC paths such as `eth_estimateGas` may reuse one EVM for several
+    /// attempts, so unlike [`Self::Canonical`] this authority is persistent.
+    Standalone,
+    /// One-shot canonical block execution with an explicit speculative plan.
+    /// The next transaction consumes this authority.
     Canonical(SweepTxPlan),
     /// Canonical trace replay using the thread-local replay coordinator.
     TraceReplay,
@@ -769,6 +785,19 @@ struct InternalCall {
     out_of_gas: bool,
 }
 
+#[inline]
+const fn is_out_of_gas(result: InstructionResult) -> bool {
+    matches!(
+        result,
+        InstructionResult::OutOfGas
+            | InstructionResult::MemoryOOG
+            | InstructionResult::MemoryLimitOOG
+            | InstructionResult::PrecompileOOG
+            | InstructionResult::InvalidOperandOOG
+            | InstructionResult::ReentrancySentryOOG
+    )
+}
+
 fn internal_call<DB, I>(
     evm: &mut MorphEvm<DB, I>,
     caller: Address,
@@ -827,15 +856,20 @@ where
             })),
         };
         let mut handler = MorphEvmHandler::<DB, I>::new();
-        let frame_result = handler.run_exec_loop(evm, frame_init)?;
+        let mut frame_result = handler.run_exec_loop(evm, frame_init)?;
         take_error::<EVMError<DB::Error, MorphInvalidTransaction>, _>(evm.ctx().error())?;
+        // `run_exec_loop` returns the raw root frame. Apply the same final-frame
+        // normalization as a regular revm root call: reverts retain unused gas,
+        // while every exceptional halt consumes the full forwarded allowance.
+        // The synthetic frame has no EIP-8037 reservoir, hence zero here.
+        handler.last_frame_result(evm, 0, &mut frame_result)?;
         let instruction_result = frame_result.instruction_result();
         Ok(InternalCall {
             output: instruction_result
                 .is_ok()
                 .then(|| frame_result.interpreter_result().output.clone()),
             actual_gas_used: gas_limit.saturating_sub(frame_result.gas().remaining()),
-            out_of_gas: matches!(instruction_result, InstructionResult::OutOfGas),
+            out_of_gas: is_out_of_gas(instruction_result),
         })
     })();
 
@@ -1346,10 +1380,6 @@ where
     warm_registry(evm, registry)?;
 
     for trigger in triggers.iter().copied() {
-        if remaining_transfer_gas == 0 {
-            outcome.tx_out_of_gas = true;
-            break;
-        }
         // A Registry request entering resolver resolution is recorded in the
         // block-level seen set, independent of resolution or sweep outcome
         // (Onyx spec §5.1).
@@ -1376,6 +1406,15 @@ where
                 continue;
             }
         };
+
+        // Resolver-zero, balance-zero, and other no-op candidates consume no
+        // transfer allowance and must still complete their bookkeeping when a
+        // preceding transfer used the budget exactly. Only a candidate that
+        // actually reaches `transfer` can turn zero allowance into tx-level OOG.
+        if remaining_transfer_gas == 0 {
+            outcome.tx_out_of_gas = true;
+            break;
+        }
 
         let transfer_gas_limit = remaining_transfer_gas;
         match execute_prepared_sweep(
@@ -1477,6 +1516,22 @@ mod tests {
             labels.iter().all(|label| !label.is_empty()),
             "metrics labels must be non-empty"
         );
+    }
+
+    #[test]
+    fn recognizes_the_complete_revm_out_of_gas_family() {
+        for result in [
+            InstructionResult::OutOfGas,
+            InstructionResult::MemoryOOG,
+            InstructionResult::MemoryLimitOOG,
+            InstructionResult::PrecompileOOG,
+            InstructionResult::InvalidOperandOOG,
+            InstructionResult::ReentrancySentryOOG,
+        ] {
+            assert!(is_out_of_gas(result), "{result:?} must be tx-level OOG");
+        }
+        assert!(!is_out_of_gas(InstructionResult::InvalidFEOpcode));
+        assert!(!is_out_of_gas(InstructionResult::Revert));
     }
 
     #[test]
@@ -1731,6 +1786,8 @@ mod tests {
         False,
         Malformed,
         Revert,
+        MemoryOog,
+        InvalidOpcode,
         MissingLog,
         DuplicateLog,
         ExtraLog,
@@ -1814,8 +1871,8 @@ mod tests {
     /// frame overhead.
     fn burn_gas(asm: &mut Assembler) {
         // MSTORE at offset 0x1C000 forces ~35.8k gas of memory expansion.
-        asm.push(&[0x01, 0xc0, 0x00]);
         asm.push_u8(0);
+        asm.push(&[0x01, 0xc0, 0x00]);
         asm.op(0x52);
     }
 
@@ -2052,6 +2109,24 @@ mod tests {
         asm.push_u8(1);
         asm.op(0x55);
 
+        match transfer_mode {
+            TransferMode::MemoryOog => {
+                // Expanding memory through 0x40000 costs more than the focused
+                // tests' 100k transfer allowance while staying below the
+                // configured memory-size limit, producing `MemoryOOG` rather
+                // than `MemoryLimitOOG`.
+                asm.push_u8(0);
+                asm.push(&[0x04, 0x00, 0x00]);
+                asm.op(0x52);
+                return asm.finish();
+            }
+            TransferMode::InvalidOpcode => {
+                asm.op(0xfe);
+                return asm.finish();
+            }
+            _ => {}
+        }
+
         if !matches!(transfer_mode, TransferMode::MissingLog) {
             if matches!(transfer_mode, TransferMode::ExtraLog) {
                 asm.push_u8(0);
@@ -2083,7 +2158,9 @@ mod tests {
                 asm.push_u8(31);
                 asm.op(0xf3);
             }
-            TransferMode::Revert => unreachable!(),
+            TransferMode::Revert | TransferMode::MemoryOog | TransferMode::InvalidOpcode => {
+                unreachable!()
+            }
         }
 
         asm.finish()
@@ -2230,6 +2307,21 @@ mod tests {
         *evm.ctx_mut()
             .journal_mut()
             .sload(token, U256::ZERO)
+            .unwrap()
+    }
+
+    fn token_destination_balance<ExtDB>(
+        evm: &mut MorphEvm<CacheDB<ExtDB>, NoOpInspector>,
+        token: Address,
+    ) -> U256
+    where
+        ExtDB: DatabaseRef + fmt::Debug,
+        ExtDB::Error: fmt::Debug,
+    {
+        let _ = evm.ctx_mut().journal_mut().load_account_mut(token).unwrap();
+        *evm.ctx_mut()
+            .journal_mut()
+            .sload(token, U256::from(1))
             .unwrap()
     }
 
@@ -2418,6 +2510,52 @@ mod tests {
         assert_eq!(result.output(), Some(&Bytes::new()));
         assert_eq!(outcome.successes.len(), 1);
         assert!(enabled.take_sweep_outcome().is_none());
+    }
+
+    #[test]
+    fn standalone_execution_mode_persists_across_transactions_on_one_evm() {
+        let mut evm = make_evm(
+            ResolverMode::Destination,
+            &[
+                (TOKEN_A, BalanceMode::Normal, TransferMode::True),
+                (TOKEN_B, BalanceMode::Normal, TransferMode::True),
+            ],
+            None,
+            true,
+        );
+
+        assert_eq!(evm.sweep_execution_mode, SweepExecutionMode::Standalone);
+        assert!(evm.transact_one(main_tx()).unwrap().is_success());
+        assert_eq!(evm.take_sweep_outcome().unwrap().successes.len(), 1);
+        assert_eq!(token_balance(&mut evm, TOKEN_A), U256::ZERO);
+        assert_eq!(evm.sweep_execution_mode, SweepExecutionMode::Standalone);
+
+        let mut second = main_tx();
+        second.inner.kind = TxKind::Call(TOKEN_B);
+        second.inner.nonce = 1;
+        assert!(evm.transact_one(second).unwrap().is_success());
+        assert_eq!(evm.take_sweep_outcome().unwrap().successes.len(), 1);
+        assert_eq!(token_balance(&mut evm, TOKEN_B), U256::ZERO);
+        assert_eq!(evm.sweep_execution_mode, SweepExecutionMode::Standalone);
+    }
+
+    #[test]
+    fn standalone_execution_mode_survives_a_rejected_estimate_attempt() {
+        let mut evm = make_evm(
+            ResolverMode::Destination,
+            &[(TOKEN_A, BalanceMode::Normal, TransferMode::True)],
+            None,
+            true,
+        );
+        let mut rejected = main_tx();
+        rejected.inner.nonce = 99;
+
+        assert!(evm.transact_one(rejected).is_err());
+        assert_eq!(evm.sweep_execution_mode, SweepExecutionMode::Standalone);
+
+        assert!(evm.transact_one(main_tx()).unwrap().is_success());
+        assert_eq!(evm.take_sweep_outcome().unwrap().successes.len(), 1);
+        assert_eq!(token_balance(&mut evm, TOKEN_A), U256::ZERO);
     }
 
     #[test]
@@ -2921,6 +3059,110 @@ mod tests {
         );
         assert!(failed.block_effect.transfer_gas_used() > 0);
         assert_eq!(only_failure(&failed), SweepFailureReason::TransferFalse);
+    }
+
+    #[test]
+    fn memory_oog_consumes_the_full_allowance_and_reverts_the_candidate() {
+        const TRANSFER_ALLOWANCE: u64 = 100_000;
+        let mut evm = make_evm(
+            ResolverMode::Destination,
+            &[(TOKEN_A, BalanceMode::Normal, TransferMode::MemoryOog)],
+            None,
+            true,
+        );
+        let plan = SweepTxPlan {
+            remaining_transfer_gas: TRANSFER_ALLOWANCE,
+            seen_registry_requests: Vec::new(),
+        };
+
+        let outcome = execute_sweep_triggers(
+            &mut evm,
+            test_sweep_config(),
+            &[SweepTrigger {
+                candidate: candidate(TOKEN_A),
+                kind: SweepTriggerKind::TokenTransfer,
+            }],
+            0,
+            &plan,
+        )
+        .unwrap();
+
+        assert!(outcome.tx_out_of_gas);
+        assert_eq!(outcome.block_effect.transfer_gas_used(), TRANSFER_ALLOWANCE);
+        assert!(outcome.successes.is_empty());
+        assert!(outcome.failures.is_empty());
+        assert_eq!(
+            token_balance(&mut evm, TOKEN_A),
+            U256::from(INITIAL_BALANCE)
+        );
+        assert_eq!(token_destination_balance(&mut evm, TOKEN_A), U256::ZERO);
+    }
+
+    #[test]
+    fn non_oog_exception_consumes_full_allowance_and_reverts_the_candidate() {
+        const TRANSFER_ALLOWANCE: u64 = 100_000;
+        let mut evm = make_evm(
+            ResolverMode::Destination,
+            &[(TOKEN_A, BalanceMode::Normal, TransferMode::InvalidOpcode)],
+            None,
+            true,
+        );
+        let plan = SweepTxPlan {
+            remaining_transfer_gas: TRANSFER_ALLOWANCE,
+            seen_registry_requests: Vec::new(),
+        };
+
+        let outcome = execute_sweep_triggers(
+            &mut evm,
+            test_sweep_config(),
+            &[SweepTrigger {
+                candidate: candidate(TOKEN_A),
+                kind: SweepTriggerKind::TokenTransfer,
+            }],
+            0,
+            &plan,
+        )
+        .unwrap();
+
+        assert!(!outcome.tx_out_of_gas);
+        assert_eq!(outcome.block_effect.transfer_gas_used(), TRANSFER_ALLOWANCE);
+        assert_eq!(
+            only_failure(&outcome),
+            SweepFailureReason::TransferCallFailed
+        );
+        assert_eq!(
+            token_balance(&mut evm, TOKEN_A),
+            U256::from(INITIAL_BALANCE)
+        );
+        assert_eq!(token_destination_balance(&mut evm, TOKEN_A), U256::ZERO);
+    }
+
+    #[test]
+    fn zero_transfer_allowance_still_processes_a_noop_registry_request() {
+        let mut evm = make_evm(ResolverMode::Unregistered, &[], None, true);
+        let requested = candidate(TOKEN_A);
+        let plan = SweepTxPlan {
+            remaining_transfer_gas: 0,
+            seen_registry_requests: Vec::new(),
+        };
+
+        let outcome = execute_sweep_triggers(
+            &mut evm,
+            test_sweep_config(),
+            &[SweepTrigger {
+                candidate: requested,
+                kind: SweepTriggerKind::RegistryRequest,
+            }],
+            0,
+            &plan,
+        )
+        .unwrap();
+
+        assert!(!outcome.tx_out_of_gas);
+        assert_eq!(outcome.candidates_checked, 1);
+        assert_eq!(outcome.block_effect.seen_registry_requests(), &[requested]);
+        assert_eq!(outcome.block_effect.transfer_gas_used(), 0);
+        assert_eq!(only_failure(&outcome), SweepFailureReason::ResolverZero);
     }
 
     /// The transaction-level transfer meter stops the loop: once the cumulative
@@ -3443,6 +3685,25 @@ mod tests {
 
         TRACE_REPLAY_CONTEXT.with(|context| assert!(context.borrow().is_none()));
         assert!(sweep_trace_replay_transaction(Some(&Bytes::from_static(b"synthetic"))).is_none());
+    }
+
+    #[test]
+    fn synthetic_rpc_call_transitions_partial_trace_replay_to_standalone() {
+        let canonical = Bytes::from_static(b"canonical-before-synthetic-call");
+        begin_sweep_trace_replay(vec![alloy_primitives::keccak256(&canonical)]);
+
+        transition_sweep_trace_replay_to_standalone();
+        TRACE_REPLAY_CONTEXT.with(|context| assert!(context.borrow().is_none()));
+
+        let mut evm = make_evm(
+            ResolverMode::Destination,
+            &[(TOKEN_A, BalanceMode::Normal, TransferMode::True)],
+            None,
+            true,
+        );
+        assert_eq!(evm.sweep_execution_mode, SweepExecutionMode::Standalone);
+        assert!(evm.transact_one(main_tx()).unwrap().is_success());
+        assert_eq!(evm.take_sweep_outcome().unwrap().successes.len(), 1);
     }
 
     #[test]

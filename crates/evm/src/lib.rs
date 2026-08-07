@@ -69,7 +69,7 @@ mod context;
 pub use context::MorphNextBlockEnvAttributes;
 
 mod error;
-pub use error::MorphEvmError;
+pub use error::{BlockSweepGasLimitExceeded, MorphEvmError};
 pub mod evm;
 use std::sync::Arc;
 

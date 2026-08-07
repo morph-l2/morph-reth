@@ -10,11 +10,13 @@ use crate::MorphEthApiError;
 use crate::eth::{MorphEthApi, MorphNodeCore};
 use alloy_consensus::transaction::TxHashRef;
 use alloy_evm::call::{CallError, caller_gas_allowance as upstream_caller_gas_allowance};
+use alloy_network::TransactionBuilder;
 use alloy_primitives::{B256, U256};
 use alloy_rpc_types_eth::BlockId;
 use morph_chainspec::{MorphChainSpec, MorphHardforks};
 use morph_revm::{
     L1BlockInfo, MorphTxExt, TokenFeeInfo, set_sweep_trace_replay_target, sweep_trace_replay_scope,
+    transition_sweep_trace_replay_to_standalone,
 };
 use reth_errors::ProviderError;
 use reth_evm::{ConfigureEvm, Evm, EvmEnvFor, TxEnvFor};
@@ -24,6 +26,7 @@ use reth_revm::{
     database::StateProviderDatabase,
     db::{State, bal::EvmDatabaseError},
 };
+use reth_rpc_convert::{RpcConvert, RpcTxReq};
 use reth_rpc_eth_api::{
     EthApiTypes, FromEvmError, RpcNodeCore,
     helpers::{Call, EthCall, LoadState, SpawnBlocking, estimate::EstimateCall},
@@ -127,6 +130,30 @@ where
             index += 1;
         }
         Ok(index)
+    }
+
+    fn create_txn_env(
+        &self,
+        evm_env: &EvmEnvFor<<Self as RpcNodeCore>::Evm>,
+        mut request: RpcTxReq<<Self::RpcConvert as RpcConvert>::Network>,
+        mut db: impl Database<Error: Into<EthApiError>>,
+    ) -> Result<TxEnvFor<<Self as RpcNodeCore>::Evm>, <Self as EthApiTypes>::Error> {
+        // This is the synthetic-call boundary. A partial-block debug trace may
+        // have replayed canonical transactions on this worker immediately
+        // before preparing this request, but the request itself must start a
+        // standalone simulation with a fresh transaction plan.
+        transition_sweep_trace_replay_to_standalone();
+
+        if request.as_ref().nonce().is_none() {
+            let nonce = db
+                .basic(request.as_ref().from().unwrap_or_default())
+                .map_err(Into::into)?
+                .map(|account| account.nonce)
+                .unwrap_or_default();
+            request.as_mut().set_nonce(nonce);
+        }
+
+        Ok(self.converter().tx_env(request, evm_env)?)
     }
 
     fn caller_gas_allowance(
