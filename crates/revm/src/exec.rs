@@ -9,7 +9,7 @@ use revm::{
     DatabaseCommit, ExecuteCommitEvm, ExecuteEvm,
     context::{ContextSetters, TxEnv, result::ExecResultAndState},
     context_interface::{
-        ContextTr, JournalTr, LocalContextTr,
+        ContextTr, JournalTr,
         result::{EVMError, ExecutionResult},
     },
     handler::{Handler, SystemCallTx, system_call::SystemCallEvm},
@@ -22,20 +22,19 @@ use revm::{
 const SYSTEM_CALL_GAS_LIMIT: u64 = 200_000;
 
 impl<DB: Database, I> MorphEvm<DB, I> {
-    fn discard_failed_inspection(&mut self) {
+    /// Clears the per-transaction caches after the handler rejected a transaction.
+    ///
+    /// The handler's `catch_error` already discarded the journal, the frame stack
+    /// and the local context, so only Morph's own side-channel caches — the fee
+    /// logs and the sweep state that live outside the journal — are left to reset.
+    fn discard_failed_transaction(&mut self) {
         self.set_sweep_execution_mode(crate::sweep::SweepExecutionMode::Disabled);
         self.sweep_outcome = None;
         self.cached_token_fee_info = None;
         self.cached_l1_data_fee = Default::default();
         self.pre_fee_logs.clear();
         self.post_fee_logs.clear();
-
-        // `InspectEvm::inspect_tx` only finalizes successful output. A sweep error
-        // happens after the main transaction succeeded, so finalize and drop that
-        // state here to leave the EVM reusable without committing either phase.
-        let _ = self.inner.ctx.journal_mut().finalize();
-        self.inner.frame_stack.clear();
-        self.inner.ctx.local_mut().clear();
+        self.tx_checkpoint = None;
     }
 }
 
@@ -56,14 +55,13 @@ where
     fn transact_one(&mut self, tx: Self::Tx) -> Result<Self::ExecutionResult, Self::Error> {
         self.inner.ctx.set_tx(tx);
         self.sweep_outcome = None;
+        // The sweep phase runs inside `MorphEvmHandler::execution_result`, before
+        // `commit_tx()`, so that `SweepOutOfGas` can still reach the main call.
         let mut h = MorphEvmHandler::new();
         match h.run(self) {
-            Ok(result) => {
-                self.apply_sweep(&result)?;
-                Ok(result)
-            }
+            Ok(result) => Ok(result),
             Err(error) => {
-                self.set_sweep_execution_mode(crate::sweep::SweepExecutionMode::Disabled);
+                self.discard_failed_transaction();
                 Err(error)
             }
         }
@@ -81,11 +79,10 @@ where
         let result = match h.run(self) {
             Ok(result) => result,
             Err(error) => {
-                self.set_sweep_execution_mode(crate::sweep::SweepExecutionMode::Disabled);
+                self.discard_failed_transaction();
                 return Err(error);
             }
         };
-        self.apply_sweep(&result)?;
         let state = self.finalize();
         Ok(ExecResultAndState::new(result, state))
     }
@@ -114,19 +111,14 @@ where
     fn inspect_one_tx(&mut self, tx: Self::Tx) -> Result<Self::ExecutionResult, Self::Error> {
         self.inner.ctx.set_tx(tx);
         self.sweep_outcome = None;
+        // Sweep system calls intentionally bypass inspector frame callbacks, so
+        // traces may hide them; the handler still runs them so replay state is
+        // canonical.
         let mut h = MorphEvmHandler::new();
         match h.inspect_run(self) {
-            Ok(result) => {
-                // Sweep system calls intentionally bypass inspector frame callbacks, so
-                // traces may hide them; applying the hook here still makes replay state canonical.
-                if let Err(error) = self.apply_sweep(&result) {
-                    self.discard_failed_inspection();
-                    return Err(error);
-                }
-                Ok(result)
-            }
+            Ok(result) => Ok(result),
             Err(error) => {
-                self.set_sweep_execution_mode(crate::sweep::SweepExecutionMode::Disabled);
+                self.discard_failed_transaction();
                 Err(error)
             }
         }

@@ -5012,6 +5012,7 @@ dependencies = [
  "morph-evm",
  "morph-payload-types",
  "morph-primitives",
+ "morph-revm",
  "reth-basic-payload-builder",
  "reth-chainspec",
  "reth-evm",

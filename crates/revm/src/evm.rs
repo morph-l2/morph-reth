@@ -1,5 +1,5 @@
 use crate::{
-    MorphBlockEnv, MorphHaltReason, MorphInvalidTransaction, MorphTxEnv,
+    MorphBlockEnv, MorphInvalidTransaction, MorphTxEnv,
     l1block::L1BlockInfo,
     precompiles::MorphPrecompiles,
     sweep::{
@@ -15,11 +15,10 @@ use alloy_primitives::{U256, keccak256};
 use morph_chainspec::hardfork::MorphHardfork;
 use revm::{
     Context, Inspector,
-    context::{
-        CfgEnv, ContextError, Evm, FrameStack, Journal,
-        result::{EVMError, ExecutionResult},
+    context::{CfgEnv, ContextError, Evm, FrameStack, Journal, result::EVMError},
+    context_interface::{
+        ContextTr, JournalTr, host::LoadError, journaled_state::JournalCheckpoint,
     },
-    context_interface::{ContextTr, JournalTr, host::LoadError},
     handler::{
         EthFrame, EvmTr, FrameInitOrResult, FrameTr, ItemOrResult, instructions::EthInstructions,
     },
@@ -284,6 +283,20 @@ pub struct MorphEvm<DB: Database, I> {
     pub(crate) sweep_execution_mode: SweepExecutionMode,
     /// Take-once sweep result for the latest transaction.
     pub(crate) sweep_outcome: Option<SweepOutcome>,
+    /// Journal checkpoint taken after the fee deduction and the EIP-7702
+    /// authorization list, immediately before the main call.
+    ///
+    /// This is the rollback boundary `SweepOutOfGas` uses (Onyx spec §5.4.1): it
+    /// reaches the main call's state and logs plus every sweep of the
+    /// transaction, while leaving the nonce increment and the fee pre-deduction
+    /// (including the token-fee ERC-20 transfer and its pre-fee logs) intact.
+    ///
+    /// Taken with `checkpoint()` immediately followed by `checkpoint_commit()` so
+    /// the journal depth returns to zero: holding an open checkpoint across the
+    /// main call would run the top-level frame at depth 1 and shift the 1024-call
+    /// depth limit by one. Only the recorded indices are needed later, and
+    /// `checkpoint_revert` at depth zero saturates rather than underflowing.
+    pub(crate) tx_checkpoint: Option<JournalCheckpoint>,
 }
 
 impl<DB: Database, I> MorphEvm<DB, I> {
@@ -347,6 +360,7 @@ impl<DB: Database, I> MorphEvm<DB, I> {
             post_fee_logs: Vec::new(),
             sweep_execution_mode: initial_sweep_execution_mode(),
             sweep_outcome: None,
+            tx_checkpoint: None,
         }
     }
 }
@@ -414,10 +428,20 @@ impl<DB: Database, I> MorphEvm<DB, I> {
         self.sweep_outcome.take()
     }
 
-    pub(crate) fn apply_sweep(
+    /// Runs the sweep phase against the state the main call left behind.
+    ///
+    /// Must be driven from [`crate::handler::MorphEvmHandler::execution_result`]
+    /// BEFORE `commit_tx()`: the transaction-level checkpoint can only reach the
+    /// main call while its journal entries are still live, and `SweepOutOfGas`
+    /// requires exactly that reach (Onyx spec §5.4.1).
+    ///
+    /// Returns `true` when the transaction's cumulative `transfer` gas hit
+    /// [`crate::TX_SWEEP_GAS_LIMIT`], meaning the caller must revert to the
+    /// transaction-level checkpoint and re-settle fees.
+    pub(crate) fn run_sweep_phase(
         &mut self,
-        result: &ExecutionResult<MorphHaltReason>,
-    ) -> Result<(), EVMError<DB::Error, MorphInvalidTransaction>> {
+        main_call_succeeded: bool,
+    ) -> Result<bool, EVMError<DB::Error, MorphInvalidTransaction>> {
         let mode = std::mem::take(&mut self.sweep_execution_mode);
         let (plan, trace_transaction, authorized) = match mode {
             SweepExecutionMode::Disabled => (Default::default(), None, false),
@@ -437,20 +461,25 @@ impl<DB: Database, I> MorphEvm<DB, I> {
 
         let Some(config) = self.block.sweep else {
             finish_sweep_trace_replay_transaction(trace_transaction, &SweepBlockEffect::default());
-            return Ok(());
+            return Ok(false);
         };
-        let ExecutionResult::Success { logs, .. } = result else {
+        if !main_call_succeeded {
             finish_sweep_trace_replay_transaction(trace_transaction, &SweepBlockEffect::default());
-            return Ok(());
-        };
+            return Ok(false);
+        }
         if !authorized {
             finish_sweep_trace_replay_transaction(trace_transaction, &SweepBlockEffect::default());
-            return Ok(());
+            return Ok(false);
         }
+        // The main call's logs are still in the journal — `post_execution::output`
+        // has not taken them yet. Fee logs are not among them: the token-fee paths
+        // move theirs into `pre_fee_logs` / `post_fee_logs` as they are produced,
+        // which is also why the fee path never yields a sweep candidate (§9).
+        let main_log_count = self.ctx_ref().journal().logs.len();
         let Some(receipt_prefix_logs) = self
             .pre_fee_logs
             .len()
-            .checked_add(logs.len())
+            .checked_add(main_log_count)
             .and_then(|count| count.checked_add(self.post_fee_logs.len()))
         else {
             self.set_sweep_execution_mode(SweepExecutionMode::Disabled);
@@ -459,7 +488,7 @@ impl<DB: Database, I> MorphEvm<DB, I> {
             ));
         };
         let collected = collect_transaction_sweep_triggers(
-            logs,
+            &self.ctx_ref().journal().logs,
             config.registry_address,
             &plan,
         );
@@ -471,27 +500,28 @@ impl<DB: Database, I> MorphEvm<DB, I> {
             receipt_prefix_logs,
             &plan,
         ) {
-            Ok(outcome) => {
-                if outcome.tx_out_of_gas {
-                    // `SweepOutOfGas`: the transaction's cumulative transfer gas
-                    // hit TX_SWEEP_GAS_LIMIT. This is handled at the transaction
-                    // level — see `MorphEvmHandler::execution_result`.
-                    self.ctx_mut().journal_mut().checkpoint_revert(checkpoint);
-                    self.set_sweep_execution_mode(SweepExecutionMode::Disabled);
-                    finish_sweep_trace_replay_transaction(
-                        trace_transaction,
-                        &outcome.block_effect,
-                    );
-                    self.sweep_outcome = Some(outcome);
-                    return Ok(());
-                }
+            Ok(mut outcome) => {
+                // Only balances the checkpoint's depth bookkeeping. On
+                // `tx_out_of_gas` the caller reverts the strictly earlier
+                // transaction-level checkpoint, which subsumes this one.
                 self.ctx_mut().journal_mut().checkpoint_commit();
-                // Sweep logs are already cached in `outcome`; close this implicit
-                // transaction so a later discard cannot revert successful sweep state.
-                self.ctx_mut().journal_mut().commit_tx();
+                let tx_out_of_gas = outcome.tx_out_of_gas;
+                if tx_out_of_gas {
+                    self.set_sweep_execution_mode(SweepExecutionMode::Disabled);
+                    // Every sweep of this transaction is about to be rolled back, so
+                    // nothing settled: drop the logs and the classifications before
+                    // they can reach the receipt or the metrics. The block effect
+                    // stays — the transfer gas burned here is work every client
+                    // reproduces and must count toward the 20M block sum, and the
+                    // requests still entered resolver resolution, which is the point
+                    // the block-level seen set records (Onyx spec §5.4.1 / §9).
+                    outcome.logs.clear();
+                    outcome.successes.clear();
+                    outcome.failures.clear();
+                }
                 finish_sweep_trace_replay_transaction(trace_transaction, &outcome.block_effect);
                 self.sweep_outcome = Some(outcome);
-                Ok(())
+                Ok(tx_out_of_gas)
             }
             Err(error) => {
                 self.ctx_mut().journal_mut().checkpoint_revert(checkpoint);

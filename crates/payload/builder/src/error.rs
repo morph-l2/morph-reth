@@ -22,6 +22,21 @@ pub enum MorphPayloadBuilderError {
         gas: u64,
     },
 
+    /// Block sweep transfer gas limit exceeded by sequencer (L1 message) transactions.
+    ///
+    /// L1 messages come from the payload attributes with a fixed queue order, so an
+    /// individual message cannot be deferred the way a pool transaction can. The
+    /// build aborts and the sequencer retries with fewer messages (Onyx spec §5.4.1).
+    #[error(
+        "block sweep transfer gas limit {limit} exceeded by sequencer transactions (cumulative {cumulative})"
+    )]
+    BlockSweepGasLimitExceededBySequencerTransactions {
+        /// Cumulative sweep `transfer` gas including the offending transaction.
+        cumulative: u64,
+        /// The block sweep transfer gas limit.
+        limit: u64,
+    },
+
     /// Invalid sequencer transaction in forced transaction list.
     #[error("invalid sequencer transaction: {error}")]
     InvalidSequencerTransaction {

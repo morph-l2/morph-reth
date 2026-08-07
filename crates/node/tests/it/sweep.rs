@@ -915,7 +915,7 @@ async fn unwhitelisted_fake_logs_do_not_suppress_the_eligible_sweep() -> eyre::R
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn synthetic_trace_calls_do_not_run_sweep() -> eyre::Result<()> {
+async fn synthetic_trace_calls_run_sweep_with_a_fresh_transaction_meter() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let (mut nodes, wallet) = stateful_builder().build().await?;
@@ -957,29 +957,33 @@ async fn synthetic_trace_calls_do_not_run_sweep() -> eyre::Result<()> {
     let token_key = TEST_TOKEN_ADDRESS.to_string();
     let source_slot = token_balance_slot(SOURCE).to_string();
     let destination_slot = token_balance_slot(DESTINATION).to_string();
-    let amount_word = B256::from(U256::from(AMOUNT).to_be_bytes::<32>()).to_string();
-    assert_eq!(
-        debug_trace["post"][&token_key]["storage"][&source_slot],
-        serde_json::Value::String(amount_word),
-        "debug_traceCall must retain the synthetic inflow at the source"
+    // Onyx spec §8: a standalone simulation runs the full sweep with a fresh 1M
+    // transaction transfer meter and an empty seen set, so the simulated inflow is
+    // swept onward exactly as it would be in a canonical block. The source slot goes
+    // 0 -> AMOUNT -> 0, which is a net-zero diff the tracer omits; the destination
+    // slot is where the sweep becomes visible.
+    assert!(
+        debug_trace["post"][&token_key]["storage"][&source_slot].is_null(),
+        "debug_traceCall must sweep the synthetic inflow back out of the source"
     );
     assert!(
-        debug_trace["post"][&token_key]["storage"][&destination_slot].is_null(),
-        "debug_traceCall must not execute the canonical-only sweep hook"
+        !debug_trace["post"][&token_key]["storage"][&destination_slot].is_null(),
+        "debug_traceCall must execute the sweep and credit the destination"
     );
 
     let parity_trace: serde_json::Value = rpc
         .request("trace_call", (call, vec!["stateDiff"], "latest"))
         .await?;
     assert!(
-        !parity_trace["stateDiff"][&token_key]["storage"][&source_slot].is_null(),
-        "trace_call state diff must retain the synthetic inflow"
+        parity_trace["stateDiff"][&token_key]["storage"][&source_slot].is_null(),
+        "trace_call state diff must show the source swept back to zero"
     );
     assert!(
-        parity_trace["stateDiff"][&token_key]["storage"][&destination_slot].is_null(),
-        "trace_call must not execute the canonical-only sweep hook"
+        !parity_trace["stateDiff"][&token_key]["storage"][&destination_slot].is_null(),
+        "trace_call must execute the sweep and credit the destination"
     );
 
+    // Simulation must not touch the chain: neither balance moved on disk.
     let state = node.inner.provider.latest()?;
     assert_eq!(
         state

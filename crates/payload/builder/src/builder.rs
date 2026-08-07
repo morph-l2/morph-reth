@@ -8,11 +8,12 @@ use alloy_primitives::{B256, Bytes, U256};
 use alloy_rlp::Encodable;
 use morph_chainspec::MorphChainSpec;
 use morph_chainspec::{L2_MESSAGE_QUEUE_ADDRESS, L2_MESSAGE_QUEUE_WITHDRAW_TRIE_ROOT_SLOT};
-use morph_evm::{MorphEvmConfig, MorphNextBlockEnvAttributes};
+use morph_evm::{MorphEvmConfig, MorphNextBlockEnvAttributes, MorphTxResult};
 use morph_payload_types::{
     ExecutableL2Data, MorphBuiltPayload, MorphPayloadAttributes, MorphPayloadBuilderAttributes,
 };
 use morph_primitives::{MorphHeader, MorphTxEnvelope};
+use morph_revm::BLOCK_SWEEP_GAS_LIMIT;
 use reth_basic_payload_builder::{
     BuildArguments, BuildOutcome, BuildOutcomeKind, MissingPayloadBehaviour, PayloadBuilder,
     PayloadConfig, is_better_payload,
@@ -20,7 +21,7 @@ use reth_basic_payload_builder::{
 use reth_chainspec::ChainSpecProvider;
 use reth_evm::{
     ConfigureEvm, Database, Evm, NextBlockEnvAttributes,
-    block::{BlockExecutionError, BlockValidationError},
+    block::{BlockExecutionError, BlockExecutor, BlockValidationError, CommitChanges},
     execute::{BlockBuilder, BlockBuilderOutcome},
 };
 use reth_execution_cache::{CachedStateMetrics, CachedStateMetricsSource, CachedStateProvider};
@@ -335,7 +336,10 @@ impl MorphPayloadBuilderCtx {
     /// Returns the executed transaction bytes for inclusion in ExecutableL2Data.
     fn execute_l1_messages(
         &self,
-        builder: &mut impl BlockBuilder<Primitives = morph_primitives::MorphPrimitives>,
+        builder: &mut impl BlockBuilder<
+            Primitives = morph_primitives::MorphPrimitives,
+            Executor: BlockExecutor<Result = MorphTxResult>,
+        >,
         info: &mut ExecutionInfo,
     ) -> Result<Vec<Bytes>, PayloadBuilderError> {
         let block_gas_limit = builder.evm().block().gas_limit();
@@ -385,8 +389,46 @@ impl MorphPayloadBuilderCtx {
             // `BlockBuilder::execute_transaction` returns `GasOutput` from
             // alloy-evm 0.34; pre-Amsterdam morph treats regular and state gas
             // as a single number, so collapse to `tx_gas_used()` immediately.
-            let gas_used = match builder.execute_transaction(recovered_tx.clone()) {
-                Ok(gas_output) => gas_output.tx_gas_used(),
+            //
+            // Unlike a pool transaction, an L1 message cannot be individually
+            // deferred: the payload attributes fix the set and its queue order, so a
+            // sweep budget overflow here aborts the build the same way a block gas
+            // overflow does, leaving the sequencer to retry with fewer messages.
+            let mut tx_sweep_transfer_gas = 0;
+            let outcome =
+                builder.execute_transaction_with_commit_condition(recovered_tx.clone(), |output| {
+                    tx_sweep_transfer_gas = output.sweep.block_effect.transfer_gas_used();
+                    if info.is_tx_over_sweep_block_limit(tx_sweep_transfer_gas) {
+                        CommitChanges::No
+                    } else {
+                        CommitChanges::Yes
+                    }
+                });
+            let gas_used = match outcome {
+                Ok(Some(gas_output)) => {
+                    info.cumulative_sweep_transfer_gas += tx_sweep_transfer_gas;
+                    gas_output.tx_gas_used()
+                }
+                Ok(None) => {
+                    let cumulative = info
+                        .cumulative_sweep_transfer_gas
+                        .saturating_add(tx_sweep_transfer_gas);
+                    tracing::warn!(
+                        target: "payload_builder",
+                        tx_index = tx_idx,
+                        tx_sweep_transfer_gas,
+                        cumulative,
+                        block_sweep_gas_limit = BLOCK_SWEEP_GAS_LIMIT,
+                        "L1 message transaction would exceed the block sweep transfer gas limit; \
+                         aborting build"
+                    );
+                    return Err(PayloadBuilderError::other(
+                        MorphPayloadBuilderError::BlockSweepGasLimitExceededBySequencerTransactions {
+                            cumulative,
+                            limit: BLOCK_SWEEP_GAS_LIMIT,
+                        },
+                    ));
+                }
                 Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
                     error,
                     ..
@@ -481,7 +523,12 @@ impl MorphPayloadBuilderCtx {
     /// Executed transaction bytes are appended to the provided vector.
     fn execute_pool_transactions<BestTxs>(
         &self,
-        builder: &mut impl BlockBuilder<Primitives = morph_primitives::MorphPrimitives>,
+        // `Executor::Result = MorphTxResult` is pinned so the sweep effect of a
+        // just-executed transaction can be read before deciding to commit it.
+        builder: &mut impl BlockBuilder<
+            Primitives = morph_primitives::MorphPrimitives,
+            Executor: BlockExecutor<Result = MorphTxResult>,
+        >,
         info: &mut ExecutionInfo,
         executed_txs: &mut Vec<Bytes>,
         mut best_txs: BestTxs,
@@ -561,8 +608,42 @@ impl MorphPayloadBuilderCtx {
             let apply_started = Instant::now();
             // Same reasoning as the L1-message branch above: collapse `GasOutput`
             // into a single u64 since we are still pre-Amsterdam.
-            let gas_used = match builder.execute_transaction(tx.clone()) {
-                Ok(gas_output) => gas_output.tx_gas_used(),
+            //
+            // `execute_transaction_with_commit_condition` is used instead of
+            // `execute_transaction` so the sweep transfer gas can be inspected after
+            // execution but before the state is committed. A transaction that would
+            // push the block over `BLOCK_SWEEP_GAS_LIMIT` is left for a later block
+            // rather than turned into a failure (Onyx spec §5.4.1).
+            let mut tx_sweep_transfer_gas = 0;
+            let outcome = builder.execute_transaction_with_commit_condition(tx.clone(), |output| {
+                tx_sweep_transfer_gas = output.sweep.block_effect.transfer_gas_used();
+                if info.is_tx_over_sweep_block_limit(tx_sweep_transfer_gas) {
+                    CommitChanges::No
+                } else {
+                    CommitChanges::Yes
+                }
+            });
+            let gas_used = match outcome {
+                Ok(None) => {
+                    self.metrics.sweep_builder_rejected_total.increment(1);
+                    tracing::debug!(
+                        target: "payload_builder",
+                        signer = %tx.signer(),
+                        nonce = tx.nonce(),
+                        tx_sweep_transfer_gas,
+                        cumulative_sweep_transfer_gas = info.cumulative_sweep_transfer_gas,
+                        block_sweep_gas_limit = BLOCK_SWEEP_GAS_LIMIT,
+                        "deferring transaction to a later block: its sweeps would exceed the \
+                         block sweep transfer gas limit"
+                    );
+                    // Deliberately no `mark_invalid`: the transaction is valid and
+                    // its descendants stay eligible, it simply does not fit here.
+                    continue;
+                }
+                Ok(Some(gas_output)) => {
+                    info.cumulative_sweep_transfer_gas += tx_sweep_transfer_gas;
+                    gas_output.tx_gas_used()
+                }
                 Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
                     error,
                     ..
@@ -651,6 +732,12 @@ struct ExecutionInfo {
     next_l1_message_index: u64,
     /// Number of transactions executed (including both sequencer and pool transactions).
     transaction_count: u64,
+    /// Cumulative sweep `transfer` gas of the transactions committed so far.
+    ///
+    /// Mirrors the `SweepBlockSession` inside the block executor, which the
+    /// [`BlockBuilder`] API does not expose. Only committed transactions advance it,
+    /// so a deferred transaction leaves it untouched (Onyx spec §5.4.1).
+    cumulative_sweep_transfer_gas: u64,
 }
 
 impl ExecutionInfo {
@@ -662,7 +749,21 @@ impl ExecutionInfo {
             total_fees: U256::ZERO,
             next_l1_message_index,
             transaction_count: 0,
+            cumulative_sweep_transfer_gas: 0,
         }
+    }
+
+    /// Whether committing a transaction that consumed `transfer_gas` would push the
+    /// block over [`BLOCK_SWEEP_GAS_LIMIT`].
+    ///
+    /// Unlike ordinary gas, this can only be answered after the transaction has
+    /// run: the block allowance is a sum over actual consumption, not something the
+    /// transaction declares. The builder therefore pays for executing a transaction
+    /// it then drops — up to 1M of wasted build work per deferral (Onyx spec §5.4.1).
+    const fn is_tx_over_sweep_block_limit(&self, transfer_gas: u64) -> bool {
+        self.cumulative_sweep_transfer_gas
+            .saturating_add(transfer_gas)
+            > BLOCK_SWEEP_GAS_LIMIT
     }
 
     /// Returns true if the transaction would exceed the block limits.

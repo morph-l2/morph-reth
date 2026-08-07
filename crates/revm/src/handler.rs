@@ -7,8 +7,11 @@ use revm::{
         Cfg, ContextTr, JournalTr, Transaction,
         result::{EVMError, ExecutionResult, InvalidTransaction},
     },
-    context_interface::{Block, journaled_state::account::JournaledAccountTr, result::ResultGas},
-    handler::{EvmTr, FrameTr, Handler, MainnetHandler, post_execution, pre_execution, validation},
+    context_interface::{
+        Block, LocalContextTr, context::take_error, journaled_state::account::JournaledAccountTr,
+        result::ResultGas,
+    },
+    handler::{EvmTr, FrameTr, Handler, post_execution, pre_execution, validation},
     inspector::{Inspector, InspectorHandler},
     interpreter::{Gas, InitialAndFloorGas, interpreter::EthInterpreter},
 };
@@ -69,16 +72,143 @@ where
         }
     }
 
+    /// Runs a protocol system call with the sweep phase switched off.
+    ///
+    /// System calls reach [`Handler::execution_result`] without going through
+    /// [`Handler::pre_execution`], so they have no fee deduction and no
+    /// transaction-level checkpoint. They are also not a candidate source: the
+    /// sweep scans user transaction logs, and a system call's logs belong to the
+    /// protocol. Both reasons make suppressing the sweep here mandatory rather than
+    /// an optimization.
     #[inline]
+    fn run_system_call(
+        &mut self,
+        evm: &mut Self::Evm,
+    ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
+        // Assigned directly rather than through `set_sweep_execution_mode`, which
+        // would also tear down an active trace-replay scope.
+        let restore = core::mem::replace(
+            &mut evm.sweep_execution_mode,
+            crate::sweep::SweepExecutionMode::Disabled,
+        );
+        evm.tx_checkpoint = None;
+
+        let init_and_floor_gas = InitialAndFloorGas::new(0, 0);
+        let result = self
+            .execution(evm, &init_and_floor_gas)
+            .and_then(|exec_result| {
+                let result_gas =
+                    post_execution::build_result_gas(false, exec_result.gas(), init_and_floor_gas);
+                self.execution_result(evm, exec_result, result_gas)
+            });
+
+        evm.sweep_execution_mode = restore;
+        match result {
+            out @ Ok(_) => out,
+            Err(error) => self.catch_error(evm, error),
+        }
+    }
+
+    /// Runs the default pre-execution phase, then records the transaction-level
+    /// sweep rollback boundary.
+    ///
+    /// The body mirrors revm's default rather than delegating to
+    /// [`MainnetHandler`], because delegating would call the mainnet
+    /// `validate_against_state_and_deduct_caller` and skip Morph's token-fee
+    /// deduction entirely.
+    ///
+    /// The checkpoint lands after the fee deduction AND after the EIP-7702
+    /// authorization list. The spec words the boundary as "after the fee is
+    /// deducted, before the main call" (Onyx spec §5.4.1), which leaves the
+    /// authorization list — sitting between the two — undefined; placing the
+    /// checkpoint last keeps delegation designators and authority nonce bumps,
+    /// matching where go-ethereum's `ApplyMessage` snapshots relative to its own
+    /// 7702 application.
+    #[inline]
+    fn pre_execution(
+        &self,
+        evm: &mut Self::Evm,
+        init_and_floor_gas: &mut InitialAndFloorGas,
+    ) -> Result<u64, Self::Error> {
+        self.validate_against_state_and_deduct_caller(evm, init_and_floor_gas)?;
+        self.load_accounts(evm)?;
+        let gas = self.apply_eip7702_auth_list(evm, init_and_floor_gas)?;
+
+        // Take and immediately close the checkpoint: only its indices are needed,
+        // and leaving it open would push the main frame to depth 1.
+        let checkpoint = evm.ctx_mut().journal_mut().checkpoint();
+        evm.ctx_mut().journal_mut().checkpoint_commit();
+        evm.tx_checkpoint = Some(checkpoint);
+
+        Ok(gas)
+    }
+
+    /// Runs the sweep phase, then commits or — on `SweepOutOfGas` — rolls the
+    /// whole transaction back and re-settles its fees.
+    ///
+    /// The body mirrors revm's default instead of delegating, because the sweep
+    /// has to land between building the output and `commit_tx()`: once the
+    /// transaction is committed, the journal entries the transaction-level
+    /// checkpoint would revert are gone.
     fn execution_result(
         &mut self,
         evm: &mut Self::Evm,
-        result: <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
+        mut result: <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
         result_gas: ResultGas,
     ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
-        MainnetHandler::default()
-            .execution_result(evm, result, result_gas)
-            .map(|result| result.map_haltreason(Into::into))
+        take_error::<Self::Error, _>(evm.ctx().error())?;
+
+        let tx_checkpoint = evm.tx_checkpoint.take();
+        let main_call_succeeded = result.instruction_result().is_ok();
+
+        if evm.run_sweep_phase(main_call_succeeded)? {
+            // `SweepOutOfGas`: revert the main call, its logs, and every sweep of
+            // this transaction. The fee pre-deduction and the nonce increment sit
+            // before the checkpoint and survive (Onyx spec §5.4.1).
+            let checkpoint = tx_checkpoint.ok_or_else(|| {
+                EVMError::Custom(
+                    "sweep exhausted the transaction allowance without a transaction-level \
+                     checkpoint"
+                        .to_string(),
+                )
+            })?;
+            evm.ctx_mut().journal_mut().checkpoint_revert(checkpoint);
+
+            // The revert also undid the reimbursement and the beneficiary reward,
+            // which ran after the checkpoint, so replay them. Inputs are unchanged
+            // — `result_gas` is already final and the refund counter is kept — so
+            // this reproduces the same numbers rather than recomputing new ones.
+            // `refund` is deliberately NOT replayed: it only mutates the in-memory
+            // gas counter, and running it twice would apply the refund twice.
+            evm.post_fee_logs.clear();
+            self.reimburse_caller(evm, &mut result)?;
+            self.reward_beneficiary(evm, &mut result)?;
+
+            // Empty after the revert: `cp.log_i` was zero because the fee paths
+            // keep their logs out of the journal. The receipt is therefore exactly
+            // `[pre-fee][post-fee]`.
+            let logs = evm.ctx_mut().journal_mut().take_logs();
+            evm.ctx_mut().journal_mut().commit_tx();
+            evm.ctx_mut().local_mut().clear();
+            evm.frame_stack().clear();
+            return Ok(ExecutionResult::Halt {
+                reason: MorphHaltReason::SweepOutOfGas,
+                // Same `ResultGas` the success path would have reported, so
+                // `gasUsed` is the main transaction's actual consumption and the
+                // refund is preserved, both independent of the sweep outcome.
+                gas: result_gas,
+                logs,
+            });
+        }
+
+        let exec_result: ExecutionResult<Self::HaltReason> =
+            post_execution::output(evm.ctx(), result, result_gas);
+
+        evm.ctx_mut().journal_mut().commit_tx();
+        evm.ctx_mut().local_mut().clear();
+        evm.frame_stack().clear();
+
+        Ok(exec_result)
     }
 
     #[inline]
@@ -294,9 +424,13 @@ where
         evm: &mut Self::Evm,
         error: Self::Error,
     ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
-        MainnetHandler::default()
-            .catch_error(evm, error)
-            .map(|result| result.map_haltreason(Into::into))
+        // Same cleanup as revm's default, spelled out so the sweep boundary is
+        // dropped along with the journal it pointed into.
+        evm.ctx_mut().local_mut().clear();
+        evm.ctx_mut().journal_mut().discard_tx();
+        evm.frame_stack().clear();
+        evm.tx_checkpoint = None;
+        Err(error)
     }
 }
 
@@ -1236,6 +1370,7 @@ mod tests {
         assert_eq!(from_balance_after, U256::from(10));
     }
 
+    #[test]
     fn evm_call_balance_of_is_read_only() {
         let token = address!("3000000000000000000000000000000000000003");
         let account = address!("1000000000000000000000000000000000000001");

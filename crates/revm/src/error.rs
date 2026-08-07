@@ -63,12 +63,26 @@ impl<DBError> From<MorphInvalidTransaction> for EVMError<DBError, MorphInvalidTr
     }
 }
 
+/// The RPC-visible name the Onyx spec §8 gives a transaction-level sweep
+/// over-limit. Raising the user's `gasLimit` cannot clear it, so an estimator
+/// that sees it must stop bisecting.
+pub const SWEEP_GAS_LIMIT_EXCEEDED: &str = "SweepGasLimitExceeded";
+
 /// Morph-specific halt reason.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, derive_more::From)]
 pub enum MorphHaltReason {
     /// Basic Ethereum halt reason.
     #[from]
     Ethereum(HaltReason),
+    /// The transaction's cumulative sweep `transfer` gas reached
+    /// `TX_SWEEP_GAS_LIMIT` (Onyx spec §5.4.1).
+    ///
+    /// The main call and every sweep of this transaction were reverted through
+    /// the transaction-level checkpoint, while the nonce increment and the fee
+    /// pre-deduction survive. The receipt has `status = 0`, `gasUsed` equal to
+    /// the main transaction's actual consumption, and exactly the
+    /// `[pre-fee][post-fee]` logs.
+    SweepOutOfGas,
 }
 
 #[cfg(feature = "rpc")]
@@ -78,6 +92,12 @@ impl reth_rpc_eth_types::error::api::FromEvmHalt<MorphHaltReason>
     fn from_evm_halt(halt_reason: MorphHaltReason, gas_limit: u64) -> Self {
         match halt_reason {
             MorphHaltReason::Ethereum(halt_reason) => Self::from_evm_halt(halt_reason, gas_limit),
+            // Not an out-of-gas the caller can pay their way out of, so it must
+            // not be reported as one (Onyx spec §8).
+            MorphHaltReason::SweepOutOfGas => Self::EvmCustom(format!(
+                "{SWEEP_GAS_LIMIT_EXCEEDED}: cumulative sweep transfer gas exceeded the \
+                 per-transaction limit; raising gasLimit cannot resolve it"
+            )),
         }
     }
 }

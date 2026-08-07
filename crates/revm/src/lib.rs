@@ -76,8 +76,8 @@ pub use precompiles::MorphPrecompiles;
 pub use sweep::{
     BALANCE_OF_GAS_LIMIT, BLOCK_SWEEP_GAS_LIMIT, RESOLVE_GAS_LIMIT, SweepBlockEffect,
     SweepBlockSession, SweepCandidate, SweepExecutionMode, SweepFailure, SweepFailureReason,
-    SweepInvariantError, SweepOutcome, SweepSuccess, SweepTraceReplayScope, SweepTxPlan,
-    TX_SWEEP_GAS_LIMIT, begin_sweep_trace_replay, clear_sweep_trace_replay,
+    SweepInvariantError, SweepOutcome, SweepQueryStats, SweepSuccess, SweepTraceReplayScope,
+    SweepTxPlan, TX_SWEEP_GAS_LIMIT, begin_sweep_trace_replay, clear_sweep_trace_replay,
     set_sweep_trace_replay_target, sweep_trace_replay_scope,
 };
 pub use token_fee::{

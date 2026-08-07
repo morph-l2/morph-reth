@@ -29,8 +29,8 @@ use alloy_primitives::{Address, Log, U256};
 use morph_chainspec::{MorphChainSpec, MorphHardfork, MorphHardforks};
 use morph_primitives::{MorphReceipt, MorphTxEnvelope};
 use morph_revm::{
-    L1_GAS_PRICE_ORACLE_ADDRESS, MorphHaltReason, SweepBlockSession, SweepExecutionMode,
-    SweepOutcome, TokenFeeInfo, evm::MorphContext,
+    BLOCK_SWEEP_GAS_LIMIT, L1_GAS_PRICE_ORACLE_ADDRESS, MorphHaltReason, SweepBlockSession,
+    SweepExecutionMode, SweepOutcome, TokenFeeInfo, evm::MorphContext,
 };
 use reth_primitives_traits::Recovered;
 use reth_revm::{DatabaseCommit, Inspector, context::result::ResultAndState};
@@ -297,17 +297,12 @@ where
             sweep,
         } = output;
 
-        let transfer_gas_used = sweep.block_effect.transfer_gas_used();
         self.sweep_session.commit(&sweep.block_effect);
 
         // Observability only; recorded here so speculative/discarded candidates
         // never move the counters (this runs solely on committed transactions).
-        self.sweep_metrics.record(
-            sweep.successes.len(),
-            &sweep.failures,
-            transfer_gas_used,
-            sweep.tx_out_of_gas,
-        );
+        self.sweep_metrics
+            .record(&sweep, self.sweep_session.transfer_gas_used());
 
         // EIP-8037 separates regular and state gas; pre-Amsterdam morph treats
         // them as a single number, so use the unified `tx_gas_used` getter.
@@ -353,6 +348,18 @@ where
     fn finish(
         self,
     ) -> Result<(Self::Evm, BlockExecutionResult<Self::Receipt>), BlockExecutionError> {
+        // The block sweep allowance is a post-hoc sum, so it can only be checked
+        // once every transaction has run. A block that went over it is invalid as a
+        // whole — verifiers must reject it rather than turn its last transaction
+        // into a failure (Onyx spec §5.4.1).
+        if self.sweep_session.exceeds_block_limit() {
+            return Err(BlockExecutionError::msg(format!(
+                "block sweep transfer gas {} exceeds the {} limit",
+                self.sweep_session.transfer_gas_used(),
+                BLOCK_SWEEP_GAS_LIMIT,
+            )));
+        }
+
         Ok((
             self.evm,
             BlockExecutionResult {
@@ -385,9 +392,7 @@ mod tests {
     use alloy_primitives::{B256, Bytes, b256};
     use morph_chainspec::MORPH_MAINNET;
     use morph_primitives::transaction::TxL1Msg;
-    use morph_revm::{
-        BLOCK_SWEEP_GAS_LIMIT, SweepConfig,
-    };
+    use morph_revm::SweepConfig;
     use revm::{
         context::{BlockEnv, CfgEnv},
         database::{CacheDB, EmptyDB},
@@ -534,10 +539,7 @@ mod tests {
 
         assert!(discarded.is_none());
         assert_eq!(discarded_seen_requests, 0);
-        assert_eq!(
-            executor.sweep_session.remaining_transfer_gas(),
-            BLOCK_SWEEP_GAS_LIMIT
-        );
+        assert_eq!(executor.sweep_session.transfer_gas_used(), 0);
 
         let output = executor
             .execute_transaction_without_commit(l1_message(EMITTER_16, 0))
@@ -548,10 +550,7 @@ mod tests {
         assert!(output.sweep.successes.is_empty());
         executor.commit_transaction(output);
 
-        assert_eq!(
-            executor.sweep_session.remaining_transfer_gas(),
-            BLOCK_SWEEP_GAS_LIMIT
-        );
+        assert_eq!(executor.sweep_session.transfer_gas_used(), 0);
     }
 
     #[test]
@@ -570,10 +569,7 @@ mod tests {
             executor.commit_transaction(output);
         }
 
-        assert_eq!(
-            executor.sweep_session.remaining_transfer_gas(),
-            BLOCK_SWEEP_GAS_LIMIT
-        );
+        assert_eq!(executor.sweep_session.transfer_gas_used(), 0);
     }
 
     #[test]
@@ -661,10 +657,7 @@ mod tests {
 
         executor.commit_transaction(output);
 
-        assert_eq!(
-            executor.sweep_session.remaining_transfer_gas(),
-            BLOCK_SWEEP_GAS_LIMIT
-        );
+        assert_eq!(executor.sweep_session.transfer_gas_used(), 0);
         let receipt = &executor.receipts[0];
         assert!(!receipt.status());
         assert!(receipt.logs().is_empty());

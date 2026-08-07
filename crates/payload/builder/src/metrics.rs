@@ -10,7 +10,7 @@
 
 use reth_metrics::{
     Metrics,
-    metrics::{Gauge, Histogram},
+    metrics::{Counter, Gauge, Histogram},
 };
 
 /// Metrics for the Morph payload builder.
@@ -65,4 +65,16 @@ pub(crate) struct MorphPayloadBuilderMetrics {
     /// Cancelled builds do not update this gauge.
     /// Analogous to geth's `processor/block/transactions`.
     pub(crate) block_transactions: Gauge,
+
+    // -------------------------------------------------------------------------
+    // Onyx sweep
+    // -------------------------------------------------------------------------
+    /// Pool transactions deferred to a later block because their sweeps would push
+    /// this block over `BLOCK_SWEEP_GAS_LIMIT` (Onyx spec §5.4.1).
+    ///
+    /// Unlike the other skip events, this one IS a metric: each deferral burns up to
+    /// 1M of build work that never lands in a block, because the sweep sum is only
+    /// knowable after execution. A rising rate means the sweep budget, not gas, is
+    /// what limits block capacity.
+    pub(crate) sweep_builder_rejected_total: Counter,
 }
