@@ -13,17 +13,9 @@ CARGO_TARGET_DIR ?= target
 # regression, and ships line-table symbols for incident diagnosis.
 PROFILE          ?= profiling
 
-# Architecture-conditional RUSTFLAGS based on the build host's CPU. EC2
-# build hosts native-compile and upload to S3 → prod hosts pull. As long
-# as build host and prod host share architecture, the v3 baseline is
-# safe for any 2015+ x86_64 EC2 instance type (m5/m6i/c5/c6i/r5/r6i etc.).
-# Graviton ARM hosts skip the flag.
-ARCH := $(shell uname -m)
-ifeq ($(ARCH),x86_64)
-RUSTFLAGS_ARCH := -C target-cpu=x86-64-v3 -C target-feature=+pclmulqdq
-else
+# Production EC2 binaries intentionally use the default x86_64 CPU baseline.
+# Keep this empty so the binary remains compatible across EC2 instance types.
 RUSTFLAGS_ARCH :=
-endif
 
 define cargo_build_and_upload
 	if [ ! -d $(DIST_DIR) ]; then mkdir -p $(DIST_DIR); fi
