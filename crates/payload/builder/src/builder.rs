@@ -361,7 +361,7 @@ impl MorphPayloadBuilderCtx {
             let tx_gas = recovered_tx.gas_limit();
 
             // Check if adding this transaction would exceed block gas limit
-            if info.cumulative_gas_used + tx_gas > block_gas_limit {
+            if info.is_tx_over_limits(tx_gas, block_gas_limit) {
                 tracing::warn!(
                     target: "payload_builder",
                     tx_index = tx_idx,
@@ -648,8 +648,13 @@ impl ExecutionInfo {
     }
 
     /// Returns true if the transaction would exceed remaining block gas.
+    ///
+    /// An overflowing sum counts as over the limit: wrapping would otherwise let a
+    /// transaction with an absurd gas limit through and produce an invalid block.
     fn is_tx_over_limits(&self, tx_gas_limit: u64, block_gas_limit: u64) -> bool {
-        self.cumulative_gas_used + tx_gas_limit > block_gas_limit
+        self.cumulative_gas_used
+            .checked_add(tx_gas_limit)
+            .is_none_or(|total_gas| total_gas > block_gas_limit)
     }
 }
 
@@ -983,6 +988,16 @@ mod tests {
         assert!(info.is_tx_over_limits(1, 0));
         // 0 > 0 is false
         assert!(!info.is_tx_over_limits(0, 0));
+    }
+
+    #[test]
+    fn test_is_tx_over_limits_gas_sum_overflow() {
+        let info = ExecutionInfo {
+            cumulative_gas_used: 1,
+            ..Default::default()
+        };
+        // Wrapping would yield 0 and wrongly report "fits"; overflow must count as over.
+        assert!(info.is_tx_over_limits(u64::MAX, 30_000_000));
     }
 
     // =========================================================================

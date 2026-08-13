@@ -38,14 +38,6 @@ impl Default for MorphBuilderConfig {
 }
 
 impl MorphBuilderConfig {
-    /// Creates a new [`MorphBuilderConfig`] with the specified parameters.
-    pub const fn new(gas_limit: Option<u64>, time_limit: Duration) -> Self {
-        Self {
-            gas_limit,
-            time_limit,
-        }
-    }
-
     /// Sets the gas limit.
     pub const fn with_gas_limit(mut self, gas_limit: u64) -> Self {
         self.gas_limit = Some(gas_limit);

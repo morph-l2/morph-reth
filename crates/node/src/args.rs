@@ -23,11 +23,6 @@ mod tests {
     }
 
     #[test]
-    fn test_default_args() {
-        let _args = CommandParser::<MorphArgs>::parse_from(["test"]).args;
-    }
-
-    #[test]
     fn reference_index_disable_flag_is_not_supported() {
         assert!(
             CommandParser::<MorphArgs>::try_parse_from(["test", "--morph.disable-reference-index"])

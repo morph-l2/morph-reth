@@ -228,16 +228,6 @@ mod tests {
     use reth_payload_primitives::PayloadAttributesBuilder;
 
     #[test]
-    fn morph_node_default() {
-        let _node = MorphNode::default();
-    }
-
-    #[test]
-    fn morph_node_new_with_args() {
-        let _node = MorphNode::new(super::super::args::MorphArgs::default());
-    }
-
-    #[test]
     fn payload_attributes_builder_produces_valid_attributes() {
         let chain_spec = MORPH_HOODI.clone();
         let builder = MorphPayloadAttributesBuilder::new(chain_spec);

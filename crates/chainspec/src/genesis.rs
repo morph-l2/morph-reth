@@ -81,9 +81,18 @@ impl TryFrom<&OtherFields> for MorphHardforkInfo {
 
 /// The configuration for the Morph chain.
 ///
-/// Unused genesis keys such as `maxTxPayloadBytesPerBlock` and `maxTxPerBlock`
-/// are ignored. They are leftover zkEVM packing limits, not Morph consensus
-/// parameters, and are not consumed by the payload builder.
+/// The genesis keys `maxTxPayloadBytesPerBlock` (122880 on mainnet/hoodi) and
+/// `maxTxPerBlock` are still present in the genesis JSON but are deliberately not
+/// read here. They are leftover zkEVM packing limits; block size is now bounded by
+/// header `gasLimit` and the payload builder time budget.
+///
+/// Note that `maxTxPayloadBytesPerBlock` is *not* yet fully retired on the network:
+/// morph-geth's `ValidateBody` (`core/block_validator.go`, via `IsValidBlockSize`)
+/// still rejects blocks whose L2 payload exceeds it, and that check runs on the L2
+/// Engine API import path. Its removal is agreed but not yet released, so until
+/// morph-geth has rolled out, a morph-reth sequencer must not produce blocks with
+/// more than 122880 bytes of non-L1-message transaction payload — geth validators
+/// would refuse to sign them.
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MorphChainConfig {
