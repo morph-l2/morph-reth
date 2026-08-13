@@ -224,9 +224,15 @@ impl<C: CanonicalChain> ReferenceIndexRuntime<C> {
     /// Perform one synchronous reconciliation/backfill turn.
     pub fn synchronize_once(&mut self, defer: bool) -> Result<(), ReferenceIndexError> {
         let result = self.synchronize_once_inner(defer);
-        if result.is_err() {
+        if let Err(error) = &result {
             self.handle.metrics().failures_total.increment(1);
-            self.handle.set_phase(ReferenceIndexPhase::Unavailable);
+            // Only unrecoverable failures gate the read path. `run` retries every
+            // other error with backoff, so leaving the phase untouched lets the
+            // cursor-vs-tip comparison surface `IndexBehind` — which tells clients
+            // to retry — instead of `IndexUnavailable`, which tells them to stop.
+            if error.requires_manual_rebuild() {
+                self.handle.set_phase(ReferenceIndexPhase::Unavailable);
+            }
         }
         result
     }
@@ -822,8 +828,29 @@ mod tests {
         let error = runtime.synchronize_once(false).unwrap_err();
 
         assert!(error.to_string().contains("returned 9 of 10 blocks"));
-        assert_eq!(handle.phase(), ReferenceIndexPhase::Unavailable);
+        // A short provider batch is transient: `run` retries it with backoff, so
+        // the phase must stay where the turn left it rather than latch to
+        // `Unavailable`, which would gate the read path for the whole window.
+        assert_eq!(handle.phase(), ReferenceIndexPhase::Backfill);
         assert_eq!(handle.db().unwrap().indexed_to().unwrap(), None);
+    }
+
+    #[test]
+    fn transient_failure_leaves_queries_retryable() {
+        let dir = tempfile::tempdir().unwrap();
+        let chain = ShortRangeChain(TestChain::linear(10, 200));
+        let config = ReferenceIndexConfig::new(dir.path(), 2818, B256::ZERO, 200);
+        let (mut runtime, handle) = ReferenceIndexRuntime::new(config, chain.clone());
+
+        runtime.synchronize_once(false).unwrap_err();
+
+        // The read path must answer `IndexBehind` (retry) and not
+        // `IndexUnavailable` (stop retrying) while catch-up is still pending.
+        let query = crate::ReferenceQuery::new(B256::ZERO, None, None).unwrap();
+        assert!(matches!(
+            handle.query_at(query, chain.0.head().unwrap()),
+            Err(ReferenceIndexError::IndexBehind)
+        ));
     }
 
     #[test]

@@ -38,7 +38,7 @@ jobs:
           cache-on-failure: true
 
       - name: Install nextest
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@v2.85.10
         with:
           tool: cargo-nextest
 
@@ -86,7 +86,7 @@ jobs:
           cache-on-failure: true
 
       - name: Install nextest
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@v2.85.10
         with:
           tool: cargo-nextest
 
