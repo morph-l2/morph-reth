@@ -5210,7 +5210,7 @@ dependencies = [
 
 [[package]]
 name = "morph-proofs"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "alloy-eips",
  "alloy-primitives",
@@ -5244,7 +5244,7 @@ dependencies = [
 
 [[package]]
 name = "morph-proofs-exex"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
