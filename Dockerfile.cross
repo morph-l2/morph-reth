@@ -1,6 +1,11 @@
 # Cross-compilation image: assumes the morph-reth binary has already been
 # compiled for $TARGETPLATFORM and placed in ./dist/bin/$TARGETARCH/
-FROM --platform=$TARGETPLATFORM ubuntu:22.04
+#
+# Runtime Ubuntu must be at least as new as the cross-rs linux-gnu builder
+# (currently Ubuntu 24.04 / glibc 2.39). Shipping 22.04 with a 24.04-built
+# binary fails at start with `GLIBC_2.38/2.39 not found`. Matches upstream
+# reth's `ubuntu:24.04` runtime.
+FROM --platform=$TARGETPLATFORM ubuntu:24.04
 
 LABEL org.opencontainers.image.source=https://github.com/morph-l2/morph-reth
 LABEL org.opencontainers.image.licenses="MIT OR Apache-2.0"
