@@ -112,8 +112,6 @@ openssl rand -hex 32 > jwt.hex
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--morph.max-tx-payload-bytes` | 122880 (120KB) | Maximum transaction payload bytes per block |
-| `--morph.max-tx-per-block` | None (unlimited) | Maximum number of transactions per block |
 | `--rpc.eth-proof-window` | 0 (disabled) | Max historical blocks for `eth_getProof` (up to 1209600) |
 
 ### Running Tests

@@ -5,7 +5,6 @@ use crate::{MorphBuilderConfig, MorphPayloadBuilderError, config::PayloadBuildin
 use alloy_consensus::{BlockHeader, Transaction, Typed2718};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{B256, Bytes, U256};
-use alloy_rlp::Encodable;
 use morph_chainspec::MorphChainSpec;
 use morph_chainspec::{L2_MESSAGE_QUEUE_ADDRESS, L2_MESSAGE_QUEUE_WITHDRAW_TRIE_ROOT_SLOT};
 use morph_evm::{MorphEvmConfig, MorphNextBlockEnvAttributes};
@@ -499,16 +498,11 @@ impl MorphPayloadBuilderCtx {
                 return Ok(Some(()));
             }
 
-            // Check if the breaker triggers (time/gas/DA/tx count limits)
-            if breaker.should_break(
-                info.cumulative_gas_used,
-                info.cumulative_da_bytes_used,
-                info.transaction_count,
-            ) {
+            // Check if the breaker triggers (time or gas limits)
+            if breaker.should_break(info.cumulative_gas_used) {
                 tracing::debug!(
                     target: "payload_builder",
                     cumulative_gas_used = info.cumulative_gas_used,
-                    cumulative_da_bytes_used = info.cumulative_da_bytes_used,
                     transaction_count = info.transaction_count,
                     elapsed = ?breaker.elapsed(),
                     "breaker triggered, stopping pool transaction execution"
@@ -536,23 +530,15 @@ impl MorphPayloadBuilderCtx {
                 continue;
             }
 
-            // Check if the transaction exceeds block limits (gas or DA size).
-            // Rare in practice; logged at debug to avoid pool-skip noise.
-            if info.is_tx_over_limits(
-                tx.gas_limit(),
-                tx.length() as u64,
-                block_gas_limit,
-                self.builder_config.max_da_block_size,
-            ) {
+            // Skip transactions that cannot fit in remaining block gas.
+            if info.is_tx_over_limits(tx.gas_limit(), block_gas_limit) {
                 tracing::debug!(
                     target: "payload_builder",
                     signer = %tx.signer(),
                     nonce = tx.nonce(),
                     tx_gas_limit = tx.gas_limit(),
-                    tx_size = tx.length(),
                     block_gas_limit,
-                    max_da_block_size = self.builder_config.max_da_block_size,
-                    "pool transaction exceeds block limits; skipping"
+                    "pool transaction exceeds remaining block gas; skipping"
                 );
                 best_txs.mark_invalid(tx.signer(), tx.nonce());
                 continue;
@@ -621,7 +607,6 @@ impl MorphPayloadBuilderCtx {
 
             // Update execution info
             info.cumulative_gas_used += gas_used;
-            info.cumulative_da_bytes_used += tx.length() as u64;
             info.transaction_count += 1;
 
             // Calculate fees: effective_tip * gas_used
@@ -643,8 +628,6 @@ impl MorphPayloadBuilderCtx {
 struct ExecutionInfo {
     /// Cumulative gas used by all executed transactions.
     cumulative_gas_used: u64,
-    /// Cumulative DA bytes used (for L2 data availability).
-    cumulative_da_bytes_used: u64,
     /// Total fees collected from executed transactions.
     total_fees: U256,
     /// Next L1 message queue index.
@@ -658,28 +641,14 @@ impl ExecutionInfo {
     const fn new(next_l1_message_index: u64) -> Self {
         Self {
             cumulative_gas_used: 0,
-            cumulative_da_bytes_used: 0,
             total_fees: U256::ZERO,
             next_l1_message_index,
             transaction_count: 0,
         }
     }
 
-    /// Returns true if the transaction would exceed the block limits.
-    fn is_tx_over_limits(
-        &self,
-        tx_gas_limit: u64,
-        tx_size: u64,
-        block_gas_limit: u64,
-        block_da_limit: Option<u64>,
-    ) -> bool {
-        // Check DA limit if configured
-        if block_da_limit.is_some_and(|da_limit| self.cumulative_da_bytes_used + tx_size > da_limit)
-        {
-            return true;
-        }
-
-        // Check gas limit
+    /// Returns true if the transaction would exceed remaining block gas.
+    fn is_tx_over_limits(&self, tx_gas_limit: u64, block_gas_limit: u64) -> bool {
         self.cumulative_gas_used + tx_gas_limit > block_gas_limit
     }
 }
@@ -785,7 +754,6 @@ where
             target: "payload_builder",
             elapsed = ?breaker.elapsed(),
             cumulative_gas_used = info.cumulative_gas_used,
-            cumulative_da_bytes_used = info.cumulative_da_bytes_used,
             tx_count = executed_txs.len(),
             "breaker stopped pool execution, finalizing payload"
         );
@@ -932,7 +900,6 @@ mod tests {
     fn test_execution_info_default() {
         let info = ExecutionInfo::default();
         assert_eq!(info.cumulative_gas_used, 0);
-        assert_eq!(info.cumulative_da_bytes_used, 0);
         assert_eq!(info.total_fees, U256::ZERO);
         assert_eq!(info.next_l1_message_index, 0);
         assert_eq!(info.transaction_count, 0);
@@ -943,7 +910,6 @@ mod tests {
         let info = ExecutionInfo::new(42);
         assert_eq!(info.next_l1_message_index, 42);
         assert_eq!(info.cumulative_gas_used, 0);
-        assert_eq!(info.cumulative_da_bytes_used, 0);
         assert_eq!(info.total_fees, U256::ZERO);
         assert_eq!(info.transaction_count, 0);
     }
@@ -965,13 +931,13 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_is_tx_over_limits_within_gas_no_da() {
+    fn test_is_tx_over_limits_within_gas() {
         let info = ExecutionInfo {
             cumulative_gas_used: 100_000,
             ..Default::default()
         };
         // tx_gas + cumulative = 100_000 + 21_000 = 121_000, block limit = 30_000_000
-        assert!(!info.is_tx_over_limits(21_000, 100, 30_000_000, None));
+        assert!(!info.is_tx_over_limits(21_000, 30_000_000));
     }
 
     #[test]
@@ -981,7 +947,7 @@ mod tests {
             ..Default::default()
         };
         // tx_gas + cumulative = 29_990_000 + 21_000 = 30_011_000 > 30_000_000
-        assert!(info.is_tx_over_limits(21_000, 100, 30_000_000, None));
+        assert!(info.is_tx_over_limits(21_000, 30_000_000));
     }
 
     #[test]
@@ -992,7 +958,7 @@ mod tests {
         };
         // tx_gas + cumulative = 29_979_000 + 21_000 = 30_000_000 == block limit
         // Uses > comparison, so exactly at limit is NOT over
-        assert!(!info.is_tx_over_limits(21_000, 100, 30_000_000, None));
+        assert!(!info.is_tx_over_limits(21_000, 30_000_000));
     }
 
     #[test]
@@ -1002,77 +968,21 @@ mod tests {
             ..Default::default()
         };
         // tx_gas + cumulative = 29_979_001 + 21_000 = 30_000_001 > 30_000_000
-        assert!(info.is_tx_over_limits(21_000, 100, 30_000_000, None));
-    }
-
-    #[test]
-    fn test_is_tx_over_limits_exceeds_da_limit() {
-        let info = ExecutionInfo {
-            cumulative_da_bytes_used: 120_000,
-            ..Default::default()
-        };
-        // da_used + tx_size = 120_000 + 10_000 = 130_000 < 131_072, NOT over
-        assert!(!info.is_tx_over_limits(21_000, 10_000, 30_000_000, Some(128 * 1024)));
-
-        // da_used + tx_size = 120_000 + 12_000 = 132_000 > 131_072
-        assert!(info.is_tx_over_limits(21_000, 12_000, 30_000_000, Some(128 * 1024)));
-    }
-
-    #[test]
-    fn test_is_tx_over_limits_da_limit_none_ignores_da() {
-        let info = ExecutionInfo {
-            cumulative_da_bytes_used: u64::MAX,
-            ..Default::default()
-        };
-        // Even with max DA usage, no DA limit means it's not over
-        assert!(!info.is_tx_over_limits(21_000, 1_000, 30_000_000, None));
-    }
-
-    #[test]
-    fn test_is_tx_over_limits_da_limit_exactly_at_boundary() {
-        let info = ExecutionInfo {
-            cumulative_da_bytes_used: 100,
-            ..Default::default()
-        };
-        // da_used + tx_size = 100 + 100 = 200 == da_limit, NOT over (uses > not >=)
-        assert!(!info.is_tx_over_limits(21_000, 100, 30_000_000, Some(200)));
-
-        // da_used + tx_size = 100 + 101 = 201 > 200
-        assert!(info.is_tx_over_limits(21_000, 101, 30_000_000, Some(200)));
-    }
-
-    #[test]
-    fn test_is_tx_over_limits_gas_ok_but_da_exceeded() {
-        let info = ExecutionInfo {
-            cumulative_gas_used: 100_000,
-            cumulative_da_bytes_used: 500,
-            ..Default::default()
-        };
-        assert!(info.is_tx_over_limits(21_000, 600, 30_000_000, Some(1000)));
-    }
-
-    #[test]
-    fn test_is_tx_over_limits_da_ok_but_gas_exceeded() {
-        let info = ExecutionInfo {
-            cumulative_gas_used: 29_990_000,
-            cumulative_da_bytes_used: 100,
-            ..Default::default()
-        };
-        assert!(info.is_tx_over_limits(21_000, 100, 30_000_000, Some(1_000_000)));
+        assert!(info.is_tx_over_limits(21_000, 30_000_000));
     }
 
     #[test]
     fn test_is_tx_over_limits_zero_gas_tx() {
         let info = ExecutionInfo::default();
-        assert!(!info.is_tx_over_limits(0, 0, 30_000_000, None));
+        assert!(!info.is_tx_over_limits(0, 30_000_000));
     }
 
     #[test]
     fn test_is_tx_over_limits_zero_block_gas_limit() {
         let info = ExecutionInfo::default();
-        assert!(info.is_tx_over_limits(1, 0, 0, None));
+        assert!(info.is_tx_over_limits(1, 0));
         // 0 > 0 is false
-        assert!(!info.is_tx_over_limits(0, 0, 0, None));
+        assert!(!info.is_tx_over_limits(0, 0));
     }
 
     // =========================================================================
@@ -1100,9 +1010,7 @@ mod tests {
     #[test]
     fn test_morph_payload_builder_set_config() {
         let builder = MorphPayloadBuilder::<(), ()>::new((), test_evm_config(), ());
-        let config = MorphBuilderConfig::default()
-            .with_gas_limit(5_000_000)
-            .with_max_tx_per_block(500);
+        let config = MorphBuilderConfig::default().with_gas_limit(5_000_000);
         let builder = builder.set_config(config.clone());
         assert_eq!(builder.config, config);
     }
