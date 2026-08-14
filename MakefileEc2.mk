@@ -5,13 +5,10 @@ DIST_DIR         = dist
 BINARY           = morph-reth
 TARBALL          = morph-reth.tar.gz
 CARGO_TARGET_DIR ?= target
-# Production deploys go to EC2 via S3. Default to `profiling` (thin LTO +
-# line-table debug) — matches the Dockerfile default. Bench data showed
-# `maxperf` (fat LTO + cgu=1) regresses ERC20 median TPS -10% and explodes
-# the import_ms long tail (p99.9 90ms, max 456ms) while only winning eth-
-# transfer by 7%. `profiling` keeps most of the throughput gain, no ERC20
-# regression, and ships line-table symbols for incident diagnosis.
-PROFILE          ?= profiling
+# Production deploys use the deterministic `reproducible` profile by default.
+# Override with PROFILE=profiling when line-table symbols are needed for
+# diagnostics. `maxperf` remains available for throughput-sensitive builds.
+PROFILE          ?= reproducible
 
 # Production EC2 binaries intentionally use the default x86_64 CPU baseline.
 # Keep this empty so the binary remains compatible across EC2 instance types.
