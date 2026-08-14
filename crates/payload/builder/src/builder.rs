@@ -327,10 +327,15 @@ impl MorphPayloadBuilderCtx {
         BestTransactionsAttributes::new(base_fee, None)
     }
 
-    /// Executes all L1 message transactions from payload attributes.
+    /// Executes L1 message transactions from payload attributes.
     ///
     /// L1 messages are forced transactions from the L1 bridge that must be executed first.
     /// They must have sequential queue indices and are never pulled from the transaction pool.
+    ///
+    /// If the next L1 message does not fit in remaining block gas, packing stops and the
+    /// leftover messages are left for the next block via `next_l1_msg_index`. A single
+    /// message larger than the whole block gas limit is skipped for this height (not
+    /// included, index not advanced) so assemble still returns a block.
     ///
     /// Returns the executed transaction bytes for inclusion in ExecutableL2Data.
     fn execute_l1_messages(
@@ -342,8 +347,6 @@ impl MorphPayloadBuilderCtx {
         let base_fee = builder.evm().block().basefee();
         let l1_tx_count = self.attributes().transactions.len();
         let mut executed_txs: Vec<Bytes> = Vec::with_capacity(l1_tx_count);
-        // Track gas spent by each transaction for error reporting
-        let mut gas_spent_by_transactions: Vec<u64> = Vec::with_capacity(l1_tx_count);
 
         for (tx_idx, tx_with_encoded) in self.attributes().transactions.iter().enumerate() {
             // The transaction is already recovered in `try_new` via `try_into_recovered()`.
@@ -361,23 +364,28 @@ impl MorphPayloadBuilderCtx {
 
             let tx_gas = recovered_tx.gas_limit();
 
-            // Check if adding this transaction would exceed block gas limit
-            if info.cumulative_gas_used + tx_gas > block_gas_limit {
-                tracing::warn!(
-                    target: "payload_builder",
-                    tx_index = tx_idx,
-                    tx_gas,
-                    cumulative_gas_used = info.cumulative_gas_used,
-                    block_gas_limit,
-                    "L1 message transaction would exceed block gas limit; aborting build"
-                );
-                gas_spent_by_transactions.push(tx_gas);
-                return Err(PayloadBuilderError::other(
-                    MorphPayloadBuilderError::BlockGasLimitExceededBySequencerTransactions {
-                        gas_spent_by_tx: gas_spent_by_transactions,
-                        gas: block_gas_limit,
-                    },
-                ));
+            // Match morph-geth: stop L1 packing when the next message does not fit
+            // remaining gas, and still seal the block with what already fits.
+            if info.cumulative_gas_used.saturating_add(tx_gas) > block_gas_limit {
+                if info.transaction_count == 0 {
+                    tracing::warn!(
+                        target: "payload_builder",
+                        tx_index = tx_idx,
+                        tx_gas,
+                        block_gas_limit,
+                        "Single L1 message gas limit exceeded for current block"
+                    );
+                } else {
+                    tracing::debug!(
+                        target: "payload_builder",
+                        tx_index = tx_idx,
+                        tx_gas,
+                        cumulative_gas_used = info.cumulative_gas_used,
+                        block_gas_limit,
+                        "L1 message would exceed remaining block gas; stopping L1 packing"
+                    );
+                }
+                break;
             }
 
             // Execute the transaction and record EVM execution time.
@@ -463,7 +471,6 @@ impl MorphPayloadBuilderCtx {
             };
 
             info.cumulative_gas_used += gas_used;
-            gas_spent_by_transactions.push(gas_used);
 
             // Increment transaction count
             info.transaction_count += 1;
