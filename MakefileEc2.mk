@@ -17,9 +17,17 @@ PROFILE          ?= profiling
 # Keep this empty so the binary remains compatible across EC2 instance types.
 RUSTFLAGS_ARCH :=
 
+# Keep build metadata stable across rebuilds of the same commit.
+SOURCE_DATE_EPOCH ?= $(shell git log -1 --format=%ct HEAD)
+
 define cargo_build_and_upload
 	if [ ! -d $(DIST_DIR) ]; then mkdir -p $(DIST_DIR); fi
-	CARGO_NET_GIT_FETCH_WITH_CLI=true RUSTFLAGS="$(RUSTFLAGS_ARCH)" cargo build --bin $(BINARY) --profile "$(PROFILE)" --target-dir "$(CARGO_TARGET_DIR)"
+	CARGO_NET_GIT_FETCH_WITH_CLI=true cargo fetch --locked
+	SRC=$$(ls -d "$${CARGO_HOME:-$$HOME/.cargo}"/registry/src/*/ | head -1); \
+	SRC=$${SRC%/}; \
+	SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" LC_ALL=C TZ=UTC \
+	RUSTFLAGS="--remap-path-prefix=$$(pwd)=/morph-reth --remap-path-prefix=$${SRC}=/registry $(RUSTFLAGS_ARCH)" \
+	cargo build --bin $(BINARY) --profile "$(PROFILE)" --locked --target-dir "$(CARGO_TARGET_DIR)"
 	cp "$(CARGO_TARGET_DIR)/$(PROFILE)/$(BINARY)" "$(DIST_DIR)/"
 	tar -czvf $(TARBALL) $(DIST_DIR)
 	aws s3 cp $(TARBALL) $(1)
