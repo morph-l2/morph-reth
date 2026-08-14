@@ -718,7 +718,9 @@ where
             timestamp: attributes.timestamp,
             suggested_fee_recipient: attributes.suggested_fee_recipient,
             prev_randao: attributes.prev_randao,
-            gas_limit: attributes.gas_limit.unwrap_or(ctx.parent().gas_limit()),
+            gas_limit: ctx
+                .builder_config
+                .next_header_gas_limit(ctx.parent().gas_limit(), attributes.gas_limit),
             withdrawals: Some(attributes.withdrawals.clone()),
             parent_beacon_block_root: attributes.parent_beacon_block_root,
             extra_data: Default::default(),

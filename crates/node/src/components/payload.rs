@@ -5,6 +5,7 @@ use morph_evm::MorphEvmConfig;
 use morph_payload_builder::{MorphBuilderConfig, MorphPayloadBuilder};
 use reth_node_api::FullNodeTypes;
 use reth_node_builder::{BuilderContext, components::PayloadBuilderBuilder};
+use reth_node_core::cli::config::PayloadBuilderConfig;
 use reth_tracing::tracing::info;
 use reth_transaction_pool::blobstore::InMemoryBlobStore;
 
@@ -60,10 +61,20 @@ where
         pool: morph_txpool::MorphTransactionPool<Node::Provider, InMemoryBlobStore>,
         evm_config: MorphEvmConfig,
     ) -> eyre::Result<Self::PayloadBuilder> {
-        let builder =
-            MorphPayloadBuilder::with_config(pool, evm_config, ctx.provider().clone(), self.config);
+        let mut config = self.config;
+        let desired_gas_limit = ctx.payload_builder_config().gas_limit();
+        if let Some(desired) = desired_gas_limit {
+            config = config.with_desired_gas_limit(desired);
+        }
 
-        info!(target: "morph::node", "Payload builder initialized");
+        let builder =
+            MorphPayloadBuilder::with_config(pool, evm_config, ctx.provider().clone(), config);
+
+        info!(
+            target: "morph::node",
+            ?desired_gas_limit,
+            "Payload builder initialized"
+        );
 
         Ok(builder)
     }

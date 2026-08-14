@@ -47,6 +47,15 @@ pub struct MorphBuilderConfig {
     ///
     /// This corresponds to the `--morph.max-tx-per-block` CLI flag.
     pub max_tx_per_block: Option<u64>,
+
+    /// Sequencer target for the block header `gasLimit` (GasCeil).
+    ///
+    /// When set, and payload attributes do not override `gas_limit`, each assembled
+    /// block ramps toward this value by at most ~1/1024 of the parent (Ethereum
+    /// `CalcGasLimit`). When `None`, the header copies the parent `gasLimit`.
+    ///
+    /// Seeded from `--builder.gaslimit` / `--miner.gaslimit`.
+    pub desired_gas_limit: Option<u64>,
 }
 
 impl Default for MorphBuilderConfig {
@@ -59,6 +68,8 @@ impl Default for MorphBuilderConfig {
             max_da_block_size: None,
             // No transaction count limit by default
             max_tx_per_block: None,
+            // No header gas target: copy parent gasLimit
+            desired_gas_limit: None,
         }
     }
 }
@@ -70,12 +81,14 @@ impl MorphBuilderConfig {
         time_limit: Duration,
         max_da_block_size: Option<u64>,
         max_tx_per_block: Option<u64>,
+        desired_gas_limit: Option<u64>,
     ) -> Self {
         Self {
             gas_limit,
             time_limit,
             max_da_block_size,
             max_tx_per_block,
+            desired_gas_limit,
         }
     }
 
@@ -101,6 +114,33 @@ impl MorphBuilderConfig {
     pub const fn with_max_tx_per_block(mut self, max_tx_per_block: u64) -> Self {
         self.max_tx_per_block = Some(max_tx_per_block);
         self
+    }
+
+    /// Sets the sequencer header `gasLimit` target.
+    pub const fn with_desired_gas_limit(mut self, desired_gas_limit: u64) -> Self {
+        self.desired_gas_limit = Some(desired_gas_limit);
+        self
+    }
+
+    /// Header `gasLimit` for the next block.
+    ///
+    /// Explicit payload-attribute overrides (safe/derivation import) win. Otherwise the
+    /// configured GasCeil is applied with Ethereum 1/1024 elasticity, or the parent
+    /// value is copied when no target is set.
+    pub fn next_header_gas_limit(
+        &self,
+        parent_gas_limit: u64,
+        attributes_gas_limit: Option<u64>,
+    ) -> u64 {
+        if let Some(explicit) = attributes_gas_limit {
+            return explicit;
+        }
+        match self.desired_gas_limit {
+            Some(desired) => {
+                alloy_eips::eip1559::calculate_block_gas_limit(parent_gas_limit, desired)
+            }
+            None => parent_gas_limit,
+        }
     }
 
     /// Creates a [`PayloadBuildingBreaker`] for this configuration.
@@ -235,6 +275,7 @@ mod tests {
         assert_eq!(config.time_limit, Duration::from_secs(1));
         assert_eq!(config.max_da_block_size, None);
         assert_eq!(config.max_tx_per_block, None);
+        assert_eq!(config.desired_gas_limit, None);
     }
 
     #[test]
@@ -243,12 +284,14 @@ mod tests {
             .with_gas_limit(20_000_000)
             .with_time_limit(Duration::from_millis(500))
             .with_max_da_block_size(128 * 1024)
-            .with_max_tx_per_block(1000);
+            .with_max_tx_per_block(1000)
+            .with_desired_gas_limit(60_000_000);
 
         assert_eq!(config.gas_limit, Some(20_000_000));
         assert_eq!(config.time_limit, Duration::from_millis(500));
         assert_eq!(config.max_da_block_size, Some(128 * 1024));
         assert_eq!(config.max_tx_per_block, Some(1000));
+        assert_eq!(config.desired_gas_limit, Some(60_000_000));
     }
 
     #[test]
@@ -368,5 +411,47 @@ mod tests {
         // If using block_gas_limit, threshold would be ~29,979,000
         // and 21001 would NOT trigger the breaker
         // Since it does trigger, we know it's using configured_limit
+    }
+
+    #[test]
+    fn next_header_gas_limit_copies_parent_without_target() {
+        let config = MorphBuilderConfig::default();
+        assert_eq!(config.next_header_gas_limit(30_000_000, None), 30_000_000);
+    }
+
+    #[test]
+    fn next_header_gas_limit_attributes_override_wins() {
+        let config = MorphBuilderConfig::default().with_desired_gas_limit(60_000_000);
+        assert_eq!(
+            config.next_header_gas_limit(30_000_000, Some(30_000_100)),
+            30_000_100
+        );
+    }
+
+    #[test]
+    fn next_header_gas_limit_ramps_toward_desired_within_1024() {
+        let parent = 30_000_000u64;
+        let config = MorphBuilderConfig::default().with_desired_gas_limit(60_000_000);
+        let next = config.next_header_gas_limit(parent, None);
+
+        let max_delta = parent / 1024;
+        assert!(next > parent, "should increase toward 60M");
+        assert!(
+            next - parent < max_delta,
+            "step {step} must be strictly less than parent/1024 ({max_delta})",
+            step = next - parent
+        );
+        assert_eq!(
+            next,
+            alloy_eips::eip1559::calculate_block_gas_limit(parent, 60_000_000)
+        );
+    }
+
+    #[test]
+    fn next_header_gas_limit_reaches_nearby_desired_in_one_step() {
+        let parent = 30_000_000u64;
+        let desired = parent + 100;
+        let config = MorphBuilderConfig::default().with_desired_gas_limit(desired);
+        assert_eq!(config.next_header_gas_limit(parent, None), desired);
     }
 }
