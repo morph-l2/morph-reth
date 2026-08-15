@@ -36,6 +36,7 @@ ENV BUILD_PROFILE=$BUILD_PROFILE
 # - other platforms (linux/arm64, etc.): no architecture flag.
 ARG TARGETPLATFORM
 ARG RUSTFLAGS=
+ARG MORPH_GIT_SHA=0000000000000000000000000000000000000000
 
 # Build dependencies (cached layer)
 RUN if [ -z "$RUSTFLAGS" ] && [ "$TARGETPLATFORM" = "linux/amd64" ]; then \
@@ -48,6 +49,9 @@ COPY . .
 RUN if [ -z "$RUSTFLAGS" ] && [ "$TARGETPLATFORM" = "linux/amd64" ]; then \
         export RUSTFLAGS="-C target-cpu=x86-64-v3 -C target-feature=+pclmulqdq"; \
     fi && \
+    VERGEN_GIT_SHA="$MORPH_GIT_SHA" \
+    VERGEN_GIT_DESCRIBE="issue-152-diagnostic" \
+    VERGEN_GIT_DIRTY="true" \
     cargo build --profile $BUILD_PROFILE --locked --bin morph-reth
 
 # Copy binary to a fixed location (ARG not resolved in COPY)

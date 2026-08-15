@@ -29,6 +29,7 @@ git clone --branch codex/issue-152-persistence-logs \
 cd morph-reth-issue-152
 docker build --platform linux/amd64 \
   --build-arg BUILD_PROFILE=profiling \
+  --build-arg MORPH_GIT_SHA="$(git rev-parse HEAD)" \
   -t morph-reth:issue-152 .
 docker run --rm morph-reth:issue-152 --version
 ```
