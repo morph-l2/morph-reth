@@ -785,6 +785,13 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
             .await
             .map_err(|e| MorphEngineApiError::ExecutionFailed(e.to_string()))?;
         ensure_payload_status_valid(&payload_status, "newPayload")?;
+        tracing::debug!(
+            target: "morph::engine::issue_152",
+            block_number = data.number,
+            block_hash = %data.hash,
+            parent_hash = %data.parent_hash,
+            "issue-152 newPayload accepted"
+        );
 
         // FCU safe/finalized must be canonical ancestors. Unsafe imports pass safe zero;
         // new_safe_l2_block passes the imported block itself, never a cached old safe.
@@ -808,6 +815,13 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
             .await
             .map_err(|e| MorphEngineApiError::ExecutionFailed(e.to_string()))?;
         ensure_payload_status_valid(&fcu_result.payload_status, "forkchoiceUpdated")?;
+        tracing::debug!(
+            target: "morph::engine::issue_152",
+            block_number = data.number,
+            block_hash = %data.hash,
+            parent_hash = %data.parent_hash,
+            "issue-152 block canonicalized by forkchoiceUpdated"
+        );
 
         Ok(header)
     }

@@ -1,4 +1,4 @@
-FROM lukemathwalker/cargo-chef:latest-rust-1 AS chef
+FROM lukemathwalker/cargo-chef:latest-rust-1.95-trixie AS chef
 WORKDIR /app
 
 # reth-mdbx-sys requires libclang for bindgen
@@ -53,8 +53,9 @@ RUN if [ -z "$RUSTFLAGS" ] && [ "$TARGETPLATFORM" = "linux/amd64" ]; then \
 # Copy binary to a fixed location (ARG not resolved in COPY)
 RUN cp /app/target/$BUILD_PROFILE/morph-reth /app/morph-reth
 
-# Minimal runtime image
-FROM debian:bookworm-slim AS runtime
+# Runtime must provide glibc >= the builder (Debian Trixie / Ubuntu 24.04).
+# Matches upstream reth's `ubuntu:24.04` runtime stage.
+FROM ubuntu:24.04 AS runtime
 
 LABEL org.opencontainers.image.source=https://github.com/morph-l2/morph-reth
 LABEL org.opencontainers.image.licenses="MIT OR Apache-2.0"
