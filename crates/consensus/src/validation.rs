@@ -38,7 +38,7 @@ use crate::MorphConsensusError;
 use alloy_consensus::{BlockHeader as _, EMPTY_OMMER_ROOT_HASH, TxReceipt};
 use alloy_evm::block::BlockExecutionResult;
 use alloy_primitives::{B256, Bloom};
-use morph_chainspec::{MorphChainSpec, MorphHardforks};
+use morph_chainspec::{MINIMUM_GAS_LIMIT, MorphChainSpec, MorphHardforks};
 use morph_primitives::{
     Block, BlockBody, MorphHeader, MorphReceipt, MorphTxEnvelope,
     transaction::morph_transaction::MORPH_TX_VERSION_1,
@@ -62,9 +62,6 @@ const MORPH_MAXIMUM_BASE_FEE: u64 = 10_000_000_000;
 
 /// Maximum gas limit (2^63 - 1)
 const MAX_GAS_LIMIT: u64 = 0x7fffffffffffffff;
-
-/// Minimum gas limit allowed for transactions.
-const MINIMUM_GAS_LIMIT: u64 = 5000;
 
 /// The bound divisor of the gas limit, used in update calculations.
 const GAS_LIMIT_BOUND_DIVISOR: u64 = 1024;
