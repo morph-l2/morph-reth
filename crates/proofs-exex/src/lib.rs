@@ -677,7 +677,7 @@ mod tests {
     use alloy_eips::{BlockNumHash, NumHash, eip1898::BlockWithParent};
     use morph_proofs::{BlockStateDiff, MdbxProofsStorage, MorphProofsStorage, MorphProofsStore};
     use reth_db::test_utils::tempdir_path;
-    use reth_ethereum_primitives::{Block, Receipt};
+    use reth_ethereum_primitives::{Block, EthPrimitives, Receipt};
     use reth_execution_types::{Chain, ExecutionOutcome};
     use reth_primitives_traits::RecoveredBlock;
     use reth_trie::{
@@ -1093,7 +1093,11 @@ mod tests {
             .expect("exex test context");
 
         let exex = build_test_exex(ctx, proofs.clone());
-        let _ = exex.ensure_initialized().expect_err("should return error");
+        let error = exex.ensure_initialized().expect_err("should return error");
+        assert!(
+            error.to_string().contains("not initialized"),
+            "expected an uninitialized-storage error, got: {error}"
+        );
     }
 
     #[tokio::test]
@@ -1122,7 +1126,38 @@ mod tests {
             .expect("exex test context");
 
         let exex = build_test_exex(ctx, proofs.clone());
-        let _ = exex.ensure_initialized().expect_err("should return error");
+        let error = exex.ensure_initialized().expect_err("should return error");
+        // Without this the test would also pass on the later canonical-hash check,
+        // which fires for the same fixture.
+        assert!(
+            error.to_string().contains("exceeds the safety threshold"),
+            "expected the startup prune-threshold error, got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_initialized_errors_when_latest_is_not_canonical() {
+        let dir = tempdir_path();
+        let store = Arc::new(MdbxProofsStorage::new(dir.as_path()).expect("env"));
+        let proofs: MorphProofsStorage<Arc<MdbxProofsStorage>> = Arc::clone(&store);
+
+        let (ctx, handle) = reth_exex_test_utils::test_exex_context()
+            .await
+            .expect("exex test context");
+
+        // Anchor proof history at the right height but the wrong hash: this is the
+        // shape of a proofs DB restored next to a mismatched chain snapshot, and it
+        // must refuse to serve rather than emit proofs for a foreign chain.
+        let genesis = handle.genesis.num_hash();
+        assert_ne!(genesis.hash, b256(0x00), "fixture must not collide");
+        init_storage_at(proofs.clone(), NumHash::new(genesis.number, b256(0x00)));
+
+        let exex = build_test_exex(ctx, proofs.clone());
+        let error = exex.ensure_initialized().expect_err("should return error");
+        assert!(
+            error.to_string().contains("latest block hash mismatch"),
+            "expected a canonical-hash mismatch error, got: {error}"
+        );
     }
 
     #[tokio::test]
@@ -1186,5 +1221,136 @@ mod tests {
             latest, 0,
             "Main thread should not have processed the blocks synchronously"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // build_batch_entry: cached fast path vs forced full re-execution
+    // -------------------------------------------------------------------------
+
+    /// Concrete `MorphProofsExEx` used to reach the private `build_batch_entry`.
+    type TestProofsExEx = MorphProofsExEx<reth_exex_test_utils::Adapter, Arc<MdbxProofsStorage>>;
+
+    fn cached_trie_data(num: u64) -> CachedBlockTrieData {
+        CachedBlockTrieData {
+            block_with_parent: BlockWithParent::new(
+                hash_for_num(num.saturating_sub(1)),
+                NumHash::new(num, hash_for_num(num)),
+            ),
+            trie_data: LazyTrieData::ready(ComputedTrieData::new(
+                Arc::new(HashedPostStateSorted::default()),
+                Arc::new(TrieUpdatesSorted::default()),
+            )),
+        }
+    }
+
+    /// The test provider only holds genesis, so any block above it that reaches the
+    /// execution branch fails with `Missing block`. That error is therefore a precise
+    /// witness that the cached fast path was *not* taken.
+    fn assert_took_execution_path(result: eyre::Result<BatchBlock<EthPrimitives>>, num: u64) {
+        let error = result.expect_err("execution path must fail on the genesis-only test provider");
+        assert!(
+            error.to_string().contains(&format!("Missing block {num}")),
+            "expected a missing-block error proving full execution was attempted, got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_batch_entry_uses_cache_when_verification_is_disabled() {
+        let (ctx, _handle) = reth_exex_test_utils::test_exex_context()
+            .await
+            .expect("exex test context");
+
+        let entry =
+            TestProofsExEx::build_batch_entry(5, Some(cached_trie_data(5)), ctx.provider(), 0)
+                .expect("cached entry");
+        assert!(
+            matches!(entry, BatchBlock::Cached { .. }),
+            "interval 0 must never force re-execution"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_batch_entry_uses_cache_off_the_verification_interval() {
+        let (ctx, _handle) = reth_exex_test_utils::test_exex_context()
+            .await
+            .expect("exex test context");
+
+        // 5 % 3 != 0 and 7 % 3 != 0, so both stay on the cached path.
+        for num in [5, 7] {
+            let entry = TestProofsExEx::build_batch_entry(
+                num,
+                Some(cached_trie_data(num)),
+                ctx.provider(),
+                3,
+            )
+            .expect("cached entry");
+            assert!(
+                matches!(entry, BatchBlock::Cached { .. }),
+                "block {num} is not a multiple of 3 and must use the cache"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn build_batch_entry_forces_execution_on_the_verification_interval() {
+        let (ctx, _handle) = reth_exex_test_utils::test_exex_context()
+            .await
+            .expect("exex test context");
+
+        // 6 % 3 == 0 and 5 % 1 == 0: cached data must be discarded in favour of execution.
+        assert_took_execution_path(
+            TestProofsExEx::build_batch_entry(6, Some(cached_trie_data(6)), ctx.provider(), 3),
+            6,
+        );
+        assert_took_execution_path(
+            TestProofsExEx::build_batch_entry(5, Some(cached_trie_data(5)), ctx.provider(), 1),
+            5,
+        );
+    }
+
+    #[tokio::test]
+    async fn build_batch_entry_falls_back_to_execution_without_cache() {
+        let (ctx, _handle) = reth_exex_test_utils::test_exex_context()
+            .await
+            .expect("exex test context");
+
+        assert_took_execution_path(
+            TestProofsExEx::build_batch_entry(5, None, ctx.provider(), 0),
+            5,
+        );
+    }
+
+    #[tokio::test]
+    async fn build_batch_entry_returns_execute_variant_for_an_available_block() {
+        let (ctx, handle) = reth_exex_test_utils::test_exex_context()
+            .await
+            .expect("exex test context");
+        let genesis = handle.genesis.number;
+
+        // Genesis is the one block the test provider can recover, so this pins the
+        // positive `Execute` variant rather than only the missing-block error.
+        let entry = TestProofsExEx::build_batch_entry(
+            genesis,
+            Some(cached_trie_data(genesis)),
+            ctx.provider(),
+            1,
+        )
+        .expect("genesis is recoverable");
+        match entry {
+            BatchBlock::Execute(block) => assert_eq!(block.number, genesis),
+            BatchBlock::Cached { .. } => {
+                panic!("verification interval 1 must discard cached data for every block")
+            }
+        }
+
+        // Same block, verification disabled: back on the cached path.
+        let cached = TestProofsExEx::build_batch_entry(
+            genesis,
+            Some(cached_trie_data(genesis)),
+            ctx.provider(),
+            0,
+        )
+        .expect("cached entry");
+        assert!(matches!(cached, BatchBlock::Cached { .. }));
     }
 }
