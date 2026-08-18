@@ -89,6 +89,7 @@ reth-payload-primitives.workspace = true
 reth-rpc-server-types.workspace = true
 reth-tasks.workspace = true
 reth-tracing.workspace = true
+reth-transaction-pool.workspace = true
 reth-trie.workspace = true
 alloy-consensus.workspace = true
 alloy-eips.workspace = true

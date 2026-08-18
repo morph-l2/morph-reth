@@ -36,6 +36,10 @@ const DEFAULT_MAX_PRUNE_BLOCKS_STARTUP: u64 = 1_000;
 /// How many blocks to process in a single sync turn before yielding.
 const SYNC_BLOCKS_PER_TURN: usize = 50;
 
+/// Backoff after a failed forward-sync turn. The work is re-armed so the loop
+/// retries instead of waiting indefinitely for the next notification.
+const SYNC_RETRY_DELAY: Duration = Duration::from_secs(1);
+
 /// Default interval between proof-storage prune runs. Default is 15 seconds.
 const DEFAULT_PRUNE_INTERVAL: Duration = Duration::from_secs(15);
 
@@ -409,10 +413,12 @@ where
                 Ok(Some((n, _))) => n,
                 Ok(None) => {
                     error!(target: "morph::proofs_exex", "No blocks stored in proofs storage during sync");
+                    Self::reschedule_sync_up_to(sync_target, target).await;
                     return;
                 }
                 Err(e) => {
                     error!(target: "morph::proofs_exex", error = ?e, "Failed to get latest block");
+                    Self::reschedule_sync_up_to(sync_target, target).await;
                     return;
                 }
             };
@@ -441,6 +447,7 @@ where
                     Ok(entry) => batch.push(entry),
                     Err(e) => {
                         error!(target: "morph::proofs_exex", block_number = block_num, error = ?e, "Preparing block for batch failed");
+                        Self::reschedule_sync_up_to(sync_target, target).await;
                         return;
                     }
                 }
@@ -448,12 +455,27 @@ where
 
             if let Err(e) = collector.execute_and_store_batch(batch) {
                 error!(target: "morph::proofs_exex", start = latest + 1, end, error = ?e, "Batch processing failed");
+                Self::reschedule_sync_up_to(sync_target, target).await;
                 return;
             }
 
             info!(target: "morph::proofs_exex", latest_stored = latest, target, "Batch processed, yielding");
             task::yield_now().await;
         }
+    }
+
+    /// Re-arm a forward-sync target after a transient failure.
+    ///
+    /// `take_state()` already consumed the original `SyncUpTo`, so returning
+    /// without this would leave the loop blocked on `notified()` until the next
+    /// chain event. If a revert or a newer tip arrived during the backoff, leave
+    /// that pending work in place instead of overwriting it with a stale target.
+    async fn reschedule_sync_up_to(sync_target: &SyncTarget, target: u64) {
+        tokio::time::sleep(SYNC_RETRY_DELAY).await;
+        if sync_target.has_pending_state() {
+            return;
+        }
+        sync_target.update_state(SyncTargetState::SyncUpTo { to: target });
     }
 
     fn build_batch_entry(
@@ -693,22 +715,17 @@ mod tests {
         B256::new([byte; 32])
     }
 
-    // deterministic hash from block number: 0 -> 0x00.., 1 -> 0x01.., etc.
     fn hash_for_num(num: u64) -> B256 {
-        // if you only care about small test numbers, this is enough:
-        b256(num as u8)
-
-        // If you want to avoid wrapping when num > 255, use something like:
-        // let mut out = [0u8; 32];
-        // out[0..8].copy_from_slice(&num.to_be_bytes());
-        // B256::new(out)
+        let mut out = [0u8; 32];
+        out[0..8].copy_from_slice(&num.to_be_bytes());
+        B256::new(out)
     }
 
     fn mk_block(num: u64) -> RecoveredBlock<Block> {
         let mut b: RecoveredBlock<Block> = Default::default();
         b.set_block_number(num);
         b.set_hash(hash_for_num(num));
-        b.set_parent_hash(hash_for_num(num - 1));
+        b.set_parent_hash(hash_for_num(num.saturating_sub(1)));
         b
     }
 
@@ -1352,5 +1369,16 @@ mod tests {
         )
         .expect("cached entry");
         assert!(matches!(cached, BatchBlock::Cached { .. }));
+    }
+
+    #[test]
+    fn hash_for_num_encodes_full_block_number() {
+        assert_eq!(hash_for_num(0), b256(0x00));
+        assert_ne!(
+            hash_for_num(0),
+            hash_for_num(256),
+            "block numbers must not wrap on a single byte"
+        );
+        let _genesis = mk_block(0);
     }
 }

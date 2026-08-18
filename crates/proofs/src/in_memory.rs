@@ -819,7 +819,7 @@ impl MorphProofsStore for InMemoryProofsStorage {
 
     fn unwind_history(&self, unwind_upto_block: BlockWithParent) -> MorphProofsStorageResult<()> {
         let mut inner = self.inner.write();
-        let unwind_upto_block_number = unwind_upto_block.block.number - 1;
+        let unwind_upto_block_number = unwind_upto_block.block.number.saturating_sub(1);
 
         // Remove all updates after unwind_upto_block_number
         inner
@@ -1133,6 +1133,16 @@ mod tests {
         assert_eq!(retrieved_diff.sorted_trie_updates, sorted_trie_updates);
         assert_eq!(retrieved_diff.sorted_post_state, sorted_post_state);
 
+        Ok(())
+    }
+
+    #[test]
+    fn unwind_history_at_genesis_does_not_underflow() -> Result<(), MorphProofsStorageError> {
+        let storage = InMemoryProofsStorage::new();
+        storage.unwind_history(BlockWithParent::new(
+            B256::ZERO,
+            NumHash::new(0, B256::ZERO),
+        ))?;
         Ok(())
     }
 }

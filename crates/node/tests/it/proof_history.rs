@@ -35,11 +35,12 @@ use reth_node_builder::{EngineNodeLauncher, Node, NodeBuilder, NodeConfig, NodeH
 use reth_node_core::args::{DiscoveryArgs, NetworkArgs, RpcServerArgs};
 use reth_payload_primitives::BuiltPayload;
 use reth_provider::{
-    BlockReaderIdExt, DBProvider, DatabaseProviderFactory, ReceiptProvider,
+    AccountReader, BlockReaderIdExt, DBProvider, DatabaseProviderFactory, ReceiptProvider,
     providers::BlockchainProvider,
 };
 use reth_rpc_server_types::RpcModuleSelection;
 use reth_tasks::Runtime;
+use reth_transaction_pool::TransactionPool;
 use reth_trie::AccountProof;
 use serde::Serialize;
 
@@ -356,6 +357,32 @@ fn assert_outside_window(error: &str, requested: u64) {
     );
 }
 
+fn sender_nonce(node: &MorphTestNode) -> eyre::Result<u64> {
+    node.inner
+        .provider
+        .basic_account(&ACCOUNT0)?
+        .map(|account| account.nonce)
+        .ok_or_else(|| eyre::eyre!("missing genesis sender {ACCOUNT0}"))
+}
+
+async fn include_transfer(
+    node: &mut MorphTestNode,
+    to: Address,
+    value: u64,
+) -> eyre::Result<alloy_primitives::BlockHash> {
+    let nonce = sender_nonce(node)?;
+    include_tx(node, signed_transfer(0, nonce, to, value)?).await
+}
+
+async fn include_call(
+    node: &mut MorphTestNode,
+    to: Address,
+    data: Bytes,
+) -> eyre::Result<alloy_primitives::BlockHash> {
+    let nonce = sender_nonce(node)?;
+    include_tx(node, signed_call(0, nonce, to, data)?).await
+}
+
 async fn include_tx(
     node: &mut MorphTestNode,
     raw_tx: Bytes,
@@ -363,9 +390,16 @@ async fn include_tx(
     use alloy_consensus::TxReceipt;
     use alloy_consensus::transaction::TxHashRef;
 
-    node.rpc.inject_tx(raw_tx).await?;
+    let tx_hash = node.rpc.inject_tx(raw_tx).await?;
     // The payload builder can emit an empty block if it races the pool insert.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !node.inner.pool.contains(&tx_hash) {
+        eyre::ensure!(
+            tokio::time::Instant::now() < deadline,
+            "injected transaction {tx_hash} never became visible in the pool"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
     let payload = node.advance_block().await?;
     eyre::ensure!(
         payload.block().body().transactions.len() == 1,
@@ -453,21 +487,22 @@ async fn proof_history_multi_block_account_and_storage() -> eyre::Result<()> {
         get_verified_proof(&client, GENESIS_CONTRACT, vec![GENESIS_SLOT], "0x0").await?;
     assert_eq!(storage_entry(&genesis_storage, GENESIS_SLOT), U256::from(1));
 
-    include_tx(&mut env.node, signed_transfer(0, 0, ACCOUNT1, 1_000)?).await?;
+    include_transfer(&mut env.node, ACCOUNT1, 1_000).await?;
     wait_for_proof_tip(&client, 1).await?;
 
-    let setter = Address::create(&ACCOUNT0, 1);
+    let nonce = sender_nonce(&env.node)?;
+    let setter = Address::create(&ACCOUNT0, nonce);
     include_tx(
         &mut env.node,
-        make_deploy_tx(CHAIN_ID, signer(0), 1, SETTER_INIT)?,
+        make_deploy_tx(CHAIN_ID, signer(0), nonce, SETTER_INIT)?,
     )
     .await?;
     wait_for_proof_tip(&client, 2).await?;
 
-    include_tx(&mut env.node, signed_call(0, 2, setter, slot_calldata(11))?).await?;
+    include_call(&mut env.node, setter, slot_calldata(11)).await?;
     wait_for_proof_tip(&client, 3).await?;
 
-    include_tx(&mut env.node, signed_call(0, 3, setter, slot_calldata(22))?).await?;
+    include_call(&mut env.node, setter, slot_calldata(22)).await?;
     wait_for_proof_tip(&client, 4).await?;
 
     let at_1_sender = get_verified_proof(&client, ACCOUNT0, vec![], "0x1").await?;
@@ -509,7 +544,7 @@ async fn proof_history_proofs_verify_against_block_state_root() -> eyre::Result<
     let mut env = setup(LaunchOpts::default()).await?;
     let client = rpc_client(&env.node)?;
 
-    include_tx(&mut env.node, signed_transfer(0, 0, ACCOUNT1, 5_000)?).await?;
+    include_transfer(&mut env.node, ACCOUNT1, 5_000).await?;
     wait_for_proof_tip(&client, 1).await?;
 
     let block_0 = get_block(&client, "0x0").await?;
@@ -543,8 +578,8 @@ async fn proof_history_rpc_block_bounds() -> eyre::Result<()> {
     let mut env = setup(LaunchOpts::default()).await?;
     let client = rpc_client(&env.node)?;
 
-    include_tx(&mut env.node, signed_transfer(0, 0, ACCOUNT1, 1)?).await?;
-    include_tx(&mut env.node, signed_transfer(0, 1, ACCOUNT2, 2)?).await?;
+    include_transfer(&mut env.node, ACCOUNT1, 1).await?;
+    include_transfer(&mut env.node, ACCOUNT2, 2).await?;
     wait_for_proof_tip(&client, 2).await?;
 
     let earliest = get_verified_proof(&client, ACCOUNT0, vec![], "earliest").await?;
@@ -575,7 +610,7 @@ async fn proof_history_returns_every_requested_storage_slot() -> eyre::Result<()
     let mut env = setup(LaunchOpts::default()).await?;
     let client = rpc_client(&env.node)?;
 
-    include_tx(&mut env.node, signed_transfer(0, 0, ACCOUNT1, 7)?).await?;
+    include_transfer(&mut env.node, ACCOUNT1, 7).await?;
     wait_for_proof_tip(&client, 1).await?;
 
     // Three populated genesis slots plus one that was never written.
@@ -632,12 +667,8 @@ async fn proof_history_prune_updates_window_bounds() -> eyre::Result<()> {
     .await?;
     let client = rpc_client(&env.node)?;
 
-    for nonce in 0..5 {
-        include_tx(
-            &mut env.node,
-            signed_transfer(0, nonce, ACCOUNT1, 100 + nonce)?,
-        )
-        .await?;
+    for i in 0..5 {
+        include_transfer(&mut env.node, ACCOUNT1, 100 + i).await?;
     }
     wait_for_proof_tip(&client, 5).await?;
     let status = wait_for_window(&client, 3, 5).await?;
@@ -671,9 +702,9 @@ async fn proof_history_unwind_restores_parent_tip() -> eyre::Result<()> {
     let mut env = setup(LaunchOpts::default()).await?;
     let client = rpc_client(&env.node)?;
 
-    let block1 = include_tx(&mut env.node, signed_transfer(0, 0, ACCOUNT1, 10)?).await?;
-    let block2 = include_tx(&mut env.node, signed_transfer(0, 1, ACCOUNT2, 20)?).await?;
-    include_tx(&mut env.node, signed_transfer(0, 2, ACCOUNT1, 30)?).await?;
+    let block1 = include_transfer(&mut env.node, ACCOUNT1, 10).await?;
+    let block2 = include_transfer(&mut env.node, ACCOUNT2, 20).await?;
+    include_transfer(&mut env.node, ACCOUNT1, 30).await?;
     wait_for_proof_tip(&client, 3).await?;
 
     let before = get_verified_proof(&client, ACCOUNT0, vec![], "0x1").await?;
@@ -712,9 +743,11 @@ async fn proof_history_reorg_replaces_old_branch() -> eyre::Result<()> {
     let now = unix_now();
     let genesis_hash = env.chain_spec.genesis_hash();
 
-    let tx_b1 = signed_transfer(0, 0, ACCOUNT1, 1_000)?;
-    let tx_b2a = signed_transfer(0, 1, ACCOUNT1, 2_000)?;
-    let tx_b2b = signed_transfer(0, 1, ACCOUNT2, 3_000)?;
+    let nonce0 = sender_nonce(&env.node)?;
+    let nonce1 = nonce0 + 1;
+    let tx_b1 = signed_transfer(0, nonce0, ACCOUNT1, 1_000)?;
+    let tx_b2a = signed_transfer(0, nonce1, ACCOUNT1, 2_000)?;
+    let tx_b2b = signed_transfer(0, nonce1, ACCOUNT2, 3_000)?;
 
     let mut p1 = morph_payload_types::AssembleL2BlockV2Params::new(genesis_hash, vec![tx_b1]);
     p1.timestamp = Some(now - 6);
@@ -816,9 +849,9 @@ async fn proof_history_stays_correct_with_verification_enabled() -> eyre::Result
     .await?;
     let client = rpc_client(&env.node)?;
 
-    include_tx(&mut env.node, signed_transfer(0, 0, ACCOUNT1, 111)?).await?;
-    include_tx(&mut env.node, signed_transfer(0, 1, ACCOUNT2, 222)?).await?;
-    include_tx(&mut env.node, signed_transfer(0, 2, ACCOUNT1, 333)?).await?;
+    include_transfer(&mut env.node, ACCOUNT1, 111).await?;
+    include_transfer(&mut env.node, ACCOUNT2, 222).await?;
+    include_transfer(&mut env.node, ACCOUNT1, 333).await?;
     wait_for_proof_tip(&client, 3).await?;
 
     let at_1 = get_verified_proof(&client, ACCOUNT1, vec![], "0x1").await?;
@@ -863,8 +896,8 @@ async fn proof_history_db_survives_node_restart() -> eyre::Result<()> {
             let storage = Arc::new(MdbxProofsStorage::open(&proofs_path, identity)?);
             let mut node = launch_node(chain_spec, storage.clone(), LaunchOpts::default()).await?;
             let client = rpc_client(&node)?;
-            include_tx(&mut node, signed_transfer(0, 0, ACCOUNT1, 10)?).await?;
-            include_tx(&mut node, signed_transfer(0, 1, ACCOUNT2, 20)?).await?;
+            include_transfer(&mut node, ACCOUNT1, 10).await?;
+            include_transfer(&mut node, ACCOUNT2, 20).await?;
             wait_for_proof_tip(&client, 2).await?;
             let first_tip = node
                 .inner

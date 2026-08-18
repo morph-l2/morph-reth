@@ -698,18 +698,20 @@ impl MdbxProofsStorage {
             walker.delete_current()?;
         }
 
-        // Delete using the simplified API: iterator of (key, subkey)
-        self.delete_dup_sorted::<AccountTrieHistory, _, _>(tx, history.clone().account_trie)?;
-        self.delete_dup_sorted::<StorageTrieHistory, _, _>(tx, history.clone().storage_trie)?;
-        self.delete_dup_sorted::<HashedAccountHistory, _, _>(tx, history.clone().hashed_account)?;
-        self.delete_dup_sorted::<HashedStorageHistory, _, _>(tx, history.clone().hashed_storage)?;
-
-        Ok(WriteCounts {
+        let counts = WriteCounts {
             account_trie_updates_written_total: history.account_trie.len() as u64,
             storage_trie_updates_written_total: history.storage_trie.len() as u64,
             hashed_accounts_written_total: history.hashed_account.len() as u64,
             hashed_storages_written_total: history.hashed_storage.len() as u64,
-        })
+        };
+
+        // Delete using the simplified API: iterator of (key, subkey)
+        self.delete_dup_sorted::<AccountTrieHistory, _, _>(tx, history.account_trie)?;
+        self.delete_dup_sorted::<StorageTrieHistory, _, _>(tx, history.storage_trie)?;
+        self.delete_dup_sorted::<HashedAccountHistory, _, _>(tx, history.hashed_account)?;
+        self.delete_dup_sorted::<HashedStorageHistory, _, _>(tx, history.hashed_storage)?;
+
+        Ok(counts)
     }
 
     /// Write trie/state history for `block_number` from `block_state_diff`.
