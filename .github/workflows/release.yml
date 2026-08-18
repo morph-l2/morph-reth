@@ -101,12 +101,12 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-          key: ${{ matrix.target }}
-
+      # No build cache here on purpose. This job checks out a ref that a
+      # workflow_dispatch caller supplies, and dispatch runs hold write access to
+      # the default-branch cache scope, so caching would let an arbitrary ref
+      # poison the cache that privileged workflows later restore. Upstream reth's
+      # release workflow caches nothing for the same reason; releases are rare
+      # enough that the cold build is worth the isolation.
       - name: Install cross main
         run: cargo install cross --git https://github.com/cross-rs/cross
 
