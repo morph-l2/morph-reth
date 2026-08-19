@@ -26,6 +26,12 @@ impl MorphPayloadBuilderBuilder {
     pub const fn new(config: MorphBuilderConfig) -> Self {
         Self { config }
     }
+
+    /// Sets the maximum DA block size (transaction payload bytes per block).
+    pub fn with_max_da_block_size(mut self, max_da_block_size: u64) -> Self {
+        self.config = self.config.with_max_da_block_size(max_da_block_size);
+        self
+    }
 }
 
 impl<Node>
