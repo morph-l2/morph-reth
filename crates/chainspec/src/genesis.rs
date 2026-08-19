@@ -84,12 +84,12 @@ impl TryFrom<&OtherFields> for MorphHardforkInfo {
 /// The genesis keys `maxTxPayloadBytesPerBlock` (122880 on mainnet/hoodi) and
 /// `maxTxPerBlock` are still present in the genesis JSON but are deliberately not
 /// read here. Sequencer packing uses `--morph.max-tx-payload-bytes` (default
-/// 720 KiB = 120 KiB × 6 blobs) rather than the leftover zkEVM genesis field.
+/// [`crate::MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK`]) rather than the leftover
+/// zkEVM genesis field.
 ///
-/// Note that morph-geth's `ValidateBody` (`core/block_validator.go`, via
-/// `IsValidBlockSize`) still rejects L2 payloads above the genesis 122880
-/// value. Until that check is raised or removed, a mixed-client sequencer
-/// must not produce larger blocks or geth validators will refuse to sign them.
+/// Import-time body validation in morph-geth (`IsValidBlockSize`) and morph-reth
+/// (`MorphConsensus::validate_block_pre_execution`) both enforce that same
+/// 720 KiB binary constant, not the stored genesis 122880.
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MorphChainConfig {

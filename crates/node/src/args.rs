@@ -1,6 +1,7 @@
 //! Morph node CLI arguments.
 
 use clap::Args;
+use morph_chainspec::MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK;
 
 /// Default maximum L2 transaction payload bytes per block (720 KiB).
 ///
@@ -10,7 +11,7 @@ use clap::Args;
 /// historical headroom under that usable size; six of them stay under the
 /// uncompressed 6-blob budget and do not require the submitter to split a
 /// single L2 block.
-pub const MORPH_DEFAULT_MAX_TX_PAYLOAD_BYTES: u64 = 720 * 1024;
+pub const MORPH_DEFAULT_MAX_TX_PAYLOAD_BYTES: u64 = MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK;
 
 /// Morph-specific CLI arguments.
 ///
@@ -26,6 +27,10 @@ pub struct MorphArgs {
     ///
     /// Default: 737280 bytes (720 KiB), sized so one L2 block fits in a
     /// 6-blob batch even without compression.
+    ///
+    /// Import-time consensus always enforces
+    /// [`morph_chainspec::MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK`], independent of
+    /// this flag. Packing above that value produces blocks other nodes reject.
     #[arg(
         long = "morph.max-tx-payload-bytes",
         value_name = "BYTES",
