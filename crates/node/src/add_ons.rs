@@ -52,8 +52,12 @@ pub struct MorphAddOns<
 > {
     /// Inner RPC add-ons from reth.
     inner: RpcAddOns<N, EthB, PVB, NoopEngineApiBuilder, EVB, RpcMiddleware, AuthHttpMiddleware>,
-    /// Optional proof-history storage used to replace `eth_getProof` on normal and auth RPC.
-    proof_history: Option<MorphProofsStorage<Arc<MdbxProofsStorage>>>,
+    /// Optional storage plus the `eth_getMultiProof` account-target limit, used to replace the
+    /// historical proof RPCs on the normal and auth servers.
+    ///
+    /// Held as one unit because the limit is only ever enforced by the RPC that this storage
+    /// installs; there is no way to configure one without the other.
+    proof_history: Option<(MorphProofsStorage<Arc<MdbxProofsStorage>>, usize)>,
 }
 
 impl<N> MorphAddOns<NodeAdapter<N>, MorphEthApiBuilder>
@@ -79,12 +83,14 @@ where
         }
     }
 
-    /// Attach initialized proof-history storage to the RPC add-ons.
+    /// Attach initialized proof-history storage, and the account-target limit its
+    /// `eth_getMultiProof` override enforces, to the RPC add-ons.
     pub fn with_proof_history(
         mut self,
         storage: MorphProofsStorage<Arc<MdbxProofsStorage>>,
+        max_multi_proof_targets: usize,
     ) -> Self {
-        self.proof_history = Some(storage);
+        self.proof_history = Some((storage, max_multi_proof_targets));
         self
     }
 }
@@ -201,21 +207,31 @@ where
                     ..
                 } = container;
 
-                if let Some(storage) = proof_history {
+                if let Some((storage, max_multi_proof_targets)) = proof_history {
                     let eth_api = registry.eth_api().clone();
                     modules
                         .replace_configured(
-                            EthProofApiExt::new(eth_api.clone(), storage.clone()).into_rpc(),
+                            EthProofApiExt::new(
+                                eth_api.clone(),
+                                storage.clone(),
+                                max_multi_proof_targets,
+                            )
+                            .into_rpc(),
                         )
                         .map_err(|error| {
-                            eyre::eyre!("Failed to replace normal RPC eth_getProof: {error}")
+                            eyre::eyre!("Failed to replace normal historical proof RPCs: {error}")
                         })?;
                     auth_module
                         .replace_auth_methods(
-                            EthProofApiExt::new(eth_api, storage.clone()).into_rpc(),
+                            EthProofApiExt::new(
+                                eth_api,
+                                storage.clone(),
+                                max_multi_proof_targets,
+                            )
+                            .into_rpc(),
                         )
                         .map_err(|error| {
-                            eyre::eyre!("Failed to replace auth RPC eth_getProof: {error}")
+                            eyre::eyre!("Failed to replace auth historical proof RPCs: {error}")
                         })?;
                     modules
                         .replace_configured(ProofStatusApiExt::new(storage).into_rpc())

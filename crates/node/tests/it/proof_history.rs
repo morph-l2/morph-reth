@@ -1,12 +1,13 @@
 //! Historical-proof correctness tests.
 //!
-//! These exercise `eth_getProof` against the durable proof-history index, not
-//! just RPC wiring. Each successful proof is checked against that block's
-//! canonical `stateRoot`. Reference-index coverage lives in `reference_index.rs`.
+//! These exercise `eth_getProof` and `eth_getMultiProof` against the durable
+//! proof-history index, not just RPC wiring. Each successful proof is checked
+//! against that block's canonical `stateRoot`. Reference-index coverage lives
+//! in `reference_index.rs`.
 
 use std::{sync::Arc, time::Duration};
 
-use alloy_consensus::{SignableTransaction, TxEip1559};
+use alloy_consensus::{SignableTransaction, TxEip1559, constants::KECCAK_EMPTY};
 use alloy_eips::{Encodable2718, NumHash, eip1898::BlockWithParent};
 use alloy_genesis::Genesis;
 use alloy_primitives::{Address, B256, Bytes, TxKind, U256};
@@ -28,7 +29,7 @@ use morph_proofs::{
     MorphProofsStore, ProofDbIdentity,
 };
 use morph_proofs_exex::MorphProofsExEx;
-use morph_rpc::ProofsSyncStatus;
+use morph_rpc::{ProofsSyncStatus, eth::proofs::DEFAULT_MAX_MULTI_PROOF_TARGETS};
 use reth_chainspec::EthChainSpec;
 use reth_e2e_test_utils::node::NodeTestContext;
 use reth_node_builder::{EngineNodeLauncher, Node, NodeBuilder, NodeConfig, NodeHandle};
@@ -41,7 +42,7 @@ use reth_provider::{
 use reth_rpc_server_types::RpcModuleSelection;
 use reth_tasks::Runtime;
 use reth_transaction_pool::TransactionPool;
-use reth_trie::AccountProof;
+use reth_trie::{AccountProof, EMPTY_ROOT_HASH};
 use serde::Serialize;
 
 const CHAIN_ID: u64 = 2910;
@@ -51,6 +52,8 @@ const ACCOUNT2: Address = alloy_primitives::address!("3C44CdDdB6a900fa2b585dd299
 const GENESIS_CONTRACT: Address =
     alloy_primitives::address!("530000000000000000000000000000000000000f");
 const GENESIS_SLOT: B256 = B256::with_last_byte(0x06);
+/// Never funded and never a sender, so it has no account-trie leaf at any tested height.
+const ABSENT: Address = alloy_primitives::address!("00000000000000000000000000000000000abbe1");
 
 /// Runtime: `PUSH1 0; CALLDATALOAD; PUSH1 0; SSTORE; STOP`.
 ///
@@ -71,6 +74,7 @@ struct LaunchOpts {
     window: u64,
     prune_interval: Duration,
     verification_interval: u64,
+    max_multi_proof_targets: usize,
 }
 
 impl Default for LaunchOpts {
@@ -81,6 +85,7 @@ impl Default for LaunchOpts {
             // asserting prune behavior.
             prune_interval: Duration::from_secs(3600),
             verification_interval: 0,
+            max_multi_proof_targets: DEFAULT_MAX_MULTI_PROOF_TARGETS,
         }
     }
 }
@@ -159,7 +164,7 @@ async fn launch_node(
         .testing_node(runtime.clone())
         .with_types_and_provider::<MorphNode, BlockchainProvider<_>>()
         .with_components(node.components_builder())
-        .with_add_ons(MorphAddOns::new().with_proof_history(storage))
+        .with_add_ons(MorphAddOns::new().with_proof_history(storage, opts.max_multi_proof_targets))
         .install_exex("morph-proof-history", async move |ctx| {
             let head = ctx.head;
             let provider = ctx
@@ -303,6 +308,17 @@ async fn get_proof<B: Serialize>(
         .map_err(|error| eyre::eyre!("eth_getProof failed: {error}"))
 }
 
+async fn get_multi_proof<B: Serialize>(
+    client: &HttpClient,
+    targets: Vec<(Address, Vec<B256>)>,
+    block: B,
+) -> eyre::Result<Vec<EIP1186AccountProofResponse>> {
+    client
+        .request("eth_getMultiProof", rpc_params![targets, block])
+        .await
+        .map_err(|error| eyre::eyre!("eth_getMultiProof failed: {error}"))
+}
+
 fn verify_against_state_root(
     proof: &EIP1186AccountProofResponse,
     state_root: B256,
@@ -344,6 +360,26 @@ async fn proof_error<B: Serialize>(
         Ok(proof) => Err(eyre::eyre!(
             "expected eth_getProof to fail, got proof for {}",
             proof.address
+        )),
+        Err(error) => Ok(error.to_string()),
+    }
+}
+
+async fn multi_proof_error<B: Serialize>(
+    client: &HttpClient,
+    targets: Vec<(Address, Vec<B256>)>,
+    block: B,
+) -> eyre::Result<String> {
+    match client
+        .request::<Vec<EIP1186AccountProofResponse>, _>(
+            "eth_getMultiProof",
+            rpc_params![targets, block],
+        )
+        .await
+    {
+        Ok(proofs) => Err(eyre::eyre!(
+            "expected eth_getMultiProof to fail, got {} proofs",
+            proofs.len()
         )),
         Err(error) => Ok(error.to_string()),
     }
@@ -567,6 +603,243 @@ async fn proof_history_proofs_verify_against_block_state_root() -> eyre::Result<
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn proof_history_multi_proof_uses_one_historical_state() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let mut env = setup(LaunchOpts::default()).await?;
+    let client = rpc_client(&env.node)?;
+
+    let recipient_at_genesis = get_verified_proof(&client, ACCOUNT1, vec![], "0x0").await?;
+    include_transfer(&mut env.node, ACCOUNT1, 1_234).await?;
+    wait_for_proof_tip(&client, 1).await?;
+    include_transfer(&mut env.node, ACCOUNT2, 5_678).await?;
+    wait_for_proof_tip(&client, 2).await?;
+
+    // Query block 1 after block 2 is canonical so the request cannot be served from latest state.
+    let block_1 = get_block(&client, "0x1").await?;
+    let empty_slot = B256::with_last_byte(0x42);
+    let expected_addresses = [ACCOUNT1, GENESIS_CONTRACT, ACCOUNT0];
+    let proofs = get_multi_proof(
+        &client,
+        vec![
+            (ACCOUNT1, vec![]),
+            (GENESIS_CONTRACT, vec![GENESIS_SLOT, empty_slot]),
+            (ACCOUNT0, vec![]),
+        ],
+        "0x1",
+    )
+    .await?;
+
+    assert_eq!(proofs.len(), expected_addresses.len());
+    assert_eq!(
+        proofs.iter().map(|proof| proof.address).collect::<Vec<_>>(),
+        expected_addresses
+    );
+    for proof in &proofs {
+        verify_against_state_root(proof, block_1.header.state_root)?;
+    }
+    assert_eq!(
+        proofs[0].balance,
+        recipient_at_genesis.balance + U256::from(1_234)
+    );
+    assert_eq!(storage_entry(&proofs[1], GENESIS_SLOT), U256::from(1));
+    assert_eq!(storage_entry(&proofs[1], empty_slot), U256::ZERO);
+    assert_eq!(proofs[2].nonce, 1);
+
+    // Match upstream semantics for empty batches while still validating the requested block.
+    assert!(get_multi_proof(&client, vec![], "0x1").await?.is_empty());
+    let outside = multi_proof_error(&client, vec![(ACCOUNT0, Vec::<B256>::new())], "0x64").await?;
+    assert_outside_window(&outside, 0x64);
+
+    Ok(())
+}
+
+/// Absent accounts must produce a valid *non-existence* proof.
+///
+/// This is a distinct code path: `MultiProof::account_proof` leaves `info` at `None` and falls
+/// back to `EMPTY_ROOT_HASH`, and `AccountProof::verify` only accepts a missing leaf when `info`
+/// is `None` **and** `storage_root` is the empty root. A response that invented either field, or
+/// an implementation that returned an existing neighbour's leaf, would fail verification here.
+///
+/// `KECCAK_EMPTY` / `EMPTY_ROOT_HASH` are asserted because they are the values the absent account
+/// *would* hash to, which is what keeps the response self-consistent: a verifier can recompute the
+/// leaf that must be missing. Zero hashes would carry no such meaning, and only signal absence
+/// out-of-band.
+#[tokio::test(flavor = "multi_thread")]
+async fn proof_history_proves_absent_accounts() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let mut env = setup(LaunchOpts::default()).await?;
+    let client = rpc_client(&env.node)?;
+
+    include_transfer(&mut env.node, ACCOUNT1, 1_000).await?;
+    wait_for_proof_tip(&client, 1).await?;
+    include_transfer(&mut env.node, ACCOUNT2, 2_000).await?;
+    wait_for_proof_tip(&client, 2).await?;
+
+    let block_1 = get_block(&client, "0x1").await?;
+    let absent_slot = B256::with_last_byte(0x07);
+
+    let single = get_proof(&client, ABSENT, vec![absent_slot], "0x1").await?;
+    verify_against_state_root(&single, block_1.header.state_root)?;
+    assert_eq!(single.nonce, 0);
+    assert_eq!(single.balance, U256::ZERO);
+    assert_eq!(single.code_hash, KECCAK_EMPTY);
+    assert_eq!(single.storage_hash, EMPTY_ROOT_HASH);
+    // A slot on a missing account still gets an entry, proving zero rather than omitting it.
+    assert_eq!(storage_entry(&single, absent_slot), U256::ZERO);
+
+    // Batching an absent target next to a present one must not contaminate either response.
+    let batched = get_multi_proof(
+        &client,
+        vec![(ACCOUNT0, vec![]), (ABSENT, vec![absent_slot])],
+        "0x1",
+    )
+    .await?;
+    assert_eq!(batched.len(), 2);
+    for proof in &batched {
+        verify_against_state_root(proof, block_1.header.state_root)?;
+    }
+    assert_eq!(batched[0].address, ACCOUNT0);
+    assert_eq!(batched[0].nonce, 1);
+    assert_ne!(batched[0].balance, U256::ZERO);
+    assert_eq!(
+        batched[1], single,
+        "eth_getMultiProof must return the same non-existence proof as eth_getProof"
+    );
+
+    Ok(())
+}
+
+/// A contract target with no requested slots must still report its real storage root.
+///
+/// `Proof::multiproof` pre-seeds every target with an empty `StorageMultiProof` and only
+/// overwrites it once the account leaf is reached, so a regression here would silently return
+/// `EMPTY_ROOT_HASH` for contracts that do have storage.
+#[tokio::test(flavor = "multi_thread")]
+async fn proof_history_multi_proof_reports_contract_storage_root_without_slots() -> eyre::Result<()>
+{
+    reth_tracing::init_test_tracing();
+
+    let mut env = setup(LaunchOpts::default()).await?;
+    let client = rpc_client(&env.node)?;
+
+    include_transfer(&mut env.node, ACCOUNT1, 1).await?;
+    wait_for_proof_tip(&client, 1).await?;
+
+    let block_1 = get_block(&client, "0x1").await?;
+    let with_slot = get_proof(&client, GENESIS_CONTRACT, vec![GENESIS_SLOT], "0x1").await?;
+    let proofs = get_multi_proof(&client, vec![(GENESIS_CONTRACT, vec![])], "0x1").await?;
+
+    assert_eq!(proofs.len(), 1);
+    verify_against_state_root(&proofs[0], block_1.header.state_root)?;
+    assert!(proofs[0].storage_proof.is_empty());
+    assert_ne!(
+        proofs[0].storage_hash, EMPTY_ROOT_HASH,
+        "genesis contract has storage, so its storage root must not be the empty root"
+    );
+    assert_eq!(proofs[0].storage_hash, with_slot.storage_hash);
+    assert_eq!(proofs[0].code_hash, with_slot.code_hash);
+
+    Ok(())
+}
+
+/// Repeating an address must yield one response per request entry, each scoped to its own slots.
+///
+/// Proof generation consolidates the duplicates into a single account target, so the expansion
+/// back to request order is the part that can regress.
+#[tokio::test(flavor = "multi_thread")]
+async fn proof_history_multi_proof_expands_duplicate_targets() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let mut env = setup(LaunchOpts::default()).await?;
+    let client = rpc_client(&env.node)?;
+
+    include_transfer(&mut env.node, ACCOUNT1, 1).await?;
+    wait_for_proof_tip(&client, 1).await?;
+
+    let block_1 = get_block(&client, "0x1").await?;
+    let empty_slot = B256::with_last_byte(0x42);
+    let proofs = get_multi_proof(
+        &client,
+        vec![
+            (GENESIS_CONTRACT, vec![GENESIS_SLOT]),
+            (GENESIS_CONTRACT, vec![empty_slot]),
+            (GENESIS_CONTRACT, vec![]),
+        ],
+        "0x1",
+    )
+    .await?;
+
+    assert_eq!(proofs.len(), 3);
+    for proof in &proofs {
+        assert_eq!(proof.address, GENESIS_CONTRACT);
+        verify_against_state_root(proof, block_1.header.state_root)?;
+    }
+    // Each entry carries exactly the slots it asked for, not the consolidated union.
+    assert_eq!(proofs[0].storage_proof.len(), 1);
+    assert_eq!(storage_entry(&proofs[0], GENESIS_SLOT), U256::from(1));
+    assert_eq!(proofs[1].storage_proof.len(), 1);
+    assert_eq!(storage_entry(&proofs[1], empty_slot), U256::ZERO);
+    assert!(proofs[2].storage_proof.is_empty());
+
+    Ok(())
+}
+
+/// The configured account-target limit and the fixed storage-key limit are both enforced at RPC.
+///
+/// Launching with a deliberately tiny target limit also proves the CLI value reaches the handler
+/// instead of the compiled-in default.
+#[tokio::test(flavor = "multi_thread")]
+async fn proof_history_multi_proof_enforces_configured_limits() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let mut env = setup(LaunchOpts {
+        max_multi_proof_targets: 2,
+        ..LaunchOpts::default()
+    })
+    .await?;
+    let client = rpc_client(&env.node)?;
+
+    include_transfer(&mut env.node, ACCOUNT1, 1).await?;
+    wait_for_proof_tip(&client, 1).await?;
+
+    // At the configured limit the request still succeeds.
+    let at_limit =
+        get_multi_proof(&client, vec![(ACCOUNT0, vec![]), (ACCOUNT1, vec![])], "0x1").await?;
+    assert_eq!(at_limit.len(), 2);
+
+    let too_many_targets = multi_proof_error(
+        &client,
+        vec![(ACCOUNT0, vec![]), (ACCOUNT1, vec![]), (ACCOUNT2, vec![])],
+        "0x1",
+    )
+    .await?;
+    assert!(
+        too_many_targets.contains("too many proof targets") && too_many_targets.contains("max 2"),
+        "expected configured target-limit error, got: {too_many_targets}"
+    );
+
+    // The storage-key cap is fixed at 1024 and is independent of the target limit.
+    let too_many_keys = multi_proof_error(
+        &client,
+        vec![(GENESIS_CONTRACT, vec![B256::ZERO; 1025])],
+        "0x1",
+    )
+    .await?;
+    assert!(
+        too_many_keys.contains("too many storage keys") && too_many_keys.contains("got 1025"),
+        "expected storage-key-limit error, got: {too_many_keys}"
+    );
+
+    // An empty batch is not short-circuited: it still range-checks the requested block.
+    let empty_outside = multi_proof_error(&client, vec![], "0x64").await?;
+    assert_outside_window(&empty_outside, 0x64);
+
+    Ok(())
+}
+
 // -----------------------------------------------------------------------------
 // 3. earliest / latest / future / missing-block bounds
 // -----------------------------------------------------------------------------
@@ -662,7 +935,7 @@ async fn proof_history_prune_updates_window_bounds() -> eyre::Result<()> {
     let mut env = setup(LaunchOpts {
         window: 2,
         prune_interval: Duration::from_millis(100),
-        verification_interval: 0,
+        ..LaunchOpts::default()
     })
     .await?;
     let client = rpc_client(&env.node)?;
@@ -842,9 +1115,8 @@ async fn proof_history_stays_correct_with_verification_enabled() -> eyre::Result
     reth_tracing::init_test_tracing();
 
     let mut env = setup(LaunchOpts {
-        window: DEFAULT_PROOFS_HISTORY_WINDOW,
-        prune_interval: Duration::from_secs(3600),
         verification_interval: 1,
+        ..LaunchOpts::default()
     })
     .await?;
     let client = rpc_client(&env.node)?;

@@ -122,6 +122,7 @@ fn main() {
                     storage,
                     morph_args.proofs_history_window,
                     morph_args.proofs_history_verification_interval,
+                    morph_args.proofs_history_max_multi_proof_targets,
                 ))
             } else {
                 None
@@ -129,8 +130,8 @@ fn main() {
             let node = MorphNode::new(morph_args);
 
             let mut add_ons = MorphAddOns::new();
-            if let Some((storage, _, _)) = &proof_history {
-                add_ons = add_ons.with_proof_history(storage.clone());
+            if let Some((storage, _, _, max_multi_proof_targets)) = &proof_history {
+                add_ons = add_ons.with_proof_history(storage.clone(), *max_multi_proof_targets);
             }
 
             let mut node_builder = builder
@@ -138,7 +139,7 @@ fn main() {
                 .with_components(node.components_builder())
                 .with_add_ons(add_ons);
 
-            if let Some((storage, window, verification_interval)) = proof_history {
+            if let Some((storage, window, verification_interval, _)) = proof_history {
                 node_builder = node_builder.install_exex(
                     "morph-proof-history",
                     async move |ctx| {

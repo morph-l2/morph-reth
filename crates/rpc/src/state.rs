@@ -77,6 +77,22 @@ impl<Eth, P> MorphProofStateProviderFactory<Eth, P> {
     pub const fn new(eth_api: Eth, storage: MorphProofsStorage<P>) -> Self {
         Self { eth_api, storage }
     }
+
+    /// Returns the underlying Eth API used for proof task scheduling and chain reads.
+    pub const fn eth_api(&self) -> &Eth {
+        &self.eth_api
+    }
+}
+
+// Hand-written so the `Clone` bounds land on the impl rather than the struct: proof handlers clone
+// the factory into a blocking task, where the returned provider only borrows the local clone.
+impl<Eth: Clone, P: Clone> Clone for MorphProofStateProviderFactory<Eth, P> {
+    fn clone(&self) -> Self {
+        Self {
+            eth_api: self.eth_api.clone(),
+            storage: self.storage.clone(),
+        }
+    }
 }
 
 impl<'a, Eth, P> MorphProofStateProviderFactory<Eth, P>

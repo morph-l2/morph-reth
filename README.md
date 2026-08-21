@@ -121,10 +121,11 @@ openssl rand -hex 32 > jwt.hex
 |------|---------|-------------|
 | `--morph.max-tx-payload-bytes` | 122880 (120KB) | Maximum transaction payload bytes per block |
 | `--morph.max-tx-per-block` | None (unlimited) | Maximum number of transactions per block |
-| `--proofs-history` | false | Enable historical `eth_getProof` and proof-history accumulation |
+| `--proofs-history` | false | Enable historical `eth_getProof` / `eth_getMultiProof` and proof-history accumulation |
 | `--proofs-history.storage-path` | `<chain-datadir>/historical-proofs` | Override the proof MDBX directory |
 | `--proofs-history.window` | 604800 | Number of canonical blocks retained (7 days at 1s/block) |
 | `--proofs-history.verification-interval` | 0 | Re-execute every Nth indexed block; 0 disables verification |
+| `--proofs-history.max-multi-proof-targets` | 256 | Maximum account targets per `eth_getMultiProof` request |
 | `--rpc.eth-proof-window` | 0 | Reth overlay limit used only while proof history is disabled |
 
 #### Initializing Historical Proofs
@@ -143,10 +144,31 @@ initialization so the source state remains fixed:
   --authrpc.jwtsecret jwt.hex
 ```
 
-The standard `eth_getProof` method is then served only for the inclusive range reported by
-`debug_proofsSyncStatus`; requests outside that range never fall back to Reth's historical overlay.
-The same `eth_getProof` override is installed on the authenticated RPC server. For manual
-maintenance use `morph-reth proofs prune` and `morph-reth proofs unwind --target <BLOCK>`.
+The standard `eth_getProof` method and reth-compatible `eth_getMultiProof` extension are then
+served only for the inclusive range reported by `debug_proofsSyncStatus`; requests outside that
+range never fall back to Reth's historical overlay. Both overrides are also installed on the
+authenticated RPC server. For manual maintenance use `morph-reth proofs prune` and
+`morph-reth proofs unwind --target <BLOCK>`.
+
+`eth_getMultiProof` accepts an ordered list of `[address, storageKeys]` targets, computes one
+consolidated proof, and returns one EIP-1186 response per target in request order. Duplicate
+addresses are consolidated internally and expanded back, each response carrying only the slots its
+own target requested. Its storage keys must be full 32-byte values, unlike the short form
+`eth_getProof` accepts. Two independent limits apply: at most
+`--proofs-history.max-multi-proof-targets` account targets (default 256) and at most 1024 storage
+keys in total. They are counted separately because an account target costs several times a storage
+slot -- it retains its own account-trie path and opens a storage-trie cursor, while slots share one
+already-open trie. Raise the target limit when a prover needs blocks that touch more accounts than
+the default in a single round trip; the 1024-key cap is fixed to match go-ethereum's `eth_getProof`.
+
+Both overrides report under the `morph.rpc.proofs` metric scope, distinguished by a `method`
+label (`eth_getProof` / `eth_getMultiProof`) rather than by separate metric names, so the counters
+can be split per method or summed. `requests_total` is counted before the request-size limits are
+applied and equals `rejected_total + successful_responses_total + failures_total`.
+
+Note that `eth_getMultiProof` exists **only** while `--proofs-history` is enabled, because Reth
+`v2.4.0` has no native implementation to fall back to. `eth_getProof` remains available either way,
+served by Reth itself when proof history is off.
 
 For cold copies, stop the source node and copy the complete chain data directory, including
 `historical-proofs`, as one consistent unit. Startup validates the proof database schema, chain ID,

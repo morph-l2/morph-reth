@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use clap::Args;
 use morph_proofs::DEFAULT_PROOFS_HISTORY_WINDOW;
+use morph_rpc::eth::proofs::DEFAULT_MAX_MULTI_PROOF_TARGETS;
 
 /// Default maximum transaction payload bytes per block (120KB).
 ///
@@ -63,6 +64,20 @@ pub struct MorphArgs {
         default_value_t = 0
     )]
     pub proofs_history_verification_interval: u64,
+
+    /// Maximum account targets accepted by one `eth_getMultiProof` request.
+    ///
+    /// Each target costs an account-trie path plus a storage-trie cursor, so this bounds the most
+    /// expensive dimension of a batch. Raise it when a prover needs blocks that touch more
+    /// accounts than the default in one round trip; the separate 1024 storage-key cap is fixed to
+    /// match go-ethereum's `eth_getProof`.
+    #[arg(
+        long = "proofs-history.max-multi-proof-targets",
+        value_name = "COUNT",
+        default_value_t = DEFAULT_MAX_MULTI_PROOF_TARGETS,
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..)
+    )]
+    pub proofs_history_max_multi_proof_targets: usize,
 }
 
 impl Default for MorphArgs {
@@ -74,6 +89,7 @@ impl Default for MorphArgs {
             proofs_history_storage_path: None,
             proofs_history_window: DEFAULT_PROOFS_HISTORY_WINDOW,
             proofs_history_verification_interval: 0,
+            proofs_history_max_multi_proof_targets: DEFAULT_MAX_MULTI_PROOF_TARGETS,
         }
     }
 }
@@ -101,6 +117,10 @@ mod tests {
         assert_eq!(args.proofs_history_storage_path, None);
         assert_eq!(args.proofs_history_window, DEFAULT_PROOFS_HISTORY_WINDOW);
         assert_eq!(args.proofs_history_verification_interval, 0);
+        assert_eq!(
+            args.proofs_history_max_multi_proof_targets,
+            DEFAULT_MAX_MULTI_PROOF_TARGETS
+        );
     }
 
     #[test]
@@ -154,6 +174,8 @@ mod tests {
             "2592000",
             "--proofs-history.verification-interval",
             "64",
+            "--proofs-history.max-multi-proof-targets",
+            "512",
         ])
         .args;
 
@@ -164,6 +186,20 @@ mod tests {
         );
         assert_eq!(args.proofs_history_window, 2_592_000);
         assert_eq!(args.proofs_history_verification_interval, 64);
+        assert_eq!(args.proofs_history_max_multi_proof_targets, 512);
+    }
+
+    #[test]
+    fn rejects_a_zero_multi_proof_target_limit() {
+        // Zero would reject every non-empty batch, so clap must refuse it up front.
+        assert!(
+            CommandParser::<MorphArgs>::try_parse_from([
+                "test",
+                "--proofs-history.max-multi-proof-targets",
+                "0",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

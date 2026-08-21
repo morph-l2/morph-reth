@@ -1,4 +1,4 @@
-//! Bounded historical MPT storage for Morph `eth_getProof`.
+//! Bounded historical MPT storage for Morph proof RPCs.
 //!
 //! The versioned-trie implementation is adapted from Base's proof-history
 //! storage at commit `b2673bbd927cb34d7cfad4d448bfbd5bd30eae88` under MIT.
