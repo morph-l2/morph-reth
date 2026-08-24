@@ -1,13 +1,16 @@
 [build.env]
 passthrough = ["JEMALLOC_SYS_WITH_LG_PAGE"]
 
-# The default x86_64-unknown-linux-gnu cross image (Ubuntu 20.04) ships GCC 9.x,
-# which is affected by https://gcc.gnu.org/bugzilla/show_bug.cgi?id=95189 (a memcmp
-# miscompilation). aws-lc-sys >= 0.33 hard-panics with "### COMPILER BUG DETECTED ###"
-# when it finds this compiler, breaking the build. Install GCC 10 (10.3.0, in the
-# "known to work" set) and point gcc/g++/cc at it so every C dependency builds with it.
-# aarch64 is unaffected: it's a true cross-compile, so aws-lc-sys can't run its probe
-# binary and skips the check entirely.
+# Default linux-gnu cross-rs `:main` images are Ubuntu 24.04 (noble, glibc
+# 2.39). Dockerfile.cross must stay on the same Ubuntu series so published
+# images can load the binary.
+#
+# Keep GCC 10 on x86_64: aws-lc-sys >= 0.33 hard-panics with
+# "### COMPILER BUG DETECTED ###" on GCC 9 (Ubuntu 20.04 default) due to
+# https://gcc.gnu.org/bugzilla/show_bug.cgi?id=95189. v1.1.0 still ran this
+# pin after the builder moved to noble; leaving it avoids mixing a compiler
+# change into the glibc runtime fix. aarch64 is a true cross-compile, so
+# aws-lc-sys skips the probe.
 [target.x86_64-unknown-linux-gnu]
 pre-build = [
     "apt-get update && apt-get install --assume-yes gcc-10 g++-10",

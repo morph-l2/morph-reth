@@ -106,15 +106,16 @@ mod tests {
     use alloy_primitives::{B256, Sealed, Signature, U256};
     use morph_primitives::{MorphTxEnvelope, TxL1Msg};
     use morph_txpool::MorphPooledTransaction;
-    use reth_transaction_pool::PoolTransaction;
+    use reth_transaction_pool::{PoolTransaction, validate::DEFAULT_MAX_TX_INPUT_BYTES};
 
     #[tokio::test]
     async fn test_validate_oversized_transaction() {
-        // Test that transactions exceeding max_tx_input_bytes are rejected
-        // The default max_tx_input_bytes in reth is 120KB (122,880 bytes)
-
-        // For this test, we create a mock pool that would reject oversized transactions
-        // The actual validation happens in the validator when checking encoded size
+        // `DEFAULT_MAX_TX_INPUT_BYTES` is 4 * TX_SLOT_BYTE_SIZE = 128 KiB. Despite the
+        // "input" in the name, for non-blob transactions the validator compares it against
+        // the full 2718-encoded length, which matches go-ethereum's `txMaxSize`.
+        //
+        // This test only covers the size the pool transaction reports; the rejection itself
+        // lives in the validator, which needs a full provider to exercise.
 
         // Create a legacy transaction
         let tx = MorphTxEnvelope::Legacy(Signed::new_unchecked(
@@ -126,15 +127,13 @@ mod tests {
             Default::default(),
         ));
 
-        // Create a pool transaction with an encoded length exceeding the limit (121KB > 120KB)
+        // Create a pool transaction one byte over the limit
         let pool_tx = MorphPooledTransaction::new(
             Recovered::new_unchecked(tx, Default::default()),
-            121 * 1024,
+            DEFAULT_MAX_TX_INPUT_BYTES + 1,
         );
 
-        // Verify the encoded length is larger than the limit
-        assert_eq!(pool_tx.encoded_length(), 121 * 1024);
-        assert!(pool_tx.encoded_length() > 120 * 1024);
+        assert!(pool_tx.encoded_length() > DEFAULT_MAX_TX_INPUT_BYTES);
     }
 
     #[tokio::test]
