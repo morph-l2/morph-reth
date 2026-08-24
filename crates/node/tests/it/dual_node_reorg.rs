@@ -4,16 +4,24 @@ use alloy_consensus::transaction::TxHashRef;
 use alloy_eips::eip2718::Decodable2718;
 use alloy_primitives::B256;
 use eyre::WrapErr;
-use jsonrpsee::core::client::ClientT;
 use morph_node::test_utils::{MorphTxBuilder, TEST_TOKEN_ID, TestNodeBuilder, wallet_at_index};
-use morph_payload_types::{AssembleL2BlockParams, ExecutableL2Data};
-use morph_primitives::MorphHeader;
-use reth_provider::{AccountReader, BlockReader, StateProviderFactory};
+use morph_payload_types::{AssembleL2BlockParams, AssembleL2BlockV2Params, ExecutableL2Data};
+use reth_provider::{AccountReader, StateProviderFactory};
 
 use super::helpers::{
-    canonical_snapshot, reference_query, sync_optimistically, wait_for_pool_membership,
-    wait_for_reference_query,
+    assemble_l2_block, assemble_l2_block_v2, canonical_block, canonical_snapshot, head_timestamp,
+    import_l2_block, reference_query, sync_optimistically, transaction_hashes,
+    wait_for_reference_query, wait_until_evicted, wait_until_pooled,
 };
+
+/// Whether an assembled block carries the given transaction.
+fn includes_transaction(data: &ExecutableL2Data, tx_hash: B256) -> bool {
+    data.transactions.iter().any(|raw| {
+        let mut raw = raw.as_ref();
+        morph_primitives::MorphTxEnvelope::decode_2718(&mut raw)
+            .is_ok_and(|tx| *tx.tx_hash() == tx_hash)
+    })
+}
 
 /// Behavior contract:
 /// - fault: canonical block 2A contains a referenced MorphTx and is replaced
@@ -28,18 +36,17 @@ async fn sibling_reorg_converges_state_pool_and_reference_index() -> eyre::Resul
     let (mut nodes, wallet) = TestNodeBuilder::new().with_num_nodes(2).build().await?;
     let follower = nodes.pop().expect("two nodes requested");
     let leader = nodes.pop().expect("two nodes requested");
-    let client = leader.auth_server_handle().http_client();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs();
+
+    // Both sibling blocks descend from block 1; their timestamps and transaction
+    // sets distinguish the two branches.
+    let genesis_timestamp = head_timestamp(&leader)?;
+    let block1_timestamp = genesis_timestamp + 1;
 
     let mut block1_params = AssembleL2BlockParams::empty(1);
-    block1_params.timestamp = Some(now - 6);
-    let block1: ExecutableL2Data = client
-        .request("engine_assembleL2Block", (block1_params,))
-        .await?;
+    block1_params.timestamp = Some(block1_timestamp);
+    let block1 = assemble_l2_block(&leader, block1_params).await?;
     let block1_hash = block1.hash;
-    let _: MorphHeader = client.request("engine_newL2BlockV2", (block1,)).await?;
+    import_l2_block(&leader, block1).await?;
     sync_optimistically(&follower, block1_hash).await?;
 
     let reference_a = B256::with_last_byte(0xa1);
@@ -48,34 +55,29 @@ async fn sibling_reorg_converges_state_pool_and_reference_index() -> eyre::Resul
         .with_reference(reference_a)
         .build_signed()?;
     let tx_a_hash = leader.rpc.inject_tx(tx_a).await?;
-    wait_for_pool_membership(&leader, tx_a_hash, true).await?;
 
     let mut block2a_params = AssembleL2BlockParams::empty(2);
-    block2a_params.timestamp = Some(now - 4);
-    let block2a: ExecutableL2Data = client
-        .request("engine_assembleL2Block", (block2a_params,))
-        .await?;
+    block2a_params.timestamp = Some(block1_timestamp + 1);
+    let block2a = assemble_l2_block(&leader, block2a_params).await?;
     assert_eq!(block2a.parent_hash, block1_hash);
     assert!(
-        block2a.transactions.iter().any(|raw| {
-            let mut raw = raw.as_ref();
-            morph_primitives::MorphTxEnvelope::decode_2718(&mut raw)
-                .is_ok_and(|tx| *tx.tx_hash() == tx_a_hash)
-        }),
+        includes_transaction(&block2a, tx_a_hash),
         "branch A must contain its referenced MorphTx"
     );
     let block2a_hash = block2a.hash;
-    let _: MorphHeader = client.request("engine_newL2BlockV2", (block2a,)).await?;
-    wait_for_pool_membership(&leader, tx_a_hash, false).await?;
+    import_l2_block(&leader, block2a).await?;
+    wait_until_evicted(&leader, tx_a_hash).await?;
     sync_optimistically(&follower, block2a_hash).await?;
+    // Baseline for the post-reorg re-admission assertion below: without this, a
+    // gossiped-and-never-removed transaction would satisfy it.
+    wait_until_evicted(&follower, tx_a_hash).await?;
 
     for (name, node) in [("leader", &leader), ("follower", &follower)] {
-        let indexed_a = wait_for_reference_query(node, reference_query(reference_a), |results| {
+        wait_for_reference_query(node, reference_query(reference_a), |results| {
             results.len() == 1 && results[0].transaction_hash == tx_a_hash
         })
         .await
         .wrap_err_with(|| format!("{name} did not index branch A"))?;
-        assert_eq!(indexed_a[0].transaction_hash, tx_a_hash);
     }
 
     let reference_b = B256::with_last_byte(0xb2);
@@ -87,64 +89,48 @@ async fn sibling_reorg_converges_state_pool_and_reference_index() -> eyre::Resul
         .with_reference(reference_b)
         .build_signed()?;
     let tx_b_hash = leader.rpc.inject_tx(tx_b).await?;
-    wait_for_pool_membership(&leader, tx_b_hash, true).await?;
+    // Establish that B reached the follower's pool before it becomes canonical;
+    // otherwise a later absence would not prove reorg-driven eviction.
+    wait_until_pooled(&follower, tx_b_hash).await?;
 
-    let block2b: ExecutableL2Data = client
-        .request(
-            "engine_assembleL2BlockV2",
-            (serde_json::json!({
-                "parentHash": block1_hash,
-                "timestamp": format!("{:#x}", now - 2),
-                "transactions": [],
-            }),),
-        )
-        .await?;
+    let mut block2b_params = AssembleL2BlockV2Params::empty(block1_hash);
+    block2b_params.timestamp = Some(block1_timestamp + 2);
+    let block2b = assemble_l2_block_v2(&leader, block2b_params).await?;
     assert_eq!(block2b.parent_hash, block1_hash);
     assert_ne!(block2b.hash, block2a_hash);
     assert!(
-        block2b.transactions.iter().any(|raw| {
-            let mut raw = raw.as_ref();
-            morph_primitives::MorphTxEnvelope::decode_2718(&mut raw)
-                .is_ok_and(|tx| *tx.tx_hash() == tx_b_hash)
-        }),
+        includes_transaction(&block2b, tx_b_hash),
         "branch B must contain its referenced MorphTx"
     );
     let block2b_hash = block2b.hash;
-    let _: MorphHeader = client.request("engine_newL2BlockV2", (block2b,)).await?;
+    import_l2_block(&leader, block2b).await?;
 
-    wait_for_pool_membership(&leader, tx_a_hash, true).await?;
-    wait_for_pool_membership(&leader, tx_b_hash, false).await?;
+    wait_until_pooled(&leader, tx_a_hash).await?;
+    wait_until_evicted(&leader, tx_b_hash).await?;
     sync_optimistically(&follower, block2b_hash).await?;
-    wait_for_pool_membership(&follower, tx_a_hash, true).await?;
+    wait_until_pooled(&follower, tx_a_hash).await?;
+    wait_until_evicted(&follower, tx_b_hash).await?;
 
     for (name, node) in [("leader", &leader), ("follower", &follower)] {
-        let indexed_b = wait_for_reference_query(node, reference_query(reference_b), |results| {
+        wait_for_reference_query(node, reference_query(reference_b), |results| {
             results.len() == 1 && results[0].transaction_hash == tx_b_hash
         })
         .await
         .wrap_err_with(|| format!("{name} did not index branch B"))?;
-        assert_eq!(indexed_b[0].transaction_hash, tx_b_hash);
 
-        let indexed_a = wait_for_reference_query(node, reference_query(reference_a), |results| {
-            results.is_empty()
-        })
-        .await
-        .wrap_err_with(|| format!("{name} retained branch A"))?;
-        assert!(
-            indexed_a.is_empty(),
-            "orphaned branch A must not leave a reference-index entry"
-        );
+        // Ordering matters: branch B is indexed in the same turn that rolls back
+        // branch A, so an empty result here cannot be "not indexed yet".
+        wait_for_reference_query(node, reference_query(reference_a), <[_]>::is_empty)
+            .await
+            .wrap_err_with(|| format!("{name} retained branch A"))?;
     }
 
     let leader_head = canonical_snapshot(&leader)?;
-    let follower_head = canonical_snapshot(&follower)?;
     assert_eq!(leader_head.hash, block2b_hash);
-    assert_eq!(follower_head.hash, block2b_hash);
-    assert_eq!(leader_head.number, follower_head.number);
-    assert_eq!(leader_head.state_root, follower_head.state_root);
     assert_eq!(
-        leader_head.next_l1_message_index,
-        follower_head.next_l1_message_index
+        leader_head,
+        canonical_snapshot(&follower)?,
+        "both nodes must expose the same head, state root, queue index, and safe tag"
     );
 
     let leader_state = leader.inner.provider.latest()?;
@@ -177,17 +163,7 @@ async fn sibling_reorg_converges_state_pool_and_reference_index() -> eyre::Resul
     );
 
     for node in [&leader, &follower] {
-        let canonical_block = node
-            .inner
-            .provider
-            .block_by_number(2)?
-            .expect("canonical block 2");
-        let hashes: Vec<_> = canonical_block
-            .body
-            .transactions
-            .iter()
-            .map(|tx| *tx.tx_hash())
-            .collect();
+        let hashes = transaction_hashes(&canonical_block(node, 2)?);
         assert!(hashes.contains(&tx_b_hash));
         assert!(!hashes.contains(&tx_a_hash));
     }

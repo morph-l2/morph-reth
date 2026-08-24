@@ -1,23 +1,38 @@
 //! Shared test helper utilities used across integration test modules.
 
-use alloy_consensus::BlockHeader;
+use alloy_consensus::{BlockHeader, transaction::TxHashRef};
 use alloy_primitives::{Address, B256, Bytes};
 use alloy_rpc_types_engine::PayloadAttributes;
+use jsonrpsee::core::client::ClientT;
 use morph_node::test_utils::MorphTestNode;
 use morph_payload_types::{
-    ExecutableL2Data, MorphBuiltPayload, MorphPayloadAttributes, MorphPayloadTypes,
+    AssembleL2BlockParams, AssembleL2BlockV2Params, ExecutableL2Data, MorphBuiltPayload,
+    MorphPayloadAttributes, MorphPayloadTypes,
 };
+use morph_primitives::{Block, MorphHeader};
 use morph_reference_index::ReferenceTransactionResult;
 use morph_rpc::ReferenceQueryArgs;
 use reth_e2e_test_utils::wallet::Wallet;
 use reth_node_api::PayloadTypes;
 use reth_payload_builder::BuildNewPayload;
 use reth_payload_primitives::BuiltPayload;
-use reth_provider::{BlockIdReader, BlockReaderIdExt};
+use reth_provider::{BlockIdReader, BlockReader, BlockReaderIdExt};
 use reth_transaction_pool::TransactionPool;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
+
+/// Interval between polls when waiting for an asynchronous node component.
+pub(crate) const POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+/// Interval between forkchoice retries, which each cost a network round trip.
+const FORKCHOICE_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Budget for state that a single node updates locally (pool maintenance, index writes).
+pub(crate) const LOCAL_POLL_BUDGET: Duration = Duration::from_secs(10);
+
+/// Budget for state that must travel between nodes over P2P before it converges.
+pub(crate) const NETWORK_POLL_BUDGET: Duration = Duration::from_secs(40);
 
 /// Observable canonical-chain state used to prove a rejected payload had no side effects.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,6 +42,76 @@ pub(crate) struct CanonicalSnapshot {
     pub(crate) state_root: B256,
     pub(crate) next_l1_message_index: u64,
     pub(crate) safe_hash: Option<B256>,
+}
+
+/// Timestamp of the current canonical head.
+///
+/// Scenario tests derive block timestamps from this so they stay hermetic instead
+/// of depending on wall-clock time.
+pub(crate) fn head_timestamp(node: &MorphTestNode) -> eyre::Result<u64> {
+    Ok(node
+        .inner
+        .provider
+        .sealed_header_by_number_or_tag(alloy_rpc_types_eth::BlockNumberOrTag::Latest)?
+        .ok_or_else(|| eyre::eyre!("canonical head is missing"))?
+        .timestamp())
+}
+
+/// Assemble a block on top of the canonical head via `engine_assembleL2Block`.
+pub(crate) async fn assemble_l2_block(
+    node: &MorphTestNode,
+    params: AssembleL2BlockParams,
+) -> eyre::Result<ExecutableL2Data> {
+    Ok(node
+        .auth_server_handle()
+        .http_client()
+        .request("engine_assembleL2Block", (params,))
+        .await?)
+}
+
+/// Assemble a block on top of an explicit parent via `engine_assembleL2BlockV2`.
+///
+/// Unlike [`assemble_l2_block`], the parent need not be the canonical head, which
+/// is what makes sibling-branch construction possible.
+pub(crate) async fn assemble_l2_block_v2(
+    node: &MorphTestNode,
+    params: AssembleL2BlockV2Params,
+) -> eyre::Result<ExecutableL2Data> {
+    Ok(node
+        .auth_server_handle()
+        .http_client()
+        .request("engine_assembleL2BlockV2", (params,))
+        .await?)
+}
+
+/// Import an assembled block via `engine_newL2BlockV2`.
+pub(crate) async fn import_l2_block(
+    node: &MorphTestNode,
+    data: ExecutableL2Data,
+) -> eyre::Result<MorphHeader> {
+    Ok(node
+        .auth_server_handle()
+        .http_client()
+        .request("engine_newL2BlockV2", (data,))
+        .await?)
+}
+
+/// Read a canonical block by number, failing if it is absent.
+pub(crate) fn canonical_block(node: &MorphTestNode, number: u64) -> eyre::Result<Block> {
+    node.inner
+        .provider
+        .block_by_number(number)?
+        .ok_or_else(|| eyre::eyre!("canonical block {number} is missing"))
+}
+
+/// Hashes of every transaction in a block, in block order.
+pub(crate) fn transaction_hashes(block: &Block) -> Vec<B256> {
+    block
+        .body
+        .transactions
+        .iter()
+        .map(|tx| *tx.tx_hash())
+        .collect()
 }
 
 /// Wrap a [`Wallet`] in an `Arc<Mutex<>>` for use in `advance_chain`.
@@ -51,13 +136,27 @@ pub(crate) fn canonical_snapshot(node: &MorphTestNode) -> eyre::Result<Canonical
     })
 }
 
-/// Wait until a transaction is present in or absent from the pool.
-pub(crate) async fn wait_for_pool_membership(
+/// Wait until pool maintenance has re-admitted a transaction.
+///
+/// Only meaningful where the transaction is expected to *return* to the pool, such
+/// as after a reorg. Submission through `inject_tx` already awaits insertion, so
+/// asserting presence straight after submission proves nothing.
+pub(crate) async fn wait_until_pooled(node: &MorphTestNode, tx_hash: B256) -> eyre::Result<()> {
+    wait_for_pool_membership(node, tx_hash, true).await
+}
+
+/// Wait until pool maintenance has evicted a transaction, normally because a block
+/// containing it became canonical.
+pub(crate) async fn wait_until_evicted(node: &MorphTestNode, tx_hash: B256) -> eyre::Result<()> {
+    wait_for_pool_membership(node, tx_hash, false).await
+}
+
+async fn wait_for_pool_membership(
     node: &MorphTestNode,
     tx_hash: B256,
     expected: bool,
 ) -> eyre::Result<()> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + LOCAL_POLL_BUDGET;
     loop {
         let present = node.inner.pool.contains(&tx_hash);
         if present == expected {
@@ -68,7 +167,7 @@ pub(crate) async fn wait_for_pool_membership(
                 "transaction {tx_hash} pool membership stayed {present}, expected {expected}"
             ));
         }
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        tokio::time::sleep(POLL_INTERVAL).await;
     }
 }
 
@@ -78,10 +177,9 @@ pub(crate) async fn wait_for_pool_membership(
 /// Upstream `sync_to` finalizes its target, which makes a later sibling reorg an
 /// invalid test setup and causes reorg-aware indexes to require manual repair.
 pub(crate) async fn sync_optimistically(node: &MorphTestNode, target: B256) -> eyre::Result<()> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
+    let deadline = tokio::time::Instant::now() + NETWORK_POLL_BUDGET;
     loop {
         if canonical_snapshot(node)?.hash == target {
-            tokio::time::sleep(Duration::from_millis(100)).await;
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
@@ -89,8 +187,10 @@ pub(crate) async fn sync_optimistically(node: &MorphTestNode, target: B256) -> e
                 "node did not optimistically sync to {target} before timeout"
             ));
         }
+        // A forkchoice update is only actioned once the payload has arrived over
+        // P2P, so it has to be retried rather than sent once.
         node.update_optimistic_forkchoice(target).await?;
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(FORKCHOICE_RETRY_INTERVAL).await;
     }
 }
 
@@ -100,12 +200,10 @@ pub(crate) async fn wait_for_reference_query(
     args: ReferenceQueryArgs,
     ready: impl Fn(&[ReferenceTransactionResult]) -> bool,
 ) -> eyre::Result<Vec<ReferenceTransactionResult>> {
-    use jsonrpsee::core::client::ClientT;
-
     let client = node
         .rpc_client()
         .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + LOCAL_POLL_BUDGET;
     let mut last_observation = String::from("no RPC response");
 
     while tokio::time::Instant::now() < deadline {
@@ -120,12 +218,14 @@ pub(crate) async fn wait_for_reference_query(
             Ok(results) => last_observation = format!("results={results:?}"),
             Err(error) => {
                 last_observation = error.to_string();
-                if last_observation.contains("reference index is unavailable") {
+                // "Unavailable" means the index gave up and needs a manual rebuild,
+                // so retrying would only burn the whole budget.
+                if last_observation.contains(REFERENCE_INDEX_UNAVAILABLE) {
                     return Err(eyre::eyre!(last_observation));
                 }
             }
         }
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        tokio::time::sleep(POLL_INTERVAL).await;
     }
 
     Err(eyre::eyre!(
@@ -133,6 +233,12 @@ pub(crate) async fn wait_for_reference_query(
     ))
 }
 
+/// RPC message that `morph-rpc` maps `ReferenceIndexError::IndexUnavailable` to.
+/// A repair still in progress reports "reference index is behind" instead, which
+/// is retryable.
+const REFERENCE_INDEX_UNAVAILABLE: &str = "reference index is unavailable";
+
+/// Unpaginated reference lookup.
 pub(crate) const fn reference_query(reference: B256) -> ReferenceQueryArgs {
     ReferenceQueryArgs {
         reference,
@@ -265,9 +371,14 @@ pub(crate) async fn build_block_no_submit(
         .await?
         .map_err(|e| eyre::eyre!("payload build failed: {e}"))?;
 
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    // `best_payload` reports the best payload built so far, so it can answer before
+    // the builder has drained the pool. Callers that need pool transactions assert
+    // on their presence, which turns a premature read into a clear failure rather
+    // than a silent one. Resolving the job changes what several consensus tests
+    // observe, so this stays a peek.
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + LOCAL_POLL_BUDGET;
     loop {
         if tokio::time::Instant::now() > deadline {
             return Err(eyre::eyre!("timeout waiting for payload"));
@@ -278,9 +389,9 @@ pub(crate) async fn build_block_no_submit(
             .best_payload(payload_id)
             .await
         {
-            Some(Ok(p)) => return Ok(p),
-            Some(Err(e)) => return Err(eyre::eyre!("payload build error: {e}")),
-            None => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
+            Some(Ok(payload)) => return Ok(payload),
+            Some(Err(error)) => return Err(eyre::eyre!("payload build error: {error}")),
+            None => tokio::time::sleep(POLL_INTERVAL).await,
         }
     }
 }

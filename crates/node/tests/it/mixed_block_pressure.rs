@@ -1,18 +1,21 @@
 //! Mixed L1/L2 block construction under independent resource limits.
 
 use alloy_consensus::{BlockHeader, transaction::TxHashRef};
-use alloy_eips::eip2718::Encodable2718;
-use alloy_primitives::{Address, B256, Bytes};
-use jsonrpsee::core::client::ClientT;
+use alloy_primitives::B256;
+use alloy_primitives::{Bytes, U256};
+use alloy_rlp::Encodable;
 use morph_node::test_utils::{
-    L1MessageBuilder, MorphTestNode, MorphTxBuilder, TEST_TOKEN_ADDRESS, TEST_TOKEN_ID,
-    TestNodeBuilder, make_transfer_tx, wallet_at_index,
+    L1MessageBuilder, MorphTestNode, MorphTxBuilder, TEST_FEE_VAULT_ADDRESS, TEST_TOKEN_ADDRESS,
+    TEST_TOKEN_ID, TestNodeBuilder, make_transfer_tx, test_token_balance_slot, wallet_at_index,
 };
 use morph_payload_types::{AssembleL2BlockParams, ExecutableL2Data};
-use morph_primitives::{Block, MorphHeader, MorphReceipt};
-use reth_provider::{BlockReader, BlockReaderIdExt, ReceiptProvider, StateProviderFactory};
+use morph_primitives::{Block, MorphReceipt};
+use reth_provider::{BlockReaderIdExt, ReceiptProvider, StateProviderFactory};
 
-use super::helpers::wait_for_pool_membership;
+use super::helpers::{
+    assemble_l2_block, canonical_block, import_l2_block, transaction_hashes, wait_until_evicted,
+    wait_until_pooled,
+};
 
 const HIGH_FEE: u128 = 20_000_000_000;
 const LOW_FEE: u128 = 10_000_000_000;
@@ -29,19 +32,18 @@ async fn assemble_and_import(
     let mut params = AssembleL2BlockParams::new(latest.number() + 1, l1_messages);
     params.timestamp = Some(latest.timestamp() + 1);
 
-    let client = node.auth_server_handle().http_client();
-    let data: ExecutableL2Data = client.request("engine_assembleL2Block", (params,)).await?;
-    let _: MorphHeader = client
-        .request("engine_newL2BlockV2", (data.clone(),))
-        .await?;
+    let data = assemble_l2_block(node, params).await?;
+    import_l2_block(node, data.clone()).await?;
     Ok(data)
 }
 
-fn canonical_block(node: &MorphTestNode, number: u64) -> eyre::Result<Block> {
-    node.inner
+fn token_balance(node: &MorphTestNode, slot: B256) -> eyre::Result<U256> {
+    Ok(node
+        .inner
         .provider
-        .block_by_number(number)?
-        .ok_or_else(|| eyre::eyre!("canonical block {number} is missing"))
+        .latest()?
+        .storage(TEST_TOKEN_ADDRESS, slot)?
+        .unwrap_or_default())
 }
 
 fn assert_l1_prefix(block: &Block, expected_l1_messages: u64) {
@@ -62,20 +64,17 @@ fn assert_l1_prefix(block: &Block, expected_l1_messages: u64) {
     assert_eq!(block.header.next_l1_msg_index, expected_l1_messages);
 }
 
-fn transaction_hashes(block: &Block) -> Vec<B256> {
+/// Data-availability bytes the builder attributes to a block, which is the RLP
+/// network length of each pool transaction. L1 messages are excluded because
+/// their data already lives on L1.
+fn l2_da_bytes(block: &Block) -> u64 {
     block
         .body
         .transactions
         .iter()
-        .map(|tx| *tx.tx_hash())
-        .collect()
-}
-
-fn token_balance_slot(account: Address) -> B256 {
-    let mut preimage = [0u8; 64];
-    preimage[12..32].copy_from_slice(account.as_slice());
-    preimage[63] = 1;
-    alloy_primitives::keccak256(preimage)
+        .filter(|tx| !tx.is_l1_msg())
+        .map(|tx| tx.length() as u64)
+        .sum()
 }
 
 /// Behavior contract:
@@ -134,19 +133,27 @@ async fn mixed_block_respects_gas_limit_without_losing_pool_transactions() -> ey
 
     assert_l1_prefix(&block, 1);
     assert!(block.header.inner.gas_used <= block.header.inner.gas_limit);
+    // The excluded transaction would not have fit, so the block must genuinely be
+    // close to full rather than merely under the limit.
+    assert!(
+        block.header.inner.gas_used + 30_000 > block.header.inner.gas_limit,
+        "gas limit did not actually bind: used {} of {}",
+        block.header.inner.gas_used,
+        block.header.inner.gas_limit
+    );
     assert!(hashes.contains(&regular_hash));
     assert!(hashes.contains(&morph_hash));
     assert!(!hashes.contains(&overflow_hash));
-    wait_for_pool_membership(&node, regular_hash, false).await?;
-    wait_for_pool_membership(&node, morph_hash, false).await?;
-    wait_for_pool_membership(&node, overflow_hash, true).await?;
+    wait_until_evicted(&node, regular_hash).await?;
+    wait_until_evicted(&node, morph_hash).await?;
+    wait_until_pooled(&node, overflow_hash).await?;
 
     Ok(())
 }
 
 /// Behavior contract:
 /// - fault pressure: individually valid pool transactions cumulatively exceed
-///   the configured DA payload-byte limit;
+///   the configured DA payload-byte limit, alongside a three-message L1 prefix;
 /// - evidence: the independently summed canonical L2 bytes stay within the
 ///   limit, fee receipt and token state agree, and the overflow remains pooled.
 #[tokio::test(flavor = "multi_thread")]
@@ -154,6 +161,7 @@ async fn mixed_block_respects_da_limit_and_preserves_fee_accounting() -> eyre::R
     reth_tracing::init_test_tracing();
 
     const MAX_DA_BYTES: u64 = 1_200;
+    const OVERFLOW_DATA_BYTES: usize = 700;
     let (mut nodes, wallet) = TestNodeBuilder::new()
         .with_max_tx_payload_bytes(MAX_DA_BYTES)
         .build()
@@ -161,14 +169,10 @@ async fn mixed_block_respects_da_limit_and_preserves_fee_accounting() -> eyre::R
     let node = nodes.pop().expect("one node requested");
     let signer_b = wallet_at_index(1, wallet.chain_id);
     let signer_c = wallet_at_index(2, wallet.chain_id);
-    let token_payer = signer_b.address();
-    let balance_slot = token_balance_slot(token_payer);
-    let token_before = node
-        .inner
-        .provider
-        .latest()?
-        .storage(TEST_TOKEN_ADDRESS, balance_slot)?
-        .unwrap_or_default();
+    let payer_slot = test_token_balance_slot(signer_b.address());
+    let vault_slot = test_token_balance_slot(TEST_FEE_VAULT_ADDRESS);
+    let payer_before = token_balance(&node, payer_slot)?;
+    let vault_before = token_balance(&node, vault_slot)?;
 
     let regular_hash = node
         .rpc
@@ -186,7 +190,7 @@ async fn mixed_block_respects_da_limit_and_preserves_fee_accounting() -> eyre::R
         .await?;
     let overflow_raw = MorphTxBuilder::new(wallet.chain_id, signer_c, 0)
         .with_v1_eth_fee()
-        .with_data(vec![0x22; 700])
+        .with_data(vec![0x22; OVERFLOW_DATA_BYTES])
         .with_fees(LOW_FEE, LOW_FEE)
         .build_signed()?;
     assert!(
@@ -195,19 +199,21 @@ async fn mixed_block_respects_da_limit_and_preserves_fee_accounting() -> eyre::R
     );
     let overflow_hash = node.rpc.inject_tx(overflow_raw).await?;
 
-    let data = assemble_and_import(&node, vec![L1MessageBuilder::new(0).build_encoded()]).await?;
+    // Three L1 messages also exercise the sequential queue-index prefix, which the
+    // DA limit must not account for.
+    let data = assemble_and_import(&node, L1MessageBuilder::build_sequential(0, 3)).await?;
     let block = canonical_block(&node, data.number)?;
     let hashes = transaction_hashes(&block);
-    let l2_bytes: u64 = block
-        .body
-        .transactions
-        .iter()
-        .filter(|tx| !tx.is_l1_msg())
-        .map(|tx| tx.encode_2718_len() as u64)
-        .sum();
+    let l2_bytes = l2_da_bytes(&block);
 
-    assert_l1_prefix(&block, 1);
+    assert_l1_prefix(&block, 3);
     assert!(l2_bytes <= MAX_DA_BYTES);
+    // Without this the assertion above would also hold for a block that stopped
+    // far short of the limit, or that dropped the limit check altogether.
+    assert!(
+        l2_bytes + OVERFLOW_DATA_BYTES as u64 > MAX_DA_BYTES,
+        "DA limit did not actually bind: {l2_bytes} of {MAX_DA_BYTES} bytes used"
+    );
     assert!(hashes.contains(&regular_hash));
     assert!(hashes.contains(&token_fee_hash));
     assert!(!hashes.contains(&overflow_hash));
@@ -217,24 +223,37 @@ async fn mixed_block_respects_da_limit_and_preserves_fee_accounting() -> eyre::R
         .provider
         .receipt_by_hash(token_fee_hash)?
         .expect("token-fee receipt must exist");
-    match receipt {
-        MorphReceipt::Morph(receipt) => {
-            assert_eq!(receipt.fee_token_id, Some(TEST_TOKEN_ID));
-            assert!(receipt.fee_rate.is_some());
-            assert!(receipt.token_scale.is_some());
-            assert!(receipt.fee_limit.is_some());
-        }
-        other => panic!("expected Morph receipt, got {:?}", other.tx_type()),
-    }
-    let token_after = node
-        .inner
-        .provider
-        .latest()?
-        .storage(TEST_TOKEN_ADDRESS, balance_slot)?
-        .unwrap_or_default();
+    let MorphReceipt::Morph(receipt) = receipt else {
+        panic!("expected Morph receipt, got {:?}", receipt.tx_type());
+    };
+    assert_eq!(receipt.fee_token_id, Some(TEST_TOKEN_ID));
+    let fee_limit = receipt.fee_limit.expect("fee_limit must be recorded");
     assert!(
-        token_after < token_before,
-        "canonical token-fee transaction must debit the payer"
+        !receipt
+            .fee_rate
+            .expect("fee_rate must be recorded")
+            .is_zero(),
+        "a zero fee rate would silently make the token fee free"
+    );
+    assert!(
+        !receipt
+            .token_scale
+            .expect("token_scale must be recorded")
+            .is_zero()
+    );
+
+    // Conservation is checked instead of re-deriving the fee formula, which would
+    // make the test pass for any consistent-but-wrong charge.
+    let debited = payer_before - token_balance(&node, payer_slot)?;
+    let credited = token_balance(&node, vault_slot)? - vault_before;
+    assert!(debited > U256::ZERO, "token fee payer was not charged");
+    assert_eq!(
+        debited, credited,
+        "tokens taken from the payer must arrive at the fee vault"
+    );
+    assert!(
+        debited <= fee_limit,
+        "token debit {debited} must stay within the signed fee limit {fee_limit}"
     );
 
     let l1_hash = *block.body.transactions[0].tx_hash();
@@ -243,26 +262,28 @@ async fn mixed_block_respects_da_limit_and_preserves_fee_accounting() -> eyre::R
         .provider
         .receipt_by_hash(l1_hash)?
         .expect("L1 receipt must exist");
-    assert_eq!(l1_receipt.l1_fee(), alloy_primitives::U256::ZERO);
+    assert_eq!(l1_receipt.l1_fee(), U256::ZERO);
 
-    wait_for_pool_membership(&node, regular_hash, false).await?;
-    wait_for_pool_membership(&node, token_fee_hash, false).await?;
-    wait_for_pool_membership(&node, overflow_hash, true).await?;
+    wait_until_evicted(&node, regular_hash).await?;
+    wait_until_evicted(&node, token_fee_hash).await?;
+    wait_until_pooled(&node, overflow_hash).await?;
 
     Ok(())
 }
 
 /// Behavior contract:
-/// - fault pressure: the configured transaction count includes mandatory L1
-///   messages as well as pool transactions;
-/// - evidence: the block stops exactly at the count, preserves the L1 prefix,
-///   and leaves the lower-priority overflow transaction in the pool.
+/// - fault pressure: individually valid pool transactions cumulatively exceed
+///   the configured DA payload-byte limit, alongside a three-message L1 prefix;
+/// - evidence: the independently summed canonical L2 bytes stay within the
+///   limit and the overflow remains pooled.
 #[tokio::test(flavor = "multi_thread")]
-async fn mixed_block_counts_l1_messages_toward_transaction_limit() -> eyre::Result<()> {
+async fn mixed_block_respects_da_limit_with_l1_messages() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
+    const MAX_DA_BYTES: u64 = 1_200;
+    const OVERFLOW_DATA_BYTES: usize = 700;
     let (mut nodes, wallet) = TestNodeBuilder::new()
-        .with_max_tx_per_block(3)
+        .with_max_tx_payload_bytes(MAX_DA_BYTES)
         .build()
         .await?;
     let node = nodes.pop().expect("one node requested");
@@ -278,32 +299,30 @@ async fn mixed_block_counts_l1_messages_toward_transaction_limit() -> eyre::Resu
         .inject_tx(
             MorphTxBuilder::new(wallet.chain_id, signer_b, 0)
                 .with_v1_eth_fee()
+                .with_data(vec![0x11; 400])
                 .with_fees(HIGH_FEE, HIGH_FEE)
                 .build_signed()?,
         )
         .await?;
-    let overflow_hash = node
-        .rpc
-        .inject_tx(
-            MorphTxBuilder::new(wallet.chain_id, signer_c, 0)
-                .with_v1_eth_fee()
-                .with_fees(LOW_FEE, LOW_FEE)
-                .build_signed()?,
-        )
-        .await?;
+    let overflow_raw = MorphTxBuilder::new(wallet.chain_id, signer_c, 0)
+        .with_v1_eth_fee()
+        .with_data(vec![0x22; OVERFLOW_DATA_BYTES])
+        .with_fees(LOW_FEE, LOW_FEE)
+        .build_signed()?;
+    let overflow_hash = node.rpc.inject_tx(overflow_raw).await?;
 
-    let data = assemble_and_import(&node, vec![L1MessageBuilder::new(0).build_encoded()]).await?;
+    let data = assemble_and_import(&node, L1MessageBuilder::build_sequential(0, 3)).await?;
     let block = canonical_block(&node, data.number)?;
     let hashes = transaction_hashes(&block);
 
-    assert_eq!(block.body.transactions.len(), 3);
-    assert_l1_prefix(&block, 1);
+    assert_l1_prefix(&block, 3);
+    assert!(l2_da_bytes(&block) <= MAX_DA_BYTES);
     assert!(hashes.contains(&regular_hash));
     assert!(hashes.contains(&morph_hash));
     assert!(!hashes.contains(&overflow_hash));
-    wait_for_pool_membership(&node, regular_hash, false).await?;
-    wait_for_pool_membership(&node, morph_hash, false).await?;
-    wait_for_pool_membership(&node, overflow_hash, true).await?;
+    wait_until_evicted(&node, regular_hash).await?;
+    wait_until_evicted(&node, morph_hash).await?;
+    wait_until_pooled(&node, overflow_hash).await?;
 
     Ok(())
 }

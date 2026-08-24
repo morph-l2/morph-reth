@@ -10,13 +10,15 @@ use reth_payload_primitives::BuiltPayload;
 use reth_provider::{AccountReader, StateProviderFactory};
 
 use super::helpers::{
-    build_block_no_submit, canonical_snapshot, payload_with_receipts_root, wait_for_pool_membership,
+    build_block_no_submit, canonical_snapshot, payload_with_receipts_root, wait_until_evicted,
+    wait_until_pooled,
 };
 
 /// Behavior contract:
 /// - fault: the payload commits to a receipts root that execution cannot produce;
-/// - evidence: both validation and import reject it, canonical/account state stay
-///   unchanged, and the unmodified payload can still be imported afterwards.
+/// - evidence: import rejects it for that specific reason rather than on a cheaper
+///   pre-execution check, validation agrees, canonical/account state stay unchanged,
+///   and the unmodified payload can still be imported afterwards.
 #[tokio::test(flavor = "multi_thread")]
 async fn invalid_receipts_root_preserves_canonical_state_then_recovers() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -35,7 +37,6 @@ async fn invalid_receipts_root_preserves_canonical_state_then_recovers() -> eyre
         .first()
         .expect("payload builder should include the pending transfer")
         .tx_hash();
-    wait_for_pool_membership(&node, tx_hash, true).await?;
 
     let before = canonical_snapshot(&node)?;
     let nonce_before = node
@@ -52,26 +53,31 @@ async fn invalid_receipts_root_preserves_canonical_state_then_recovers() -> eyre
         "test fault must change the receipts root"
     );
     let invalid_data = payload_with_receipts_root(&base_payload, wrong_root);
+    let validation_data = payload_with_receipts_root(&base_payload, B256::repeat_byte(0x55));
+    assert_eq!(
+        invalid_data.parent_hash, before.hash,
+        "the payload must be a direct child of the head, so the receipts root is the only fault"
+    );
+    assert_ne!(
+        validation_data.hash, invalid_data.hash,
+        "validation must use a distinct payload to avoid the rejected-payload cache"
+    );
 
     let client = node.auth_server_handle().http_client();
-    let validation: GenericResponse = client
-        .request("engine_validateL2Block", (invalid_data.clone(),))
-        .await?;
+    let import_error = client
+        .request::<MorphHeader, _>("engine_newL2BlockV2", (invalid_data,))
+        .await
+        .expect_err("newL2BlockV2 must reject the invalid execution result")
+        .to_string();
     assert!(
-        !validation.success,
-        "execution must reject a self-consistent header hash with the wrong receipts root"
+        import_error.contains("receipt root mismatch"),
+        "expected a post-execution receipt-root rejection, got: {import_error}"
     );
-    assert_eq!(
-        canonical_snapshot(&node)?,
-        before,
-        "validation must not mutate canonical state"
-    );
-
-    let import: Result<MorphHeader, _> =
-        client.request("engine_newL2BlockV2", (invalid_data,)).await;
+    // A payload whose header hash disagrees with its own fields is rejected before
+    // execution, so that outcome would leave the execution path untested.
     assert!(
-        import.is_err(),
-        "newL2BlockV2 must reject the invalid execution result"
+        !import_error.contains("block hash mismatch"),
+        "payload was rejected by the pre-execution hash check: {import_error}"
     );
     assert_eq!(
         canonical_snapshot(&node)?,
@@ -88,7 +94,20 @@ async fn invalid_receipts_root_preserves_canonical_state_then_recovers() -> eyre
         nonce_after_rejection, nonce_before,
         "failed execution must not commit account state"
     );
-    wait_for_pool_membership(&node, tx_hash, true).await?;
+    wait_until_pooled(&node, tx_hash).await?;
+
+    let validation: GenericResponse = client
+        .request("engine_validateL2Block", (validation_data,))
+        .await?;
+    assert!(
+        !validation.success,
+        "validation must report the invalid payload as unusable"
+    );
+    assert_eq!(
+        canonical_snapshot(&node)?,
+        before,
+        "validation must not mutate canonical state"
+    );
 
     let valid_data = base_payload.executable_data().clone();
     let valid_hash = valid_data.hash;
@@ -105,7 +124,7 @@ async fn invalid_receipts_root_preserves_canonical_state_then_recovers() -> eyre
         .basic_account(&sender)?
         .map_or(0, |account| account.nonce);
     assert_eq!(nonce_after_recovery, nonce_before + 1);
-    wait_for_pool_membership(&node, tx_hash, false).await?;
+    wait_until_evicted(&node, tx_hash).await?;
 
     Ok(())
 }
