@@ -119,14 +119,13 @@ openssl rand -hex 32 > jwt.hex
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--morph.max-tx-payload-bytes` | 122880 (120KB) | Maximum transaction payload bytes per block |
-| `--morph.max-tx-per-block` | None (unlimited) | Maximum number of transactions per block |
+| `--morph.max-tx-payload-bytes` | 737280 (720 KiB) | Maximum L2 tx payload bytes per block (fits one uncompressed 6-blob batch) |
 | `--proofs-history` | false | Enable historical `eth_getProof` / `eth_getMultiProof` and proof-history accumulation |
 | `--proofs-history.storage-path` | `<chain-datadir>/historical-proofs` | Override the proof MDBX directory |
 | `--proofs-history.window` | 604800 | Number of canonical blocks retained (7 days at 1s/block) |
 | `--proofs-history.verification-interval` | 0 | Re-execute every Nth indexed block; 0 disables verification |
 | `--proofs-history.max-multi-proof-targets` | 256 | Maximum account targets per `eth_getMultiProof` request |
-| `--rpc.eth-proof-window` | 0 | Reth overlay limit used only while proof history is disabled |
+| `--rpc.eth-proof-window` | 0 (disabled) | Reth historical overlay window for `eth_getProof` when proof history is disabled (max 1209600) |
 
 #### Initializing Historical Proofs
 
@@ -173,6 +172,12 @@ served by Reth itself when proof history is off.
 For cold copies, stop the source node and copy the complete chain data directory, including
 `historical-proofs`, as one consistent unit. Startup validates the proof database schema, chain ID,
 genesis hash, and latest canonical block hash before resuming.
+
+#### Upstream Reth Flags with Morph-Specific Behavior
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--builder.gaslimit` / `--miner.gaslimit` | None (copy parent header) | Sequencer target for the block header `gasLimit`. Each assembled block ramps toward it by at most ~1/1024 of the parent, as morph-geth's `--miner.gaslimit` does. Unset leaves the header copying the parent. Ignored when payload attributes carry an explicit `gasLimit` (derivation import). |
 
 ### Running Tests
 

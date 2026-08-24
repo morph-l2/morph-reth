@@ -11,17 +11,6 @@ pub enum MorphPayloadBuilderError {
     #[error("failed to recover transaction signer")]
     TransactionEcRecoverFailed,
 
-    /// Block gas limit exceeded by sequencer transactions.
-    #[error(
-        "block gas limit {gas} exceeded by sequencer transactions, gas spent by tx: {gas_spent_by_tx:?}"
-    )]
-    BlockGasLimitExceededBySequencerTransactions {
-        /// Gas spent by each transaction.
-        gas_spent_by_tx: Vec<u64>,
-        /// Block gas limit.
-        gas: u64,
-    },
-
     /// Invalid sequencer transaction in forced transaction list.
     #[error("invalid sequencer transaction: {error}")]
     InvalidSequencerTransaction {
