@@ -64,6 +64,18 @@ pub enum MorphConsensusError {
     /// Withdrawals are not empty.
     #[error("Withdrawals are not empty")]
     WithdrawalsNonEmpty,
+
+    /// L2 transaction payload exceeds the per-block DA cap.
+    ///
+    /// Matches go-ethereum `ErrInvalidBlockPayloadSize`. L1 messages are
+    /// excluded from `size`.
+    #[error("invalid block payload size: {size} exceeds limit {limit}")]
+    InvalidBlockPayloadSize {
+        /// Encoded L2 payload bytes (EIP-2718, L1 messages excluded).
+        size: u64,
+        /// Maximum allowed payload bytes.
+        limit: u64,
+    },
 }
 
 impl From<alloy_rlp::Error> for MorphConsensusError {
