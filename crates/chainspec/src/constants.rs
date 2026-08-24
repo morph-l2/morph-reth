@@ -69,6 +69,20 @@ pub const L2_MESSAGE_QUEUE_ADDRESS: Address = address!("530000000000000000000000
 /// This is slot 33, which stores the Merkle root for L2->L1 messages.
 pub const L2_MESSAGE_QUEUE_WITHDRAW_TRIE_ROOT_SLOT: U256 = U256::from_limbs([33, 0, 0, 0]);
 
+// =============================================================================
+// Protocol Gas Constants
+// =============================================================================
+
+/// Lowest block `gasLimit` the protocol accepts.
+///
+/// Matches go-ethereum's `params.MinGasLimit` (`params/protocol_params.go`).
+/// Both ends of block production read it, which is why it lives here rather than
+/// in either crate alone: the sequencer clamps its `gasLimit` target to it before
+/// ramping (`morph-payload-builder`), and header validation rejects anything below
+/// it (`morph-consensus`). One definition keeps producer and validator from
+/// drifting apart.
+pub const MINIMUM_GAS_LIMIT: u64 = 5000;
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -115,6 +115,12 @@ openssl rand -hex 32 > jwt.hex
 | `--morph.max-tx-payload-bytes` | 737280 (720 KiB) | Maximum L2 tx payload bytes per block (fits one uncompressed 6-blob batch) |
 | `--rpc.eth-proof-window` | 0 (disabled) | Max historical blocks for `eth_getProof` (up to 1209600) |
 
+#### Upstream Reth Flags with Morph-Specific Behavior
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--builder.gaslimit` / `--miner.gaslimit` | None (copy parent header) | Sequencer target for the block header `gasLimit`. Each assembled block ramps toward it by at most ~1/1024 of the parent, as morph-geth's `--miner.gaslimit` does. Unset leaves the header copying the parent. Ignored when payload attributes carry an explicit `gasLimit` (derivation import). |
+
 ### Running Tests
 
 ```bash

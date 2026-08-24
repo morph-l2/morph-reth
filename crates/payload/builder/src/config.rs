@@ -1,6 +1,8 @@
 //! Configuration for the Morph payload builder.
 
+use alloy_eips::eip1559::calculate_block_gas_limit;
 use core::time::Duration;
+use morph_chainspec::MINIMUM_GAS_LIMIT;
 use reth_chainspec::MIN_TRANSACTION_GAS;
 use reth_primitives_traits::FastInstant as Instant;
 
@@ -39,6 +41,15 @@ pub struct MorphBuilderConfig {
     ///
     /// This corresponds to the `--morph.max-tx-payload-bytes` CLI flag.
     pub max_da_block_size: Option<u64>,
+
+    /// Sequencer target for the block header `gasLimit` (GasCeil).
+    ///
+    /// When set, and payload attributes do not override `gas_limit`, each assembled
+    /// block ramps toward this value by at most ~1/1024 of the parent (Ethereum
+    /// `CalcGasLimit`). When `None`, the header copies the parent `gasLimit`.
+    ///
+    /// Seeded from `--builder.gaslimit` / `--miner.gaslimit`.
+    pub desired_gas_limit: Option<u64>,
 }
 
 impl Default for MorphBuilderConfig {
@@ -49,6 +60,8 @@ impl Default for MorphBuilderConfig {
             time_limit: Duration::from_secs(1),
             // No DA limit by default; the node wires the CLI default.
             max_da_block_size: None,
+            // No header gas target: copy parent gasLimit
+            desired_gas_limit: None,
         }
     }
 }
@@ -70,6 +83,38 @@ impl MorphBuilderConfig {
     pub const fn with_max_da_block_size(mut self, max_da_block_size: u64) -> Self {
         self.max_da_block_size = Some(max_da_block_size);
         self
+    }
+
+    /// Sets the sequencer header `gasLimit` target.
+    pub const fn with_desired_gas_limit(mut self, desired_gas_limit: u64) -> Self {
+        self.desired_gas_limit = Some(desired_gas_limit);
+        self
+    }
+
+    /// Header `gasLimit` for the next block.
+    ///
+    /// Explicit payload-attribute overrides (safe/derivation import) win. Otherwise the
+    /// configured GasCeil is applied with Ethereum 1/1024 elasticity, or the parent
+    /// value is copied when no target is set.
+    pub fn next_header_gas_limit(
+        &self,
+        parent_gas_limit: u64,
+        attributes_gas_limit: Option<u64>,
+    ) -> u64 {
+        if let Some(explicit) = attributes_gas_limit {
+            return explicit;
+        }
+        match self.desired_gas_limit {
+            // A sub-minimum target is raised to `MINIMUM_GAS_LIMIT` before ramping,
+            // mirroring go-ethereum's `CalcGasLimit` (`core/block_validator.go`).
+            // `calculate_block_gas_limit` has no such floor on its own, so without
+            // this the sequencer would ramp the header below the limit its own
+            // header validation accepts and stop producing canonical blocks.
+            Some(desired) => {
+                calculate_block_gas_limit(parent_gas_limit, desired.max(MINIMUM_GAS_LIMIT))
+            }
+            None => parent_gas_limit,
+        }
     }
 
     /// Creates a [`PayloadBuildingBreaker`] for this configuration.
@@ -170,18 +215,23 @@ mod tests {
         assert_eq!(config.gas_limit, None);
         assert_eq!(config.time_limit, Duration::from_secs(1));
         assert_eq!(config.max_da_block_size, None);
+        assert_eq!(config.desired_gas_limit, None);
     }
 
     #[test]
     fn test_config_builder_pattern() {
+        // `gas_limit` is the soft packing cap, `desired_gas_limit` is the header
+        // ceiling the sequencer ramps toward. Different dimensions, both set here.
         let config = MorphBuilderConfig::default()
             .with_gas_limit(20_000_000)
             .with_time_limit(Duration::from_millis(500))
-            .with_max_da_block_size(720 * 1024);
+            .with_max_da_block_size(720 * 1024)
+            .with_desired_gas_limit(60_000_000);
 
         assert_eq!(config.gas_limit, Some(20_000_000));
         assert_eq!(config.time_limit, Duration::from_millis(500));
         assert_eq!(config.max_da_block_size, Some(720 * 1024));
+        assert_eq!(config.desired_gas_limit, Some(60_000_000));
     }
 
     #[test]
@@ -270,5 +320,98 @@ mod tests {
         // If using block_gas_limit, threshold would be ~29,979,000
         // and 21001 would NOT trigger the breaker
         // Since it does trigger, we know it's using configured_limit
+    }
+
+    /// Mainnet's genesis `gasLimit`, used as the parent value throughout these tests.
+    const MAINNET_GAS_LIMIT: u64 = 30_000_000;
+
+    #[test]
+    fn next_header_gas_limit_copies_parent_without_target() {
+        let config = MorphBuilderConfig::default();
+        assert_eq!(
+            config.next_header_gas_limit(MAINNET_GAS_LIMIT, None),
+            MAINNET_GAS_LIMIT
+        );
+    }
+
+    #[test]
+    fn next_header_gas_limit_attributes_override_wins() {
+        // Derivation imports (`newSafeL2Block`) carry the header's own value, which must
+        // survive untouched even when the sequencer has a different target configured.
+        let config = MorphBuilderConfig::default().with_desired_gas_limit(60_000_000);
+        assert_eq!(
+            config.next_header_gas_limit(MAINNET_GAS_LIMIT, Some(30_000_100)),
+            30_000_100
+        );
+    }
+
+    #[test]
+    fn next_header_gas_limit_ramps_toward_desired_within_1024() {
+        let parent = MAINNET_GAS_LIMIT;
+        let config = MorphBuilderConfig::default().with_desired_gas_limit(60_000_000);
+
+        // parent/1024 - 1 == 29_295, the largest step header validation accepts:
+        // `validate_against_parent_gas_limit` rejects a diff of parent/1024 or more.
+        assert_eq!(config.next_header_gas_limit(parent, None), 30_029_295);
+        assert_eq!(
+            config.next_header_gas_limit(parent, None) - parent,
+            parent / 1024 - 1
+        );
+    }
+
+    #[test]
+    fn next_header_gas_limit_ramps_down_toward_lower_desired() {
+        let parent = MAINNET_GAS_LIMIT;
+        let config = MorphBuilderConfig::default().with_desired_gas_limit(20_000_000);
+
+        assert_eq!(config.next_header_gas_limit(parent, None), 29_970_705);
+        assert_eq!(
+            parent - config.next_header_gas_limit(parent, None),
+            parent / 1024 - 1
+        );
+    }
+
+    #[test]
+    fn next_header_gas_limit_converges_on_desired_and_stays() {
+        for desired in [60_000_000u64, 10_000_000] {
+            let config = MorphBuilderConfig::default().with_desired_gas_limit(desired);
+            let mut gas_limit = MAINNET_GAS_LIMIT;
+
+            // Ramping is bounded per block, so convergence takes hundreds of blocks.
+            for _ in 0..4000 {
+                gas_limit = config.next_header_gas_limit(gas_limit, None);
+            }
+
+            assert_eq!(gas_limit, desired, "should converge on {desired}");
+            // Once reached, the target is a fixed point rather than oscillating.
+            assert_eq!(config.next_header_gas_limit(gas_limit, None), desired);
+        }
+    }
+
+    #[test]
+    fn next_header_gas_limit_never_ramps_below_protocol_minimum() {
+        // A target below `MINIMUM_GAS_LIMIT` (0 being the likeliest bad input) must be
+        // raised to the floor, as go-ethereum's `CalcGasLimit` does. Ramping past it
+        // would build headers the node's own validation rejects.
+        let config = MorphBuilderConfig::default().with_desired_gas_limit(0);
+        let mut gas_limit = MAINNET_GAS_LIMIT;
+
+        for _ in 0..20_000 {
+            gas_limit = config.next_header_gas_limit(gas_limit, None);
+            assert!(
+                gas_limit >= MINIMUM_GAS_LIMIT,
+                "ramped to {gas_limit}, below the {MINIMUM_GAS_LIMIT} floor"
+            );
+        }
+
+        assert_eq!(gas_limit, MINIMUM_GAS_LIMIT);
+    }
+
+    #[test]
+    fn next_header_gas_limit_reaches_nearby_desired_in_one_step() {
+        let parent = 30_000_000u64;
+        let desired = parent + 100;
+        let config = MorphBuilderConfig::default().with_desired_gas_limit(desired);
+        assert_eq!(config.next_header_gas_limit(parent, None), desired);
     }
 }
