@@ -5,7 +5,6 @@ use core::time::Duration;
 use morph_chainspec::MINIMUM_GAS_LIMIT;
 use reth_chainspec::MIN_TRANSACTION_GAS;
 use reth_primitives_traits::FastInstant as Instant;
-use std::fmt::Debug;
 
 /// Minimal data bytes size per transaction.
 /// This is a conservative estimate for the minimum encoded transaction size.
@@ -35,20 +34,13 @@ pub struct MorphBuilderConfig {
 
     /// Maximum total data availability size for a block.
     ///
-    /// L2 transactions need to be published to L1 for data availability.
-    /// This limit controls the maximum size of transaction data in a single block.
+    /// L2 transactions are published to L1 in EIP-4844 blobs. This limit is the
+    /// uncompressed L2 tx payload (L1 messages excluded) that must fit in one
+    /// 6-blob batch so the submitter never has to split a single L2 block.
     /// If `None`, no DA limit is enforced.
     ///
     /// This corresponds to the `--morph.max-tx-payload-bytes` CLI flag.
     pub max_da_block_size: Option<u64>,
-
-    /// Maximum number of transactions per block.
-    ///
-    /// If set, the builder will stop adding transactions once this limit is reached.
-    /// If `None`, no transaction count limit is enforced.
-    ///
-    /// This corresponds to the `--morph.max-tx-per-block` CLI flag.
-    pub max_tx_per_block: Option<u64>,
 
     /// Sequencer target for the block header `gasLimit` (GasCeil).
     ///
@@ -66,10 +58,8 @@ impl Default for MorphBuilderConfig {
             gas_limit: None,
             // Default to 1 second - leaves time for consensus
             time_limit: Duration::from_secs(1),
-            // No DA limit by default
+            // No DA limit by default; the node wires the CLI default.
             max_da_block_size: None,
-            // No transaction count limit by default
-            max_tx_per_block: None,
             // No header gas target: copy parent gasLimit
             desired_gas_limit: None,
         }
@@ -92,12 +82,6 @@ impl MorphBuilderConfig {
     /// Sets the maximum DA block size.
     pub const fn with_max_da_block_size(mut self, max_da_block_size: u64) -> Self {
         self.max_da_block_size = Some(max_da_block_size);
-        self
-    }
-
-    /// Sets the maximum number of transactions per block.
-    pub const fn with_max_tx_per_block(mut self, max_tx_per_block: u64) -> Self {
-        self.max_tx_per_block = Some(max_tx_per_block);
         self
     }
 
@@ -137,22 +121,16 @@ impl MorphBuilderConfig {
     pub(crate) fn breaker(&self, block_gas_limit: u64) -> PayloadBuildingBreaker {
         // Use configured gas limit or fall back to block gas limit
         let effective_gas_limit = self.gas_limit.unwrap_or(block_gas_limit);
-        PayloadBuildingBreaker::new(
-            self.time_limit,
-            effective_gas_limit,
-            self.max_da_block_size,
-            self.max_tx_per_block,
-        )
+        PayloadBuildingBreaker::new(self.time_limit, effective_gas_limit, self.max_da_block_size)
     }
 }
 
-/// Used in the payload builder to exit the transactions execution loop early.
+/// Used in the [`super::MorphPayloadBuilder`] to exit the transactions execution loop early.
 ///
-/// The breaker checks four conditions:
+/// The breaker checks three conditions:
 /// 1. Time limit - stop if building takes too long
 /// 2. Gas limit - stop if remaining gas is insufficient for any transaction
 /// 3. DA limit - stop if data availability size limit is reached
-/// 4. Transaction count limit - stop if maximum transactions per block is reached
 #[derive(Debug, Clone)]
 pub struct PayloadBuildingBreaker {
     /// When the payload building started.
@@ -163,24 +141,16 @@ pub struct PayloadBuildingBreaker {
     gas_limit: u64,
     /// Maximum DA block size.
     max_da_block_size: Option<u64>,
-    /// Maximum number of transactions per block.
-    max_tx_per_block: Option<u64>,
 }
 
 impl PayloadBuildingBreaker {
     /// Creates a new [`PayloadBuildingBreaker`].
-    fn new(
-        time_limit: Duration,
-        gas_limit: u64,
-        max_da_block_size: Option<u64>,
-        max_tx_per_block: Option<u64>,
-    ) -> Self {
+    fn new(time_limit: Duration, gas_limit: u64, max_da_block_size: Option<u64>) -> Self {
         Self {
             start: Instant::now(),
             time_limit,
             gas_limit,
             max_da_block_size,
-            max_tx_per_block,
         }
     }
 
@@ -190,13 +160,7 @@ impl PayloadBuildingBreaker {
     /// - Time limit has been exceeded
     /// - Gas limit has been reached (leaving room for at least one minimal transaction)
     /// - DA size limit has been reached (leaving room for at least one minimal transaction)
-    /// - Transaction count limit has been reached
-    pub fn should_break(
-        &self,
-        cumulative_gas_used: u64,
-        cumulative_da_size_used: u64,
-        transaction_count: u64,
-    ) -> bool {
+    pub fn should_break(&self, cumulative_gas_used: u64, cumulative_da_size_used: u64) -> bool {
         // Check time limit
         if self.start.elapsed() >= self.time_limit {
             tracing::trace!(
@@ -232,19 +196,6 @@ impl PayloadBuildingBreaker {
             return true;
         }
 
-        // Check transaction count limit if configured
-        if let Some(max_count) = self.max_tx_per_block
-            && transaction_count >= max_count
-        {
-            tracing::trace!(
-                target: "payload_builder",
-                transaction_count,
-                max_tx_per_block = max_count,
-                "transaction count limit reached"
-            );
-            return true;
-        }
-
         false
     }
 
@@ -264,7 +215,6 @@ mod tests {
         assert_eq!(config.gas_limit, None);
         assert_eq!(config.time_limit, Duration::from_secs(1));
         assert_eq!(config.max_da_block_size, None);
-        assert_eq!(config.max_tx_per_block, None);
         assert_eq!(config.desired_gas_limit, None);
     }
 
@@ -275,34 +225,28 @@ mod tests {
         let config = MorphBuilderConfig::default()
             .with_gas_limit(20_000_000)
             .with_time_limit(Duration::from_millis(500))
-            .with_max_da_block_size(128 * 1024)
-            .with_max_tx_per_block(1000)
+            .with_max_da_block_size(720 * 1024)
             .with_desired_gas_limit(60_000_000);
 
         assert_eq!(config.gas_limit, Some(20_000_000));
         assert_eq!(config.time_limit, Duration::from_millis(500));
-        assert_eq!(config.max_da_block_size, Some(128 * 1024));
-        assert_eq!(config.max_tx_per_block, Some(1000));
+        assert_eq!(config.max_da_block_size, Some(720 * 1024));
         assert_eq!(config.desired_gas_limit, Some(60_000_000));
     }
 
     #[test]
     fn test_breaker_should_break_on_time_limit() {
-        let breaker = PayloadBuildingBreaker::new(
-            Duration::from_millis(100),
-            30_000_000,
-            Some(128 * 1024),
-            None,
-        );
+        let breaker =
+            PayloadBuildingBreaker::new(Duration::from_millis(100), 30_000_000, Some(720 * 1024));
 
         // Should not break immediately
-        assert!(!breaker.should_break(0, 0, 0));
+        assert!(!breaker.should_break(0, 0));
 
         // Wait for time limit
         std::thread::sleep(Duration::from_millis(150));
 
         // Should break now
-        assert!(breaker.should_break(0, 0, 0));
+        assert!(breaker.should_break(0, 0));
     }
 
     #[test]
@@ -311,13 +255,13 @@ mod tests {
         // Threshold = 42000 - 21000 = 21000
         // should_break returns true when cumulative_gas_used > threshold
         let gas_limit = 2 * MIN_TRANSACTION_GAS;
-        let breaker = PayloadBuildingBreaker::new(Duration::from_secs(10), gas_limit, None, None);
+        let breaker = PayloadBuildingBreaker::new(Duration::from_secs(10), gas_limit, None);
 
         // At threshold (21000), should NOT break (21000 > 21000 is false)
-        assert!(!breaker.should_break(MIN_TRANSACTION_GAS, 0, 0));
+        assert!(!breaker.should_break(MIN_TRANSACTION_GAS, 0));
 
         // Just over threshold, should break (21001 > 21000 is true)
-        assert!(breaker.should_break(MIN_TRANSACTION_GAS + 1, 0, 0));
+        assert!(breaker.should_break(MIN_TRANSACTION_GAS + 1, 0));
     }
 
     #[test]
@@ -325,49 +269,22 @@ mod tests {
         // Set max_da = 2 * MIN_TRANSACTION_DATA_SIZE = 230
         // Threshold = 230 - 115 = 115
         let max_da_size = 2 * MIN_TRANSACTION_DATA_SIZE;
-        let breaker = PayloadBuildingBreaker::new(
-            Duration::from_secs(10),
-            30_000_000,
-            Some(max_da_size),
-            None,
-        );
+        let breaker =
+            PayloadBuildingBreaker::new(Duration::from_secs(10), 30_000_000, Some(max_da_size));
 
         // At threshold (115), should NOT break (115 > 115 is false)
-        assert!(!breaker.should_break(0, MIN_TRANSACTION_DATA_SIZE, 0));
+        assert!(!breaker.should_break(0, MIN_TRANSACTION_DATA_SIZE));
 
         // Just over threshold, should break (116 > 115 is true)
-        assert!(breaker.should_break(0, MIN_TRANSACTION_DATA_SIZE + 1, 0));
-    }
-
-    #[test]
-    fn test_breaker_should_break_on_tx_count_limit() {
-        let breaker =
-            PayloadBuildingBreaker::new(Duration::from_secs(10), 30_000_000, None, Some(100));
-
-        // Below limit, should NOT break
-        assert!(!breaker.should_break(0, 0, 99));
-
-        // At limit, should break (>= comparison)
-        assert!(breaker.should_break(0, 0, 100));
-
-        // Above limit, should break
-        assert!(breaker.should_break(0, 0, 101));
+        assert!(breaker.should_break(0, MIN_TRANSACTION_DATA_SIZE + 1));
     }
 
     #[test]
     fn test_breaker_no_da_limit() {
-        let breaker = PayloadBuildingBreaker::new(Duration::from_secs(10), 30_000_000, None, None);
+        let breaker = PayloadBuildingBreaker::new(Duration::from_secs(10), 30_000_000, None);
 
         // Should not break even with huge DA size when no limit is set
-        assert!(!breaker.should_break(0, u64::MAX, 0));
-    }
-
-    #[test]
-    fn test_breaker_no_tx_count_limit() {
-        let breaker = PayloadBuildingBreaker::new(Duration::from_secs(10), 30_000_000, None, None);
-
-        // Should not break even with huge tx count when no limit is set
-        assert!(!breaker.should_break(0, 0, u64::MAX));
+        assert!(!breaker.should_break(0, u64::MAX));
     }
 
     #[test]
@@ -380,9 +297,9 @@ mod tests {
 
         // Threshold = 42000 - 21000 = 21000
         // At threshold, should NOT break
-        assert!(!breaker.should_break(MIN_TRANSACTION_GAS, 0, 0));
+        assert!(!breaker.should_break(MIN_TRANSACTION_GAS, 0));
         // Just over, should break
-        assert!(breaker.should_break(MIN_TRANSACTION_GAS + 1, 0, 0));
+        assert!(breaker.should_break(MIN_TRANSACTION_GAS + 1, 0));
     }
 
     #[test]
@@ -396,8 +313,8 @@ mod tests {
 
         // Should use configured_limit, not block_gas_limit
         // Threshold = 42000 - 21000 = 21000
-        assert!(!breaker.should_break(MIN_TRANSACTION_GAS, 0, 0));
-        assert!(breaker.should_break(MIN_TRANSACTION_GAS + 1, 0, 0));
+        assert!(!breaker.should_break(MIN_TRANSACTION_GAS, 0));
+        assert!(breaker.should_break(MIN_TRANSACTION_GAS + 1, 0));
 
         // Verify it's not using block_gas_limit
         // If using block_gas_limit, threshold would be ~29,979,000

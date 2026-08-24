@@ -23,6 +23,7 @@ reth-primitives-traits.workspace = true
 
 # Alloy
 alloy-consensus.workspace = true
+alloy-eips.workspace = true
 alloy-evm.workspace = true
 alloy-primitives.workspace = true
 alloy-rlp.workspace = true

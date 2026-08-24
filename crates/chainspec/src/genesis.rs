@@ -80,15 +80,22 @@ impl TryFrom<&OtherFields> for MorphHardforkInfo {
 }
 
 /// The configuration for the Morph chain.
+///
+/// The genesis keys `maxTxPayloadBytesPerBlock` (122880 on mainnet/hoodi) and
+/// `maxTxPerBlock` are still present in the genesis JSON but are deliberately not
+/// read here. Sequencer packing uses `--morph.max-tx-payload-bytes` (default
+/// [`crate::MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK`]) rather than the leftover
+/// zkEVM genesis field.
+///
+/// Import-time body validation in morph-geth (`IsValidBlockSize`) and morph-reth
+/// (`MorphConsensus::validate_block_pre_execution`) both enforce that same
+/// 720 KiB binary constant, not the stored genesis 122880.
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MorphChainConfig {
     /// The address of the L2 transaction fee vault.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fee_vault_address: Option<Address>,
-    /// The maximum tx payload size per block in bytes.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_tx_payload_bytes_per_block: Option<usize>,
 }
 
 impl MorphChainConfig {
@@ -100,13 +107,6 @@ impl MorphChainConfig {
     /// Returns whether the fee vault is enabled.
     pub const fn is_fee_vault_enabled(&self) -> bool {
         self.fee_vault_address.is_some()
-    }
-
-    /// Checks if the given block size (in bytes) is valid for this chain.
-    pub fn is_valid_block_size(&self, size: usize) -> bool {
-        self.max_tx_payload_bytes_per_block
-            .map(|max| size <= max)
-            .unwrap_or(true)
     }
 }
 
@@ -174,10 +174,7 @@ mod tests {
             config.fee_vault_address,
             Some(address!("530000000000000000000000000000000000000a"))
         );
-        assert_eq!(config.max_tx_payload_bytes_per_block, Some(122880));
         assert!(config.is_fee_vault_enabled());
-        assert!(config.is_valid_block_size(100000));
-        assert!(!config.is_valid_block_size(200000));
     }
 
     #[test]
@@ -185,8 +182,26 @@ mod tests {
         let config = MorphChainConfig::default();
         assert!(!config.is_fee_vault_enabled());
         assert_eq!(config.fee_vault_address, None);
-        assert_eq!(config.max_tx_payload_bytes_per_block, None);
-        // Without max size limit, any size is valid
-        assert!(config.is_valid_block_size(usize::MAX));
+    }
+
+    #[test]
+    fn test_ignores_unused_packing_fields() {
+        let config_str = r#"
+        {
+          "morph": {
+            "feeVaultAddress": "0x530000000000000000000000000000000000000a",
+            "maxTxPayloadBytesPerBlock": 122880,
+            "maxTxPerBlock": 100
+          }
+        }
+        "#;
+
+        let others: OtherFields = serde_json::from_str(config_str).unwrap();
+        let config = MorphChainConfig::extract_from(&others).unwrap();
+
+        assert_eq!(
+            config.fee_vault_address,
+            Some(address!("530000000000000000000000000000000000000a"))
+        );
     }
 }
