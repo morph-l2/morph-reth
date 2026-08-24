@@ -118,17 +118,9 @@ where
     type AddOns = MorphAddOns<NodeAdapter<N>>;
 
     fn components_builder(&self) -> Self::ComponentsBuilder {
-        // Build payload config from args
-        let payload_config =
-            MorphBuilderConfig::default().with_max_da_block_size(self.args.max_tx_payload_bytes);
-
-        let payload_config = if let Some(max_tx) = self.args.max_tx_per_block {
-            payload_config.with_max_tx_per_block(max_tx)
-        } else {
-            payload_config
-        };
-
-        Self::components(payload_config)
+        Self::components(
+            MorphBuilderConfig::default().with_max_da_block_size(self.args.max_tx_payload_bytes),
+        )
     }
 
     fn add_ons(&self) -> Self::AddOns {
@@ -236,27 +228,6 @@ mod tests {
     use super::*;
     use morph_chainspec::MORPH_HOODI;
     use reth_payload_primitives::PayloadAttributesBuilder;
-
-    #[test]
-    fn morph_node_default() {
-        let node = MorphNode::default();
-        assert_eq!(
-            node.args.max_tx_payload_bytes,
-            super::super::args::MORPH_DEFAULT_MAX_TX_PAYLOAD_BYTES
-        );
-        assert!(node.args.max_tx_per_block.is_none());
-    }
-
-    #[test]
-    fn morph_node_new_with_args() {
-        let args = super::super::args::MorphArgs {
-            max_tx_payload_bytes: 200_000,
-            max_tx_per_block: Some(500),
-        };
-        let node = MorphNode::new(args);
-        assert_eq!(node.args.max_tx_payload_bytes, 200_000);
-        assert_eq!(node.args.max_tx_per_block, Some(500));
-    }
 
     #[test]
     fn payload_attributes_builder_produces_valid_attributes() {
