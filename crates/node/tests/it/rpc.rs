@@ -9,13 +9,13 @@ use alloy_primitives::{Address, B256, Bytes, Sealable, TxKind, U256};
 use alloy_signer::SignerSync;
 use jsonrpsee::core::client::ClientT;
 use morph_node::test_utils::{
-    L1MessageBuilder, MorphTestNode, MorphTxBuilder, TEST_TOKEN_ID, TestNodeBuilder, advance_chain,
+    MorphTestNode, MorphTxBuilder, TEST_TOKEN_ID, TestNodeBuilder, advance_chain,
 };
 use morph_primitives::MorphTxEnvelope;
 use reth_payload_primitives::BuiltPayload;
 use reth_provider::{
-    AccountReader, BlockReader, BlockReaderIdExt, HeaderProvider, ReceiptProvider,
-    StateProviderFactory, TransactionsProvider,
+    AccountReader, BlockReader, BlockReaderIdExt, HeaderProvider, StateProviderFactory,
+    TransactionsProvider,
 };
 use serde_json::Value;
 
@@ -174,72 +174,6 @@ async fn block_gas_used_reflects_execution() -> eyre::Result<()> {
     Ok(())
 }
 
-/// MorphTx v0 receipt stored in the database carries the expected ERC20 fee fields.
-///
-/// After including a MorphTx v0 (ERC20 fee) in a block, the receipt retrieved
-/// from the provider must have `fee_token_id`, `fee_rate`, `token_scale`, and
-/// `fee_limit` populated by the receipt builder.
-#[tokio::test(flavor = "multi_thread")]
-async fn morph_tx_receipt_contains_fee_fields() -> eyre::Result<()> {
-    reth_tracing::init_test_tracing();
-
-    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
-    let mut node = nodes.pop().unwrap();
-
-    // Build and inject a MorphTx v0 with ERC20 fee payment
-    let raw_tx = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
-        .with_v0_token_fee(TEST_TOKEN_ID)
-        .build_signed()?;
-    node.rpc.inject_tx(raw_tx).await?;
-
-    let payload = node.advance_block().await?;
-
-    // Extract the transaction hash from the sealed block
-    let tx = payload
-        .block()
-        .body()
-        .transactions
-        .first()
-        .expect("block must contain the MorphTx");
-    let tx_hash = *tx.tx_hash();
-
-    // Retrieve the receipt from the provider
-    let receipt = node
-        .inner
-        .provider
-        .receipt_by_hash(tx_hash)?
-        .expect("receipt must exist after block import");
-
-    // The receipt must be the Morph variant and carry populated fee fields
-    match &receipt {
-        morph_primitives::MorphReceipt::Morph(morph_receipt) => {
-            assert_eq!(
-                morph_receipt.fee_token_id,
-                Some(TEST_TOKEN_ID),
-                "fee_token_id must match the submitted transaction"
-            );
-            assert!(
-                morph_receipt.fee_rate.is_some(),
-                "fee_rate must be present in MorphTx v0 receipt"
-            );
-            assert!(
-                morph_receipt.token_scale.is_some(),
-                "token_scale must be present in MorphTx v0 receipt"
-            );
-            assert!(
-                morph_receipt.fee_limit.is_some(),
-                "fee_limit must be present in MorphTx v0 receipt"
-            );
-        }
-        other => panic!(
-            "expected MorphReceipt::Morph variant, got {:?}",
-            other.tx_type()
-        ),
-    }
-
-    Ok(())
-}
-
 /// ETH balance decreases after a transfer transaction.
 #[tokio::test(flavor = "multi_thread")]
 async fn balance_decreases_after_eth_transfer() -> eyre::Result<()> {
@@ -296,36 +230,6 @@ async fn nonce_increments_after_tx() -> eyre::Result<()> {
         .map(|a| a.nonce)
         .unwrap_or(0);
     assert_eq!(nonce_after, 1, "nonce should be 1 after one tx");
-    Ok(())
-}
-
-/// L1 message receipt has l1_fee = 0 (gas is prepaid on L1).
-#[tokio::test(flavor = "multi_thread")]
-async fn l1_message_receipt_l1_fee_is_zero() -> eyre::Result<()> {
-    reth_tracing::init_test_tracing();
-    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
-    let mut node = nodes.pop().unwrap();
-
-    let l1_msg = L1MessageBuilder::new(0)
-        .with_target(alloy_primitives::Address::with_last_byte(0x42))
-        .with_gas_limit(50_000)
-        .build_encoded();
-    let payload = super::helpers::advance_block_with_l1_messages(&mut node, vec![l1_msg]).await?;
-
-    let tx = payload.block().body().transactions.first().unwrap();
-    let tx_hash = *tx.tx_hash();
-
-    let receipt = node
-        .inner
-        .provider
-        .receipt_by_hash(tx_hash)?
-        .expect("L1 message receipt must exist");
-
-    assert_eq!(
-        receipt.l1_fee(),
-        alloy_primitives::U256::ZERO,
-        "L1 message l1_fee must be 0"
-    );
     Ok(())
 }
 

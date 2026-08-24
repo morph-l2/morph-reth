@@ -9,7 +9,7 @@
 //! use morph_node::test_utils::{TestNodeBuilder, HardforkSchedule, advance_chain};
 //!
 //! // Spin up a node with all forks active at t=0
-//! let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+//! let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
 //! let mut node = nodes.pop().unwrap();
 //!
 //! // Advance 10 blocks with transfer transactions
@@ -17,7 +17,8 @@
 //! let payloads = advance_chain(10, &mut node, wallet).await?;
 //! ```
 
-use crate::MorphNode;
+use crate::{MorphArgs, MorphNode};
+use alloy_consensus::BlockHeader;
 use alloy_eips::eip2718::Encodable2718;
 use alloy_genesis::Genesis;
 use alloy_primitives::{Address, B256, Bytes, TxKind, U256};
@@ -29,13 +30,19 @@ use morph_primitives::{
     MorphTxEnvelope, TxL1Msg, TxMorph, transaction::l1_transaction::L1_TX_TYPE_ID,
 };
 use reth_e2e_test_utils::{
-    NodeHelperType, TmpDB, transaction::TransactionTestContext, wallet::Wallet,
+    NodeHelperType, TmpDB, node::NodeTestContext, transaction::TransactionTestContext,
+    wallet::Wallet,
 };
-use reth_node_api::NodeTypesWithDBAdapter;
+use reth_node_api::{NodeTypesWithDBAdapter, TreeConfig};
+use reth_node_builder::{EngineNodeLauncher, Node, NodeBuilder, NodeConfig, NodeHandle};
+use reth_node_core::args::{DiscoveryArgs, NetworkArgs, RpcServerArgs};
 use reth_payload_builder::BuildNewPayload;
 use reth_provider::providers::BlockchainProvider;
+use reth_rpc_server_types::RpcModuleSelection;
+use reth_tasks::Runtime;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tracing::{Instrument, Level, span};
 
 /// Morph Node Helper type alias for E2E tests.
 pub type MorphTestNode =
@@ -57,7 +64,7 @@ pub type MorphTestNode =
 /// #[test_case(HardforkSchedule::PreJade  ; "pre jade")]
 /// #[tokio::test(flavor = "multi_thread")]
 /// async fn test_block_building(schedule: HardforkSchedule) -> eyre::Result<()> {
-///     let (mut nodes, _, wallet) = TestNodeBuilder::new().with_schedule(schedule).build().await?;
+///     let (mut nodes, wallet) = TestNodeBuilder::new().with_schedule(schedule).build().await?;
 ///     // ...
 /// }
 /// ```
@@ -171,17 +178,23 @@ impl HardforkSchedule {
 ///
 /// ```ignore
 /// // Single node with all forks active (default)
-/// let (mut nodes, _tasks, wallet) = TestNodeBuilder::new().build().await?;
+/// let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
 ///
 /// // Single node with Jade disabled
-/// let (mut nodes, _tasks, wallet) = TestNodeBuilder::new()
+/// let (mut nodes, wallet) = TestNodeBuilder::new()
 ///     .with_schedule(HardforkSchedule::PreJade)
 ///     .build()
 ///     .await?;
 ///
 /// // Two nodes connected to each other
-/// let (nodes, _tasks, wallet) = TestNodeBuilder::new()
+/// let (nodes, wallet) = TestNodeBuilder::new()
 ///     .with_num_nodes(2)
+///     .build()
+///     .await?;
+///
+/// // Single node with a non-default payload-builder limit
+/// let (nodes, wallet) = TestNodeBuilder::new()
+///     .with_max_tx_payload_bytes(3)
 ///     .build()
 ///     .await?;
 /// ```
@@ -191,6 +204,7 @@ pub struct TestNodeBuilder {
     num_nodes: usize,
     is_dev: bool,
     desired_gas_limit: Option<u64>,
+    morph_args: Option<MorphArgs>,
 }
 
 impl Default for TestNodeBuilder {
@@ -215,6 +229,7 @@ impl TestNodeBuilder {
             num_nodes: 1,
             is_dev: false,
             desired_gas_limit: None,
+            morph_args: None,
         }
     }
 
@@ -270,6 +285,16 @@ impl TestNodeBuilder {
         self
     }
 
+    /// Override the maximum pool-transaction payload bytes included in a block.
+    ///
+    /// Restricted to single-node setups.
+    pub fn with_max_tx_payload_bytes(mut self, max_bytes: u64) -> Self {
+        self.morph_args
+            .get_or_insert_with(MorphArgs::default)
+            .max_tx_payload_bytes = max_bytes;
+        self
+    }
+
     /// Build and launch the configured nodes.
     ///
     /// Returns the node handles and a wallet derived from
@@ -280,6 +305,19 @@ impl TestNodeBuilder {
 
         let genesis: Genesis = serde_json::from_value(self.genesis_json)?;
         let chain_spec = morph_chainspec::MorphChainSpec::from_genesis(genesis);
+
+        if let Some(args) = self.morph_args {
+            if self.num_nodes != 1 {
+                return Err(eyre::eyre!(
+                    "custom Morph arguments support one test node, but {} were requested; \
+                     the upstream multi-node helper builds MorphNode::default() per node",
+                    self.num_nodes
+                ));
+            }
+            let (node, wallet) =
+                launch_test_node_with_args(Arc::new(chain_spec), self.is_dev, args).await?;
+            return Ok((vec![node], wallet));
+        }
 
         // Built via `E2ETestSetupBuilder` rather than `setup_engine` so the node config
         // can carry `--builder.gaslimit`, which `setup_engine` gives no way to set.
@@ -299,18 +337,76 @@ impl TestNodeBuilder {
     }
 }
 
-// =============================================================================
-// Backward-compatible setup() function
-// =============================================================================
+/// Launch one node from explicit [`MorphArgs`].
+///
+/// Mirrors `reth_e2e_test_utils::setup_engine` for a single node, including its
+/// network, RPC, and tree-config defaults. It exists because that helper builds
+/// the node as `N::default()` and exposes no hook to pass an instance, so tests
+/// that need non-default payload-builder limits cannot go through it. Keep the
+/// config here in sync with upstream so the two paths stay comparable.
+async fn launch_test_node_with_args(
+    chain_spec: Arc<morph_chainspec::MorphChainSpec>,
+    is_dev: bool,
+    args: MorphArgs,
+) -> eyre::Result<(MorphTestNode, Wallet)> {
+    use reth_chainspec::EthChainSpec;
+
+    let runtime = Runtime::test();
+    let network = NetworkArgs {
+        discovery: DiscoveryArgs {
+            disable_discovery: true,
+            ..DiscoveryArgs::default()
+        },
+        ..NetworkArgs::default()
+    };
+    let node_config = NodeConfig::new(chain_spec.clone())
+        .with_network(network)
+        .with_unused_ports()
+        .with_rpc(
+            RpcServerArgs::default()
+                .with_unused_ports()
+                .with_http()
+                .with_http_api(RpcModuleSelection::All),
+        )
+        .set_dev(is_dev);
+    let node = MorphNode::new(args);
+    let tree_config = TreeConfig::default().with_cross_block_cache_size(1024 * 1024);
+    let span = span!(Level::INFO, "node", idx = 0);
+
+    let NodeHandle {
+        node,
+        node_exit_future: _,
+    } = NodeBuilder::new(node_config)
+        .testing_node(runtime)
+        .with_types_and_provider::<MorphNode, BlockchainProvider<_>>()
+        .with_components(node.components_builder())
+        .with_add_ons(node.add_ons())
+        .launch_with_fn(|builder| {
+            let launcher = EngineNodeLauncher::new(
+                builder.task_executor().clone(),
+                builder.config().datadir(),
+                tree_config,
+            );
+            builder.launch_with(launcher)
+        })
+        .instrument(span)
+        .await?;
+
+    let node = NodeTestContext::new(node, morph_payload_attributes).await?;
+    let genesis_number = chain_spec.genesis_header().number();
+    let genesis_hash = node.block_hash(genesis_number);
+    node.update_forkchoice(genesis_hash, genesis_hash).await?;
+
+    Ok((
+        node,
+        Wallet::default().with_chain_id(chain_spec.chain().into()),
+    ))
+}
 
 /// Creates ephemeral Morph nodes for E2E testing.
 ///
 /// Convenience wrapper around [`TestNodeBuilder`] for tests that don't need
-/// custom hardfork schedules or node counts.
-///
-/// # Parameters
-/// - `num_nodes`: number of interconnected nodes to create
-/// - `is_dev`: whether to enable dev mode (auto-sealing every 100ms)
+/// custom hardfork schedules or payload-builder limits.
 pub async fn setup(num_nodes: usize, is_dev: bool) -> eyre::Result<(Vec<MorphTestNode>, Wallet)> {
     TestNodeBuilder::new()
         .with_num_nodes(num_nodes)
@@ -742,6 +838,33 @@ pub const TEST_TOKEN_ADDRESS: Address = Address::new([
     0x00, 0x00, 0x00, 0x22,
 ]);
 
+/// Fee vault configured by the test genesis, which receives token fees.
+///
+/// Address: `0x530000000000000000000000000000000000000a`
+pub const TEST_FEE_VAULT_ADDRESS: Address = Address::new([
+    0x53, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x0a,
+]);
+
+/// Base slot of the test token's `balances` mapping.
+///
+/// The registry stores this one-based so that zero means "unknown", and
+/// `morph_revm`'s token-fee reader subtracts one. The test genesis registers `2`
+/// for `TEST_TOKEN_ID`, so the effective base slot is `1`.
+const TEST_TOKEN_BALANCE_BASE_SLOT: u64 = 1;
+
+/// Storage slot holding `account`'s balance of the test ERC20 token.
+///
+/// Derives the Solidity mapping slot independently from the token-fee
+/// implementation so fee-accounting tests do not share their oracle with
+/// production code.
+pub fn test_token_balance_slot(account: Address) -> B256 {
+    let mut preimage = [0u8; 64];
+    preimage[12..32].copy_from_slice(account.as_slice());
+    preimage[32..].copy_from_slice(&U256::from(TEST_TOKEN_BALANCE_BASE_SLOT).to_be_bytes::<32>());
+    alloy_primitives::keccak256(preimage)
+}
+
 // =============================================================================
 // MorphTxBuilder
 // =============================================================================
@@ -891,6 +1014,13 @@ impl MorphTxBuilder {
     /// Set gas limit.
     pub fn with_gas_limit(mut self, gas_limit: u64) -> Self {
         self.gas_limit = gas_limit;
+        self
+    }
+
+    /// Set max and priority fees to control deterministic pool ordering.
+    pub fn with_fees(mut self, max_fee_per_gas: u128, max_priority_fee_per_gas: u128) -> Self {
+        self.max_fee_per_gas = max_fee_per_gas;
+        self.max_priority_fee_per_gas = max_priority_fee_per_gas;
         self
     }
 
