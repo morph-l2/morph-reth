@@ -85,6 +85,13 @@ inherits = "release"
 lto = "fat"
 codegen-units = 1
 
+# Deterministic release profile for reproducible production builds.
+[profile.reproducible]
+inherits = "release"
+panic = "abort"
+codegen-units = 1
+incremental = false
+
 [workspace.dependencies]
 morph-chainspec = { path = "crates/chainspec", default-features = false }
 morph-consensus = { path = "crates/consensus", default-features = false }

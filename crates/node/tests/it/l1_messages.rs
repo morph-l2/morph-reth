@@ -161,3 +161,86 @@ async fn l1_message_gas_is_tracked() -> eyre::Result<()> {
 
     Ok(())
 }
+
+/// When a later L1 message does not fit remaining block gas, assemble still
+/// succeeds with the messages that already fit. The leftover is retried on
+/// the next block via `next_l1_msg_index`.
+#[tokio::test(flavor = "multi_thread")]
+async fn l1_message_gas_overflow_seals_what_fits() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let block_gas_limit = 50_000u64;
+    let (mut nodes, _wallet) = TestNodeBuilder::new()
+        .with_gas_limit(block_gas_limit)
+        .build()
+        .await?;
+    let mut node = nodes.pop().unwrap();
+
+    let msg0 = L1MessageBuilder::new(0)
+        .with_target(Address::with_last_byte(0x01))
+        .with_gas_limit(21_000)
+        .build_encoded();
+    let msg1 = L1MessageBuilder::new(1)
+        .with_target(Address::with_last_byte(0x02))
+        .with_gas_limit(40_000)
+        .build_encoded();
+
+    let payload = advance_block_with_l1_messages(&mut node, vec![msg0, msg1]).await?;
+    let block = payload.block();
+
+    assert_eq!(
+        block.body().transactions.len(),
+        1,
+        "only the L1 message that fits remaining gas should be included"
+    );
+    let tx = block.body().transactions.first().unwrap();
+    assert!(tx.is_l1_msg());
+    assert_eq!(tx.queue_index(), Some(0));
+    assert_eq!(block.header().next_l1_msg_index, 1);
+
+    let leftover = L1MessageBuilder::new(1)
+        .with_target(Address::with_last_byte(0x02))
+        .with_gas_limit(40_000)
+        .build_encoded();
+    let payload2 = advance_block_with_l1_messages(&mut node, vec![leftover]).await?;
+    let block2 = payload2.block();
+
+    assert_eq!(block2.body().transactions.len(), 1);
+    assert_eq!(
+        block2.body().transactions.first().unwrap().queue_index(),
+        Some(1)
+    );
+    assert_eq!(block2.header().next_l1_msg_index, 2);
+
+    Ok(())
+}
+
+/// A single L1 message larger than the whole block gas limit must not abort
+/// assemble. The message is left for a later block (`next_l1_msg_index` unchanged).
+#[tokio::test(flavor = "multi_thread")]
+async fn single_oversized_l1_message_does_not_abort_assemble() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let block_gas_limit = 50_000u64;
+    let (mut nodes, _wallet) = TestNodeBuilder::new()
+        .with_gas_limit(block_gas_limit)
+        .build()
+        .await?;
+    let mut node = nodes.pop().unwrap();
+
+    let oversized = L1MessageBuilder::new(0)
+        .with_target(Address::with_last_byte(0x01))
+        .with_gas_limit(100_000)
+        .build_encoded();
+
+    let payload = advance_block_with_l1_messages(&mut node, vec![oversized]).await?;
+    let block = payload.block();
+
+    assert!(
+        block.body().transactions.is_empty(),
+        "oversized L1 message must not be included"
+    );
+    assert_eq!(block.header().next_l1_msg_index, 0);
+
+    Ok(())
+}

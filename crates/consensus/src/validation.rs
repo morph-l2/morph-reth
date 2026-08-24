@@ -27,6 +27,8 @@
 //! - No uncle blocks allowed
 //! - Withdrawals field must not be present
 //! - Transaction root must be valid
+//! - L2 transaction payload (EIP-2718 encoded, L1 messages excluded) must not
+//!   exceed [`morph_chainspec::MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK`]
 //!
 //! ## Post-Execution Validation
 //!
@@ -36,9 +38,12 @@
 //!
 use crate::MorphConsensusError;
 use alloy_consensus::{BlockHeader as _, EMPTY_OMMER_ROOT_HASH, TxReceipt};
+use alloy_eips::eip2718::Encodable2718;
 use alloy_evm::block::BlockExecutionResult;
 use alloy_primitives::{B256, Bloom};
-use morph_chainspec::{MorphChainSpec, MorphHardforks};
+use morph_chainspec::{
+    MINIMUM_GAS_LIMIT, MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK, MorphChainSpec, MorphHardforks,
+};
 use morph_primitives::{
     Block, BlockBody, MorphHeader, MorphReceipt, MorphTxEnvelope,
     transaction::morph_transaction::MORPH_TX_VERSION_1,
@@ -62,9 +67,6 @@ const MORPH_MAXIMUM_BASE_FEE: u64 = 10_000_000_000;
 
 /// Maximum gas limit (2^63 - 1)
 const MAX_GAS_LIMIT: u64 = 0x7fffffffffffffff;
-
-/// Minimum gas limit allowed for transactions.
-const MINIMUM_GAS_LIMIT: u64 = 5000;
 
 /// The bound divisor of the gas limit, used in update calculations.
 const GAS_LIMIT_BOUND_DIVISOR: u64 = 1024;
@@ -271,7 +273,9 @@ impl Consensus<Block> for MorphConsensus {
     /// 2. **Ommers Hash**: Must be the empty ommer root hash
     /// 3. **Transaction Root**: Must be valid
     /// 4. **Withdrawals**: Must be empty (Morph L2 doesn't support withdrawals)
-    /// 5. **L1 Messages**: Must be ordered correctly (sequential queue indices, L1 before L2)
+    /// 5. **L2 Payload Size**: Encoded L2 txs (L1 messages excluded) must not
+    ///    exceed [`MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK`]
+    /// 6. **L1 Messages**: Must be ordered correctly (sequential queue indices, L1 before L2)
     fn validate_block_pre_execution(
         &self,
         block: &SealedBlock<Block>,
@@ -304,6 +308,9 @@ impl Consensus<Block> for MorphConsensus {
                 MorphConsensusError::WithdrawalsNonEmpty,
             ));
         }
+
+        // Matches go-ethereum's BlockValidator.ValidateBody() → IsValidBlockSize().
+        validate_l2_tx_payload_size(&block.body().transactions)?;
 
         // Validate MorphTx activation, version and field constraints.
         // Matches go-ethereum's BlockValidator.ValidateBody() → ValidateMorphTxVersion().
@@ -464,6 +471,37 @@ fn validate_against_parent_gas_limit<H: BlockHeader>(
         });
     }
 
+    Ok(())
+}
+
+// ============================================================================
+// L2 Payload Size Validation
+// ============================================================================
+
+/// Sum of EIP-2718 encoded L2 transaction bytes.
+///
+/// Matches go-ethereum `Block.PayloadSize()`: L1 messages are excluded because
+/// their calldata is already published on L1.
+fn l2_tx_payload_bytes(txs: &[MorphTxEnvelope]) -> u64 {
+    txs.iter()
+        .filter(|tx| !tx.is_l1_msg())
+        .map(|tx| tx.encode_2718_len() as u64)
+        .fold(0, u64::saturating_add)
+}
+
+/// Rejects blocks whose L2 payload exceeds [`MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK`].
+///
+/// Matches go-ethereum `MorphConfig.IsValidBlockSize` (`size <= limit`).
+fn validate_l2_tx_payload_size(txs: &[MorphTxEnvelope]) -> Result<(), ConsensusError> {
+    let size = l2_tx_payload_bytes(txs);
+    if size > MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK {
+        return Err(ConsensusError::other(
+            MorphConsensusError::InvalidBlockPayloadSize {
+                size,
+                limit: MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK,
+            },
+        ));
+    }
     Ok(())
 }
 
@@ -766,13 +804,17 @@ mod tests {
     }
 
     fn create_l1_msg_tx(queue_index: u64) -> MorphTxEnvelope {
+        create_l1_msg_tx_with_input(queue_index, Bytes::default())
+    }
+
+    fn create_l1_msg_tx_with_input(queue_index: u64, input: Bytes) -> MorphTxEnvelope {
         use alloy_consensus::Sealed;
         let tx = TxL1Msg {
             queue_index,
             gas_limit: 21000,
             to: Address::ZERO,
             value: U256::ZERO,
-            input: Bytes::default(),
+            input,
             sender: Address::ZERO,
         };
         // L1 messages have no signature - use Sealed instead of Signed
@@ -780,8 +822,16 @@ mod tests {
     }
 
     fn create_regular_tx() -> MorphTxEnvelope {
+        create_legacy_tx_with_input(Bytes::default())
+    }
+
+    fn create_legacy_tx_with_input(input: Bytes) -> MorphTxEnvelope {
         use alloy_consensus::TxLegacy;
-        let tx = TxLegacy::default();
+        let tx = TxLegacy {
+            gas_limit: 1_000_000,
+            input,
+            ..Default::default()
+        };
         let sig = Signature::new(U256::ZERO, U256::ZERO, false);
         MorphTxEnvelope::Legacy(Signed::new_unchecked(tx, sig, B256::ZERO))
     }
@@ -790,16 +840,25 @@ mod tests {
         timestamp: u64,
         transactions: Vec<MorphTxEnvelope>,
     ) -> SealedBlock<Block> {
+        create_sealed_block_with_next_l1(timestamp, transactions, 0)
+    }
+
+    fn create_sealed_block_with_next_l1(
+        timestamp: u64,
+        transactions: Vec<MorphTxEnvelope>,
+        next_l1_msg_index: u64,
+    ) -> SealedBlock<Block> {
         use alloy_consensus::proofs::calculate_transaction_root;
         use reth_primitives_traits::Block as _;
 
         let transactions_root = calculate_transaction_root(&transactions);
-        let header = create_morph_header(Header {
+        let mut header = create_morph_header(Header {
             timestamp,
             transactions_root,
             ommers_hash: EMPTY_OMMER_ROOT_HASH,
             ..Default::default()
         });
+        header.next_l1_msg_index = next_l1_msg_index;
         Block::new(
             header,
             BlockBody {
@@ -1863,6 +1922,70 @@ mod tests {
                 .to_string()
                 .contains("emerald fork not reached")
         );
+    }
+
+    #[test]
+    fn test_l2_tx_payload_bytes_excludes_l1_messages() {
+        let l1 = create_l1_msg_tx_with_input(
+            0,
+            Bytes::from(vec![1u8; MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK as usize + 1]),
+        );
+        let l2 = create_regular_tx();
+
+        assert_eq!(l2_tx_payload_bytes(std::slice::from_ref(&l1)), 0);
+        assert_eq!(
+            l2_tx_payload_bytes(&[l1, l2.clone()]),
+            l2_tx_payload_bytes(std::slice::from_ref(&l2))
+        );
+    }
+
+    #[test]
+    fn test_validate_block_pre_execution_accepts_payload_at_limit() {
+        let consensus = MorphConsensus::new(create_test_chainspec());
+        // A default legacy tx is well under the 720 KiB cap.
+        let block = create_sealed_block(0, vec![create_regular_tx()]);
+
+        assert!(consensus.validate_block_pre_execution(&block).is_ok());
+        assert!(
+            l2_tx_payload_bytes(&block.body().transactions) <= MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK
+        );
+    }
+
+    #[test]
+    fn test_validate_block_pre_execution_rejects_oversized_l2_payload() {
+        let consensus = MorphConsensus::new(create_test_chainspec());
+        let oversized = create_legacy_tx_with_input(Bytes::from(vec![
+            0u8;
+            MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK
+                as usize
+        ]));
+        let size = l2_tx_payload_bytes(std::slice::from_ref(&oversized));
+        assert!(size > MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK);
+
+        let block = create_sealed_block(0, vec![oversized]);
+        let result = consensus.validate_block_pre_execution(&block);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("invalid block payload size"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_block_pre_execution_ignores_large_l1_messages() {
+        let consensus = MorphConsensus::new(create_test_chainspec());
+        let huge_l1 = create_l1_msg_tx_with_input(
+            0,
+            Bytes::from(vec![
+                1u8;
+                MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK as usize + 1024
+            ]),
+        );
+        let block = create_sealed_block_with_next_l1(0, vec![huge_l1, create_regular_tx()], 1);
+
+        assert!(consensus.validate_block_pre_execution(&block).is_ok());
     }
 
     #[test]

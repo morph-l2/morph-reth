@@ -1,45 +1,48 @@
 //! Morph node CLI arguments.
 
 use clap::Args;
+use morph_chainspec::MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK;
 
-/// Default maximum transaction payload bytes per block (120KB).
+/// Default maximum L2 transaction payload bytes per block (720 KiB).
 ///
-/// This matches Morph's go-ethereum configuration.
-pub const MORPH_DEFAULT_MAX_TX_PAYLOAD_BYTES: u64 = 122_880;
+/// `720 KiB = 120 KiB × 6`. A Morph batch can carry up to 6 EIP-4844 blobs.
+/// Each blob's usable payload is `4096 × 31 = 126_976` bytes (~124 KiB), so
+/// six blobs hold 761_856 bytes uncompressed. 120 KiB per blob is the
+/// historical headroom under that usable size; six of them stay under the
+/// uncompressed 6-blob budget and do not require the submitter to split a
+/// single L2 block.
+pub const MORPH_DEFAULT_MAX_TX_PAYLOAD_BYTES: u64 = MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK;
 
 /// Morph-specific CLI arguments.
 ///
-/// These arguments extend the standard reth CLI with Morph-specific options
-/// for block building and transaction limits.
+/// Block packing is bounded by header `gasLimit`, the payload builder time
+/// budget, and `--morph.max-tx-payload-bytes` (the uncompressed L2 payload
+/// that must fit in one 6-blob batch).
 ///
 /// Note: Block building deadline is configured via reth's built-in `--builder.deadline` flag.
 #[derive(Debug, Clone, Args)]
 #[command(next_help_heading = "Morph")]
 pub struct MorphArgs {
-    /// Maximum transaction payload bytes per block.
+    /// Maximum L2 transaction payload bytes per block (L1 messages excluded).
     ///
-    /// Limits the total size of transactions included in a single block.
-    /// Default: 122880 bytes (120KB), matching Morph's go-ethereum configuration.
+    /// Default: 737280 bytes (720 KiB), sized so one L2 block fits in a
+    /// 6-blob batch even without compression.
+    ///
+    /// Import-time consensus always enforces
+    /// [`morph_chainspec::MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK`], independent of
+    /// this flag. Packing above that value produces blocks other nodes reject.
     #[arg(
         long = "morph.max-tx-payload-bytes",
         value_name = "BYTES",
         default_value_t = MORPH_DEFAULT_MAX_TX_PAYLOAD_BYTES
     )]
     pub max_tx_payload_bytes: u64,
-
-    /// Maximum number of transactions per block.
-    ///
-    /// If not set, there is no limit on the number of transactions.
-    /// Morph Holesky testnet uses 1000 as the default limit.
-    #[arg(long = "morph.max-tx-per-block", value_name = "COUNT")]
-    pub max_tx_per_block: Option<u64>,
 }
 
 impl Default for MorphArgs {
     fn default() -> Self {
         Self {
             max_tx_payload_bytes: MORPH_DEFAULT_MAX_TX_PAYLOAD_BYTES,
-            max_tx_per_block: None,
         }
     }
 }
@@ -62,35 +65,18 @@ mod tests {
             args.max_tx_payload_bytes,
             MORPH_DEFAULT_MAX_TX_PAYLOAD_BYTES
         );
-        assert_eq!(args.max_tx_per_block, None);
+        assert_eq!(args.max_tx_payload_bytes, 720 * 1024);
     }
 
     #[test]
-    fn test_custom_args() {
+    fn test_custom_payload_bytes() {
         let args = CommandParser::<MorphArgs>::parse_from([
             "test",
             "--morph.max-tx-payload-bytes",
             "100000",
-            "--morph.max-tx-per-block",
-            "500",
         ])
         .args;
         assert_eq!(args.max_tx_payload_bytes, 100000);
-        assert_eq!(args.max_tx_per_block, Some(500));
-    }
-
-    #[test]
-    fn test_all_args_combined() {
-        let args = CommandParser::<MorphArgs>::parse_from([
-            "test",
-            "--morph.max-tx-payload-bytes",
-            "200000",
-            "--morph.max-tx-per-block",
-            "1000",
-        ])
-        .args;
-        assert_eq!(args.max_tx_payload_bytes, 200000);
-        assert_eq!(args.max_tx_per_block, Some(1000));
     }
 
     #[test]
@@ -106,12 +92,19 @@ mod tests {
     }
 
     #[test]
+    fn unused_tx_count_flag_is_not_supported() {
+        assert!(
+            CommandParser::<MorphArgs>::try_parse_from(["test", "--morph.max-tx-per-block", "1"])
+                .is_err()
+        );
+    }
+
+    #[test]
     fn test_default_trait_impl() {
         let args = MorphArgs::default();
         assert_eq!(
             args.max_tx_payload_bytes,
             MORPH_DEFAULT_MAX_TX_PAYLOAD_BYTES
         );
-        assert!(args.max_tx_per_block.is_none());
     }
 }
