@@ -68,4 +68,18 @@ The benchmark uses the sequential V1 Morph Engine methods because each run only 
 head. The V2 methods add explicit-parent/reorg behavior, which this workload does not exercise.
 
 Use `bench-block-exec verify-state --rpc-a <url> --rpc-b <url>` when comparing two nodes. It checks
-their latest block number, state root, receipts root, and deterministic receiver balances.
+their latest block number, state root, receipts root, and deterministic funded-sender balances.
+
+## Limitations
+
+- This is a synthetic execution-engine ceiling test, not a production TPS forecast. It disables
+  discovery and transaction backup and raises the block, payload, RPC, and txpool limits far above
+  normal deployment values; it does not include consensus, networking, proving, or L1 data costs.
+- The supported runner is reth-only. The archived April 2026 reth/geth report was produced by an
+  older runner and older binaries and must not be presented as a current-`main` comparison.
+- Open-loop mode pre-generates `target_tps * duration_secs` signed requests. The defaults create
+  24 million transactions per run and therefore require substantial memory. `target_tps` is offered
+  load; use `realized_tps`, the active/drain split, and the completion log to judge delivered load.
+- Three runs provide descriptive repeatability, not a confidence interval or statistical
+  significance test. Preserve the per-run JSONL and logs and inspect run-to-run spread before making
+  regression or capacity claims.

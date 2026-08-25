@@ -221,18 +221,7 @@ pub(crate) fn summarize(args: SummarizeArgs) -> eyre::Result<()> {
         let meets_300ms_pct = meets_300ms_count as f64 / n * 100.0;
 
         rows.push(format!(
-            "{}\t{}\t{}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.1}\t{:.1}",
-            engine,
-            layer,
-            tx_count,
-            avg_assemble,
-            avg_import,
-            avg_total,
-            p50,
-            p95,
-            p99,
-            effective_tps,
-            meets_300ms_pct,
+            "{engine}\t{layer}\t{tx_count}\t{avg_assemble:.2}\t{avg_import:.2}\t{avg_total:.2}\t{p50:.2}\t{p95:.2}\t{p99:.2}\t{effective_tps:.1}\t{meets_300ms_pct:.1}",
         ));
     }
 
@@ -264,34 +253,44 @@ fn summarize_v2(results_dir: &str, output: Option<&str>) -> eyre::Result<()> {
     // 1. Collect all .jsonl files.
     let jsonl_files: Vec<PathBuf> = walkdir(dir)?
         .into_iter()
-        .filter(|p| {
-            p.extension()
-                .is_some_and(|ext| ext == "jsonl" || ext == "json")
-                && !is_raw_sweep_result(p)
-        })
+        .filter(|p| p.extension().is_some_and(|ext| ext == "jsonl") && !is_raw_sweep_result(p))
         .collect();
+    eyre::ensure!(
+        !jsonl_files.is_empty(),
+        "no benchmark JSONL files found under {}",
+        dir.display()
+    );
 
     // 2. Parse BlockTimingV2 from each file.
-    let mut all_timings: Vec<BlockTimingV2> = Vec::new();
+    let mut all_timings: Vec<(PathBuf, BlockTimingV2)> = Vec::new();
     for path in &jsonl_files {
         let file = fs::File::open(path)?;
         let reader = BufReader::new(file);
-        for line in reader.lines() {
+        for (line_idx, line) in reader.lines().enumerate() {
             let line = line?;
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
             }
-            if let Ok(timing) = serde_json::from_str::<BlockTimingV2>(trimmed) {
-                all_timings.push(timing);
-            }
+            let timing = serde_json::from_str::<BlockTimingV2>(trimmed).map_err(|err| {
+                eyre::eyre!(
+                    "invalid benchmark record at {}:{}: {err}",
+                    path.display(),
+                    line_idx + 1
+                )
+            })?;
+            all_timings.push((path.clone(), timing));
         }
     }
+    eyre::ensure!(
+        !all_timings.is_empty(),
+        "benchmark JSONL files contained no timing records"
+    );
 
     // 3. Keep fixed-block load and open-loop target as separate dimensions.
     type GroupKey = (String, String, String, u64, u64, u64, Option<u64>);
-    let mut groups: BTreeMap<GroupKey, Vec<BlockTimingV2>> = BTreeMap::new();
-    for t in all_timings {
+    let mut groups: BTreeMap<GroupKey, Vec<(PathBuf, BlockTimingV2)>> = BTreeMap::new();
+    for (source, t) in all_timings {
         groups
             .entry((
                 t.engine.clone(),
@@ -303,7 +302,7 @@ fn summarize_v2(results_dir: &str, output: Option<&str>) -> eyre::Result<()> {
                 t.target_tps,
             ))
             .or_default()
-            .push(t);
+            .push((source, t));
     }
 
     // 4. Build TSV output.
@@ -312,9 +311,19 @@ fn summarize_v2(results_dir: &str, output: Option<&str>) -> eyre::Result<()> {
     let mut rows: Vec<String> = vec![header.to_string()];
 
     for ((engine, mode, workload, senders, warmup, txs_per_block, target_tps), entries) in &groups {
-        let data: Vec<&BlockTimingV2> = entries.iter().collect();
+        let errors = entries.iter().filter(|(_, t)| t.error).count();
+        eyre::ensure!(
+            errors == 0,
+            "refusing to summarize {errors} failed sample(s) for {engine}/{mode}/{workload}"
+        );
+        let data: Vec<&BlockTimingV2> = entries.iter().map(|(_, timing)| timing).collect();
         if data.is_empty() {
             continue;
+        }
+
+        let mut runs: BTreeMap<&Path, Vec<&BlockTimingV2>> = BTreeMap::new();
+        for (source, timing) in entries {
+            runs.entry(source.as_path()).or_default().push(timing);
         }
 
         let n = data.len() as f64;
@@ -343,7 +352,31 @@ fn summarize_v2(results_dir: &str, output: Option<&str>) -> eyre::Result<()> {
         // Mgas/s
         let avg_mgas_s: f64 = data.iter().map(|t| t.mgas_per_sec).sum::<f64>() / n;
 
-        let (early_tps, mid_tps, late_tps, late_vs_early_pct) = tps_window_stats(&data);
+        let per_run_windows: Vec<(f64, f64, f64, f64)> =
+            runs.values().map(|run| tps_window_stats(run)).collect();
+        let early_tps = mean(
+            &per_run_windows
+                .iter()
+                .map(|window| window.0)
+                .collect::<Vec<_>>(),
+        );
+        let mid_tps = mean(
+            &per_run_windows
+                .iter()
+                .map(|window| window.1)
+                .collect::<Vec<_>>(),
+        );
+        let late_tps = mean(
+            &per_run_windows
+                .iter()
+                .map(|window| window.2)
+                .collect::<Vec<_>>(),
+        );
+        let late_vs_early_pct = if early_tps > 0.0 {
+            (late_tps / early_tps - 1.0) * 100.0
+        } else {
+            0.0
+        };
         let (
             active_blocks,
             active_avg_tps,
@@ -353,22 +386,27 @@ fn summarize_v2(results_dir: &str, output: Option<&str>) -> eyre::Result<()> {
             drain_realized_tps,
         ) = openloop_phase_split_stats(mode, &data);
 
-        // Degradation: for runs with 200+ entries, compare first 100 vs last 100
-        let degradation_pct = if data.len() >= 200 {
-            let first100_avg: f64 = data[..100].iter().map(|t| t.tps).sum::<f64>() / 100.0;
-            let last100_avg: f64 =
-                data[data.len() - 100..].iter().map(|t| t.tps).sum::<f64>() / 100.0;
-            if first100_avg > 0.0 {
-                (last100_avg / first100_avg - 1.0) * 100.0
-            } else {
-                0.0
-            }
-        } else {
+        // Degradation is computed within each run. Concatenating fresh-node runs
+        // would compare one run against another rather than early vs late blocks.
+        let run_degradations: Vec<f64> = runs
+            .values()
+            .filter(|run| run.len() >= 200)
+            .map(|run| {
+                let first100_avg: f64 = run[..100].iter().map(|t| t.tps).sum::<f64>() / 100.0;
+                let last100_avg: f64 =
+                    run[run.len() - 100..].iter().map(|t| t.tps).sum::<f64>() / 100.0;
+                if first100_avg > 0.0 {
+                    (last100_avg / first100_avg - 1.0) * 100.0
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let degradation_pct = if run_degradations.is_empty() {
             f64::NAN
+        } else {
+            mean(&run_degradations)
         };
-
-        // Error count
-        let errors = data.iter().filter(|t| t.error).count();
 
         let deg_str = if degradation_pct.is_nan() {
             "N/A".to_string()
@@ -592,6 +630,56 @@ mod tests {
         assert!(
             row.contains("\t-30.0"),
             "expected late-vs-early drop in row: {row}"
+        );
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn summarize_v2_keeps_degradation_windows_within_each_run() {
+        let dir = temp_dir("summary-v2-independent-runs");
+        let output = dir.join("summary.tsv");
+
+        write_rows_with_tps(
+            &dir.join("exec-eth-transfer-1000-run1.jsonl"),
+            1000,
+            vec![1000.0; 100],
+        );
+        write_rows_with_tps(
+            &dir.join("exec-eth-transfer-1000-run2.jsonl"),
+            1000,
+            vec![2000.0; 100],
+        );
+
+        summarize_v2(dir.to_str().unwrap(), Some(output.to_str().unwrap())).unwrap();
+
+        let summary = fs::read_to_string(&output).unwrap();
+        let header: Vec<&str> = summary.lines().next().unwrap().split('\t').collect();
+        let row: Vec<&str> = summary.lines().nth(1).unwrap().split('\t').collect();
+        let field = |name: &str| {
+            let idx = header.iter().position(|value| *value == name).unwrap();
+            row[idx]
+        };
+
+        assert_eq!(field("early_tps"), "1500.0");
+        assert_eq!(field("mid_tps"), "1500.0");
+        assert_eq!(field("late_tps"), "1500.0");
+        assert_eq!(field("late_vs_early%"), "0.0");
+        assert_eq!(field("degradation%"), "N/A");
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn summarize_v2_rejects_malformed_records() {
+        let dir = temp_dir("summary-v2-malformed");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("broken.jsonl"), "not-json\n").unwrap();
+
+        let err = summarize_v2(dir.to_str().unwrap(), None).unwrap_err();
+        assert!(
+            err.to_string().contains("broken.jsonl:1"),
+            "unexpected error: {err}"
         );
 
         fs::remove_dir_all(dir).unwrap();

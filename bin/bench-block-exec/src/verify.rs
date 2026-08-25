@@ -1,7 +1,7 @@
 use clap::Args;
 use serde::{Deserialize, Serialize};
 
-use crate::tx_factory::receiver_address;
+use crate::tx_factory::generate_senders;
 
 #[derive(Args)]
 pub(crate) struct VerifyStateArgs {
@@ -122,10 +122,10 @@ pub(crate) async fn run(args: VerifyStateArgs) -> eyre::Result<()> {
         ));
     }
 
-    // 5. Compare balances for receiver addresses.
+    // 5. Compare balances for deterministic funded sender accounts.
     let mut balances_matched: u64 = 0;
-    for i in 0..args.check_balances {
-        let addr = receiver_address(i);
+    for sender in generate_senders(args.check_balances as usize) {
+        let addr = sender.address;
         let addr_hex = format!("{addr:#x}");
 
         let balance_a = rpc_call(

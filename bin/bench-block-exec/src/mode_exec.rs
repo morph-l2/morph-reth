@@ -151,7 +151,7 @@ pub(crate) async fn run_with_state(args: &ExecArgs, state: &mut ExecRunState) ->
         // Submit to txpool in waves (NOT timed — we only care about execution).
         // Fire all waves as fast as possible, only wait for pool at the end.
         const WAVE_SIZE: usize = 10_000;
-        let num_waves = (txs.len() + WAVE_SIZE - 1) / WAVE_SIZE;
+        let num_waves = txs.len().div_ceil(WAVE_SIZE);
         for (wi, wave) in txs.chunks(WAVE_SIZE).enumerate() {
             eprint!(
                 "\r  submitting wave {}/{} ({} txs)...",
@@ -258,10 +258,9 @@ pub(crate) async fn run_with_state(args: &ExecArgs, state: &mut ExecRunState) ->
         }
 
         if error {
-            eprintln!(
-                "block {display_block_number}: stopping exec run after error to keep block-number state consistent."
+            eyre::bail!(
+                "block {display_block_number}: exec run failed; refusing to summarize a partial run"
             );
-            break;
         }
 
         state.record_transactions(actual_tx_count);

@@ -73,7 +73,7 @@ pub(crate) fn build_genesis(args: &WriteGenesisArgs) -> eyre::Result<serde_json:
             normalized.len() == 40 && normalized.chars().all(|c| c.is_ascii_hexdigit()),
             "sender must be a 40-character hex address, got: {sender}"
         );
-        alloc.insert(normalized.clone(), json!({ "balance": &hex_balance }));
+        alloc.insert(normalized, json!({ "balance": &hex_balance }));
         // Parse as Address for contract storage.
         let addr: alloy_primitives::Address = sender
             .parse()

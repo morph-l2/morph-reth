@@ -132,6 +132,8 @@ pub(crate) fn build_http_client(pool_max_idle_per_host: usize) -> eyre::Result<r
     reqwest::Client::builder()
         .pool_max_idle_per_host(pool_max_idle_per_host.max(1))
         .tcp_nodelay(true)
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(60))
         .build()
         .map_err(Into::into)
 }
@@ -256,10 +258,7 @@ pub(crate) async fn submit_prebuilt_bodies_with_target_cursor(
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire().await.map_err(|e| eyre::eyre!("{e}"))?;
 
-            // Fire-and-forget: send the request, check HTTP status, but skip
-            // reading/parsing the response body. The pool_wait phase will
-            // confirm all txs landed via nonce polling.
-            client
+            let resp = client
                 .post(&url)
                 .header("Content-Type", "application/json")
                 .body(body)
@@ -268,6 +267,11 @@ pub(crate) async fn submit_prebuilt_bodies_with_target_cursor(
                 .map_err(|e| eyre::eyre!("send failed: {e}"))?
                 .error_for_status()
                 .map_err(|e| eyre::eyre!("http error: {e}"))?;
+            let body = resp
+                .bytes()
+                .await
+                .map_err(|e| eyre::eyre!("read failed: {e}"))?;
+            ensure_submit_batch_success(body.as_ref())?;
 
             Ok::<(), eyre::Report>(())
         }));
@@ -442,7 +446,6 @@ pub async fn run(args: E2eArgs) -> eyre::Result<()> {
 
     // 2. Open output file.
     let mut out_file = std::fs::File::create(&args.output)?;
-    let mut consecutive_errors: u64 = 0;
 
     // 3. Main block loop.
     for block_idx in 0..args.blocks {
@@ -461,12 +464,6 @@ pub async fn run(args: E2eArgs) -> eyre::Result<()> {
             {
                 Ok(ms) => ms,
                 Err(e) => {
-                    eprintln!("block {block_number}: submit error: {e}");
-                    consecutive_errors += 1;
-                    if consecutive_errors >= 5 {
-                        eprintln!("5 consecutive errors - aborting.");
-                        break;
-                    }
                     write_error_timing(
                         &mut out_file,
                         block_number,
@@ -475,7 +472,9 @@ pub async fn run(args: E2eArgs) -> eyre::Result<()> {
                         &workload,
                         args.senders,
                     )?;
-                    continue;
+                    return Err(eyre::eyre!(
+                        "block {block_number}: submit failed after sender nonces advanced: {e}"
+                    ));
                 }
             };
 
@@ -491,12 +490,6 @@ pub async fn run(args: E2eArgs) -> eyre::Result<()> {
         {
             Ok(ms) => ms,
             Err(e) => {
-                eprintln!("block {block_number}: pool wait error: {e}");
-                consecutive_errors += 1;
-                if consecutive_errors >= 5 {
-                    eprintln!("5 consecutive errors - aborting.");
-                    break;
-                }
                 write_error_timing(
                     &mut out_file,
                     block_number,
@@ -505,7 +498,9 @@ pub async fn run(args: E2eArgs) -> eyre::Result<()> {
                     &workload,
                     args.senders,
                 )?;
-                continue;
+                return Err(eyre::eyre!(
+                    "block {block_number}: pool acceptance failed: {e}"
+                ));
             }
         };
 
@@ -543,13 +538,6 @@ pub async fn run(args: E2eArgs) -> eyre::Result<()> {
         } else {
             (0.0, true)
         };
-
-        // --- error tracking ---
-        if error {
-            consecutive_errors += 1;
-        } else {
-            consecutive_errors = 0;
-        }
 
         // --- record timing ---
         let mut timing = BlockTimingV2 {
@@ -598,14 +586,55 @@ pub async fn run(args: E2eArgs) -> eyre::Result<()> {
             );
         }
 
-        // --- bail on repeated failures ---
-        if consecutive_errors >= 5 {
-            eprintln!("5 consecutive errors - aborting.");
-            break;
+        if error {
+            eyre::bail!(
+                "block {block_number}: e2e run failed; refusing to summarize a partial run"
+            );
         }
     }
 
     println!("Results written to {}", args.output);
+    Ok(())
+}
+
+/// Write an error-only timing line (all timing fields zero, error=true).
+fn write_error_timing(
+    out: &mut std::fs::File,
+    block_number: u64,
+    expected_tx_count: u64,
+    engine: &str,
+    workload: &Workload,
+    senders: u64,
+) -> eyre::Result<()> {
+    let mut timing = BlockTimingV2 {
+        block_number,
+        tx_count: 0,
+        expected_tx_count,
+        target_tps: None,
+        engine: engine.to_string(),
+        mode: "e2e".to_string(),
+        workload: workload.to_string(),
+        senders,
+        warmup_blocks: 0,
+        phase: None,
+        submit_ms: 0.0,
+        pool_wait_ms: 0.0,
+        assemble_ms: 0.0,
+        import_ms: 0.0,
+        total_ms: 0.0,
+        gas_used: 0,
+        tps: 0.0,
+        mgas_per_sec: 0.0,
+        inclusion_rate: 0.0,
+        cumulative_blocks: block_number,
+        cumulative_txs: 0,
+        rolling_avg_tps_100: None,
+        error: true,
+    };
+    timing.finalize();
+
+    let line = serde_json::to_string(&timing)?;
+    writeln!(out, "{line}")?;
     Ok(())
 }
 
@@ -1078,49 +1107,4 @@ mod tests {
         handle_a.abort();
         handle_b.abort();
     }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Write an error-only timing line (all timing fields zero, error=true).
-fn write_error_timing(
-    out: &mut std::fs::File,
-    block_number: u64,
-    expected_tx_count: u64,
-    engine: &str,
-    workload: &Workload,
-    senders: u64,
-) -> eyre::Result<()> {
-    let mut timing = BlockTimingV2 {
-        block_number,
-        tx_count: 0,
-        expected_tx_count,
-        target_tps: None,
-        engine: engine.to_string(),
-        mode: "e2e".to_string(),
-        workload: workload.to_string(),
-        senders,
-        warmup_blocks: 0,
-        phase: None,
-        submit_ms: 0.0,
-        pool_wait_ms: 0.0,
-        assemble_ms: 0.0,
-        import_ms: 0.0,
-        total_ms: 0.0,
-        gas_used: 0,
-        tps: 0.0,
-        mgas_per_sec: 0.0,
-        inclusion_rate: 0.0,
-        cumulative_blocks: block_number,
-        cumulative_txs: 0,
-        rolling_avg_tps_100: None,
-        error: true,
-    };
-    timing.finalize();
-
-    let line = serde_json::to_string(&timing)?;
-    writeln!(out, "{line}")?;
-    Ok(())
 }

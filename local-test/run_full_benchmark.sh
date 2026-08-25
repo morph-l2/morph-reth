@@ -11,7 +11,7 @@ BENCH_BIN=${BENCH_BIN:-"$ROOT_DIR/target/$PROFILE/bench-block-exec"}
 JWT_SECRET=${JWT_SECRET:-"$ROOT_DIR/local-test/jwt-secret.txt"}
 CONTRACT_DIR=${CONTRACT_DIR:-"$ROOT_DIR/local-test/bench-contracts"}
 RESULTS_DIR=${RESULTS_DIR:-"/tmp/morph-reth-bench/$(date -u +%Y%m%dT%H%M%SZ)"}
-GENESIS=${GENESIS:-"$RESULTS_DIR/genesis.json"}
+GENESIS=${GENESIS:-}
 DATA_DIR=${DATA_DIR:-"$RESULTS_DIR/reth-data"}
 HTTP_PORT=${HTTP_PORT:-18545}
 AUTHRPC_PORT=${AUTHRPC_PORT:-18551}
@@ -52,6 +52,35 @@ require_command() {
     }
 }
 
+normalize_and_validate_paths() {
+    mkdir -p "$RESULTS_DIR"
+    RESULTS_DIR=$(cd "$RESULTS_DIR" && pwd -P)
+
+    local data_parent data_name
+    data_parent=$(dirname "$DATA_DIR")
+    data_name=$(basename "$DATA_DIR")
+    mkdir -p "$data_parent"
+    data_parent=$(cd "$data_parent" && pwd -P)
+    DATA_DIR="$data_parent/$data_name"
+
+    case "$DATA_DIR" in
+        "$RESULTS_DIR"/*) ;;
+        *)
+            echo "DATA_DIR must be a child of RESULTS_DIR before it can be reset: $DATA_DIR" >&2
+            exit 1
+            ;;
+    esac
+
+    if find "$RESULTS_DIR" -maxdepth 1 -type f -name '*.jsonl' -print -quit | grep -q .; then
+        echo "RESULTS_DIR already contains benchmark JSONL files; choose a fresh directory: $RESULTS_DIR" >&2
+        exit 1
+    fi
+
+    if [[ -z "$GENESIS" ]]; then
+        GENESIS="$RESULTS_DIR/genesis.json"
+    fi
+}
+
 prepare() {
     require_command cargo
     require_command curl
@@ -59,7 +88,7 @@ prepare() {
     require_command jq
     require_command openssl
 
-    mkdir -p "$RESULTS_DIR"
+    normalize_and_validate_paths
 
     if [[ "$BUILD" == "1" ]]; then
         echo "[$(timestamp)] Building morph-reth and benchmark tool ($PROFILE profile)"
@@ -96,7 +125,15 @@ prepare() {
         --arg workloads "$WORKLOADS" \
         --argjson senders "$SENDERS" \
         --argjson runs "$RUNS" \
-        '{created_at:$created_at,git_commit:$git_commit,dirty_files:($git_dirty|tonumber),profile:$profile,reth_version:$reth_version,modes:$modes,workloads:$workloads,senders:$senders,runs:$runs}' \
+        --arg exec_block_sizes "$EXEC_BLOCK_SIZES" \
+        --argjson exec_blocks "$EXEC_BLOCKS" \
+        --argjson sustained_txs_per_block "$SUSTAINED_TXS_PER_BLOCK" \
+        --argjson sustained_blocks "$SUSTAINED_BLOCKS" \
+        --argjson sustained_warmup_blocks "$SUSTAINED_WARMUP_BLOCKS" \
+        --argjson openloop_target_tps "$OPENLOOP_TARGET_TPS" \
+        --argjson openloop_duration_secs "$OPENLOOP_DURATION_SECS" \
+        --arg uname "$(uname -a)" \
+        '{created_at:$created_at,git_commit:$git_commit,dirty_files:($git_dirty|tonumber),profile:$profile,reth_version:$reth_version,uname:$uname,modes:$modes,workloads:$workloads,senders:$senders,runs:$runs,exec:{block_sizes:$exec_block_sizes,blocks:$exec_blocks},sustained:{txs_per_block:$sustained_txs_per_block,blocks:$sustained_blocks,warmup_blocks:$sustained_warmup_blocks},openloop:{target_tps:$openloop_target_tps,duration_secs:$openloop_duration_secs}}' \
         > "$RESULTS_DIR/metadata.json"
 }
 
@@ -123,7 +160,7 @@ wait_for_rpc() {
 start_reth() {
     local run_name=$1
     cleanup_node
-    rm -rf "$DATA_DIR"
+    rm -rf -- "$DATA_DIR"
     mkdir -p "$DATA_DIR" "$RESULTS_DIR/logs"
     NODE_LOG="$RESULTS_DIR/logs/${run_name}-node.log"
     "$RETH_BIN" node \

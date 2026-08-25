@@ -268,7 +268,7 @@ fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
     };
 
     // Pad key to BLOCK_SIZE.
-    let mut padded = vec![0u8; BLOCK_SIZE];
+    let mut padded = [0u8; BLOCK_SIZE];
     padded[..key.len()].copy_from_slice(&key);
 
     // ipad = key ^ 0x36
@@ -327,7 +327,7 @@ pub(crate) fn create_jwt_token(secret_hex: &str) -> eyre::Result<String> {
 
 /// Decode a hex string (without `0x` prefix) into bytes.
 fn hex_decode(hex: &str) -> eyre::Result<Vec<u8>> {
-    ensure!(hex.len() % 2 == 0, "hex string has odd length");
+    ensure!(hex.len().is_multiple_of(2), "hex string has odd length");
     (0..hex.len())
         .step_by(2)
         .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).map_err(Into::into))
@@ -376,10 +376,11 @@ impl EngineClient {
     /// every [`Self::JWT_REFRESH_SECS`] seconds.
     fn authed_client(&self, url: &str) -> eyre::Result<HttpClient> {
         let mut guard = self.cached.lock().unwrap();
-        if let Some((ref cached_url, ref client, created_at)) = *guard {
-            if cached_url == url && created_at.elapsed().as_secs() < Self::JWT_REFRESH_SECS {
-                return Ok(client.clone());
-            }
+        if let Some((ref cached_url, ref client, created_at)) = *guard
+            && cached_url == url
+            && created_at.elapsed().as_secs() < Self::JWT_REFRESH_SECS
+        {
+            return Ok(client.clone());
         }
 
         let token = create_jwt_token(&self.jwt_secret_hex)?;

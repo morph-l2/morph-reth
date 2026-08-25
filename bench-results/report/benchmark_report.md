@@ -1,5 +1,10 @@
 # morph-reth vs morph-geth Execution Engine Benchmark Report
 
+> **Historical result — not a current-main benchmark.** These measurements were produced on
+> 2026-04-09 with the then-current branch and archived runner. The supported reth-only runner and
+> its semantics have since changed; do not use the numbers or causal claims below as evidence for
+> the current `main` branch without rerunning and independently validating the methodology.
+
 **Date**: 2026-04-09  
 **Author**: Panos  
 **Environment**: Apple M4 Pro (14 cores, 48GB RAM), macOS Darwin 25.4.0

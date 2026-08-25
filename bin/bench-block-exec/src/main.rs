@@ -37,7 +37,7 @@ enum Command {
 
 #[derive(Subcommand)]
 enum RunMode {
-    /// Mode A: Pure execution (bypass txpool).
+    /// Mode A: Block execution after untimed txpool preload.
     Exec(mode_exec::ExecArgs),
     /// Mode B: End-to-end (txpool -> assembly -> import).
     E2e(mode_e2e::E2eArgs),

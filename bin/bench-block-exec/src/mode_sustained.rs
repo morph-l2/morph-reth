@@ -150,7 +150,6 @@ pub async fn run(args: SustainedArgs) -> eyre::Result<()> {
     println!("--- Phase 2: measurement ({} blocks) ---", args.blocks);
 
     let mut out_file = std::fs::File::create(&args.output)?;
-    let mut consecutive_errors: u64 = 0;
     let mut cumulative_txs: u64 = 0;
     let mut rolling_tps: VecDeque<f64> = VecDeque::with_capacity(100);
 
@@ -171,13 +170,9 @@ pub async fn run(args: SustainedArgs) -> eyre::Result<()> {
             {
                 Ok(ms) => ms,
                 Err(e) => {
-                    eprintln!("block {block_number}: submit error: {e}");
-                    consecutive_errors += 1;
-                    if consecutive_errors >= 5 {
-                        eprintln!("5 consecutive errors - aborting.");
-                        break;
-                    }
-                    continue;
+                    return Err(eyre::eyre!(
+                        "block {block_number}: submit failed after sender nonces advanced: {e}"
+                    ));
                 }
             };
 
@@ -193,13 +188,9 @@ pub async fn run(args: SustainedArgs) -> eyre::Result<()> {
         {
             Ok(ms) => ms,
             Err(e) => {
-                eprintln!("block {block_number}: pool wait error: {e}");
-                consecutive_errors += 1;
-                if consecutive_errors >= 5 {
-                    eprintln!("5 consecutive errors - aborting.");
-                    break;
-                }
-                continue;
+                return Err(eyre::eyre!(
+                    "block {block_number}: pool acceptance failed: {e}"
+                ));
             }
         };
 
@@ -237,13 +228,6 @@ pub async fn run(args: SustainedArgs) -> eyre::Result<()> {
         } else {
             (0.0, true)
         };
-
-        // --- error tracking ---
-        if error {
-            consecutive_errors += 1;
-        } else {
-            consecutive_errors = 0;
-        }
 
         // --- update cumulative counters ---
         cumulative_txs += actual_tx_count;
@@ -311,10 +295,10 @@ pub async fn run(args: SustainedArgs) -> eyre::Result<()> {
             );
         }
 
-        // --- bail on repeated failures ---
-        if consecutive_errors >= 5 {
-            eprintln!("5 consecutive errors - aborting.");
-            break;
+        if error {
+            eyre::bail!(
+                "block {block_number}: sustained run failed; refusing to summarize a partial run"
+            );
         }
     }
 

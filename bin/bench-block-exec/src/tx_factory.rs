@@ -108,7 +108,7 @@ pub fn generate_senders(count: usize) -> Vec<BenchSender> {
             preimage[..32].copy_from_slice(master.as_slice());
             preimage[32..].copy_from_slice(&(i as u64).to_be_bytes());
             let secret = keccak256(preimage);
-            let signer = PrivateKeySigner::from_bytes(&secret.into())
+            let signer = PrivateKeySigner::from_bytes(&secret)
                 .expect("deterministic key derivation should never fail");
             let address = signer.address();
             BenchSender {
@@ -124,14 +124,15 @@ pub fn generate_senders(count: usize) -> Vec<BenchSender> {
 // Address / storage helpers
 // ---------------------------------------------------------------------------
 
-/// Generate a deterministic receiver address from an index.
+/// Generate a deterministic receiver address for one sender nonce.
 ///
-/// Uses `0xBB` as the first byte and the index in the last 8 bytes.
-pub fn receiver_address(index: u64) -> Address {
-    let mut bytes = [0u8; 20];
-    bytes[0] = 0xBB;
-    bytes[12..20].copy_from_slice(&index.to_be_bytes());
-    Address::from(bytes)
+/// Including both fields prevents different senders and later blocks from
+/// repeatedly touching the same small receiver set during state-growth tests.
+pub fn receiver_address(sender: Address, nonce: u64) -> Address {
+    let mut preimage = [0u8; 28];
+    preimage[..20].copy_from_slice(sender.as_slice());
+    preimage[20..].copy_from_slice(&nonce.to_be_bytes());
+    Address::from_slice(&keccak256(preimage)[12..])
 }
 
 /// Compute the storage slot for a Solidity `mapping(address => ...)` entry.
@@ -203,7 +204,7 @@ pub fn build_eth_transfers(
             gas_limit: 21_000,
             max_fee_per_gas: BENCH_MAX_FEE_PER_GAS,
             max_priority_fee_per_gas: 0,
-            to: TxKind::Call(receiver_address(i)),
+            to: TxKind::Call(receiver_address(sender.address, start_nonce + i)),
             value: U256::from(1),
             access_list: Default::default(),
             input: Bytes::new(),
@@ -225,7 +226,7 @@ pub fn build_erc20_transfers(
     let start_nonce = sender.nonce;
     let txs = (0..count)
         .map(|i| {
-            let to = receiver_address(i);
+            let to = receiver_address(sender.address, start_nonce + i);
 
             // transfer(address,uint256) selector: 0xa9059cbb
             let mut calldata = vec![0xa9, 0x05, 0x9c, 0xbb];
@@ -259,13 +260,14 @@ pub fn build_swap_txs(
     count: u64,
     chain_id: u64,
 ) -> eyre::Result<Vec<Bytes>> {
+    const AMOUNT_IN: u128 = 1_000_000_000_000_000_000;
     let selector = &keccak256(b"swap0For1(uint256)")[..4];
     let start_nonce = sender.nonce;
     let txs = (0..count)
         .map(|_| {
             let mut calldata = Vec::with_capacity(4 + 32);
             calldata.extend_from_slice(selector);
-            calldata.extend_from_slice(&U256::from(1).to_be_bytes::<32>());
+            calldata.extend_from_slice(&U256::from(AMOUNT_IN).to_be_bytes::<32>());
 
             TxEip1559 {
                 chain_id,
@@ -378,8 +380,12 @@ mod tests {
 
     #[test]
     fn receiver_addresses_are_unique() {
-        let addrs: HashSet<Address> = (0..100).map(receiver_address).collect();
-        assert_eq!(addrs.len(), 100);
+        let senders = generate_senders(2);
+        let addrs: HashSet<Address> = senders
+            .iter()
+            .flat_map(|sender| (0..100).map(|nonce| receiver_address(sender.address, nonce)))
+            .collect();
+        assert_eq!(addrs.len(), 200);
     }
 
     #[test]

@@ -95,6 +95,32 @@ struct PrebuiltSubmitBatch {
     bodies: Vec<Vec<u8>>,
 }
 
+struct SubmitLoopConfig {
+    duration_secs: u64,
+    submit_tick_ms: u64,
+    http_client: reqwest::Client,
+    submit_targets: Vec<String>,
+    submit_options: SubmitOptions,
+    sender_finished: Arc<AtomicBool>,
+    abort: Arc<AtomicBool>,
+    submitted_txs: Arc<AtomicU64>,
+}
+
+struct ProducerLoopConfig {
+    client: EngineClient,
+    engine_rpc: String,
+    http_rpc: String,
+    pool_client: reqwest::Client,
+    workload: Workload,
+    target_tps: u64,
+    senders: u64,
+    producer_idle_ms: u64,
+    drain_secs: u64,
+    sender_finished: Arc<AtomicBool>,
+    abort: Arc<AtomicBool>,
+    submitted_txs: Arc<AtomicU64>,
+}
+
 pub async fn run(args: OpenLoopArgs) -> eyre::Result<()> {
     let workload: Workload = args.workload.parse()?;
     let jwt_hex = std::fs::read_to_string(&args.jwt_secret)
@@ -179,29 +205,33 @@ pub async fn run(args: OpenLoopArgs) -> eyre::Result<()> {
 
     let submit_future = drive_submit_loop(
         tick_batches,
-        args.duration_secs,
-        args.submit_tick_ms,
-        http_client.clone(),
-        submit_targets,
-        submit_options,
-        Arc::clone(&sender_finished),
-        Arc::clone(&abort),
-        Arc::clone(&submitted_txs),
+        SubmitLoopConfig {
+            duration_secs: args.duration_secs,
+            submit_tick_ms: args.submit_tick_ms,
+            http_client: http_client.clone(),
+            submit_targets,
+            submit_options,
+            sender_finished: Arc::clone(&sender_finished),
+            abort: Arc::clone(&abort),
+            submitted_txs: Arc::clone(&submitted_txs),
+        },
     );
     let produce_future = drive_producer_loop(
         &mut out_file,
-        client,
-        args.engine_rpc.clone(),
-        args.http_rpc.clone(),
-        pool_client,
-        workload,
-        args.target_tps,
-        args.senders,
-        args.producer_idle_ms,
-        args.drain_secs,
-        Arc::clone(&sender_finished),
-        Arc::clone(&abort),
-        Arc::clone(&submitted_txs),
+        ProducerLoopConfig {
+            client,
+            engine_rpc: args.engine_rpc.clone(),
+            http_rpc: args.http_rpc.clone(),
+            pool_client,
+            workload,
+            target_tps: args.target_tps,
+            senders: args.senders,
+            producer_idle_ms: args.producer_idle_ms,
+            drain_secs: args.drain_secs,
+            sender_finished: Arc::clone(&sender_finished),
+            abort: Arc::clone(&abort),
+            submitted_txs: Arc::clone(&submitted_txs),
+        },
     );
 
     let (submit_res, produce_res) = tokio::join!(submit_future, produce_future);
@@ -232,15 +262,18 @@ pub async fn run(args: OpenLoopArgs) -> eyre::Result<()> {
 /// background `JoinSet` collects errors; the first fatal error aborts.
 async fn drive_submit_loop(
     mut tick_batches: mpsc::Receiver<eyre::Result<PrebuiltSubmitBatch>>,
-    duration_secs: u64,
-    submit_tick_ms: u64,
-    http_client: reqwest::Client,
-    submit_targets: Vec<String>,
-    submit_options: SubmitOptions,
-    sender_finished: Arc<AtomicBool>,
-    abort: Arc<AtomicBool>,
-    submitted_txs: Arc<AtomicU64>,
+    config: SubmitLoopConfig,
 ) -> eyre::Result<SubmitSummary> {
+    let SubmitLoopConfig {
+        duration_secs,
+        submit_tick_ms,
+        http_client,
+        submit_targets,
+        submit_options,
+        sender_finished,
+        abort,
+        submitted_txs,
+    } = config;
     let tick = Duration::from_millis(submit_tick_ms.max(1));
     let deadline = tokio::time::Instant::now() + Duration::from_secs(duration_secs.max(1));
     let mut next_tick = tokio::time::Instant::now();
@@ -330,19 +363,22 @@ async fn drive_submit_loop(
 
 async fn drive_producer_loop(
     out_file: &mut std::fs::File,
-    client: EngineClient,
-    engine_rpc: String,
-    http_rpc: String,
-    pool_client: reqwest::Client,
-    workload: Workload,
-    target_tps: u64,
-    senders: u64,
-    producer_idle_ms: u64,
-    drain_secs: u64,
-    sender_finished: Arc<AtomicBool>,
-    abort: Arc<AtomicBool>,
-    submitted_txs: Arc<AtomicU64>,
+    config: ProducerLoopConfig,
 ) -> eyre::Result<ProducerSummary> {
+    let ProducerLoopConfig {
+        client,
+        engine_rpc,
+        http_rpc,
+        pool_client,
+        workload,
+        target_tps,
+        senders,
+        producer_idle_ms,
+        drain_secs,
+        sender_finished,
+        abort,
+        submitted_txs,
+    } = config;
     let idle = Duration::from_millis(producer_idle_ms.max(1));
     let max_drain = Duration::from_secs(drain_secs.max(1));
     let mut next_block_number = 1u64;
@@ -460,7 +496,7 @@ async fn drive_producer_loop(
         let line = serde_json::to_string(&timing)?;
         writeln!(out_file, "{line}")?;
 
-        if imported_blocks % 10 == 0 {
+        if imported_blocks.is_multiple_of(10) {
             println!(
                 "openloop block {imported_blocks}: total={:.1}ms assemble={:.1}ms import={:.1}ms tps={:.0} txs={}",
                 timing.total_ms, timing.assemble_ms, timing.import_ms, timing.tps, timing.tx_count,
@@ -537,7 +573,7 @@ fn resolve_submit_targets(http_rpc: &str, submit_http_rpcs: &[String]) -> Vec<St
 }
 
 fn build_tick_txs(
-    senders: &mut Vec<BenchSender>,
+    senders: &mut [BenchSender],
     workload: Workload,
     total_txs: u64,
     chain_id: u64,

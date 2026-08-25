@@ -102,10 +102,10 @@ fn read_timings(path: &str) -> eyre::Result<ReadTimingsResult> {
             continue;
         }
         total_rows += 1;
-        if let Ok(t) = serde_json::from_str::<BlockTimingV2>(trimmed) {
-            if !t.error {
-                timings.push(t);
-            }
+        if let Ok(t) = serde_json::from_str::<BlockTimingV2>(trimmed)
+            && !t.error
+        {
+            timings.push(t);
         }
     }
     Ok(ReadTimingsResult {
@@ -203,8 +203,7 @@ pub async fn run(args: SweepArgs) -> eyre::Result<()> {
 
         if let Err(err) = mode_exec::run_with_state(&exec_args, &mut exec_state).await {
             eprintln!(
-                "  Sweep step at {} txs/block failed: {err}. Writing partial summary from prior successful points.",
-                txs
+                "  Sweep step at {txs} txs/block failed: {err}. Writing partial summary from prior successful points."
             );
             break;
         }
@@ -231,7 +230,7 @@ pub async fn run(args: SweepArgs) -> eyre::Result<()> {
         let point = match compute_point(txs, &timings.valid) {
             Some(p) => p,
             None => {
-                println!("  No valid timings at {} txs/block, skipping.", txs);
+                println!("  No valid timings at {txs} txs/block, skipping.");
                 break;
             }
         };
@@ -291,7 +290,7 @@ pub async fn run(args: SweepArgs) -> eyre::Result<()> {
     println!("  Peak TPS:       {:.0}", result.peak_tps);
     println!("  Peak Mgas/s:    {:.2}", result.peak_mgas_s);
     println!("  Inflection at:  {} txs/block", result.inflection_txs);
-    println!("  Summary:        {}", summary_path);
+    println!("  Summary:        {summary_path}");
 
     Ok(())
 }
