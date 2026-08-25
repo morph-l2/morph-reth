@@ -24,7 +24,6 @@ morph-txpool.workspace = true
 
 # Reth dependencies
 reth-db.workspace = true
-reth-db-api.workspace = true
 reth-chain-state.workspace = true
 reth-node-core.workspace = true
 reth-chainspec.workspace = true
@@ -33,18 +32,16 @@ reth-engine-tree.workspace = true
 reth-errors.workspace = true
 reth-evm.workspace = true
 reth-execution-cache.workspace = true
-reth-exex.workspace = true
 reth-node-api.workspace = true
 reth-node-builder.workspace = true
 reth-node-ethereum.workspace = true
 reth-payload-builder.workspace = true
 reth-payload-primitives.workspace = true
 reth-primitives-traits.workspace = true
+reth-prune-types.workspace = true
 reth-provider.workspace = true
 reth-rpc-builder.workspace = true
 reth-rpc-eth-api.workspace = true
-reth-storage-api.workspace = true
-reth-tasks.workspace = true
 reth-transaction-pool.workspace = true
 reth-tracing.workspace = true
 reth-trie.workspace = true
@@ -99,7 +96,6 @@ morph-chainspec.workspace = true
 morph-payload-types.workspace = true
 morph-primitives.workspace = true
 serde_json.workspace = true
-tempfile.workspace = true
 
 [[test]]
 name = "it"

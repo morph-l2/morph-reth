@@ -190,6 +190,7 @@ pub struct TestNodeBuilder {
     schedule: HardforkSchedule,
     num_nodes: usize,
     is_dev: bool,
+    desired_gas_limit: Option<u64>,
 }
 
 impl Default for TestNodeBuilder {
@@ -213,6 +214,7 @@ impl TestNodeBuilder {
             schedule: HardforkSchedule::AllActive,
             num_nodes: 1,
             is_dev: false,
+            desired_gas_limit: None,
         }
     }
 
@@ -260,6 +262,14 @@ impl TestNodeBuilder {
         self
     }
 
+    /// Set the sequencer's header `gasLimit` target, as `--builder.gaslimit` would.
+    ///
+    /// Assembled blocks then ramp toward this value instead of copying the parent.
+    pub fn with_desired_gas_limit(mut self, desired_gas_limit: u64) -> Self {
+        self.desired_gas_limit = Some(desired_gas_limit);
+        self
+    }
+
     /// Build and launch the configured nodes.
     ///
     /// Returns the node handles and a wallet derived from
@@ -271,13 +281,20 @@ impl TestNodeBuilder {
         let genesis: Genesis = serde_json::from_value(self.genesis_json)?;
         let chain_spec = morph_chainspec::MorphChainSpec::from_genesis(genesis);
 
-        reth_e2e_test_utils::setup_engine(
+        // Built via `E2ETestSetupBuilder` rather than `setup_engine` so the node config
+        // can carry `--builder.gaslimit`, which `setup_engine` gives no way to set.
+        let is_dev = self.is_dev;
+        let desired_gas_limit = self.desired_gas_limit;
+        reth_e2e_test_utils::E2ETestSetupBuilder::<MorphNode, _>::new(
             self.num_nodes,
             Arc::new(chain_spec),
-            self.is_dev,
-            Default::default(),
             morph_payload_attributes,
         )
+        .with_node_config_modifier(move |mut config| {
+            config.builder.gas_limit = desired_gas_limit;
+            config.set_dev(is_dev)
+        })
+        .build()
         .await
     }
 }

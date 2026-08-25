@@ -301,16 +301,6 @@ impl MorphChainSpec {
     pub fn fee_vault_address(&self) -> Option<Address> {
         self.info.morph_chain_info.fee_vault_address
     }
-
-    /// Returns the maximum tx payload size per block in bytes.
-    pub fn max_tx_payload_bytes_per_block(&self) -> Option<usize> {
-        self.info.morph_chain_info.max_tx_payload_bytes_per_block
-    }
-
-    /// Checks if the given block size (in bytes) is valid for this chain.
-    pub fn is_valid_block_size(&self, size: usize) -> bool {
-        self.info.morph_chain_info.is_valid_block_size(size)
-    }
 }
 
 impl From<ChainSpec> for MorphChainSpec {
@@ -716,9 +706,10 @@ mod tests {
         let chainspec = MorphChainSpec::from(genesis);
 
         assert!(chainspec.is_fee_vault_enabled());
-        assert_eq!(chainspec.max_tx_payload_bytes_per_block(), Some(122880));
-        assert!(chainspec.is_valid_block_size(100000));
-        assert!(!chainspec.is_valid_block_size(200000));
+        assert_eq!(
+            chainspec.fee_vault_address(),
+            Some(address!("530000000000000000000000000000000000000a"))
+        );
     }
 
     #[test]

@@ -12,6 +12,14 @@ pub const MORPH_HOODI_CHAIN_ID: u64 = 2910;
 /// The sequencer has the right to set any base fee below `MORPH_MAX_BASE_FEE`.
 pub const MORPH_BASE_FEE: u64 = 1_000_000;
 
+/// Maximum L2 transaction payload bytes per block (L1 messages excluded).
+///
+/// Matches morph-geth `params.MorphMaxTxPayloadBytesPerBlock` (`720 * 1024`).
+/// `720 KiB = 120 KiB × 6`, sized so one uncompressed L2 block fits in a 6-blob
+/// batch (`6 × 4096 × 31 = 761_856` usable bytes). Enforced on import by Morph
+/// consensus and used as the sequencer packing default.
+pub const MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK: u64 = 720 * 1024;
+
 /// Default priority fee returned by `eth_maxPriorityFeePerGas` when the gas
 /// price oracle has no usable block samples (cold start or empty/zero-tip
 /// blocks, the common case on Morph L2).
@@ -61,6 +69,20 @@ pub const L2_MESSAGE_QUEUE_ADDRESS: Address = address!("530000000000000000000000
 /// This is slot 33, which stores the Merkle root for L2->L1 messages.
 pub const L2_MESSAGE_QUEUE_WITHDRAW_TRIE_ROOT_SLOT: U256 = U256::from_limbs([33, 0, 0, 0]);
 
+// =============================================================================
+// Protocol Gas Constants
+// =============================================================================
+
+/// Lowest block `gasLimit` the protocol accepts.
+///
+/// Matches go-ethereum's `params.MinGasLimit` (`params/protocol_params.go`).
+/// Both ends of block production read it, which is why it lives here rather than
+/// in either crate alone: the sequencer clamps its `gasLimit` target to it before
+/// ramping (`morph-payload-builder`), and header validation rejects anything below
+/// it (`morph-consensus`). One definition keeps producer and validator from
+/// drifting apart.
+pub const MINIMUM_GAS_LIMIT: u64 = 5000;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,5 +131,11 @@ mod tests {
     #[test]
     fn test_base_fee() {
         assert_eq!(MORPH_BASE_FEE, 1_000_000);
+    }
+
+    #[test]
+    fn test_max_tx_payload_bytes_per_block() {
+        assert_eq!(MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK, 720 * 1024);
+        assert_eq!(MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK, 737_280);
     }
 }

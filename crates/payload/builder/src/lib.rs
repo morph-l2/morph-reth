@@ -22,6 +22,8 @@
 //! - Queue indices must be strictly sequential
 //! - Gas is prepaid on L1, so no refunds for unused gas
 //! - L1 messages are never in the transaction pool
+//! - If the next L1 message does not fit remaining block gas, packing stops and
+//!   leftovers are retried on the next block via `next_l1_msg_index`
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]

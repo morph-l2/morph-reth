@@ -1,33 +1,22 @@
 use alloy_primitives::{B256, U64};
 use serde::{Deserialize, Serialize};
 
+/// Canonical chain snapshot used to linearize reference-index queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CanonicalTip {
+    /// Canonical head block number.
+    pub number: u64,
+    /// Canonical head block hash.
+    pub hash: B256,
+    /// Canonical head timestamp.
+    pub timestamp: u64,
+}
+
 /// Current reference index database schema version.
-pub const SCHEMA_VERSION: u32 = 1;
-
-/// Stored Jade activation sentinel for chains where Jade has not activated.
-pub const JADE_NOT_ACTIVE_SENTINEL: u64 = u64::MAX;
-
-/// Persistent backfill progress state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[repr(u8)]
-pub enum BackfillState {
-    NotStarted = 0,
-    InProgress = 1,
-    Complete = 2,
-}
-
-impl TryFrom<u8> for BackfillState {
-    type Error = ReferenceIndexError;
-
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            0 => Ok(Self::NotStarted),
-            1 => Ok(Self::InProgress),
-            2 => Ok(Self::Complete),
-            other => Err(ReferenceIndexError::InvalidBackfillState(other)),
-        }
-    }
-}
+///
+/// Version 1 was used only by the pre-release ExEx prototype. There is no
+/// migration path: operators remove that derived database manually.
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Validated query parameters for reference lookups.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,10 +27,14 @@ pub struct ReferenceQuery {
 }
 
 impl ReferenceQuery {
+    /// Default page size.
     pub const DEFAULT_LIMIT: u64 = 100;
+    /// Maximum accepted page size.
     pub const MAX_LIMIT: u64 = 100;
+    /// Maximum accepted result offset.
     pub const MAX_OFFSET: u64 = 10_000;
 
+    /// Validate and normalize public RPC query arguments.
     pub fn new(
         reference: B256,
         offset: Option<u64>,
@@ -69,9 +62,13 @@ impl ReferenceQuery {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReferenceTransactionResult {
+    /// Hash of the matching Morph transaction.
     pub transaction_hash: B256,
+    /// Canonical block number containing the transaction.
     pub block_number: U64,
+    /// Timestamp of the containing canonical block.
     pub block_timestamp: U64,
+    /// Zero-based transaction position within the block.
     pub transaction_index: U64,
 }
 
@@ -82,22 +79,41 @@ pub enum ReferenceIndexError {
     Initializing,
     #[error("reference index is behind")]
     IndexBehind,
+    #[error("reference index is unavailable")]
+    IndexUnavailable,
     #[error("reference query limit too large: {limit}")]
     LimitTooLarge { limit: u64 },
     #[error("reference query offset too large: {offset}")]
     OffsetTooLarge { offset: u64 },
-    #[error("invalid backfill state: {0}")]
-    InvalidBackfillState(u8),
     #[error("reference index backfill batch size must be greater than zero")]
     InvalidBackfillBatchSize,
+    #[error("reference index metadata is incomplete: {0}")]
+    CorruptMetadata(&'static str),
     #[error("reference index chain identity mismatch: {0}")]
     ChainIdentityMismatch(&'static str),
     #[error("reference index schema mismatch: expected {expected}, got {actual}")]
     SchemaMismatch { expected: u32, actual: u32 },
+    #[error(
+        "reference index has no canonical ancestor at or after Jade block {jade_first_block}; manual rebuild required"
+    )]
+    ManualRebuildRequired { jade_first_block: u64 },
     #[error(transparent)]
     Database(#[from] reth_db_api::DatabaseError),
     #[error(transparent)]
     Provider(#[from] reth_errors::ProviderError),
     #[error(transparent)]
     Other(#[from] eyre::Report),
+}
+
+impl ReferenceIndexError {
+    /// Errors that cannot be repaired while the existing derived DB remains.
+    pub(crate) fn requires_manual_rebuild(&self) -> bool {
+        matches!(
+            self,
+            Self::CorruptMetadata(_)
+                | Self::ChainIdentityMismatch(_)
+                | Self::SchemaMismatch { .. }
+                | Self::ManualRebuildRequired { .. }
+        )
+    }
 }
