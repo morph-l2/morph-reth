@@ -80,7 +80,7 @@ pub struct OpenLoopArgs {
 #[derive(Debug, Default, Clone, Copy)]
 struct SubmitSummary {
     submitted_txs: u64,
-    submit_calls: u64,
+    http_calls: u64,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -247,9 +247,9 @@ pub async fn run(args: OpenLoopArgs) -> eyre::Result<()> {
     );
 
     println!(
-        "Openloop complete: submitted={} txs over {} submit calls, imported={} blocks / {} txs",
+        "Openloop complete: submitted={} txs over {} HTTP calls, imported={} blocks / {} txs",
         submit_summary.submitted_txs,
-        submit_summary.submit_calls,
+        submit_summary.http_calls,
         produce_summary.imported_blocks,
         produce_summary.imported_txs,
     );
@@ -257,9 +257,12 @@ pub async fn run(args: OpenLoopArgs) -> eyre::Result<()> {
     Ok(())
 }
 
-/// Fire-and-forget submit: each tick spawns HTTP sends without waiting for
-/// responses, so the next tick's batch can start sending immediately.  A
-/// background `JoinSet` collects errors; the first fatal error aborts.
+/// Submit one planned tick at a time with bounded HTTP concurrency.
+///
+/// Waiting for each tick prevents a nominal load target from creating an
+/// unbounded queue of client-side requests after the measurement deadline.
+/// When the RPC path cannot sustain the target, fewer ticks are accepted and
+/// the completion line reports the actual submitted transaction count.
 async fn drive_submit_loop(
     mut tick_batches: mpsc::Receiver<eyre::Result<PrebuiltSubmitBatch>>,
     config: SubmitLoopConfig,
@@ -280,8 +283,6 @@ async fn drive_submit_loop(
     let mut next_target_idx = 0usize;
     let mut summary = SubmitSummary::default();
     let options = submit_options.sanitized();
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(options.concurrency));
-    let mut inflight: tokio::task::JoinSet<eyre::Result<()>> = tokio::task::JoinSet::new();
 
     let result: eyre::Result<SubmitSummary> = async {
         loop {
@@ -293,48 +294,23 @@ async fn drive_submit_loop(
                 break;
             }
 
-            // Drain completed inflight tasks, propagate first error.
-            while let Some(result) = inflight.try_join_next() {
-                result.map_err(|e| eyre::eyre!("join: {e}"))??;
-            }
-
             let batch = match tick_batches.recv().await {
                 Some(result) => result?,
                 None => break,
             };
 
             if batch.tx_count > 0 {
-                // Fire-and-forget: spawn all HTTP sends for this tick without awaiting.
-                let target_count = submit_targets.len();
-                let body_count = batch.bodies.len();
-                for (offset, body) in batch.bodies.into_iter().enumerate() {
-                    let sem = semaphore.clone();
-                    let client = http_client.clone();
-                    let url = submit_targets[(next_target_idx + offset) % target_count].clone();
-
-                    inflight.spawn(async move {
-                        let _permit = sem.acquire().await.map_err(|e| eyre::eyre!("{e}"))?;
-                        let resp = client
-                            .post(&url)
-                            .header("Content-Type", "application/json")
-                            .body(body)
-                            .send()
-                            .await
-                            .map_err(|e| eyre::eyre!("send failed: {e}"))?
-                            .error_for_status()
-                            .map_err(|e| eyre::eyre!("http error: {e}"))?;
-                        let body = resp
-                            .bytes()
-                            .await
-                            .map_err(|e| eyre::eyre!("read failed: {e}"))?;
-                        ensure_submit_batch_success(body.as_ref())?;
-                        Ok(())
-                    });
-                }
-                next_target_idx = (next_target_idx + body_count.max(1)) % target_count.max(1);
+                let body_count = submit_prebuilt_batch(
+                    &http_client,
+                    &submit_targets,
+                    batch.bodies,
+                    options.concurrency,
+                    &mut next_target_idx,
+                )
+                .await?;
 
                 summary.submitted_txs += batch.tx_count;
-                summary.submit_calls += 1;
+                summary.http_calls += body_count as u64;
                 submitted_txs.store(summary.submitted_txs, Ordering::SeqCst);
             }
 
@@ -343,11 +319,6 @@ async fn drive_submit_loop(
             if next_tick > now {
                 tokio::time::sleep_until(next_tick).await;
             }
-        }
-
-        // Wait for all inflight requests to finish.
-        while let Some(result) = inflight.join_next().await {
-            result.map_err(|e| eyre::eyre!("join: {e}"))??;
         }
 
         Ok(summary)
@@ -359,6 +330,54 @@ async fn drive_submit_loop(
         abort.store(true, Ordering::SeqCst);
     }
     result
+}
+
+async fn submit_prebuilt_batch(
+    client: &reqwest::Client,
+    submit_targets: &[String],
+    bodies: Vec<Vec<u8>>,
+    concurrency: usize,
+    next_target_idx: &mut usize,
+) -> eyre::Result<usize> {
+    let target_count = submit_targets.len().max(1);
+    let body_count = bodies.len();
+    let mut inflight: tokio::task::JoinSet<eyre::Result<()>> = tokio::task::JoinSet::new();
+
+    for (offset, body) in bodies.into_iter().enumerate() {
+        while inflight.len() >= concurrency.max(1) {
+            let result = inflight
+                .join_next()
+                .await
+                .ok_or_else(|| eyre::eyre!("submit task set unexpectedly empty"))?;
+            result.map_err(|e| eyre::eyre!("join: {e}"))??;
+        }
+
+        let client = client.clone();
+        let url = submit_targets[(*next_target_idx + offset) % target_count].clone();
+        inflight.spawn(async move {
+            let resp = client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .body(body)
+                .send()
+                .await
+                .map_err(|e| eyre::eyre!("send failed: {e}"))?
+                .error_for_status()
+                .map_err(|e| eyre::eyre!("http error: {e}"))?;
+            let body = resp
+                .bytes()
+                .await
+                .map_err(|e| eyre::eyre!("read failed: {e}"))?;
+            ensure_submit_batch_success(body.as_ref())
+        });
+    }
+
+    while let Some(result) = inflight.join_next().await {
+        result.map_err(|e| eyre::eyre!("join: {e}"))??;
+    }
+
+    *next_target_idx = (*next_target_idx + body_count.max(1)) % target_count;
+    Ok(body_count)
 }
 
 async fn drive_producer_loop(

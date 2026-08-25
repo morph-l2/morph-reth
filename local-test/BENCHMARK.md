@@ -87,7 +87,9 @@ their latest block number, state root, receipts root, and deterministic funded-s
   older runner and older binaries and must not be presented as a current-`main` comparison.
 - Open-loop mode pre-generates `target_tps * duration_secs` signed requests. The defaults create
   24 million transactions per run and therefore require substantial memory. `target_tps` is offered
-  load; use `realized_tps`, the active/drain split, and the completion log to judge delivered load.
+  load, not guaranteed delivered load. Submission uses bounded concurrency and stops scheduling at
+  the deadline; use `realized_tps`, the active/drain split, and the completion log's submitted count
+  to judge the achieved load.
 - Three runs provide descriptive repeatability, not a confidence interval or statistical
   significance test. Preserve the per-run JSONL and logs and inspect run-to-run spread before making
   regression or capacity claims.
