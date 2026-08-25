@@ -54,6 +54,8 @@ Common overrides:
 | `WORKLOADS` | `eth-transfer erc20-transfer` | Space-separated workloads; `uniswap-swap` is also supported |
 | `RUNS` | `3` | Independent fresh-node runs per configuration |
 | `SENDERS` | `2000` | Deterministic funded sender accounts |
+| `EXEC_BLOCK_SIZES` | `1000 4000` | Requested txs/block; both defaults fit the 720 KiB cap |
+| `SUSTAINED_TXS_PER_BLOCK` | `4000` | Requested txs/block; chosen to fit all supported workloads |
 | `OPENLOOP_TARGET_TPS` | `200000` | Requested open-loop submission rate |
 | `P2P_PORT` | `30313` | Isolated P2P listener port for the benchmark node |
 
@@ -64,6 +66,11 @@ keep the commit, build profile, hardware power mode, sender count, workload, and
 `metadata.json` records the commit and main run configuration. A non-zero `dirty_files` value means
 the result was produced from an uncommitted worktree and should be labeled accordingly.
 
+Fixed-size modes require 100% inclusion. Requests that do not fit under the current payload or gas
+limit fail the run instead of reporting the smaller assembled block as though it represented the
+requested block size. The April report's 50k/100k blocks predate the 720 KiB consensus cap and are
+therefore not directly reproducible on current `main`.
+
 The benchmark uses the sequential V1 Morph Engine methods because each run only extends the current
 head. The V2 methods add explicit-parent/reorg behavior, which this workload does not exercise.
 
@@ -73,8 +80,9 @@ their latest block number, state root, receipts root, and deterministic funded-s
 ## Limitations
 
 - This is a synthetic execution-engine ceiling test, not a production TPS forecast. It disables
-  discovery and transaction backup and raises the block, payload, RPC, and txpool limits far above
-  normal deployment values; it does not include consensus, networking, proving, or L1 data costs.
+  discovery and transaction backup and raises the block gas, RPC, and txpool limits far above normal
+  deployment values; the current 720 KiB consensus payload cap remains enforced. It does not include
+  consensus networking, proving, or L1 data costs.
 - The supported runner is reth-only. The archived April 2026 reth/geth report was produced by an
   older runner and older binaries and must not be presented as a current-`main` comparison.
 - Open-loop mode pre-generates `target_tps * duration_secs` signed requests. The defaults create

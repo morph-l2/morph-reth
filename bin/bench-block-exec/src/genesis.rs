@@ -1,6 +1,7 @@
 use alloy_primitives::U256;
 use clap::Args;
 use eyre::ensure;
+use morph_chainspec::MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK;
 use serde_json::{Map, json};
 
 use crate::tx_factory;
@@ -190,7 +191,7 @@ pub(crate) fn build_genesis(args: &WriteGenesisArgs) -> eyre::Result<serde_json:
             "morph": {
                 "useZktrie": false,
                 "maxTxPerBlock": max_tx,
-                "maxTxPayloadBytesPerBlock": 1_073_741_824u64,
+                "maxTxPayloadBytesPerBlock": MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK,
                 "feeVaultAddress": format!("0x{FEE_VAULT_ADDR}")
             }
         },

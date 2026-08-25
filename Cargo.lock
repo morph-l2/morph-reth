@@ -1564,6 +1564,7 @@ dependencies = [
  "clap",
  "eyre",
  "jsonrpsee",
+ "morph-chainspec",
  "rand 0.8.6",
  "rayon",
  "reqwest 0.12.28",

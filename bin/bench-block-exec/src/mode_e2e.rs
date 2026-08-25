@@ -527,7 +527,16 @@ pub async fn run(args: E2eArgs) -> eyre::Result<()> {
         };
 
         // --- import block ---
-        let (import_ms, error) = if let Some(data) = assembled {
+        let full_inclusion = actual_tx_count == expected_tx_count;
+        if !error && !full_inclusion {
+            eprintln!(
+                "block {block_number}: assembled {actual_tx_count}/{expected_tx_count} transactions"
+            );
+        }
+
+        let (import_ms, error) = if !full_inclusion {
+            (0.0, true)
+        } else if let Some(data) = assembled {
             match client.new_l2_block(&args.engine_rpc, data).await {
                 Ok(ms) => (ms, error),
                 Err(e) => {

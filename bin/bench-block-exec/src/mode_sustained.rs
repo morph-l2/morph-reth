@@ -134,6 +134,13 @@ pub async fn run(args: SustainedArgs) -> eyre::Result<()> {
             .assemble_l2_block(&args.engine_rpc, assemble_params)
             .await?;
 
+        eyre::ensure!(
+            assembled.transactions.len() as u64 == args.txs_per_block,
+            "warmup block {block_number}: assembled {}/{} transactions; requested block does not fit",
+            assembled.transactions.len(),
+            args.txs_per_block
+        );
+
         // Import block.
         client.new_l2_block(&args.engine_rpc, assembled).await?;
 
@@ -217,7 +224,16 @@ pub async fn run(args: SustainedArgs) -> eyre::Result<()> {
         };
 
         // --- import block ---
-        let (import_ms, error) = if let Some(data) = assembled {
+        let full_inclusion = actual_tx_count == expected_tx_count;
+        if !error && !full_inclusion {
+            eprintln!(
+                "block {block_number}: assembled {actual_tx_count}/{expected_tx_count} transactions"
+            );
+        }
+
+        let (import_ms, error) = if !full_inclusion {
+            (0.0, true)
+        } else if let Some(data) = assembled {
             match client.new_l2_block(&args.engine_rpc, data).await {
                 Ok(ms) => (ms, error),
                 Err(e) => {
