@@ -27,8 +27,9 @@
 //! - No uncle blocks allowed
 //! - Withdrawals field must not be present
 //! - Transaction root must be valid
-//! - L2 transaction payload (EIP-2718 encoded, L1 messages excluded) must not
-//!   exceed [`morph_chainspec::MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK`]
+//! - By default, L2 transaction payload (EIP-2718 encoded, L1 messages excluded) must not
+//!   exceed [`morph_chainspec::MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK`]. Synthetic benchmark
+//!   nodes can explicitly disable this DA-derived check and then accept non-production blocks.
 //!
 //! ## Post-Execution Validation
 //!
@@ -79,6 +80,9 @@ const GAS_LIMIT_BOUND_DIVISOR: u64 = 1024;
 ///
 /// Validates Morph L2 blocks according to the L2 consensus rules.
 /// See module-level documentation for detailed validation rules.
+/// [`MorphConsensus::new`] enforces the production payload-size limit. Synthetic execution
+/// benchmarks can opt out with [`MorphConsensus::without_tx_payload_size_limit`], in which case
+/// accepted blocks can exceed the Morph DA envelope and are not production-valid.
 ///
 /// # L1 Message Validation Architecture
 ///
@@ -104,12 +108,25 @@ const GAS_LIMIT_BOUND_DIVISOR: u64 = 1024;
 pub struct MorphConsensus {
     /// Chain specification containing hardfork information and chain config.
     chain_spec: Arc<MorphChainSpec>,
+    /// Maximum accepted L2 transaction payload bytes, or `None` for benchmark-only unlimited mode.
+    max_tx_payload_bytes: Option<u64>,
 }
 
 impl MorphConsensus {
     /// Creates a new [`MorphConsensus`] instance.
     pub fn new(chain_spec: Arc<MorphChainSpec>) -> Self {
-        Self { chain_spec }
+        Self {
+            chain_spec,
+            max_tx_payload_bytes: Some(MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK),
+        }
+    }
+
+    /// Disables the L2 transaction payload-size check for synthetic execution benchmarks.
+    ///
+    /// Blocks accepted in this mode can exceed Morph's DA envelope and are not production-valid.
+    pub fn without_tx_payload_size_limit(mut self) -> Self {
+        self.max_tx_payload_bytes = None;
+        self
     }
 
     /// Returns a reference to the chain specification.
@@ -273,8 +290,9 @@ impl Consensus<Block> for MorphConsensus {
     /// 2. **Ommers Hash**: Must be the empty ommer root hash
     /// 3. **Transaction Root**: Must be valid
     /// 4. **Withdrawals**: Must be empty (Morph L2 doesn't support withdrawals)
-    /// 5. **L2 Payload Size**: Encoded L2 txs (L1 messages excluded) must not
-    ///    exceed [`MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK`]
+    /// 5. **L2 Payload Size**: By default, encoded L2 txs (L1 messages excluded) must not
+    ///    exceed [`MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK`]. The benchmark-only mode skips this
+    ///    DA-derived check.
     /// 6. **L1 Messages**: Must be ordered correctly (sequential queue indices, L1 before L2)
     fn validate_block_pre_execution(
         &self,
@@ -310,7 +328,11 @@ impl Consensus<Block> for MorphConsensus {
         }
 
         // Matches go-ethereum's BlockValidator.ValidateBody() → IsValidBlockSize().
-        validate_l2_tx_payload_size(&block.body().transactions)?;
+        // The pressure-test branch can explicitly disable this DA-derived bound to measure the
+        // execution engine rather than batch publication capacity.
+        if let Some(limit) = self.max_tx_payload_bytes {
+            validate_l2_tx_payload_size(&block.body().transactions, limit)?;
+        }
 
         // Validate MorphTx activation, version and field constraints.
         // Matches go-ethereum's BlockValidator.ValidateBody() → ValidateMorphTxVersion().
@@ -489,16 +511,19 @@ fn l2_tx_payload_bytes(txs: &[MorphTxEnvelope]) -> u64 {
         .fold(0, u64::saturating_add)
 }
 
-/// Rejects blocks whose L2 payload exceeds [`MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK`].
+/// Rejects blocks whose L2 payload exceeds `max_tx_payload_bytes`.
 ///
 /// Matches go-ethereum `MorphConfig.IsValidBlockSize` (`size <= limit`).
-fn validate_l2_tx_payload_size(txs: &[MorphTxEnvelope]) -> Result<(), ConsensusError> {
+fn validate_l2_tx_payload_size(
+    txs: &[MorphTxEnvelope],
+    max_tx_payload_bytes: u64,
+) -> Result<(), ConsensusError> {
     let size = l2_tx_payload_bytes(txs);
-    if size > MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK {
+    if size > max_tx_payload_bytes {
         return Err(ConsensusError::other(
             MorphConsensusError::InvalidBlockPayloadSize {
                 size,
-                limit: MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK,
+                limit: max_tx_payload_bytes,
             },
         ));
     }
@@ -1971,6 +1996,24 @@ mod tests {
             err.contains("invalid block payload size"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn test_benchmark_consensus_accepts_oversized_l2_payload() {
+        let consensus =
+            MorphConsensus::new(create_test_chainspec()).without_tx_payload_size_limit();
+        let oversized = create_legacy_tx_with_input(Bytes::from(vec![
+            0u8;
+            MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK
+                as usize
+        ]));
+        assert!(
+            l2_tx_payload_bytes(std::slice::from_ref(&oversized))
+                > MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK
+        );
+
+        let block = create_sealed_block(0, vec![oversized]);
+        assert!(consensus.validate_block_pre_execution(&block).is_ok());
     }
 
     #[test]

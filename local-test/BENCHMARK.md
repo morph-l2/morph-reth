@@ -19,7 +19,8 @@ the archived runner's filename layout.
 
 The runner rebuilds morph-reth and the benchmark binary, compiles the Solidity fixtures, generates a
 fresh genesis, waits for RPC readiness, captures node and benchmark logs, writes run metadata, and
-generates `summary.tsv`.
+generates `summary.tsv`. Node stdout is fixed at info level and background log files are disabled so
+all diagnostic output stays with the run artifacts.
 
 ## Prerequisites
 
@@ -54,11 +55,15 @@ Common overrides:
 | `WORKLOADS` | `eth-transfer erc20-transfer` | Space-separated workloads; `uniswap-swap` is also supported |
 | `RUNS` | `3` | Independent fresh-node runs per configuration |
 | `SENDERS` | `2000` | Deterministic funded sender accounts |
-| `EXEC_BLOCK_SIZES` | `1000 4000` | Requested txs/block; both defaults fit the 720 KiB cap |
-| `SUSTAINED_TXS_PER_BLOCK` | `4000` | Requested txs/block; chosen to fit all supported workloads |
-| `OPENLOOP_TARGET_TPS` | `35000` | Validated near-saturation submission rate on the reference M4 Pro host |
+| `EXEC_BLOCK_SIZES` | `1000 10000 50000 100000` | Requested txs/block for the execution scaling curve |
+| `SUSTAINED_TXS_PER_BLOCK` | `50000` | Requested txs/block for the long state-growth run |
+| `OPENLOOP_TARGET_TPS` | `200000` | Offered load; use the submitted and realized rates to judge what was delivered |
 | `OPENLOOP_DURATION_SECS` | `120` | Active submission duration |
-| `OPENLOOP_DRAIN_SECS` | `180` | Maximum time to import all accepted transactions after submission ends |
+| `OPENLOOP_DRAIN_SECS` | `600` | Maximum time to import all accepted transactions after submission ends |
+| `BENCHMARK_DISABLE_TX_PAYLOAD_LIMIT` | `1` | Disable both builder and import-side DA payload bounds; benchmark only |
+| `BENCHMARK_GENESIS_MAX_TX_PAYLOAD_BYTES` | `1073741824` | Compatibility value recorded in generated genesis; not enforced when the bypass is enabled |
+| `BENCHMARK_BUILDER_DEADLINE_SECS` | `12` | Fixed payload-building deadline for very large synthetic blocks |
+| `BENCHMARK_TXPOOL_MAX_COUNT` | `30000000` | Per-subpool count ceiling for high-rate open-loop runs |
 | `P2P_PORT` | `30313` | Isolated P2P listener port for the benchmark node |
 
 ## Interpreting results
@@ -68,10 +73,12 @@ keep the commit, build profile, hardware power mode, sender count, workload, and
 `metadata.json` records the commit and main run configuration. A non-zero `dirty_files` value means
 the result was produced from an uncommitted worktree and should be labeled accordingly.
 
-Fixed-size modes require 100% inclusion. Requests that do not fit under the current payload or gas
-limit fail the run instead of reporting the smaller assembled block as though it represented the
-requested block size. The April report's 50k/100k blocks predate the 720 KiB consensus cap and are
-therefore not directly reproducible on current `main`.
+Fixed-size modes require 100% inclusion. Requests that do not fit under the configured gas limit or
+builder deadline fail the run instead of reporting the smaller assembled block as though it
+represented the requested block size. The default runner explicitly disables the DA-derived payload
+limit on both block building and import, so its 50k/100k results measure the execution path rather
+than production-valid block capacity. Set `BENCHMARK_DISABLE_TX_PAYLOAD_LIMIT=0` to test the normal
+720 KiB behavior.
 
 The benchmark uses the sequential V1 Morph Engine methods because each run only extends the current
 head. The V2 methods add explicit-parent/reorg behavior, which this workload does not exercise.
@@ -83,17 +90,17 @@ their latest block number, state root, receipts root, and deterministic funded-s
 
 - This is a synthetic execution-engine ceiling test, not a production TPS forecast. It disables
   discovery and transaction backup and raises the block gas, RPC, and txpool limits far above normal
-  deployment values; the current 720 KiB consensus payload cap remains enforced. It does not include
-  consensus networking, proving, or L1 data costs.
+  deployment values. By default it also disables the 720 KiB builder and import payload checks;
+  blocks produced in this mode can exceed the Morph DA envelope and are not production-valid. It
+  does not include consensus networking, proving, or L1 data costs.
 - The supported runner is reth-only. The archived April 2026 reth/geth report was produced by an
   older runner and older binaries and must not be presented as a current-`main` comparison.
 - Open-loop mode pre-generates `target_tps * duration_secs` signed requests. The defaults create
-  4.2 million transactions per run and therefore require substantial memory. Calibrate the target
-  down on slower hosts before a full suite; a target that fills the txpool is a failed run, not a
-  throughput result. `target_tps` is offered
-  load, not guaranteed delivered load. Submission uses bounded concurrency and stops scheduling at
-  the deadline; use `realized_tps`, the active/drain split, and the completion log's submitted count
-  to judge the achieved load.
+  24 million transactions per run and therefore require substantial memory. A target that fills the
+  txpool is a failed run, not a throughput result. `target_tps` is offered load, not guaranteed
+  delivered load. Submission uses bounded concurrency and stops scheduling at the deadline; use
+  `realized_tps`, the active/drain split, and the completion log's submitted count to judge the
+  achieved load.
 - Three runs provide descriptive repeatability, not a confidence interval or statistical
   significance test. Preserve the per-run JSONL and logs and inspect run-to-run spread before making
   regression or capacity claims.

@@ -26,6 +26,9 @@ pub(crate) struct WriteGenesisArgs {
     /// Max transactions per block. 0 = use 10,000,000 (effectively unlimited).
     #[arg(long, default_value = "10000")]
     pub max_tx_per_block: u64,
+    /// Compatibility payload-size field written to the Morph genesis config.
+    #[arg(long, default_value_t = MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK)]
+    pub max_tx_payload_bytes: u64,
     /// Pre-deploy BenchToken bytecode (hex). If set, deploys at BENCH_TOKEN_ADDR.
     #[arg(long)]
     pub bench_token_code: Option<String>,
@@ -191,7 +194,7 @@ pub(crate) fn build_genesis(args: &WriteGenesisArgs) -> eyre::Result<serde_json:
             "morph": {
                 "useZktrie": false,
                 "maxTxPerBlock": max_tx,
-                "maxTxPayloadBytesPerBlock": MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK,
+                "maxTxPayloadBytesPerBlock": args.max_tx_payload_bytes,
                 "feeVaultAddress": format!("0x{FEE_VAULT_ADDR}")
             }
         },
@@ -237,6 +240,7 @@ mod tests {
             senders: 0,
             gas_limit: "0x2540BE400".to_string(),
             max_tx_per_block: 10000,
+            max_tx_payload_bytes: MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK,
             bench_token_code: None,
             bench_swap_code: None,
         }
@@ -279,6 +283,18 @@ mod tests {
 
         let morph = &genesis["config"]["morph"];
         assert_eq!(morph["maxTxPerBlock"], 10_000_000);
+    }
+
+    #[test]
+    fn genesis_uses_requested_benchmark_payload_size() {
+        let mut args = default_args();
+        args.max_tx_payload_bytes = 1_073_741_824;
+
+        let genesis = build_genesis(&args).unwrap();
+        assert_eq!(
+            genesis["config"]["morph"]["maxTxPayloadBytesPerBlock"],
+            1_073_741_824u64
+        );
     }
 
     #[test]

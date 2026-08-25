@@ -80,15 +80,33 @@ impl MorphNode {
     where
         N: FullNodeTypes<Types = Self>,
     {
+        Self::components_with_consensus(
+            MorphPayloadBuilderBuilder::new(payload_builder_config),
+            MorphConsensusBuilder::default(),
+        )
+    }
+
+    fn components_with_consensus<N>(
+        payload_builder: MorphPayloadBuilderBuilder,
+        consensus_builder: MorphConsensusBuilder,
+    ) -> ComponentsBuilder<
+        N,
+        MorphPoolBuilder,
+        BasicPayloadServiceBuilder<MorphPayloadBuilderBuilder>,
+        EthereumNetworkBuilder,
+        MorphExecutorBuilder,
+        MorphConsensusBuilder,
+    >
+    where
+        N: FullNodeTypes<Types = Self>,
+    {
         ComponentsBuilder::default()
             .node_types::<N>()
             .pool(MorphPoolBuilder::default())
             .executor(MorphExecutorBuilder::default())
-            .payload(BasicPayloadServiceBuilder::new(
-                MorphPayloadBuilderBuilder::new(payload_builder_config),
-            ))
+            .payload(BasicPayloadServiceBuilder::new(payload_builder))
             .network(EthereumNetworkBuilder::default())
-            .consensus(MorphConsensusBuilder::default())
+            .consensus(consensus_builder)
     }
 }
 
@@ -118,9 +136,17 @@ where
     type AddOns = MorphAddOns<NodeAdapter<N>>;
 
     fn components_builder(&self) -> Self::ComponentsBuilder {
-        Self::components(
-            MorphBuilderConfig::default().with_max_da_block_size(self.args.max_tx_payload_bytes),
-        )
+        if self.args.benchmark_disable_tx_payload_limit {
+            Self::components_with_consensus(
+                MorphPayloadBuilderBuilder::new(MorphBuilderConfig::default()).with_reth_deadline(),
+                MorphConsensusBuilder::default().without_tx_payload_size_limit(),
+            )
+        } else {
+            Self::components(
+                MorphBuilderConfig::default()
+                    .with_max_da_block_size(self.args.max_tx_payload_bytes),
+            )
+        }
     }
 
     fn add_ons(&self) -> Self::AddOns {

@@ -21,14 +21,18 @@ SENDERS=${SENDERS:-2000}
 MODES=${MODES:-"exec sustained openloop"}
 WORKLOADS=${WORKLOADS:-"eth-transfer erc20-transfer"}
 RUNS=${RUNS:-3}
-EXEC_BLOCK_SIZES=${EXEC_BLOCK_SIZES:-"1000 4000"}
-EXEC_BLOCKS=${EXEC_BLOCKS:-12}
-SUSTAINED_TXS_PER_BLOCK=${SUSTAINED_TXS_PER_BLOCK:-4000}
+EXEC_BLOCK_SIZES=${EXEC_BLOCK_SIZES:-"1000 10000 50000 100000"}
+EXEC_BLOCKS=${EXEC_BLOCKS:-10}
+SUSTAINED_TXS_PER_BLOCK=${SUSTAINED_TXS_PER_BLOCK:-50000}
 SUSTAINED_BLOCKS=${SUSTAINED_BLOCKS:-100}
 SUSTAINED_WARMUP_BLOCKS=${SUSTAINED_WARMUP_BLOCKS:-5}
-OPENLOOP_TARGET_TPS=${OPENLOOP_TARGET_TPS:-35000}
+OPENLOOP_TARGET_TPS=${OPENLOOP_TARGET_TPS:-200000}
 OPENLOOP_DURATION_SECS=${OPENLOOP_DURATION_SECS:-120}
-OPENLOOP_DRAIN_SECS=${OPENLOOP_DRAIN_SECS:-180}
+OPENLOOP_DRAIN_SECS=${OPENLOOP_DRAIN_SECS:-600}
+BENCHMARK_DISABLE_TX_PAYLOAD_LIMIT=${BENCHMARK_DISABLE_TX_PAYLOAD_LIMIT:-1}
+BENCHMARK_GENESIS_MAX_TX_PAYLOAD_BYTES=${BENCHMARK_GENESIS_MAX_TX_PAYLOAD_BYTES:-1073741824}
+BENCHMARK_BUILDER_DEADLINE_SECS=${BENCHMARK_BUILDER_DEADLINE_SECS:-12}
+BENCHMARK_TXPOOL_MAX_COUNT=${BENCHMARK_TXPOOL_MAX_COUNT:-30000000}
 START_TIMEOUT_SECS=${START_TIMEOUT_SECS:-30}
 BUILD=${BUILD:-1}
 
@@ -89,6 +93,14 @@ prepare() {
     require_command jq
     require_command openssl
 
+    case "$BENCHMARK_DISABLE_TX_PAYLOAD_LIMIT" in
+        0|1) ;;
+        *)
+            echo "BENCHMARK_DISABLE_TX_PAYLOAD_LIMIT must be 0 or 1" >&2
+            exit 1
+            ;;
+    esac
+
     normalize_and_validate_paths
 
     if [[ "$BUILD" == "1" ]]; then
@@ -113,8 +125,16 @@ prepare() {
         --output "$GENESIS" \
         --senders "$SENDERS" \
         --max-tx-per-block 1000000 \
+        --max-tx-payload-bytes "$BENCHMARK_GENESIS_MAX_TX_PAYLOAD_BYTES" \
         --bench-token-code "$token_code" \
         --bench-swap-code "$swap_code"
+
+    local payload_limit_disabled=false
+    local enforced_max_tx_payload_bytes=737280
+    if [[ "$BENCHMARK_DISABLE_TX_PAYLOAD_LIMIT" == "1" ]]; then
+        payload_limit_disabled=true
+        enforced_max_tx_payload_bytes=null
+    fi
 
     jq -n \
         --arg created_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -134,9 +154,14 @@ prepare() {
         --argjson openloop_target_tps "$OPENLOOP_TARGET_TPS" \
         --argjson openloop_duration_secs "$OPENLOOP_DURATION_SECS" \
         --argjson openloop_drain_secs "$OPENLOOP_DRAIN_SECS" \
-        --argjson max_tx_payload_bytes "$(jq -er '.config.morph.maxTxPayloadBytesPerBlock' "$GENESIS")" \
+        --argjson payload_limit_disabled "$payload_limit_disabled" \
+        --argjson enforced_max_tx_payload_bytes "$enforced_max_tx_payload_bytes" \
+        --argjson genesis_max_tx_payload_bytes "$(jq -er '.config.morph.maxTxPayloadBytesPerBlock' "$GENESIS")" \
+        --argjson builder_deadline_secs "$BENCHMARK_BUILDER_DEADLINE_SECS" \
+        --argjson txpool_max_count "$BENCHMARK_TXPOOL_MAX_COUNT" \
+        --arg node_log_level "info" \
         --arg uname "$(uname -a)" \
-        '{created_at:$created_at,git_commit:$git_commit,dirty_files:($git_dirty|tonumber),profile:$profile,reth_version:$reth_version,uname:$uname,modes:$modes,workloads:$workloads,senders:$senders,runs:$runs,consensus:{max_tx_payload_bytes:$max_tx_payload_bytes},exec:{block_sizes:$exec_block_sizes,blocks:$exec_blocks},sustained:{txs_per_block:$sustained_txs_per_block,blocks:$sustained_blocks,warmup_blocks:$sustained_warmup_blocks},openloop:{target_tps:$openloop_target_tps,duration_secs:$openloop_duration_secs,drain_secs:$openloop_drain_secs}}' \
+        '{created_at:$created_at,git_commit:$git_commit,dirty_files:($git_dirty|tonumber),profile:$profile,reth_version:$reth_version,uname:$uname,modes:$modes,workloads:$workloads,senders:$senders,runs:$runs,consensus:{tx_payload_limit_disabled:$payload_limit_disabled,enforced_max_tx_payload_bytes:$enforced_max_tx_payload_bytes,genesis_compatibility_max_tx_payload_bytes:$genesis_max_tx_payload_bytes},node:{builder_deadline_secs:$builder_deadline_secs,txpool_max_count:$txpool_max_count,log_level:$node_log_level},exec:{block_sizes:$exec_block_sizes,blocks:$exec_blocks},sustained:{txs_per_block:$sustained_txs_per_block,blocks:$sustained_blocks,warmup_blocks:$sustained_warmup_blocks},openloop:{target_tps:$openloop_target_tps,duration_secs:$openloop_duration_secs,drain_secs:$openloop_drain_secs}}' \
         > "$RESULTS_DIR/metadata.json"
 }
 
@@ -162,19 +187,27 @@ wait_for_rpc() {
 
 start_reth() {
     local run_name=$1
+    local benchmark_payload_arg=
+    if [[ "$BENCHMARK_DISABLE_TX_PAYLOAD_LIMIT" == "1" ]]; then
+        benchmark_payload_arg=--morph.benchmark-disable-tx-payload-limit
+    fi
     cleanup_node
     rm -rf -- "$DATA_DIR"
     mkdir -p "$DATA_DIR" "$RESULTS_DIR/logs"
     NODE_LOG="$RESULTS_DIR/logs/${run_name}-node.log"
     "$RETH_BIN" node \
         --chain "$GENESIS" --datadir "$DATA_DIR" \
+        --color never --log.stdout.format log-fmt --log.stdout.filter info \
+        --log.file.max-files 0 \
         --http --http.addr 127.0.0.1 --http.port "$HTTP_PORT" --http.api "web3,debug,eth,txpool,net" \
         --authrpc.addr 127.0.0.1 --authrpc.port "$AUTHRPC_PORT" --authrpc.jwtsecret "$JWT_SECRET" \
         --port "$P2P_PORT" --disable-discovery --nat none \
+        --builder.deadline "$BENCHMARK_BUILDER_DEADLINE_SECS" \
+        ${benchmark_payload_arg:+"$benchmark_payload_arg"} \
         --engine.persistence-threshold 2 --engine.memory-block-buffer-target 2 \
-        --txpool.pending-max-count 1000000 --txpool.pending-max-size 8192 \
-        --txpool.basefee-max-count 1000000 --txpool.basefee-max-size 8192 \
-        --txpool.queued-max-count 1000000 --txpool.queued-max-size 8192 \
+        --txpool.pending-max-count "$BENCHMARK_TXPOOL_MAX_COUNT" --txpool.pending-max-size 8192 \
+        --txpool.basefee-max-count "$BENCHMARK_TXPOOL_MAX_COUNT" --txpool.basefee-max-size 8192 \
+        --txpool.queued-max-count "$BENCHMARK_TXPOOL_MAX_COUNT" --txpool.queued-max-size 8192 \
         --txpool.max-account-slots 1000000 --txpool.additional-validation-tasks 12 \
         --txpool.max-batch-size 128 --txpool.disable-transactions-backup \
         --rpc.max-request-size 1024 --rpc.max-response-size 1024 --rpc.max-connections 1000 \
