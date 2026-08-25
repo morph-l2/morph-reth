@@ -111,4 +111,94 @@ mod tests {
 
         assert!(parsed.is_ok(), "expected openloop mode to parse");
     }
+
+    #[test]
+    fn cli_parses_legacy_small_set_for_exec() {
+        let parsed = Cli::try_parse_from([
+            "bench-block-exec",
+            "run",
+            "exec",
+            "--jwt-secret",
+            "./local-test/jwt-secret.txt",
+            "--workload",
+            "eth-transfer",
+            "--txs-per-block",
+            "1000",
+            "--blocks",
+            "1",
+            "--output",
+            "/tmp/exec.jsonl",
+            "--receiver-mode",
+            "legacy-small-set",
+        ])
+        .unwrap();
+
+        let Command::Run {
+            mode: RunMode::Exec(args),
+        } = parsed.command
+        else {
+            panic!("expected exec mode");
+        };
+        assert_eq!(args.receiver_mode, tx_factory::ReceiverMode::LegacySmallSet);
+    }
+
+    #[test]
+    fn cli_parses_legacy_small_set_for_sustained() {
+        let parsed = Cli::try_parse_from([
+            "bench-block-exec",
+            "run",
+            "sustained",
+            "--jwt-secret",
+            "./local-test/jwt-secret.txt",
+            "--workload",
+            "erc20-transfer",
+            "--txs-per-block",
+            "50000",
+            "--blocks",
+            "1",
+            "--output",
+            "/tmp/sustained.jsonl",
+            "--receiver-mode",
+            "legacy-small-set",
+        ])
+        .unwrap();
+
+        let Command::Run {
+            mode: RunMode::Sustained(args),
+        } = parsed.command
+        else {
+            panic!("expected sustained mode");
+        };
+        assert_eq!(args.receiver_mode, tx_factory::ReceiverMode::LegacySmallSet);
+    }
+
+    #[test]
+    fn cli_parses_legacy_small_set_for_openloop() {
+        let parsed = Cli::try_parse_from([
+            "bench-block-exec",
+            "run",
+            "openloop",
+            "--jwt-secret",
+            "./local-test/jwt-secret.txt",
+            "--workload",
+            "eth-transfer",
+            "--target-tps",
+            "200000",
+            "--duration-secs",
+            "1",
+            "--output",
+            "/tmp/openloop.jsonl",
+            "--receiver-mode",
+            "legacy-small-set",
+        ])
+        .unwrap();
+
+        let Command::Run {
+            mode: RunMode::Openloop(args),
+        } = parsed.command
+        else {
+            panic!("expected openloop mode");
+        };
+        assert_eq!(args.receiver_mode, tx_factory::ReceiverMode::LegacySmallSet);
+    }
 }

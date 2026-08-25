@@ -194,6 +194,7 @@ pub async fn run(args: SweepArgs) -> eyre::Result<()> {
             blocks: args.blocks_per_step,
             output: output_path.clone(),
             chain_id: args.chain_id,
+            receiver_mode: crate::tx_factory::ReceiverMode::Unique,
             senders: 1,
             submit_batch_size: args.submit_batch_size,
             submit_concurrency: args.submit_concurrency,

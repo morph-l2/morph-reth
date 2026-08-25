@@ -2,6 +2,7 @@
 ///
 /// This module implements a JWT-authenticated client that talks to the Engine API
 /// (`engine_assembleL2Block`, `engine_newL2Block`) and measures per-call timing.
+use crate::tx_factory::ReceiverMode;
 use alloy_primitives::{B256, Bytes};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use eyre::ensure;
@@ -206,6 +207,9 @@ pub(crate) struct BlockTimingV2 {
     pub engine: String,
     pub mode: String,
     pub workload: String,
+    /// Transfer-recipient model, absent only in records produced before it was tracked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receiver_mode: Option<ReceiverMode>,
     pub senders: u64,
     pub warmup_blocks: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]

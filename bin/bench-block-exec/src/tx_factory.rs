@@ -41,6 +41,39 @@ pub enum Workload {
     UniswapSwap,
 }
 
+/// How transfer recipients are derived for benchmark transactions.
+#[derive(
+    clap::ValueEnum,
+    serde::Serialize,
+    serde::Deserialize,
+    Debug,
+    Default,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReceiverMode {
+    /// Derive a distinct recipient from the sender and its monotonically increasing nonce.
+    #[default]
+    Unique,
+    /// Reproduce the historical benchmark's small recipient set based on batch-local indices.
+    LegacySmallSet,
+}
+
+impl std::fmt::Display for ReceiverMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unique => f.write_str("unique"),
+            Self::LegacySmallSet => f.write_str("legacy-small-set"),
+        }
+    }
+}
+
 impl Workload {
     /// Human-readable name for the workload (used in CLI args and reporting).
     pub fn as_str(&self) -> &'static str {
@@ -135,6 +168,20 @@ pub fn receiver_address(sender: Address, nonce: u64) -> Address {
     Address::from_slice(&keccak256(preimage)[12..])
 }
 
+fn legacy_receiver_address(local_index: u64) -> Address {
+    let mut bytes = [0u8; 20];
+    bytes[0] = 0xBB;
+    bytes[12..].copy_from_slice(&local_index.to_be_bytes());
+    Address::from(bytes)
+}
+
+fn receiver_for(mode: ReceiverMode, sender: Address, nonce: u64, local_index: u64) -> Address {
+    match mode {
+        ReceiverMode::Unique => receiver_address(sender, nonce),
+        ReceiverMode::LegacySmallSet => legacy_receiver_address(local_index),
+    }
+}
+
 /// Compute the storage slot for a Solidity `mapping(address => ...)` entry.
 ///
 /// Equivalent to `keccak256(abi.encode(key, slot))`.
@@ -196,6 +243,15 @@ pub fn build_eth_transfers(
     count: u64,
     chain_id: u64,
 ) -> eyre::Result<Vec<Bytes>> {
+    build_eth_transfers_with_receiver_mode(sender, count, chain_id, ReceiverMode::Unique)
+}
+
+fn build_eth_transfers_with_receiver_mode(
+    sender: &mut BenchSender,
+    count: u64,
+    chain_id: u64,
+    receiver_mode: ReceiverMode,
+) -> eyre::Result<Vec<Bytes>> {
     let start_nonce = sender.nonce;
     let txs = (0..count)
         .map(|i| TxEip1559 {
@@ -204,7 +260,12 @@ pub fn build_eth_transfers(
             gas_limit: 21_000,
             max_fee_per_gas: BENCH_MAX_FEE_PER_GAS,
             max_priority_fee_per_gas: 0,
-            to: TxKind::Call(receiver_address(sender.address, start_nonce + i)),
+            to: TxKind::Call(receiver_for(
+                receiver_mode,
+                sender.address,
+                start_nonce + i,
+                i,
+            )),
             value: U256::from(1),
             access_list: Default::default(),
             input: Bytes::new(),
@@ -223,10 +284,19 @@ pub fn build_erc20_transfers(
     count: u64,
     chain_id: u64,
 ) -> eyre::Result<Vec<Bytes>> {
+    build_erc20_transfers_with_receiver_mode(sender, count, chain_id, ReceiverMode::Unique)
+}
+
+fn build_erc20_transfers_with_receiver_mode(
+    sender: &mut BenchSender,
+    count: u64,
+    chain_id: u64,
+    receiver_mode: ReceiverMode,
+) -> eyre::Result<Vec<Bytes>> {
     let start_nonce = sender.nonce;
     let txs = (0..count)
         .map(|i| {
-            let to = receiver_address(sender.address, start_nonce + i);
+            let to = receiver_for(receiver_mode, sender.address, start_nonce + i, i);
 
             // transfer(address,uint256) selector: 0xa9059cbb
             let mut calldata = vec![0xa9, 0x05, 0x9c, 0xbb];
@@ -300,6 +370,17 @@ pub fn build_block_txs(
     total_txs: u64,
     chain_id: u64,
 ) -> eyre::Result<Vec<Bytes>> {
+    build_block_txs_with_receiver_mode(senders, workload, total_txs, chain_id, ReceiverMode::Unique)
+}
+
+/// Build a full block's transactions using the selected transfer-recipient model.
+pub fn build_block_txs_with_receiver_mode(
+    senders: &mut [BenchSender],
+    workload: Workload,
+    total_txs: u64,
+    chain_id: u64,
+    receiver_mode: ReceiverMode,
+) -> eyre::Result<Vec<Bytes>> {
     assert!(!senders.is_empty(), "must have at least one sender");
 
     let num_senders = senders.len() as u64;
@@ -317,8 +398,12 @@ pub fn build_block_txs(
                 return Ok(Vec::new());
             }
             match workload {
-                Workload::EthTransfer => build_eth_transfers(sender, count, chain_id),
-                Workload::Erc20Transfer => build_erc20_transfers(sender, count, chain_id),
+                Workload::EthTransfer => {
+                    build_eth_transfers_with_receiver_mode(sender, count, chain_id, receiver_mode)
+                }
+                Workload::Erc20Transfer => {
+                    build_erc20_transfers_with_receiver_mode(sender, count, chain_id, receiver_mode)
+                }
                 Workload::UniswapSwap => build_swap_txs(sender, count, chain_id),
             }
         })
@@ -361,6 +446,13 @@ mod tests {
         TxEnvelope::decode_2718_exact(tx.as_ref()).unwrap().nonce()
     }
 
+    fn decode_recipient(tx: &Bytes) -> Address {
+        TxEnvelope::decode_2718_exact(tx.as_ref())
+            .unwrap()
+            .to()
+            .unwrap()
+    }
+
     #[test]
     fn generate_senders_produces_unique_addresses() {
         let senders = generate_senders(100);
@@ -386,6 +478,47 @@ mod tests {
             .flat_map(|sender| (0..100).map(|nonce| receiver_address(sender.address, nonce)))
             .collect();
         assert_eq!(addrs.len(), 200);
+    }
+
+    #[test]
+    fn legacy_small_set_reuses_local_indices_across_senders_and_blocks() {
+        let mut senders = generate_senders(2);
+        let first = build_block_txs_with_receiver_mode(
+            &mut senders,
+            Workload::EthTransfer,
+            6,
+            99_999,
+            ReceiverMode::LegacySmallSet,
+        )
+        .unwrap();
+        let second = build_block_txs_with_receiver_mode(
+            &mut senders,
+            Workload::EthTransfer,
+            6,
+            99_999,
+            ReceiverMode::LegacySmallSet,
+        )
+        .unwrap();
+
+        let first_recipients: HashSet<Address> = first.iter().map(decode_recipient).collect();
+        let second_recipients: HashSet<Address> = second.iter().map(decode_recipient).collect();
+
+        assert_eq!(first_recipients.len(), 3);
+        assert_eq!(second_recipients, first_recipients);
+        assert_eq!(
+            first_recipients,
+            HashSet::from([
+                "0xbb00000000000000000000000000000000000000"
+                    .parse()
+                    .unwrap(),
+                "0xbb00000000000000000000000000000000000001"
+                    .parse()
+                    .unwrap(),
+                "0xbb00000000000000000000000000000000000002"
+                    .parse()
+                    .unwrap(),
+            ])
+        );
     }
 
     #[test]

@@ -60,6 +60,7 @@ Common overrides:
 | `OPENLOOP_TARGET_TPS` | `200000` | Offered load; use the submitted and realized rates to judge what was delivered |
 | `OPENLOOP_DURATION_SECS` | `120` | Active submission duration |
 | `OPENLOOP_DRAIN_SECS` | `600` | Maximum time to import all accepted transactions after submission ends |
+| `RECEIVER_MODE` | `unique` | `unique` grows state per transaction; `legacy-small-set` reproduces the archived runner's batch-local repeated recipients |
 | `BENCHMARK_DISABLE_TX_PAYLOAD_LIMIT` | `1` | Disable both builder and import-side DA payload bounds; benchmark only |
 | `BENCHMARK_GENESIS_MAX_TX_PAYLOAD_BYTES` | `1073741824` | Compatibility value recorded in generated genesis; not enforced when the bypass is enabled |
 | `BENCHMARK_BUILDER_DEADLINE_SECS` | `12` | Fixed payload-building deadline for very large synthetic blocks |
@@ -72,6 +73,15 @@ Treat the first full run after a cold build as a smoke test, not a baseline. For
 keep the commit, build profile, hardware power mode, sender count, workload, and node flags fixed.
 `metadata.json` records the commit and main run configuration. A non-zero `dirty_files` value means
 the result was produced from an uncommitted worktree and should be labeled accordingly.
+
+Recipient mode is part of the workload definition. The default `unique` mode derives each transfer
+recipient from the sender and monotonically increasing nonce, so long runs grow account or token
+storage state. `RECEIVER_MODE=legacy-small-set` intentionally recreates the April runner's
+`receiver_address(batch_local_index)` behavior: all senders share the same recipient indices and the
+indices restart for every generated block or open-loop tick. With 2,000 senders this means 25
+recipients for each 50,000-transaction fixed block and 5 recipients for each 10,000-transaction
+open-loop tick. This mode is only suitable for comparison with the archived report; it is not a
+state-growth workload.
 
 Fixed-size modes require 100% inclusion. Requests that do not fit under the configured gas limit or
 builder deadline fail the run instead of reporting the smaller assembled block as though it
@@ -95,6 +105,8 @@ their latest block number, state root, receipts root, and deterministic funded-s
   does not include consensus networking, proving, or L1 data costs.
 - The supported runner is reth-only. The archived April 2026 reth/geth report was produced by an
   older runner and older binaries and must not be presented as a current-`main` comparison.
+- `legacy-small-set` repeatedly writes hot accounts/storage slots and therefore overstates throughput
+  for workloads that create or touch many distinct users. Always label results with the receiver mode.
 - Open-loop mode pre-generates `target_tps * duration_secs` signed requests. The defaults create
   24 million transactions per run and therefore require substantial memory. A target that fills the
   txpool is a failed run, not a throughput result. `target_tps` is offered load, not guaranteed

@@ -9,7 +9,7 @@ use crate::mode_e2e::{
     DEFAULT_SUBMIT_BATCH_SIZE, DEFAULT_SUBMIT_CONCURRENCY, SubmitOptions, build_http_client,
     build_submit_bodies, ensure_submit_batch_success,
 };
-use crate::tx_factory::{self, BenchSender, Workload};
+use crate::tx_factory::{self, BenchSender, ReceiverMode, Workload};
 
 use alloy_primitives::Bytes;
 use std::collections::VecDeque;
@@ -57,6 +57,10 @@ pub struct OpenLoopArgs {
 
     #[arg(long, default_value = "99999")]
     pub chain_id: u64,
+
+    /// Transfer-recipient model. Use legacy-small-set only for historical comparisons.
+    #[arg(long, value_enum, default_value_t)]
+    pub receiver_mode: ReceiverMode,
 
     #[arg(long, default_value_t = DEFAULT_SUBMIT_BATCH_SIZE)]
     pub submit_batch_size: usize,
@@ -112,6 +116,7 @@ struct ProducerLoopConfig {
     http_rpc: String,
     pool_client: reqwest::Client,
     workload: Workload,
+    receiver_mode: ReceiverMode,
     target_tps: u64,
     senders: u64,
     producer_idle_ms: u64,
@@ -145,11 +150,12 @@ pub async fn run(args: OpenLoopArgs) -> eyre::Result<()> {
     // This moves ECDSA signing out of the hot submit loop so the submit
     // cadence is limited only by HTTP throughput, not by signing speed.
     println!(
-        "Mode D (openloop): target={} TPS, duration={}s, {} senders, {} workload, {} submit target(s)",
+        "Mode D (openloop): target={} TPS, duration={}s, {} senders, {} workload, {} recipients, {} submit target(s)",
         args.target_tps,
         args.duration_secs,
         args.senders,
         workload,
+        args.receiver_mode,
         submit_targets.len(),
     );
     println!("  Pre-generating {total_txs} txs across {num_ticks} ticks...");
@@ -157,6 +163,7 @@ pub async fn run(args: OpenLoopArgs) -> eyre::Result<()> {
     let batch_size = args.submit_batch_size;
     let senders_count = args.senders as usize;
     let chain_id = args.chain_id;
+    let receiver_mode = args.receiver_mode;
     let pregen_start = Instant::now();
 
     let prebuilt_ticks: Vec<PrebuiltSubmitBatch> = tokio::task::spawn_blocking(move || {
@@ -170,6 +177,7 @@ pub async fn run(args: OpenLoopArgs) -> eyre::Result<()> {
                 workload,
                 total,
                 chain_id,
+                receiver_mode,
                 &mut next_sender_idx,
             )
             .expect("tx generation should not fail");
@@ -224,6 +232,7 @@ pub async fn run(args: OpenLoopArgs) -> eyre::Result<()> {
             http_rpc: args.http_rpc.clone(),
             pool_client,
             workload,
+            receiver_mode: args.receiver_mode,
             target_tps: args.target_tps,
             senders: args.senders,
             producer_idle_ms: args.producer_idle_ms,
@@ -390,6 +399,7 @@ async fn drive_producer_loop(
         http_rpc,
         pool_client,
         workload,
+        receiver_mode,
         target_tps,
         senders,
         producer_idle_ms,
@@ -473,6 +483,7 @@ async fn drive_producer_loop(
             engine: "reth".to_string(),
             mode: "openloop".to_string(),
             workload: workload.to_string(),
+            receiver_mode: Some(receiver_mode),
             senders,
             warmup_blocks: 0,
             phase: Some(
@@ -596,6 +607,7 @@ fn build_tick_txs(
     workload: Workload,
     total_txs: u64,
     chain_id: u64,
+    receiver_mode: ReceiverMode,
     next_sender_idx: &mut usize,
 ) -> eyre::Result<Vec<Bytes>> {
     if senders.is_empty() || total_txs == 0 {
@@ -607,7 +619,13 @@ fn build_tick_txs(
         senders.rotate_left(rotate_by);
     }
 
-    let txs = tx_factory::build_block_txs(senders, workload, total_txs, chain_id)?;
+    let txs = tx_factory::build_block_txs_with_receiver_mode(
+        senders,
+        workload,
+        total_txs,
+        chain_id,
+        receiver_mode,
+    )?;
 
     if rotate_by > 0 {
         senders.rotate_right(rotate_by);
@@ -684,6 +702,7 @@ mod tests {
             engine: "reth".to_string(),
             mode: "openloop".to_string(),
             workload: "eth-transfer".to_string(),
+            receiver_mode: Some(ReceiverMode::Unique),
             senders: 100,
             warmup_blocks: 0,
             phase: Some("active".to_string()),
@@ -744,6 +763,7 @@ mod tests {
             Workload::EthTransfer,
             2,
             99999,
+            ReceiverMode::Unique,
             &mut next_sender_idx,
         )
         .unwrap();
@@ -752,6 +772,7 @@ mod tests {
             Workload::EthTransfer,
             2,
             99999,
+            ReceiverMode::Unique,
             &mut next_sender_idx,
         )
         .unwrap();
@@ -760,6 +781,7 @@ mod tests {
             Workload::EthTransfer,
             2,
             99999,
+            ReceiverMode::Unique,
             &mut next_sender_idx,
         )
         .unwrap();

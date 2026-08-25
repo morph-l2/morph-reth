@@ -6,7 +6,7 @@
 
 use crate::engine::{AssembleL2BlockParams, BlockTimingV2, EngineClient};
 use crate::mode_e2e;
-use crate::tx_factory::{self, BenchSender, Workload};
+use crate::tx_factory::{self, BenchSender, ReceiverMode, Workload};
 
 use std::cmp;
 use std::io::Write;
@@ -41,6 +41,10 @@ pub struct ExecArgs {
 
     #[arg(long, default_value = "99999")]
     pub chain_id: u64,
+
+    /// Transfer-recipient model. Use legacy-small-set only for historical comparisons.
+    #[arg(long, value_enum, default_value_t)]
+    pub receiver_mode: ReceiverMode,
 
     /// Number of senders (more senders avoids txpool per-account limits).
     #[arg(long, default_value = "1")]
@@ -130,8 +134,8 @@ pub(crate) async fn run_with_state(args: &ExecArgs, state: &mut ExecRunState) ->
     let mut out_file = std::fs::File::create(&args.output)?;
 
     println!(
-        "Mode exec: {} blocks x {} txs ({} workload), txpool path",
-        args.blocks, args.txs_per_block, workload,
+        "Mode exec: {} blocks x {} txs ({} workload), {} recipients, txpool path",
+        args.blocks, args.txs_per_block, workload, args.receiver_mode,
     );
 
     // 3. Loop through blocks.
@@ -141,11 +145,12 @@ pub(crate) async fn run_with_state(args: &ExecArgs, state: &mut ExecRunState) ->
         let expected_tx_count = args.txs_per_block;
 
         // Build transactions for this block.
-        let txs = tx_factory::build_block_txs(
+        let txs = tx_factory::build_block_txs_with_receiver_mode(
             state.senders_mut(),
             workload,
             args.txs_per_block,
             args.chain_id,
+            args.receiver_mode,
         )?;
 
         // Submit to txpool in waves (NOT timed — we only care about execution).
@@ -229,6 +234,7 @@ pub(crate) async fn run_with_state(args: &ExecArgs, state: &mut ExecRunState) ->
             engine: "reth".to_string(),
             mode: "exec".to_string(),
             workload: workload.to_string(),
+            receiver_mode: Some(args.receiver_mode),
             senders: args.senders.max(1),
             warmup_blocks: 0,
             phase: None,

@@ -10,7 +10,7 @@ use crate::mode_e2e::{
     DEFAULT_SUBMIT_CONCURRENCY, PoolWaitOptions, SubmitOptions, build_http_client,
     submit_to_txpool_with_client, wait_for_pool_with_client,
 };
-use crate::tx_factory::{self, Workload};
+use crate::tx_factory::{self, ReceiverMode, Workload};
 
 use std::cmp;
 use std::collections::VecDeque;
@@ -52,6 +52,10 @@ pub struct SustainedArgs {
     #[arg(long, default_value = "99999")]
     pub chain_id: u64,
 
+    /// Transfer-recipient model. Use legacy-small-set only for historical comparisons.
+    #[arg(long, value_enum, default_value_t)]
+    pub receiver_mode: ReceiverMode,
+
     #[arg(long, default_value_t = DEFAULT_SUBMIT_BATCH_SIZE)]
     pub submit_batch_size: usize,
 
@@ -91,8 +95,13 @@ pub async fn run(args: SustainedArgs) -> eyre::Result<()> {
     ))?;
 
     println!(
-        "Mode C (sustained): {} warmup + {} measured blocks x {} txs/block, {} senders, {} workload",
-        args.warmup_blocks, args.blocks, args.txs_per_block, args.senders, workload
+        "Mode C (sustained): {} warmup + {} measured blocks x {} txs/block, {} senders, {} workload, {} recipients",
+        args.warmup_blocks,
+        args.blocks,
+        args.txs_per_block,
+        args.senders,
+        workload,
+        args.receiver_mode,
     );
 
     // -----------------------------------------------------------------------
@@ -107,8 +116,13 @@ pub async fn run(args: SustainedArgs) -> eyre::Result<()> {
         let block_number = block_idx + 1;
 
         // Build transactions.
-        let txs =
-            tx_factory::build_block_txs(&mut senders, workload, args.txs_per_block, args.chain_id)?;
+        let txs = tx_factory::build_block_txs_with_receiver_mode(
+            &mut senders,
+            workload,
+            args.txs_per_block,
+            args.chain_id,
+            args.receiver_mode,
+        )?;
 
         // Submit to txpool.
         submit_to_txpool_with_client(&http_client, &args.http_rpc, &txs, submit_options).await?;
@@ -165,8 +179,13 @@ pub async fn run(args: SustainedArgs) -> eyre::Result<()> {
         let measured_block = block_idx + 1;
 
         // --- build transactions ---
-        let txs =
-            tx_factory::build_block_txs(&mut senders, workload, args.txs_per_block, args.chain_id)?;
+        let txs = tx_factory::build_block_txs_with_receiver_mode(
+            &mut senders,
+            workload,
+            args.txs_per_block,
+            args.chain_id,
+            args.receiver_mode,
+        )?;
 
         let expected_tx_count = txs.len() as u64;
 
@@ -257,6 +276,7 @@ pub async fn run(args: SustainedArgs) -> eyre::Result<()> {
             engine: "reth".to_string(),
             mode: "sustained".to_string(),
             workload: workload.to_string(),
+            receiver_mode: Some(args.receiver_mode),
             senders: args.senders,
             warmup_blocks: args.warmup_blocks,
             phase: None,

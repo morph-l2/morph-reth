@@ -29,6 +29,7 @@ SUSTAINED_WARMUP_BLOCKS=${SUSTAINED_WARMUP_BLOCKS:-5}
 OPENLOOP_TARGET_TPS=${OPENLOOP_TARGET_TPS:-200000}
 OPENLOOP_DURATION_SECS=${OPENLOOP_DURATION_SECS:-120}
 OPENLOOP_DRAIN_SECS=${OPENLOOP_DRAIN_SECS:-600}
+RECEIVER_MODE=${RECEIVER_MODE:-unique}
 BENCHMARK_DISABLE_TX_PAYLOAD_LIMIT=${BENCHMARK_DISABLE_TX_PAYLOAD_LIMIT:-1}
 BENCHMARK_GENESIS_MAX_TX_PAYLOAD_BYTES=${BENCHMARK_GENESIS_MAX_TX_PAYLOAD_BYTES:-1073741824}
 BENCHMARK_BUILDER_DEADLINE_SECS=${BENCHMARK_BUILDER_DEADLINE_SECS:-12}
@@ -101,6 +102,14 @@ prepare() {
             ;;
     esac
 
+    case "$RECEIVER_MODE" in
+        unique|legacy-small-set) ;;
+        *)
+            echo "RECEIVER_MODE must be unique or legacy-small-set" >&2
+            exit 1
+            ;;
+    esac
+
     normalize_and_validate_paths
 
     if [[ "$BUILD" == "1" ]]; then
@@ -144,6 +153,7 @@ prepare() {
         --arg reth_version "$($RETH_BIN --version | tr '\n' ' ')" \
         --arg modes "$MODES" \
         --arg workloads "$WORKLOADS" \
+        --arg receiver_mode "$RECEIVER_MODE" \
         --argjson senders "$SENDERS" \
         --argjson runs "$RUNS" \
         --arg exec_block_sizes "$EXEC_BLOCK_SIZES" \
@@ -161,7 +171,7 @@ prepare() {
         --argjson txpool_max_count "$BENCHMARK_TXPOOL_MAX_COUNT" \
         --arg node_log_level "info" \
         --arg uname "$(uname -a)" \
-        '{created_at:$created_at,git_commit:$git_commit,dirty_files:($git_dirty|tonumber),profile:$profile,reth_version:$reth_version,uname:$uname,modes:$modes,workloads:$workloads,senders:$senders,runs:$runs,consensus:{tx_payload_limit_disabled:$payload_limit_disabled,enforced_max_tx_payload_bytes:$enforced_max_tx_payload_bytes,genesis_compatibility_max_tx_payload_bytes:$genesis_max_tx_payload_bytes},node:{builder_deadline_secs:$builder_deadline_secs,txpool_max_count:$txpool_max_count,log_level:$node_log_level},exec:{block_sizes:$exec_block_sizes,blocks:$exec_blocks},sustained:{txs_per_block:$sustained_txs_per_block,blocks:$sustained_blocks,warmup_blocks:$sustained_warmup_blocks},openloop:{target_tps:$openloop_target_tps,duration_secs:$openloop_duration_secs,drain_secs:$openloop_drain_secs}}' \
+        '{created_at:$created_at,git_commit:$git_commit,dirty_files:($git_dirty|tonumber),profile:$profile,reth_version:$reth_version,uname:$uname,modes:$modes,workloads:$workloads,receiver_mode:$receiver_mode,senders:$senders,runs:$runs,consensus:{tx_payload_limit_disabled:$payload_limit_disabled,enforced_max_tx_payload_bytes:$enforced_max_tx_payload_bytes,genesis_compatibility_max_tx_payload_bytes:$genesis_max_tx_payload_bytes},node:{builder_deadline_secs:$builder_deadline_secs,txpool_max_count:$txpool_max_count,log_level:$node_log_level},exec:{block_sizes:$exec_block_sizes,blocks:$exec_blocks},sustained:{txs_per_block:$sustained_txs_per_block,blocks:$sustained_blocks,warmup_blocks:$sustained_warmup_blocks},openloop:{target_tps:$openloop_target_tps,duration_secs:$openloop_duration_secs,drain_secs:$openloop_drain_secs}}' \
         > "$RESULTS_DIR/metadata.json"
 }
 
@@ -222,6 +232,7 @@ COMMON_ARGS=(
     --http-rpc "http://127.0.0.1:$HTTP_PORT"
     --senders "$SENDERS"
     --chain-id "$CHAIN_ID"
+    --receiver-mode "$RECEIVER_MODE"
     --submit-batch-size 500
     --submit-concurrency 32
 )

@@ -7,6 +7,18 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct V2GroupKey {
+    engine: String,
+    mode: String,
+    workload: String,
+    receiver_mode: Option<crate::tx_factory::ReceiverMode>,
+    senders: u64,
+    warmup_blocks: u64,
+    expected_tx_count: u64,
+    target_tps: Option<u64>,
+}
+
 #[derive(Args)]
 pub(crate) struct SummarizeArgs {
     /// Directory containing per-round result files.
@@ -288,33 +300,40 @@ fn summarize_v2(results_dir: &str, output: Option<&str>) -> eyre::Result<()> {
     );
 
     // 3. Keep fixed-block load and open-loop target as separate dimensions.
-    type GroupKey = (String, String, String, u64, u64, u64, Option<u64>);
-    let mut groups: BTreeMap<GroupKey, Vec<(PathBuf, BlockTimingV2)>> = BTreeMap::new();
+    let mut groups: BTreeMap<V2GroupKey, Vec<(PathBuf, BlockTimingV2)>> = BTreeMap::new();
     for (source, t) in all_timings {
         groups
-            .entry((
-                t.engine.clone(),
-                t.mode.clone(),
-                t.workload.clone(),
-                t.senders,
-                t.warmup_blocks,
-                t.expected_tx_count,
-                t.target_tps,
-            ))
+            .entry(V2GroupKey {
+                engine: t.engine.clone(),
+                mode: t.mode.clone(),
+                workload: t.workload.clone(),
+                receiver_mode: t.receiver_mode,
+                senders: t.senders,
+                warmup_blocks: t.warmup_blocks,
+                expected_tx_count: t.expected_tx_count,
+                target_tps: t.target_tps,
+            })
             .or_default()
             .push((source, t));
     }
 
     // 4. Build TSV output.
-    let header = "engine\tmode\tworkload\tsenders\twarmup\ttxs_per_block\ttarget_tps\tblocks\tavg_txs\tinclusion%\tavg_asm_ms\tavg_imp_ms\tavg_tot_ms\tp50_ms\tp95_ms\tp99_ms\tpeak_tps\tavg_tps\trealized_tps\tavg_mgas_s\tearly_tps\tmid_tps\tlate_tps\tlate_vs_early%\tactive_blocks\tactive_avg_tps\tactive_realized_tps\tdrain_blocks\tdrain_avg_tps\tdrain_realized_tps\tdegradation%\terrors";
+    let header = "engine\tmode\tworkload\treceiver_mode\tsenders\twarmup\ttxs_per_block\ttarget_tps\tblocks\tavg_txs\tinclusion%\tavg_asm_ms\tavg_imp_ms\tavg_tot_ms\tp50_ms\tp95_ms\tp99_ms\tpeak_tps\tavg_tps\trealized_tps\tavg_mgas_s\tearly_tps\tmid_tps\tlate_tps\tlate_vs_early%\tactive_blocks\tactive_avg_tps\tactive_realized_tps\tdrain_blocks\tdrain_avg_tps\tdrain_realized_tps\tdegradation%\terrors";
 
     let mut rows: Vec<String> = vec![header.to_string()];
 
-    for ((engine, mode, workload, senders, warmup, txs_per_block, target_tps), entries) in &groups {
+    for (key, entries) in &groups {
+        let receiver_mode = key.receiver_mode.map_or_else(
+            || "unknown".to_string(),
+            |receiver_mode| receiver_mode.to_string(),
+        );
         let errors = entries.iter().filter(|(_, t)| t.error).count();
         eyre::ensure!(
             errors == 0,
-            "refusing to summarize {errors} failed sample(s) for {engine}/{mode}/{workload}"
+            "refusing to summarize {errors} failed sample(s) for {}/{}/{}/{receiver_mode}",
+            key.engine,
+            key.mode,
+            key.workload,
         );
         let data: Vec<&BlockTimingV2> = entries.iter().map(|(_, timing)| timing).collect();
         if data.is_empty() {
@@ -384,7 +403,7 @@ fn summarize_v2(results_dir: &str, output: Option<&str>) -> eyre::Result<()> {
             drain_blocks,
             drain_avg_tps,
             drain_realized_tps,
-        ) = openloop_phase_split_stats(mode, &data);
+        ) = openloop_phase_split_stats(&key.mode, &data);
 
         // Degradation is computed within each run. Concatenating fresh-node runs
         // would compare one run against another rather than early vs late blocks.
@@ -415,14 +434,16 @@ fn summarize_v2(results_dir: &str, output: Option<&str>) -> eyre::Result<()> {
         };
 
         rows.push(format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.1}\t{:.1}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.1}\t{:.1}\t{:.1}\t{:.2}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{}\t{:.1}\t{:.1}\t{}\t{:.1}\t{:.1}\t{}\t{}",
-            engine,
-            mode,
-            workload,
-            senders,
-            warmup,
-            txs_per_block,
-            target_tps.map_or_else(|| "N/A".to_string(), |value| value.to_string()),
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.1}\t{:.1}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.1}\t{:.1}\t{:.1}\t{:.2}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{}\t{:.1}\t{:.1}\t{}\t{:.1}\t{:.1}\t{}\t{}",
+            key.engine,
+            key.mode,
+            key.workload,
+            receiver_mode,
+            key.senders,
+            key.warmup_blocks,
+            key.expected_tx_count,
+            key.target_tps
+                .map_or_else(|| "N/A".to_string(), |value| value.to_string()),
             blocks,
             avg_txs,
             avg_inclusion,
@@ -531,6 +552,7 @@ mod tests {
                     engine: "reth".to_string(),
                     mode: "exec".to_string(),
                     workload: "eth-transfer".to_string(),
+                    receiver_mode: Some(crate::tx_factory::ReceiverMode::Unique),
                     senders: 1,
                     warmup_blocks: 0,
                     phase: None,
@@ -553,6 +575,48 @@ mod tests {
             .collect();
 
         fs::write(path, rows.join("\n")).unwrap();
+    }
+
+    fn label_rows_with_receiver_mode(path: &Path, receiver_mode: &str) {
+        let labeled = fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| {
+                let mut value: serde_json::Value = serde_json::from_str(line).unwrap();
+                value["receiver_mode"] = serde_json::Value::String(receiver_mode.to_string());
+                serde_json::to_string(&value).unwrap()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(path, labeled).unwrap();
+    }
+
+    #[test]
+    fn summarize_v2_separates_and_labels_receiver_modes() {
+        let dir = temp_dir("summary-v2-receiver-modes");
+        let output = dir.join("summary.tsv");
+        let unique = dir.join("exec-unique.jsonl");
+        let legacy = dir.join("exec-legacy.jsonl");
+
+        write_rows(&unique, 1_000, 10_000.0);
+        label_rows_with_receiver_mode(&unique, "unique");
+        write_rows(&legacy, 1_000, 20_000.0);
+        label_rows_with_receiver_mode(&legacy, "legacy-small-set");
+
+        summarize_v2(dir.to_str().unwrap(), Some(output.to_str().unwrap())).unwrap();
+
+        let summary = fs::read_to_string(&output).unwrap();
+        let lines: Vec<&str> = summary.lines().collect();
+        assert!(lines[0].contains("receiver_mode"));
+        assert_eq!(
+            lines.len(),
+            3,
+            "receiver modes must not be merged: {summary}"
+        );
+        assert!(summary.contains("\tunique\t"));
+        assert!(summary.contains("\tlegacy-small-set\t"));
+
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
