@@ -81,6 +81,36 @@ pub struct OpenLoopArgs {
     pub submit_buffer_ticks: usize,
 }
 
+/// Block producer used with an external load generator such as Contender.
+///
+/// The producer exits only after `stop_file` exists and the transaction pool has
+/// drained. Keeping transaction generation outside this process ensures that an
+/// external-client comparison does not accidentally include openloop traffic.
+#[derive(clap::Args)]
+pub struct ExternalProducerArgs {
+    #[arg(long, default_value = "http://127.0.0.1:8551")]
+    pub engine_rpc: String,
+
+    #[arg(long)]
+    pub jwt_secret: String,
+
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    pub http_rpc: String,
+
+    #[arg(long)]
+    pub output: String,
+
+    /// Create this file to request a graceful stop after the txpool drains.
+    #[arg(long)]
+    pub stop_file: String,
+
+    #[arg(long, default_value_t = DEFAULT_OPEN_LOOP_PRODUCER_IDLE_MS)]
+    pub producer_idle_ms: u64,
+
+    #[arg(long, default_value = "600")]
+    pub drain_secs: u64,
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 struct SubmitSummary {
     submitted_txs: u64,
@@ -263,6 +293,157 @@ pub async fn run(args: OpenLoopArgs) -> eyre::Result<()> {
         produce_summary.imported_txs,
     );
     println!("Results written to {}", args.output);
+    Ok(())
+}
+
+pub async fn run_external_producer(args: ExternalProducerArgs) -> eyre::Result<()> {
+    let jwt_hex = std::fs::read_to_string(&args.jwt_secret)
+        .map_err(|e| eyre::eyre!("failed to read JWT secret file: {e}"))?
+        .trim()
+        .to_string();
+    let client = EngineClient::new(&args.engine_rpc, jwt_hex)?;
+    let pool_client = build_http_client(1)?;
+    let mut out_file = std::fs::File::create(&args.output)?;
+    let idle = Duration::from_millis(args.producer_idle_ms.max(1));
+    let max_drain = Duration::from_secs(args.drain_secs.max(1));
+    let mut next_block_number = current_block_number(&pool_client, &args.http_rpc).await? + 1;
+    let mut imported_blocks = 0u64;
+    let mut cumulative_txs = 0u64;
+    let mut last_completed_at = Instant::now();
+    let mut stop_requested_at: Option<Instant> = None;
+    let mut consecutive_errors = 0u64;
+
+    println!(
+        "External producer: next_block={} idle={}ms stop_file={}",
+        next_block_number,
+        args.producer_idle_ms.max(1),
+        args.stop_file
+    );
+
+    loop {
+        if stop_requested_at.is_none() && std::path::Path::new(&args.stop_file).exists() {
+            stop_requested_at = Some(Instant::now());
+            println!("External producer: stop requested; draining txpool");
+        }
+
+        let assemble_params = AssembleL2BlockParams {
+            number: next_block_number,
+            transactions: vec![],
+            timestamp: Some(next_block_number),
+        };
+        let (assembled, assemble_ms) = match client
+            .assemble_l2_block(&args.engine_rpc, assemble_params)
+            .await
+        {
+            Ok(result) => result,
+            Err(e) => {
+                consecutive_errors += 1;
+                eprintln!("external producer block {next_block_number}: assemble error: {e}");
+                if consecutive_errors >= 5 {
+                    return Err(eyre::eyre!(
+                        "external producer aborted after 5 consecutive assemble/import errors"
+                    ));
+                }
+                tokio::time::sleep(idle).await;
+                continue;
+            }
+        };
+
+        let actual_tx_count = assembled.transactions.len() as u64;
+        let gas_used = assembled.gas_used;
+        let import_ms = match client.new_l2_block(&args.engine_rpc, assembled).await {
+            Ok(ms) => ms,
+            Err(e) => {
+                consecutive_errors += 1;
+                eprintln!("external producer block {next_block_number}: import error: {e}");
+                if consecutive_errors >= 5 {
+                    return Err(eyre::eyre!(
+                        "external producer aborted after 5 consecutive assemble/import errors"
+                    ));
+                }
+                tokio::time::sleep(idle).await;
+                continue;
+            }
+        };
+
+        consecutive_errors = 0;
+        imported_blocks += 1;
+        cumulative_txs += actual_tx_count;
+
+        let completed_at = Instant::now();
+        let observed_interval_ms =
+            completed_at.duration_since(last_completed_at).as_secs_f64() * 1000.0;
+        last_completed_at = completed_at;
+        let mut timing = BlockTimingV2 {
+            block_number: next_block_number,
+            tx_count: actual_tx_count,
+            expected_tx_count: 0,
+            target_tps: None,
+            engine: "reth".to_string(),
+            mode: "external-producer".to_string(),
+            workload: "external".to_string(),
+            receiver_mode: None,
+            senders: 0,
+            warmup_blocks: 0,
+            phase: Some(
+                if stop_requested_at.is_some() {
+                    "drain"
+                } else {
+                    "active"
+                }
+                .to_string(),
+            ),
+            submit_ms: 0.0,
+            pool_wait_ms: 0.0,
+            assemble_ms,
+            import_ms,
+            total_ms: 0.0,
+            gas_used,
+            tps: 0.0,
+            mgas_per_sec: 0.0,
+            inclusion_rate: 0.0,
+            cumulative_blocks: imported_blocks,
+            cumulative_txs,
+            rolling_avg_tps_100: None,
+            error: false,
+        };
+        timing.finalize();
+        apply_observed_interval(
+            &mut timing,
+            observed_interval_ms.max(assemble_ms + import_ms),
+        );
+        writeln!(out_file, "{}", serde_json::to_string(&timing)?)?;
+        out_file.flush()?;
+
+        if imported_blocks.is_multiple_of(10) {
+            println!(
+                "external producer block {}: txs={} cumulative={} total={:.1}ms",
+                next_block_number, actual_tx_count, cumulative_txs, timing.total_ms
+            );
+        }
+
+        if let Some(requested_at) = stop_requested_at {
+            let (pending_txs, queued_txs) = txpool_status(&pool_client, &args.http_rpc).await?;
+            if pending_txs == 0 && queued_txs == 0 && actual_tx_count == 0 {
+                break;
+            }
+            if requested_at.elapsed() >= max_drain {
+                return Err(eyre::eyre!(
+                    "external producer drain timed out: imported={cumulative_txs} pending={pending_txs} queued={queued_txs}"
+                ));
+            }
+        }
+
+        next_block_number += 1;
+        if actual_tx_count == 0 {
+            tokio::time::sleep(idle).await;
+        }
+    }
+
+    println!(
+        "External producer complete: imported={} blocks / {} txs",
+        imported_blocks, cumulative_txs
+    );
     Ok(())
 }
 
@@ -672,6 +853,23 @@ async fn txpool_status(client: &reqwest::Client, http_rpc: &str) -> eyre::Result
         .ok_or_else(|| eyre::eyre!("txpool_status missing queued"))?;
 
     Ok((pending, queued))
+}
+
+async fn current_block_number(client: &reqwest::Client, http_rpc: &str) -> eyre::Result<u64> {
+    let resp = client
+        .post(http_rpc)
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "eth_blockNumber",
+            "params": [],
+            "id": 1
+        }))
+        .send()
+        .await?
+        .error_for_status()?;
+    let value: serde_json::Value = resp.json().await?;
+    parse_hex_quantity(value.get("result"))
+        .ok_or_else(|| eyre::eyre!("eth_blockNumber missing or invalid result"))
 }
 
 fn parse_hex_quantity(value: Option<&serde_json::Value>) -> Option<u64> {

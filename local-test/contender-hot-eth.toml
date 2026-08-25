@@ -1,0 +1,53 @@
+# Contender ETH-transfer workload that mirrors the benchmark's historical
+# legacy-small-set receiver model at 200k TPS / 100ms openloop ticks:
+# 2,000 senders x 10 transactions per tick repeatedly touch 10 recipients.
+
+[[spam]]
+[spam.tx]
+to = "0xbb00000000000000000000000000000000000000"
+value = "1"
+
+[[spam]]
+[spam.tx]
+to = "0xbb00000000000000000000000000000000000001"
+value = "1"
+
+[[spam]]
+[spam.tx]
+to = "0xbb00000000000000000000000000000000000002"
+value = "1"
+
+[[spam]]
+[spam.tx]
+to = "0xbb00000000000000000000000000000000000003"
+value = "1"
+
+[[spam]]
+[spam.tx]
+to = "0xbb00000000000000000000000000000000000004"
+value = "1"
+
+[[spam]]
+[spam.tx]
+to = "0xbb00000000000000000000000000000000000005"
+value = "1"
+
+[[spam]]
+[spam.tx]
+to = "0xbb00000000000000000000000000000000000006"
+value = "1"
+
+[[spam]]
+[spam.tx]
+to = "0xbb00000000000000000000000000000000000007"
+value = "1"
+
+[[spam]]
+[spam.tx]
+to = "0xbb00000000000000000000000000000000000008"
+value = "1"
+
+[[spam]]
+[spam.tx]
+to = "0xbb00000000000000000000000000000000000009"
+value = "1"
