@@ -26,8 +26,9 @@ EXEC_BLOCKS=${EXEC_BLOCKS:-12}
 SUSTAINED_TXS_PER_BLOCK=${SUSTAINED_TXS_PER_BLOCK:-4000}
 SUSTAINED_BLOCKS=${SUSTAINED_BLOCKS:-100}
 SUSTAINED_WARMUP_BLOCKS=${SUSTAINED_WARMUP_BLOCKS:-5}
-OPENLOOP_TARGET_TPS=${OPENLOOP_TARGET_TPS:-200000}
+OPENLOOP_TARGET_TPS=${OPENLOOP_TARGET_TPS:-35000}
 OPENLOOP_DURATION_SECS=${OPENLOOP_DURATION_SECS:-120}
+OPENLOOP_DRAIN_SECS=${OPENLOOP_DRAIN_SECS:-180}
 START_TIMEOUT_SECS=${START_TIMEOUT_SECS:-30}
 BUILD=${BUILD:-1}
 
@@ -132,9 +133,10 @@ prepare() {
         --argjson sustained_warmup_blocks "$SUSTAINED_WARMUP_BLOCKS" \
         --argjson openloop_target_tps "$OPENLOOP_TARGET_TPS" \
         --argjson openloop_duration_secs "$OPENLOOP_DURATION_SECS" \
+        --argjson openloop_drain_secs "$OPENLOOP_DRAIN_SECS" \
         --argjson max_tx_payload_bytes "$(jq -er '.config.morph.maxTxPayloadBytesPerBlock' "$GENESIS")" \
         --arg uname "$(uname -a)" \
-        '{created_at:$created_at,git_commit:$git_commit,dirty_files:($git_dirty|tonumber),profile:$profile,reth_version:$reth_version,uname:$uname,modes:$modes,workloads:$workloads,senders:$senders,runs:$runs,consensus:{max_tx_payload_bytes:$max_tx_payload_bytes},exec:{block_sizes:$exec_block_sizes,blocks:$exec_blocks},sustained:{txs_per_block:$sustained_txs_per_block,blocks:$sustained_blocks,warmup_blocks:$sustained_warmup_blocks},openloop:{target_tps:$openloop_target_tps,duration_secs:$openloop_duration_secs}}' \
+        '{created_at:$created_at,git_commit:$git_commit,dirty_files:($git_dirty|tonumber),profile:$profile,reth_version:$reth_version,uname:$uname,modes:$modes,workloads:$workloads,senders:$senders,runs:$runs,consensus:{max_tx_payload_bytes:$max_tx_payload_bytes},exec:{block_sizes:$exec_block_sizes,blocks:$exec_blocks},sustained:{txs_per_block:$sustained_txs_per_block,blocks:$sustained_blocks,warmup_blocks:$sustained_warmup_blocks},openloop:{target_tps:$openloop_target_tps,duration_secs:$openloop_duration_secs,drain_secs:$openloop_drain_secs}}' \
         > "$RESULTS_DIR/metadata.json"
 }
 
@@ -223,7 +225,7 @@ run_openloop() {
     "$BENCH_BIN" run openloop "${COMMON_ARGS[@]}" --workload "$workload" \
         --target-tps "$OPENLOOP_TARGET_TPS" --duration-secs "$OPENLOOP_DURATION_SECS" \
         --submit-buffer-ticks 64 --submit-tick-ms 50 --producer-idle-ms 5 \
-        --drain-secs 180 --output "$output" \
+        --drain-secs "$OPENLOOP_DRAIN_SECS" --output "$output" \
         2>&1 | tee "$RESULTS_DIR/logs/${name}-bench.log"
 }
 

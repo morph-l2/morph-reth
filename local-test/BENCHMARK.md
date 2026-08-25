@@ -56,7 +56,9 @@ Common overrides:
 | `SENDERS` | `2000` | Deterministic funded sender accounts |
 | `EXEC_BLOCK_SIZES` | `1000 4000` | Requested txs/block; both defaults fit the 720 KiB cap |
 | `SUSTAINED_TXS_PER_BLOCK` | `4000` | Requested txs/block; chosen to fit all supported workloads |
-| `OPENLOOP_TARGET_TPS` | `200000` | Requested open-loop submission rate |
+| `OPENLOOP_TARGET_TPS` | `35000` | Validated near-saturation submission rate on the reference M4 Pro host |
+| `OPENLOOP_DURATION_SECS` | `120` | Active submission duration |
+| `OPENLOOP_DRAIN_SECS` | `180` | Maximum time to import all accepted transactions after submission ends |
 | `P2P_PORT` | `30313` | Isolated P2P listener port for the benchmark node |
 
 ## Interpreting results
@@ -86,7 +88,9 @@ their latest block number, state root, receipts root, and deterministic funded-s
 - The supported runner is reth-only. The archived April 2026 reth/geth report was produced by an
   older runner and older binaries and must not be presented as a current-`main` comparison.
 - Open-loop mode pre-generates `target_tps * duration_secs` signed requests. The defaults create
-  24 million transactions per run and therefore require substantial memory. `target_tps` is offered
+  4.2 million transactions per run and therefore require substantial memory. Calibrate the target
+  down on slower hosts before a full suite; a target that fills the txpool is a failed run, not a
+  throughput result. `target_tps` is offered
   load, not guaranteed delivered load. Submission uses bounded concurrency and stops scheduling at
   the deadline; use `realized_tps`, the active/drain split, and the completion log's submitted count
   to judge the achieved load.
