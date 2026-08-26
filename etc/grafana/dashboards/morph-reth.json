@@ -144,6 +144,18 @@
           "legendFormat": "Target: {{target_triple}}",
           "range": false,
           "refId": "E"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "exemplar": false,
+          "expr": "max by (cargo_features) (reth_info{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
+          "instant": true,
+          "legendFormat": "Features: {{cargo_features}}",
+          "range": false,
+          "refId": "F"
         }
       ],
       "title": "Build Info",
@@ -656,7 +668,7 @@
           },
           "editorMode": "code",
           "expr": "reth_sync_execution_gas_per_second{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
-          "legendFormat": "{{service}} · Gas/s",
+          "legendFormat": "{{service}} \u00b7 Gas/s",
           "range": true,
           "refId": "A"
         },
@@ -671,7 +683,7 @@
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
-          "legendFormat": "{{service}} · Avg Gas/s (1m)",
+          "legendFormat": "{{service}} \u00b7 Avg Gas/s (1m)",
           "range": true,
           "refId": "B",
           "useBackend": false
@@ -687,7 +699,7 @@
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
-          "legendFormat": "{{service}} · Avg Gas/s (5m)",
+          "legendFormat": "{{service}} \u00b7 Avg Gas/s (5m)",
           "range": true,
           "refId": "C",
           "useBackend": false
@@ -703,7 +715,7 @@
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
-          "legendFormat": "{{service}} · Avg Gas/s (10m)",
+          "legendFormat": "{{service}} \u00b7 Avg Gas/s (10m)",
           "range": true,
           "refId": "D",
           "useBackend": false
@@ -719,7 +731,7 @@
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
-          "legendFormat": "{{service}} · Avg Gas/s (30m)",
+          "legendFormat": "{{service}} \u00b7 Avg Gas/s (30m)",
           "range": true,
           "refId": "E",
           "useBackend": false
@@ -735,7 +747,7 @@
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
-          "legendFormat": "{{service}} · Avg Gas/s (1h)",
+          "legendFormat": "{{service}} \u00b7 Avg Gas/s (1h)",
           "range": true,
           "refId": "F",
           "useBackend": false
@@ -751,7 +763,7 @@
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
-          "legendFormat": "{{service}} · Avg Gas/s (24h)",
+          "legendFormat": "{{service}} \u00b7 Avg Gas/s (24h)",
           "range": true,
           "refId": "G",
           "useBackend": false
@@ -918,7 +930,7 @@
       "type": "timeseries",
       "targets": [
         {
-          "expr": "reth_morph_engine_head_block_timegap_seconds{chain=\"$chain\", role=~\"$role\"}",
+          "expr": "reth_morph_engine_head_block_timegap_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
           "legendFormat": "{{service}}"
         }
       ]
@@ -1265,10 +1277,334 @@
       "type": "timeseries",
       "targets": [
         {
-          "expr": "sum by (service) (rate(reth_morph_engine_assemble_l2_block_failures_total{chain=\"$chain\", role=~\"$role\"}[$__rate_interval]) + rate(reth_morph_engine_validate_l2_block_failures_total{chain=\"$chain\", role=~\"$role\"}[$__rate_interval]) + rate(reth_morph_engine_new_l2_block_failures_total{chain=\"$chain\", role=~\"$role\"}[$__rate_interval]) + rate(reth_morph_engine_new_safe_l2_block_failures_total{chain=\"$chain\", role=~\"$role\"}[$__rate_interval]))",
+          "expr": "sum by (service) (rate(reth_morph_engine_assemble_l2_block_failures_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]) + rate(reth_morph_engine_validate_l2_block_failures_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]) + rate(reth_morph_engine_new_l2_block_failures_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]) + rate(reth_morph_engine_new_safe_l2_block_failures_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
           "legendFormat": "{{service}}"
         }
       ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "min": 0,
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 61
+      },
+      "id": 300,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "rate(reth_consensus_engine_beacon_new_payload_messages{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+          "instant": false,
+          "legendFormat": "{{service}} \u00b7 newPayload",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "rate(reth_consensus_engine_beacon_forkchoice_updated_messages{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+          "instant": false,
+          "legendFormat": "{{service}} \u00b7 forkchoiceUpdated",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "Engine Tree Messages",
+      "type": "timeseries",
+      "description": "Rates of newPayload and forkchoiceUpdated messages received by the internal engine tree."
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "min": 0,
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 61
+      },
+      "id": 301,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "rate(reth_consensus_engine_beacon_failed_new_payload_response_deliveries{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+          "instant": false,
+          "legendFormat": "{{service}} \u00b7 newPayload",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "rate(reth_consensus_engine_beacon_failed_forkchoice_updated_response_deliveries{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+          "instant": false,
+          "legendFormat": "{{service}} \u00b7 forkchoiceUpdated",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "Engine Tree Failed Response Deliveries",
+      "type": "timeseries",
+      "description": "Failed internal response deliveries, typically because the requester terminated before the engine tree replied."
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "min": 0,
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 69
+      },
+      "id": 302,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "reth_consensus_engine_beacon_new_payload_forkchoice_updated_time_diff{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
+          "instant": false,
+          "legendFormat": "{{service}} \u00b7 {{role}} \u00b7 p{{quantile}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Engine Tree newPayload to FCU Gap",
+      "type": "timeseries",
+      "description": "Time from a newPayload response to the next forkchoiceUpdated request."
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "min": 0,
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 69
+      },
+      "id": 303,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "reth_consensus_engine_beacon_new_payload_latency{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
+          "instant": false,
+          "legendFormat": "{{service}} \u00b7 {{role}} \u00b7 p{{quantile}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Engine Tree newPayload Processing Latency",
+      "type": "timeseries",
+      "description": "Internal engine-tree processing latency for newly executed valid newPayload calls; early errors and already-seen blocks are excluded."
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "min": 0,
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 77
+      },
+      "id": 304,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "reth_consensus_engine_beacon_forkchoice_updated_latency{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
+          "instant": false,
+          "legendFormat": "{{service}} \u00b7 {{role}} \u00b7 p{{quantile}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Engine Tree FCU Processing Latency",
+      "type": "timeseries",
+      "description": "Internal engine-tree processing latency for forkchoiceUpdated."
     },
     {
       "collapsed": false,
@@ -1276,7 +1612,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 61
+        "y": 85
       },
       "id": 16,
       "panels": [],
@@ -1311,7 +1647,7 @@
         "h": 9,
         "w": 12,
         "x": 0,
-        "y": 62
+        "y": 86
       },
       "id": 17,
       "options": {
@@ -1367,7 +1703,7 @@
         "h": 9,
         "w": 12,
         "x": 12,
-        "y": 62
+        "y": 86
       },
       "id": 18,
       "options": {
@@ -1423,7 +1759,7 @@
         "h": 9,
         "w": 12,
         "x": 0,
-        "y": 71
+        "y": 95
       },
       "id": 19,
       "options": {
@@ -1479,7 +1815,7 @@
         "h": 9,
         "w": 12,
         "x": 12,
-        "y": 71
+        "y": 95
       },
       "id": 20,
       "options": {
@@ -1503,12 +1839,192 @@
       ]
     },
     {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "min": 0,
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 104
+      },
+      "id": 305,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "reth_payloads_active_jobs{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+          "instant": false,
+          "legendFormat": "{{service}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Active Jobs",
+      "type": "timeseries",
+      "description": "Number of active standard reth payload jobs."
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "min": 0,
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 104
+      },
+      "id": 306,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "reth_payloads_initiated_jobs{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+          "instant": false,
+          "legendFormat": "{{service}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Initiated Jobs",
+      "type": "timeseries",
+      "description": "Total number of standard reth payload jobs initiated."
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "min": 0,
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 112
+      },
+      "id": 307,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "reth_payloads_failed_jobs{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+          "instant": false,
+          "legendFormat": "{{service}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Failed Jobs",
+      "type": "timeseries",
+      "description": "Total number of standard reth payload jobs that failed."
+    },
+    {
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 80
+        "y": 120
       },
       "id": 23,
       "panels": [],
@@ -1582,7 +2098,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 81
+        "y": 121
       },
       "id": 24,
       "options": {
@@ -1611,7 +2127,7 @@
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{service}} · State Root Duration",
+          "legendFormat": "{{service}} \u00b7 State Root Duration",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -1628,7 +2144,7 @@
           "hide": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{service}} · Execution Duration",
+          "legendFormat": "{{service}} \u00b7 Execution Duration",
           "range": true,
           "refId": "B",
           "useBackend": false
@@ -1704,7 +2220,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 81
+        "y": 121
       },
       "id": 25,
       "options": {
@@ -1734,7 +2250,7 @@
           "hide": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{service}} · Account cache hits",
+          "legendFormat": "{{service}} \u00b7 Account cache hits",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -1751,7 +2267,7 @@
           "hide": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{service}} · Storage cache hits",
+          "legendFormat": "{{service}} \u00b7 Storage cache hits",
           "range": true,
           "refId": "B",
           "useBackend": false
@@ -1768,7 +2284,7 @@
           "hide": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{service}} · Code cache hits",
+          "legendFormat": "{{service}} \u00b7 Code cache hits",
           "range": true,
           "refId": "C",
           "useBackend": false
@@ -1870,7 +2386,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 89
+        "y": 129
       },
       "id": 27,
       "options": {
@@ -1900,7 +2416,7 @@
           "hide": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{service}} · Precompile cache hits",
+          "legendFormat": "{{service}} \u00b7 Precompile cache hits",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -1976,7 +2492,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 89
+        "y": 129
       },
       "id": 32,
       "options": {
@@ -2002,7 +2518,7 @@
           "editorMode": "code",
           "expr": "reth_sparse_state_trie_multiproof_total_account_nodes{chain=\"$chain\", role=~\"$role\", service=~\"$service\",quantile=~\"(0|0.5|0.9|0.95|1)\"}",
           "instant": false,
-          "legendFormat": "{{service}} · Account {{quantile}} percentile",
+          "legendFormat": "{{service}} \u00b7 Account {{quantile}} percentile",
           "range": true,
           "refId": "Branch Nodes"
         }
@@ -2077,7 +2593,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 97
+        "y": 137
       },
       "id": 33,
       "options": {
@@ -2103,7 +2619,7 @@
           "editorMode": "code",
           "expr": "reth_sparse_state_trie_multiproof_total_storage_nodes{chain=\"$chain\", role=~\"$role\", service=~\"$service\",quantile=~\"(0|0.5|0.9|0.95|1)\"}",
           "instant": false,
-          "legendFormat": "{{service}} · Storage {{quantile}} percentile",
+          "legendFormat": "{{service}} \u00b7 Storage {{quantile}} percentile",
           "range": true,
           "refId": "Branch Nodes"
         }
@@ -2179,7 +2695,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 97
+        "y": 137
       },
       "id": 37,
       "options": {
@@ -2203,12 +2719,12 @@
             "uid": "${datasource}"
           },
           "disableTextWrap": false,
-          "editorMode": "builder",
-          "expr": "reth_sync_block_validation_state_root_histogram{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
+          "editorMode": "code",
+          "expr": "reth_sync_block_validation_state_root_histogram{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{service}} · State Root Duration p{{quantile}}",
+          "legendFormat": "{{service}} \u00b7 {{role}} \u00b7 p{{quantile}}",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -2218,12 +2734,1771 @@
       "type": "timeseries"
     },
     {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "min": 0,
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 145
+      },
+      "id": 308,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "reth_tree_root_sparse_trie_account_cache_hits_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} / (reth_tree_root_sparse_trie_account_cache_hits_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} + reth_tree_root_sparse_trie_account_cache_misses_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
+          "instant": false,
+          "legendFormat": "{{service}} \u00b7 {{role}} \u00b7 hit %",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Account Trie Cache Hit %",
+      "type": "timeseries",
+      "description": "Process-lifetime percent of account leaf updates served without requiring proofs."
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "min": 0,
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 145
+      },
+      "id": 309,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "reth_tree_root_sparse_trie_storage_cache_hits_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} / (reth_tree_root_sparse_trie_storage_cache_hits_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} + reth_tree_root_sparse_trie_storage_cache_misses_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
+          "instant": false,
+          "legendFormat": "{{service}} \u00b7 {{role}} \u00b7 hit %",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Storage Trie Cache Hit %",
+      "type": "timeseries",
+      "description": "Process-lifetime percent of storage leaf updates served without requiring proofs."
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "min": 0,
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 153
+      },
+      "id": 310,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "reth_trie_proof_task_account_worker_idle_time_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
+          "instant": false,
+          "legendFormat": "{{service}} \u00b7 {{role}} \u00b7 p{{quantile}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Account Proof Worker Idle Time",
+      "type": "timeseries",
+      "description": "Time account proof workers spend idle waiting for messages."
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "min": 0,
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 6,
+        "y": 153
+      },
+      "id": 311,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "reth_trie_proof_task_storage_worker_idle_time_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
+          "instant": false,
+          "legendFormat": "{{service}} \u00b7 {{role}} \u00b7 p{{quantile}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Storage Proof Worker Idle Time",
+      "type": "timeseries",
+      "description": "Time storage proof workers spend idle waiting for messages."
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "min": 0,
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 153
+      },
+      "id": 312,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "reth_tree_root_sparse_trie_idle_time_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
+          "instant": false,
+          "legendFormat": "{{service}} \u00b7 {{role}} \u00b7 p{{quantile}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Sparse Trie Task Idle Time",
+      "type": "timeseries",
+      "description": "Time the sparse trie task spends idle waiting for messages."
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "min": 0,
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 153
+      },
+      "id": 313,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "reth_tree_root_hashing_task_idle_time_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
+          "instant": false,
+          "legendFormat": "{{service}} \u00b7 {{role}} \u00b7 p{{quantile}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Hashing Task Idle Time",
+      "type": "timeseries",
+      "description": "Time the hashing task spends idle waiting for execution messages."
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "min": 0,
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 161
+      },
+      "id": 314,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (service) (rate(reth_sync_block_validation_state_root_task_timeout_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
+          "instant": false,
+          "legendFormat": "{{service}} \u00b7 timeout",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (service) (rate(reth_sync_block_validation_state_root_task_fallback_success_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
+          "instant": false,
+          "legendFormat": "{{service}} \u00b7 fallback success",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "State Root Task Fallback Outcomes",
+      "type": "timeseries",
+      "description": "Rates of state-root task timeouts and successful sequential fallbacks."
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "min": 0,
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 161
+      },
+      "id": 315,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "reth_sync_block_validation_deferred_trie_compute_duration{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
+          "instant": false,
+          "legendFormat": "{{service}} \u00b7 {{role}} \u00b7 p{{quantile}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Block Validation Deferred Trie Compute Duration",
+      "type": "timeseries",
+      "description": "Duration of deferred trie computation performed as block-validation overhead; this uses the v2.4 deferred_trie_compute_duration metric."
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 169
+      },
+      "id": 316,
+      "panels": [],
+      "title": "Proof History",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "min": 0,
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 170
+      },
+      "id": 317,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "reth_morph_proofs_earliest_block{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+          "instant": false,
+          "legendFormat": "{{service}} \u00b7 earliest",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "reth_morph_proofs_latest_block{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+          "instant": false,
+          "legendFormat": "{{service}} \u00b7 latest",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "reth_morph_proofs_latest_block{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} - reth_morph_proofs_earliest_block{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} + 1",
+          "instant": false,
+          "legendFormat": "{{service}} \u00b7 inclusive window",
+          "range": true,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "clamp_min(reth_blockchain_tree_canonical_chain_height{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} - reth_morph_proofs_latest_block{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}, 0)",
+          "instant": false,
+          "legendFormat": "{{service}} \u00b7 canonical lag",
+          "range": true,
+          "refId": "D"
+        }
+      ],
+      "title": "Proof History Window Health",
+      "type": "timeseries",
+      "description": "Durable proof window bounds, inclusive size (latest - earliest + 1), and lag behind the canonical chain."
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "min": 0,
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 178
+      },
+      "id": 318,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "reth_morph_proofs_block_total_duration_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
+          "instant": false,
+          "legendFormat": "{{service}} \u00b7 total p{{quantile}}",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "reth_morph_proofs_block_execution_duration_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
+          "instant": false,
+          "legendFormat": "{{service}} \u00b7 execution p{{quantile}}",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "reth_morph_proofs_block_state_root_duration_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
+          "instant": false,
+          "legendFormat": "{{service}} \u00b7 state root p{{quantile}}",
+          "range": true,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "reth_morph_proofs_block_write_duration_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
+          "instant": false,
+          "legendFormat": "{{service}} \u00b7 write p{{quantile}}",
+          "range": true,
+          "refId": "D"
+        }
+      ],
+      "title": "Proof History Ingest Operation Duration",
+      "type": "timeseries",
+      "description": "Live-path observations are single-block samples. During catch-up, total duration can represent an entire batch while execution, state-root, and write are recorded as zero placeholders; do not interpret catch-up samples as per-block or per-stage latency."
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "min": 0,
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 186
+      },
+      "id": 319,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "rate(reth_morph_proofs_account_trie_updates_written_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+          "instant": false,
+          "legendFormat": "{{service}} \u00b7 account trie updates",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "rate(reth_morph_proofs_storage_trie_updates_written_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+          "instant": false,
+          "legendFormat": "{{service}} \u00b7 storage trie updates",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "rate(reth_morph_proofs_hashed_accounts_written_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+          "instant": false,
+          "legendFormat": "{{service}} \u00b7 hashed accounts",
+          "range": true,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "rate(reth_morph_proofs_hashed_storages_written_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+          "instant": false,
+          "legendFormat": "{{service}} \u00b7 hashed storages",
+          "range": true,
+          "refId": "D"
+        }
+      ],
+      "title": "Proof History Write Volume",
+      "type": "timeseries",
+      "description": "Rates of proof-history trie updates and hashed leaves written."
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "min": 0,
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 186
+      },
+      "id": 320,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "rate(reth_morph_proofs_prune_errors_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+          "instant": false,
+          "legendFormat": "{{service}} \u00b7 prune",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "rate(reth_morph_proofs_unwind_errors_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+          "instant": false,
+          "legendFormat": "{{service}} \u00b7 unwind",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "Proof History Errors",
+      "type": "timeseries",
+      "description": "Rates of proof-history prune and unwind failures."
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "min": 0,
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 194
+      },
+      "id": 321,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (service, method) (rate(reth_morph_rpc_proofs_requests_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
+          "instant": false,
+          "legendFormat": "{{service}} \u00b7 {{method}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Proof RPC Request Rate by Method",
+      "type": "timeseries",
+      "description": "Proof RPC requests received, split by eth_getProof and eth_getMultiProof."
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "min": 0,
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 194
+      },
+      "id": 322,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (service, method) (rate(reth_morph_rpc_proofs_successful_responses_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
+          "instant": false,
+          "legendFormat": "{{service}} \u00b7 {{method}} success",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (service, method) (rate(reth_morph_rpc_proofs_failures_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
+          "instant": false,
+          "legendFormat": "{{service}} \u00b7 {{method}} failure",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (service, method) (rate(reth_morph_rpc_proofs_rejected_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
+          "instant": false,
+          "legendFormat": "{{service}} \u00b7 {{method}} rejected",
+          "range": true,
+          "refId": "C"
+        }
+      ],
+      "title": "Proof RPC Outcomes by Method",
+      "type": "timeseries",
+      "description": "Successful, failed, and size-limit-rejected proof RPC rates by method."
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "min": 0,
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 202
+      },
+      "id": 323,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "reth_morph_rpc_proofs_latency_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
+          "instant": false,
+          "legendFormat": "{{service}} \u00b7 {{role}} \u00b7 {{method}} p{{quantile}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Proof RPC Successful Latency by Method",
+      "type": "timeseries",
+      "description": "Latency histogram records successful proof RPC responses only; failures and rejections are excluded."
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "min": 0,
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 202
+      },
+      "id": 324,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "reth_morph_proofs_pruner_total_duration_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
+          "instant": false,
+          "legendFormat": "{{service}} \u00b7 {{role}} \u00b7 p{{quantile}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Proof Pruner Batch Duration",
+      "type": "timeseries",
+      "description": "Duration of non-empty proof-history prune batches."
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "min": 0,
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 210
+      },
+      "id": 325,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "reth_morph_proofs_pruner_pruned_blocks{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+          "instant": false,
+          "legendFormat": "{{service}} \u00b7 pruned blocks",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "reth_morph_proofs_pruner_account_trie_updates_written{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+          "instant": false,
+          "legendFormat": "{{service}} \u00b7 account trie updates",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "reth_morph_proofs_pruner_storage_trie_updates_written{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+          "instant": false,
+          "legendFormat": "{{service}} \u00b7 storage trie updates",
+          "range": true,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "reth_morph_proofs_pruner_hashed_accounts_written{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+          "instant": false,
+          "legendFormat": "{{service}} \u00b7 hashed accounts",
+          "range": true,
+          "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "reth_morph_proofs_pruner_hashed_storages_written{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+          "instant": false,
+          "legendFormat": "{{service}} \u00b7 hashed storages",
+          "range": true,
+          "refId": "E"
+        }
+      ],
+      "title": "Latest Proof Prune Batch Stats",
+      "type": "timeseries",
+      "description": "Gauges describe the latest completed proof-prune batch; they are not cumulative totals."
+    },
+    {
       "collapsed": true,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 105
+        "y": 218
+      },
+      "id": 326,
+      "panels": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic-by-name"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "lineWidth": 1,
+                "pointSize": 5,
+                "showPoints": "auto",
+                "spanNulls": false
+              },
+              "min": 0,
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 219
+          },
+          "id": 327,
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "reth_exex_notifications_sent_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "instant": false,
+              "legendFormat": "{{service}} \u00b7 {{exex}}",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "Total Notifications Sent",
+          "type": "timeseries",
+          "description": "Proof History runtime when its execution extension and write-ahead log are enabled. Total canonical-state notifications sent to the ExEx."
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic-by-name"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "lineWidth": 1,
+                "pointSize": 5,
+                "showPoints": "auto",
+                "spanNulls": false
+              },
+              "min": 0,
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 219
+          },
+          "id": 328,
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "reth_exex_events_sent_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "instant": false,
+              "legendFormat": "{{service}} \u00b7 {{exex}}",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "Total Events Sent",
+          "type": "timeseries",
+          "description": "Proof History runtime when its execution extension and write-ahead log are enabled. Total events sent from the ExEx to its manager."
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic-by-name"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "lineWidth": 1,
+                "pointSize": 5,
+                "showPoints": "auto",
+                "spanNulls": false
+              },
+              "min": 0,
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 227
+          },
+          "id": 329,
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "reth_exex_manager_current_capacity{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "instant": false,
+              "legendFormat": "{{service}} \u00b7 current",
+              "range": true,
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "max_over_time(reth_exex_manager_max_capacity{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[1h])",
+              "instant": false,
+              "legendFormat": "{{service}} \u00b7 max",
+              "range": true,
+              "refId": "B"
+            }
+          ],
+          "title": "Current and Max Capacity",
+          "type": "timeseries",
+          "description": "Proof History runtime when its execution extension and write-ahead log are enabled. Current and maximum notification-buffer capacity."
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic-by-name"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "lineWidth": 1,
+                "pointSize": 5,
+                "showPoints": "auto",
+                "spanNulls": false
+              },
+              "min": 0,
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 227
+          },
+          "id": 330,
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "reth_exex_manager_buffer_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "instant": false,
+              "legendFormat": "{{service}}",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "Buffer Size",
+          "type": "timeseries",
+          "description": "Proof History runtime when its execution extension and write-ahead log are enabled. Current number of buffered state notifications."
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 235
+          },
+          "id": 331,
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "reth_exex_manager_num_exexs{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "instant": false,
+              "legendFormat": "{{service}}",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "Number of ExExes",
+          "type": "stat",
+          "description": "Proof History runtime when its execution extension and write-ahead log are enabled. Number of execution extensions installed in the node."
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic-by-name"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "lineWidth": 1,
+                "pointSize": 5,
+                "showPoints": "auto",
+                "spanNulls": false
+              },
+              "min": 0,
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 235
+          },
+          "id": 332,
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "reth_exex_wal_lowest_committed_block_height{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} and on (chain, role, service, instance) (reth_exex_wal_committed_blocks_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0)",
+              "instant": false,
+              "legendFormat": "{{service}} \u00b7 lowest",
+              "range": true,
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "reth_exex_wal_highest_committed_block_height{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} and on (chain, role, service, instance) (reth_exex_wal_committed_blocks_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0)",
+              "instant": false,
+              "legendFormat": "{{service}} \u00b7 highest",
+              "range": true,
+              "refId": "B"
+            }
+          ],
+          "title": "Current Committed Block Heights",
+          "type": "timeseries",
+          "description": "Proof History runtime when its execution extension and write-ahead log are enabled. Lowest and highest committed block heights retained by the WAL."
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic-by-name"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "lineWidth": 1,
+                "pointSize": 5,
+                "showPoints": "auto",
+                "spanNulls": false
+              },
+              "min": 0,
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 243
+          },
+          "id": 333,
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "reth_exex_wal_committed_blocks_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "instant": false,
+              "legendFormat": "{{service}} \u00b7 committed blocks",
+              "range": true,
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "reth_exex_wal_notifications_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "instant": false,
+              "legendFormat": "{{service}} \u00b7 notifications",
+              "range": true,
+              "refId": "B"
+            }
+          ],
+          "title": "Number of entities",
+          "type": "timeseries",
+          "description": "Proof History runtime when its execution extension and write-ahead log are enabled. Current committed-block and notification entity counts in the WAL."
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic-by-name"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "lineWidth": 1,
+                "pointSize": 5,
+                "showPoints": "auto",
+                "spanNulls": false
+              },
+              "min": 0,
+              "unit": "bytes"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 243
+          },
+          "id": 334,
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "reth_exex_wal_size_bytes{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "instant": false,
+              "legendFormat": "{{service}}",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "Total size of all notifications",
+          "type": "timeseries",
+          "description": "Proof History runtime when its execution extension and write-ahead log are enabled. Total size of all notifications retained in the WAL."
+        }
+      ],
+      "title": "Execution Extension Runtime",
+      "type": "row",
+      "description": "Proof History runtime when its execution extension and write-ahead log are enabled."
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 219
       },
       "id": 38,
       "panels": [
@@ -2292,7 +4567,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 138
+            "y": 252
           },
           "id": 39,
           "options": {
@@ -2320,7 +4595,7 @@
               "expr": "avg by (service) (rate(reth_database_transaction_close_duration_seconds_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\", outcome=\"commit\"}[$__rate_interval]) / clamp_min(rate(reth_database_transaction_close_duration_seconds_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\", outcome=\"commit\"}[$__rate_interval]), 1))",
               "format": "time_series",
               "instant": false,
-              "legendFormat": "{{service}} · Commit time",
+              "legendFormat": "{{service}} \u00b7 Commit time",
               "range": true,
               "refId": "A"
             }
@@ -2353,7 +4628,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 138
+            "y": 252
           },
           "id": 40,
           "maxDataPoints": 25,
@@ -2377,7 +4652,7 @@
               "color": "rgba(255,0,255,0.7)"
             },
             "filterValues": {
-              "le": 1E-9
+              "le": 1e-09
             },
             "legend": {
               "show": true
@@ -2411,7 +4686,7 @@
               "expr": "avg by (service, quantile) (max_over_time(reth_database_transaction_close_duration_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", outcome=\"commit\"}[$__rate_interval]))",
               "format": "time_series",
               "instant": false,
-              "legendFormat": "{{service}} · {{quantile}}",
+              "legendFormat": "{{service}} \u00b7 {{quantile}}",
               "range": true,
               "refId": "A"
             }
@@ -2484,7 +4759,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 146
+            "y": 260
           },
           "id": 41,
           "options": {
@@ -2512,7 +4787,7 @@
               "expr": "sum by (service, outcome, mode) (rate(reth_database_transaction_open_duration_seconds_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\", outcome!=\"\"}[$__rate_interval]) / rate(reth_database_transaction_open_duration_seconds_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\", outcome!=\"\"}[$__rate_interval])) > 0",
               "format": "time_series",
               "instant": false,
-              "legendFormat": "{{service}} · {{mode}}, {{outcome}}",
+              "legendFormat": "{{service}} \u00b7 {{mode}}, {{outcome}}",
               "range": true,
               "refId": "A"
             }
@@ -2584,7 +4859,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 146
+            "y": 260
           },
           "id": 42,
           "options": {
@@ -2612,7 +4887,7 @@
               "expr": "max by (service, outcome, mode) (max_over_time(reth_database_transaction_open_duration_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", outcome!=\"\", quantile=\"1\"}[$__interval])) > 0",
               "format": "time_series",
               "instant": false,
-              "legendFormat": "{{service}} · {{mode}}, {{outcome}}",
+              "legendFormat": "{{service}} \u00b7 {{mode}}, {{outcome}}",
               "range": true,
               "refId": "A"
             }
@@ -2712,7 +4987,7 @@
                   },
                   {
                     "id": "displayName",
-                    "value": "${__field.labels.service} · Diff (opened − closed)"
+                    "value": "${__field.labels.service} \u00b7 Diff (opened \u2212 closed)"
                   }
                 ]
               }
@@ -2722,7 +4997,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 154
+            "y": 268
           },
           "id": 43,
           "options": {
@@ -2753,7 +5028,7 @@
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} · Opened",
+              "legendFormat": "{{service}} \u00b7 Opened",
               "range": true,
               "refId": "A",
               "useBackend": false
@@ -2768,7 +5043,7 @@
               "expr": "sum by (service) (reth_database_transaction_closed_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\", mode=\"read-write\"})",
               "format": "time_series",
               "instant": false,
-              "legendFormat": "{{service}} · Closed",
+              "legendFormat": "{{service}} \u00b7 Closed",
               "range": true,
               "refId": "B"
             },
@@ -2878,7 +5153,7 @@
                   },
                   {
                     "id": "displayName",
-                    "value": "${__field.labels.service} · Diff (opened − closed)"
+                    "value": "${__field.labels.service} \u00b7 Diff (opened \u2212 closed)"
                   }
                 ]
               }
@@ -2888,7 +5163,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 154
+            "y": 268
           },
           "id": 44,
           "options": {
@@ -2919,7 +5194,7 @@
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} · Opened",
+              "legendFormat": "{{service}} \u00b7 Opened",
               "range": true,
               "refId": "A",
               "useBackend": false
@@ -2937,7 +5212,7 @@
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} · Closed",
+              "legendFormat": "{{service}} \u00b7 Closed",
               "range": true,
               "refId": "B",
               "useBackend": false
@@ -2983,7 +5258,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 162
+            "y": 276
           },
           "id": 45,
           "options": {
@@ -3023,7 +5298,7 @@
               "editorMode": "builder",
               "expr": "reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
               "interval": "",
-              "legendFormat": "{{service}} · {{table}}",
+              "legendFormat": "{{service}} \u00b7 {{table}}",
               "range": true,
               "refId": "A"
             }
@@ -3099,7 +5374,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 162
+            "y": 276
           },
           "id": 46,
           "options": {
@@ -3127,7 +5402,7 @@
               "expr": "max(max_over_time(reth_database_operation_large_value_duration_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"1\"}[$__interval])) by (service, table) > 0",
               "format": "time_series",
               "instant": false,
-              "legendFormat": "{{service}} · {{table}}",
+              "legendFormat": "{{service}} \u00b7 {{table}}",
               "range": true,
               "refId": "A"
             }
@@ -3162,7 +5437,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 170
+            "y": 284
           },
           "id": 47,
           "options": {
@@ -3198,7 +5473,7 @@
               },
               "editorMode": "builder",
               "expr": "sum by (service, type) ( reth_db_table_pages{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} )",
-              "legendFormat": "{{service}} · {{type}}",
+              "legendFormat": "{{service}} \u00b7 {{type}}",
               "range": true,
               "refId": "A"
             }
@@ -3275,7 +5550,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 170
+            "y": 284
           },
           "id": 48,
           "options": {
@@ -3376,7 +5651,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 178
+            "y": 292
           },
           "id": 49,
           "options": {
@@ -3401,7 +5676,7 @@
               },
               "editorMode": "code",
               "expr": "sum(reth_db_freelist{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) by (service, job)",
-              "legendFormat": "{{service}} · Pages ({{job}})",
+              "legendFormat": "{{service}} \u00b7 Pages ({{job}})",
               "range": true,
               "refId": "A"
             }
@@ -3539,7 +5814,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 178
+            "y": 292
           },
           "id": 50,
           "options": {
@@ -3613,7 +5888,7 @@
             "h": 8,
             "w": 8,
             "x": 0,
-            "y": 186
+            "y": 300
           },
           "id": 51,
           "options": {
@@ -3653,7 +5928,7 @@
               "editorMode": "code",
               "expr": "reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
               "interval": "",
-              "legendFormat": "{{service}} · {{segment}}",
+              "legendFormat": "{{service}} \u00b7 {{segment}}",
               "range": true,
               "refId": "A"
             }
@@ -3779,7 +6054,7 @@
             "h": 8,
             "w": 8,
             "x": 8,
-            "y": 186
+            "y": 300
           },
           "id": 52,
           "options": {
@@ -3944,7 +6219,7 @@
             "h": 8,
             "w": 8,
             "x": 16,
-            "y": 186
+            "y": 300
           },
           "id": 53,
           "options": {
@@ -4059,7 +6334,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 194
+            "y": 308
           },
           "id": 54,
           "options": {
@@ -4160,7 +6435,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 194
+            "y": 308
           },
           "id": 55,
           "options": {
@@ -4185,7 +6460,7 @@
               },
               "editorMode": "code",
               "expr": "max by (service, segment) (max_over_time(reth_static_files_jar_provider_write_duration_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", operation=\"commit-writer\", quantile=\"1\"}[$__interval])) or (0 * max by (service, segment) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}))",
-              "legendFormat": "{{service}} · {{segment}}",
+              "legendFormat": "{{service}} \u00b7 {{segment}}",
               "range": true,
               "refId": "A"
             }
@@ -4260,7 +6535,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 202
+            "y": 316
           },
           "id": 56,
           "options": {
@@ -4286,7 +6561,7 @@
               "editorMode": "builder",
               "expr": "reth_blockchain_tree_canonical_chain_height{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
               "hide": false,
-              "legendFormat": "{{service}} · Canonical chain height",
+              "legendFormat": "{{service}} \u00b7 Canonical chain height",
               "range": true,
               "refId": "B"
             }
@@ -4361,7 +6636,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 202
+            "y": 316
           },
           "id": 57,
           "options": {
@@ -4387,7 +6662,7 @@
               "editorMode": "builder",
               "expr": "reth_blockchain_tree_block_buffer_blocks{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
               "hide": false,
-              "legendFormat": "{{service}} · Buffered blocks",
+              "legendFormat": "{{service}} \u00b7 Buffered blocks",
               "range": true,
               "refId": "B"
             }
@@ -4462,7 +6737,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 210
+            "y": 324
           },
           "id": 58,
           "options": {
@@ -4564,7 +6839,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 210
+            "y": 324
           },
           "id": 59,
           "options": {
@@ -4609,7 +6884,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 138
+        "y": 252
       },
       "id": 60,
       "panels": [
@@ -4706,7 +6981,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 219
+            "y": 333
           },
           "id": 61,
           "options": {
@@ -4735,7 +7010,7 @@
               "format": "time_series",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
-              "legendFormat": "{{service}} · {{transport}}",
+              "legendFormat": "{{service}} \u00b7 {{transport}}",
               "range": true,
               "refId": "A",
               "useBackend": false
@@ -4769,7 +7044,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 219
+            "y": 333
           },
           "id": 62,
           "maxDataPoints": 25,
@@ -4793,7 +7068,7 @@
               "color": "rgba(255,0,255,0.7)"
             },
             "filterValues": {
-              "le": 1E-9
+              "le": 1e-09
             },
             "legend": {
               "show": true
@@ -4902,7 +7177,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 227
+            "y": 341
           },
           "id": 63,
           "options": {
@@ -4928,7 +7203,7 @@
               "editorMode": "code",
               "expr": "max by (service, method) (max_over_time(reth_rpc_server_calls_time_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])) > 0",
               "instant": false,
-              "legendFormat": "{{service}} · {{method}}",
+              "legendFormat": "{{service}} \u00b7 {{method}}",
               "range": true,
               "refId": "A"
             }
@@ -4961,7 +7236,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 227
+            "y": 341
           },
           "id": 64,
           "maxDataPoints": 25,
@@ -4985,7 +7260,7 @@
               "color": "rgba(255,0,255,0.7)"
             },
             "filterValues": {
-              "le": 1E-9
+              "le": 1e-09
             },
             "legend": {
               "show": true
@@ -5130,7 +7405,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 235
+            "y": 349
           },
           "id": 65,
           "options": {
@@ -5159,7 +7434,7 @@
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} · Headers cache cached items",
+              "legendFormat": "{{service}} \u00b7 Headers cache cached items",
               "range": true,
               "refId": "A",
               "useBackend": false
@@ -5176,7 +7451,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} · Receipts cache queued consumers",
+              "legendFormat": "{{service}} \u00b7 Receipts cache queued consumers",
               "range": true,
               "refId": "B",
               "useBackend": false
@@ -5193,7 +7468,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} · Headers cache queued consumers",
+              "legendFormat": "{{service}} \u00b7 Headers cache queued consumers",
               "range": true,
               "refId": "C",
               "useBackend": false
@@ -5210,7 +7485,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} · Block cache queued consumers",
+              "legendFormat": "{{service}} \u00b7 Block cache queued consumers",
               "range": true,
               "refId": "D",
               "useBackend": false
@@ -5227,7 +7502,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} · Blocks cache memory usage",
+              "legendFormat": "{{service}} \u00b7 Blocks cache memory usage",
               "range": true,
               "refId": "E",
               "useBackend": false
@@ -5244,7 +7519,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} · Receipts cache cached items",
+              "legendFormat": "{{service}} \u00b7 Receipts cache cached items",
               "range": true,
               "refId": "F",
               "useBackend": false
@@ -5261,7 +7536,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} · Receipts cache memory usage",
+              "legendFormat": "{{service}} \u00b7 Receipts cache memory usage",
               "range": true,
               "refId": "G",
               "useBackend": false
@@ -5278,7 +7553,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} · Block cache cached items",
+              "legendFormat": "{{service}} \u00b7 Block cache cached items",
               "range": true,
               "refId": "H",
               "useBackend": false
@@ -5354,7 +7629,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 235
+            "y": 349
           },
           "id": 66,
           "options": {
@@ -5380,7 +7655,7 @@
               "editorMode": "code",
               "expr": "sum by (service, method) (rate(reth_rpc_server_calls_successful_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])) > 0",
               "instant": false,
-              "legendFormat": "{{service}} · {{method}}",
+              "legendFormat": "{{service}} \u00b7 {{method}}",
               "range": true,
               "refId": "A"
             }
@@ -5398,7 +7673,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 139
+        "y": 253
       },
       "id": 117,
       "panels": [
@@ -5470,7 +7745,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 441
+            "y": 555
           },
           "id": 119,
           "options": {
@@ -5572,7 +7847,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 441
+            "y": 555
           },
           "id": 120,
           "options": {
@@ -5674,7 +7949,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 449
+            "y": 563
           },
           "id": 121,
           "options": {
@@ -5700,7 +7975,7 @@
               "editorMode": "builder",
               "expr": "reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
               "instant": false,
-              "legendFormat": "{{service}} · Open",
+              "legendFormat": "{{service}} \u00b7 Open",
               "range": true,
               "refId": "A"
             }
@@ -5776,7 +8051,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 449
+            "y": 563
           },
           "id": 122,
           "options": {
@@ -5803,7 +8078,7 @@
               "expr": "(reth_executor_spawn_critical_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} or (0 * reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})) - (reth_executor_spawn_finished_critical_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} or (0 * reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}))",
               "hide": false,
               "instant": false,
-              "legendFormat": "{{service}} · Tasks running",
+              "legendFormat": "{{service}} \u00b7 Tasks running",
               "range": true,
               "refId": "C"
             }
@@ -5892,7 +8167,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 457
+            "y": 571
           },
           "id": 123,
           "options": {
@@ -5923,7 +8198,7 @@
               "hide": false,
               "includeNullMetadata": false,
               "instant": false,
-              "legendFormat": "{{service}} · Tasks started",
+              "legendFormat": "{{service}} \u00b7 Tasks started",
               "range": true,
               "refId": "A",
               "useBackend": false
@@ -5937,7 +8212,7 @@
               "expr": "(reth_executor_spawn_regular_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} or (0 * reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})) - (reth_executor_spawn_finished_regular_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} or (0 * reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}))",
               "hide": false,
               "instant": false,
-              "legendFormat": "{{service}} · Tasks running",
+              "legendFormat": "{{service}} \u00b7 Tasks running",
               "range": true,
               "refId": "C"
             }
@@ -6026,7 +8301,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 457
+            "y": 571
           },
           "id": 124,
           "options": {
@@ -6057,7 +8332,7 @@
               "hide": false,
               "includeNullMetadata": false,
               "instant": false,
-              "legendFormat": "{{service}} · Tasks started",
+              "legendFormat": "{{service}} \u00b7 Tasks started",
               "range": true,
               "refId": "A",
               "useBackend": false
@@ -6071,7 +8346,7 @@
               "expr": "(reth_executor_spawn_regular_blocking_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} or (0 * reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})) - (reth_executor_spawn_finished_regular_blocking_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} or (0 * reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}))",
               "hide": false,
               "instant": false,
-              "legendFormat": "{{service}} · Tasks running",
+              "legendFormat": "{{service}} \u00b7 Tasks running",
               "range": true,
               "refId": "C"
             }
@@ -6146,7 +8421,7 @@
             "h": 8,
             "w": 24,
             "x": 0,
-            "y": 465
+            "y": 579
           },
           "id": 125,
           "options": {
@@ -6179,6 +8454,246 @@
           ],
           "title": "Pruner duration, total",
           "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic-by-name"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "lineWidth": 1,
+                "pointSize": 5,
+                "showPoints": "auto",
+                "spanNulls": false
+              },
+              "min": 0,
+              "unit": "decbytes"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 587
+          },
+          "id": 335,
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "reth_jemalloc_active{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "instant": false,
+              "legendFormat": "{{service}} \u00b7 active",
+              "range": true,
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "reth_jemalloc_allocated{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "instant": false,
+              "legendFormat": "{{service}} \u00b7 allocated",
+              "range": true,
+              "refId": "B"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "reth_jemalloc_mapped{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "instant": false,
+              "legendFormat": "{{service}} \u00b7 mapped",
+              "range": true,
+              "refId": "C"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "reth_jemalloc_metadata{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "instant": false,
+              "legendFormat": "{{service}} \u00b7 metadata",
+              "range": true,
+              "refId": "D"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "reth_jemalloc_resident{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "instant": false,
+              "legendFormat": "{{service}} \u00b7 resident",
+              "range": true,
+              "refId": "E"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "reth_jemalloc_retained{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "instant": false,
+              "legendFormat": "{{service}} \u00b7 retained",
+              "range": true,
+              "refId": "F"
+            }
+          ],
+          "title": "Jemalloc Memory",
+          "type": "timeseries",
+          "description": "Memory reported by jemalloc in default-feature builds."
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic-by-name"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "lineWidth": 1,
+                "pointSize": 5,
+                "showPoints": "auto",
+                "spanNulls": false
+              },
+              "min": 0,
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 587
+          },
+          "id": 336,
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "rate(reth_pruner_segments_duration_seconds_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]) / rate(reth_pruner_segments_duration_seconds_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+              "instant": false,
+              "legendFormat": "{{service}} \u00b7 {{segment}}",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "Pruner duration, per segment",
+          "type": "timeseries",
+          "description": "Average standard reth pruning duration by segment."
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic-by-name"
+              },
+              "custom": {
+                "axisCenteredZero": false,
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "lineWidth": 1,
+                "pointSize": 5,
+                "showPoints": "auto",
+                "spanNulls": false
+              },
+              "min": 0,
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 595
+          },
+          "id": 337,
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "reth_pruner_segments_highest_pruned_block{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "instant": false,
+              "legendFormat": "{{service}} \u00b7 {{segment}}",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "Highest pruned block, per segment",
+          "type": "timeseries",
+          "description": "Highest block pruned by each standard reth pruning segment."
         }
       ],
       "title": "Process & Maintenance",
@@ -6190,7 +8705,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 140
+        "y": 254
       },
       "id": 80,
       "panels": [
@@ -6261,7 +8776,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 293
+            "y": 407
           },
           "id": 82,
           "options": {
@@ -6284,7 +8799,7 @@
               },
               "editorMode": "builder",
               "expr": "reth_transaction_pool_basefee_pool_size_bytes{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
-              "legendFormat": "{{service}} · Base Fee Pool Size",
+              "legendFormat": "{{service}} \u00b7 Base Fee Pool Size",
               "range": true,
               "refId": "A"
             },
@@ -6296,7 +8811,7 @@
               "editorMode": "builder",
               "expr": "reth_transaction_pool_pending_pool_size_bytes{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
               "hide": false,
-              "legendFormat": "{{service}} · Pending Pool Size",
+              "legendFormat": "{{service}} \u00b7 Pending Pool Size",
               "range": true,
               "refId": "B"
             },
@@ -6308,7 +8823,7 @@
               "editorMode": "builder",
               "expr": "reth_transaction_pool_queued_pool_size_bytes{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
               "hide": false,
-              "legendFormat": "{{service}} · Queued Pool Size",
+              "legendFormat": "{{service}} \u00b7 Queued Pool Size",
               "range": true,
               "refId": "C"
             },
@@ -6319,7 +8834,7 @@
               },
               "editorMode": "builder",
               "expr": "reth_transaction_pool_blob_pool_size_bytes{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
-              "legendFormat": "{{service}} · Blob Pool Size",
+              "legendFormat": "{{service}} \u00b7 Blob Pool Size",
               "range": true,
               "refId": "D"
             }
@@ -6394,7 +8909,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 293
+            "y": 407
           },
           "id": 83,
           "options": {
@@ -6421,7 +8936,7 @@
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} · Dirty Accounts",
+              "legendFormat": "{{service}} \u00b7 Dirty Accounts",
               "range": true,
               "refId": "A",
               "useBackend": false
@@ -6438,7 +8953,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} · Drift Count",
+              "legendFormat": "{{service}} \u00b7 Drift Count",
               "range": true,
               "refId": "B",
               "useBackend": false
@@ -6455,7 +8970,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} · Reinserted Transactions",
+              "legendFormat": "{{service}} \u00b7 Reinserted Transactions",
               "range": true,
               "refId": "C",
               "useBackend": false
@@ -6472,7 +8987,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} · Deleted Tracked Finalized Blobs",
+              "legendFormat": "{{service}} \u00b7 Deleted Tracked Finalized Blobs",
               "range": true,
               "refId": "D",
               "useBackend": false
@@ -6547,7 +9062,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 301
+            "y": 415
           },
           "id": 84,
           "options": {
@@ -6570,7 +9085,7 @@
               },
               "editorMode": "builder",
               "expr": "reth_transaction_pool_basefee_pool_transactions{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
-              "legendFormat": "{{service}} · Base Fee Pool Transactions",
+              "legendFormat": "{{service}} \u00b7 Base Fee Pool Transactions",
               "range": true,
               "refId": "A"
             },
@@ -6582,7 +9097,7 @@
               "editorMode": "builder",
               "expr": "reth_transaction_pool_pending_pool_transactions{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
               "hide": false,
-              "legendFormat": "{{service}} · Pending Pool Transactions",
+              "legendFormat": "{{service}} \u00b7 Pending Pool Transactions",
               "range": true,
               "refId": "B"
             },
@@ -6594,7 +9109,7 @@
               "editorMode": "builder",
               "expr": "reth_transaction_pool_queued_pool_transactions{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
               "hide": false,
-              "legendFormat": "{{service}} · Queued Pool Transactions",
+              "legendFormat": "{{service}} \u00b7 Queued Pool Transactions",
               "range": true,
               "refId": "C"
             },
@@ -6605,7 +9120,7 @@
               },
               "editorMode": "builder",
               "expr": "reth_transaction_pool_blob_pool_transactions{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
-              "legendFormat": "{{service}} · Blob Pool Transactions",
+              "legendFormat": "{{service}} \u00b7 Blob Pool Transactions",
               "range": true,
               "refId": "D"
             }
@@ -6693,7 +9208,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 301
+            "y": 415
           },
           "id": 85,
           "options": {
@@ -6719,7 +9234,7 @@
               "expr": "rate(reth_transaction_pool_inserted_transactions{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
-              "legendFormat": "{{service}} · Inserted Transactions",
+              "legendFormat": "{{service}} \u00b7 Inserted Transactions",
               "range": true,
               "refId": "A",
               "useBackend": false
@@ -6735,7 +9250,7 @@
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
-              "legendFormat": "{{service}} · Removed Transactions",
+              "legendFormat": "{{service}} \u00b7 Removed Transactions",
               "range": true,
               "refId": "B",
               "useBackend": false
@@ -6751,7 +9266,7 @@
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
-              "legendFormat": "{{service}} · Invalid Transactions",
+              "legendFormat": "{{service}} \u00b7 Invalid Transactions",
               "range": true,
               "refId": "C",
               "useBackend": false
@@ -6768,7 +9283,7 @@
               "hide": false,
               "includeNullMetadata": false,
               "instant": false,
-              "legendFormat": "{{service}} · Bad Transactions",
+              "legendFormat": "{{service}} \u00b7 Bad Transactions",
               "range": true,
               "refId": "D",
               "useBackend": false
@@ -6843,7 +9358,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 309
+            "y": 423
           },
           "id": 86,
           "options": {
@@ -6867,7 +9382,7 @@
               "editorMode": "builder",
               "expr": "reth_network_pending_pool_imports{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
               "hide": false,
-              "legendFormat": "{{service}} · Transactions Pending Import",
+              "legendFormat": "{{service}} \u00b7 Transactions Pending Import",
               "range": true,
               "refId": "C"
             }
@@ -6967,7 +9482,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 309
+            "y": 423
           },
           "id": 87,
           "options": {
@@ -6992,7 +9507,7 @@
               "expr": "rate(reth_network_pool_transactions_messages_sent_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
               "hide": false,
               "instant": false,
-              "legendFormat": "{{service}} · Tx",
+              "legendFormat": "{{service}} \u00b7 Tx",
               "range": true,
               "refId": "A"
             },
@@ -7004,7 +9519,7 @@
               "editorMode": "builder",
               "expr": "rate(reth_network_pool_transactions_messages_received_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
               "hide": false,
-              "legendFormat": "{{service}} · Rx",
+              "legendFormat": "{{service}} \u00b7 Rx",
               "range": true,
               "refId": "B"
             },
@@ -7016,7 +9531,7 @@
               "editorMode": "code",
               "expr": "reth_network_pool_transactions_messages_sent_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} - reth_network_pool_transactions_messages_received_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
               "hide": false,
-              "legendFormat": "{{service}} · Messages in Channel",
+              "legendFormat": "{{service}} \u00b7 Messages in Channel",
               "range": true,
               "refId": "C"
             }
@@ -7091,7 +9606,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 317
+            "y": 431
           },
           "id": 88,
           "options": {
@@ -7118,7 +9633,7 @@
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} · Queued Messages per Second",
+              "legendFormat": "{{service}} \u00b7 Queued Messages per Second",
               "range": true,
               "refId": "A",
               "useBackend": false
@@ -7193,7 +9708,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 317
+            "y": 431
           },
           "id": 89,
           "options": {
@@ -7220,7 +9735,7 @@
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} · All transactions by hash",
+              "legendFormat": "{{service}} \u00b7 All transactions by hash",
               "range": true,
               "refId": "A",
               "useBackend": false
@@ -7237,7 +9752,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} · All transactions by id",
+              "legendFormat": "{{service}} \u00b7 All transactions by id",
               "range": true,
               "refId": "B",
               "useBackend": false
@@ -7254,7 +9769,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} · All transactions by all senders",
+              "legendFormat": "{{service}} \u00b7 All transactions by all senders",
               "range": true,
               "refId": "C",
               "useBackend": false
@@ -7271,7 +9786,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} · Blob transactions nonce gaps",
+              "legendFormat": "{{service}} \u00b7 Blob transactions nonce gaps",
               "range": true,
               "refId": "D",
               "useBackend": false
@@ -7347,7 +9862,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 325
+            "y": 439
           },
           "id": 90,
           "options": {
@@ -7374,7 +9889,7 @@
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} · Dropped",
+              "legendFormat": "{{service}} \u00b7 Dropped",
               "range": true,
               "refId": "A",
               "useBackend": false
@@ -7450,7 +9965,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 325
+            "y": 439
           },
           "id": 91,
           "options": {
@@ -7478,7 +9993,7 @@
               "hide": false,
               "includeNullMetadata": false,
               "instant": false,
-              "legendFormat": "{{service}} · Freq Announced Transactions Already in Pool",
+              "legendFormat": "{{service}} \u00b7 Freq Announced Transactions Already in Pool",
               "range": true,
               "refId": "A",
               "useBackend": false
@@ -7495,7 +10010,7 @@
               "hide": false,
               "includeNullMetadata": false,
               "instant": false,
-              "legendFormat": "{{service}} · Freq Received Transactions Already in Pool ",
+              "legendFormat": "{{service}} \u00b7 Freq Received Transactions Already in Pool ",
               "range": true,
               "refId": "B",
               "useBackend": false
@@ -7570,7 +10085,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 333
+            "y": 447
           },
           "id": 92,
           "options": {
@@ -7594,7 +10109,7 @@
               "editorMode": "builder",
               "expr": "reth_network_inflight_transaction_requests{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
               "hide": false,
-              "legendFormat": "{{service}} · Inflight Transaction Requests",
+              "legendFormat": "{{service}} \u00b7 Inflight Transaction Requests",
               "range": true,
               "refId": "C"
             }
@@ -7669,7 +10184,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 333
+            "y": 447
           },
           "id": 93,
           "options": {
@@ -7697,7 +10212,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} · Network Events",
+              "legendFormat": "{{service}} \u00b7 Network Events",
               "range": true,
               "refId": "B",
               "useBackend": false
@@ -7714,7 +10229,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} · Transaction Events",
+              "legendFormat": "{{service}} \u00b7 Transaction Events",
               "range": true,
               "refId": "C",
               "useBackend": false
@@ -7732,7 +10247,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} · Pending Transactions",
+              "legendFormat": "{{service}} \u00b7 Pending Transactions",
               "range": true,
               "refId": "D",
               "useBackend": false
@@ -7749,7 +10264,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} · Pending Pool Imports",
+              "legendFormat": "{{service}} \u00b7 Pending Pool Imports",
               "range": true,
               "refId": "E",
               "useBackend": false
@@ -7766,7 +10281,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} · Fetch Events",
+              "legendFormat": "{{service}} \u00b7 Fetch Events",
               "range": true,
               "refId": "F",
               "useBackend": false
@@ -7783,7 +10298,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} · Commands",
+              "legendFormat": "{{service}} \u00b7 Commands",
               "range": true,
               "refId": "G",
               "useBackend": false
@@ -7800,7 +10315,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} · Fetch Pending Hashes",
+              "legendFormat": "{{service}} \u00b7 Fetch Pending Hashes",
               "range": true,
               "refId": "A",
               "useBackend": false
@@ -7817,7 +10332,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} · Total Transactions Manager Future",
+              "legendFormat": "{{service}} \u00b7 Total Transactions Manager Future",
               "range": true,
               "refId": "H",
               "useBackend": false
@@ -7892,7 +10407,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 341
+            "y": 455
           },
           "id": 94,
           "options": {
@@ -7919,7 +10434,7 @@
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} · Hashes in Pending Fetch Cache",
+              "legendFormat": "{{service}} \u00b7 Hashes in Pending Fetch Cache",
               "range": true,
               "refId": "A",
               "useBackend": false
@@ -7936,7 +10451,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} · Hashes in Inflight Requests",
+              "legendFormat": "{{service}} \u00b7 Hashes in Inflight Requests",
               "range": true,
               "refId": "B",
               "useBackend": false
@@ -7950,7 +10465,7 @@
               "expr": "sum by (service) (reth_network_hashes_inflight_transaction_requests{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) + sum by (service) (reth_network_hashes_pending_fetch{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "hide": false,
               "instant": false,
-              "legendFormat": "{{service}} · Total Hashes in Transaction Fetcher",
+              "legendFormat": "{{service}} \u00b7 Total Hashes in Transaction Fetcher",
               "range": true,
               "refId": "C"
             }
@@ -8025,7 +10540,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 341
+            "y": 455
           },
           "id": 95,
           "options": {
@@ -8053,7 +10568,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} · Network Handle Messages",
+              "legendFormat": "{{service}} \u00b7 Network Handle Messages",
               "range": true,
               "refId": "A",
               "useBackend": false
@@ -8070,7 +10585,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} · Swarm Events",
+              "legendFormat": "{{service}} \u00b7 Swarm Events",
               "range": true,
               "refId": "B",
               "useBackend": false
@@ -8087,7 +10602,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} · Total Network Manager Future",
+              "legendFormat": "{{service}} \u00b7 Total Network Manager Future",
               "range": true,
               "refId": "C",
               "useBackend": false
@@ -8163,7 +10678,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 349
+            "y": 463
           },
           "id": 96,
           "options": {
@@ -8191,7 +10706,7 @@
               "hide": false,
               "includeNullMetadata": false,
               "instant": false,
-              "legendFormat": "{{service}} · Freq Announced Transactions Already Seen by Peer",
+              "legendFormat": "{{service}} \u00b7 Freq Announced Transactions Already Seen by Peer",
               "range": true,
               "refId": "A",
               "useBackend": false
@@ -8208,7 +10723,7 @@
               "hide": false,
               "includeNullMetadata": false,
               "instant": false,
-              "legendFormat": "{{service}} · Freq Received Transactions Already Seen by Peer",
+              "legendFormat": "{{service}} \u00b7 Freq Received Transactions Already Seen by Peer",
               "range": true,
               "refId": "B",
               "useBackend": false
@@ -8284,7 +10799,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 349
+            "y": 463
           },
           "id": 97,
           "options": {
@@ -8312,7 +10827,7 @@
               "hide": false,
               "includeNullMetadata": false,
               "instant": false,
-              "legendFormat": "{{service}} · Legacy",
+              "legendFormat": "{{service}} \u00b7 Legacy",
               "range": true,
               "refId": "A",
               "useBackend": false
@@ -8329,7 +10844,7 @@
               "hide": false,
               "includeNullMetadata": false,
               "instant": false,
-              "legendFormat": "{{service}} · EIP-2930",
+              "legendFormat": "{{service}} \u00b7 EIP-2930",
               "range": true,
               "refId": "B",
               "useBackend": false
@@ -8346,7 +10861,7 @@
               "hide": false,
               "includeNullMetadata": false,
               "instant": false,
-              "legendFormat": "{{service}} · EIP-1559",
+              "legendFormat": "{{service}} \u00b7 EIP-1559",
               "range": true,
               "refId": "C",
               "useBackend": false
@@ -8363,7 +10878,7 @@
               "hide": false,
               "includeNullMetadata": false,
               "instant": false,
-              "legendFormat": "{{service}} · EIP-4844",
+              "legendFormat": "{{service}} \u00b7 EIP-4844",
               "range": true,
               "refId": "D",
               "useBackend": false
@@ -8380,7 +10895,7 @@
               "hide": false,
               "includeNullMetadata": false,
               "instant": false,
-              "legendFormat": "{{service}} · EIP-7702",
+              "legendFormat": "{{service}} \u00b7 EIP-7702",
               "range": true,
               "refId": "E",
               "useBackend": false
@@ -8397,7 +10912,7 @@
               "hide": false,
               "includeNullMetadata": false,
               "instant": false,
-              "legendFormat": "{{service}} · Morph (0x7F/other)",
+              "legendFormat": "{{service}} \u00b7 Morph (0x7F/other)",
               "range": true,
               "refId": "F",
               "useBackend": false
@@ -8473,7 +10988,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 357
+            "y": 471
           },
           "id": 98,
           "options": {
@@ -8501,7 +11016,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} · Find Idle Peer",
+              "legendFormat": "{{service}} \u00b7 Find Idle Peer",
               "range": true,
               "refId": "C",
               "useBackend": false
@@ -8518,7 +11033,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} · Fill Request",
+              "legendFormat": "{{service}} \u00b7 Fill Request",
               "range": true,
               "refId": "B",
               "useBackend": false
@@ -8594,7 +11109,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 357
+            "y": 471
           },
           "id": 99,
           "options": {
@@ -8622,7 +11137,7 @@
               "hide": false,
               "includeNullMetadata": false,
               "instant": false,
-              "legendFormat": "{{service}} · Legacy",
+              "legendFormat": "{{service}} \u00b7 Legacy",
               "range": true,
               "refId": "A",
               "useBackend": false
@@ -8639,7 +11154,7 @@
               "hide": false,
               "includeNullMetadata": false,
               "instant": false,
-              "legendFormat": "{{service}} · Eip2930",
+              "legendFormat": "{{service}} \u00b7 Eip2930",
               "range": true,
               "refId": "B",
               "useBackend": false
@@ -8656,7 +11171,7 @@
               "hide": false,
               "includeNullMetadata": false,
               "instant": false,
-              "legendFormat": "{{service}} · Eip1559",
+              "legendFormat": "{{service}} \u00b7 Eip1559",
               "range": true,
               "refId": "C",
               "useBackend": false
@@ -8673,7 +11188,7 @@
               "hide": false,
               "includeNullMetadata": false,
               "instant": false,
-              "legendFormat": "{{service}} · Eip4844",
+              "legendFormat": "{{service}} \u00b7 Eip4844",
               "range": true,
               "refId": "D",
               "useBackend": false
@@ -8690,7 +11205,7 @@
               "hide": false,
               "includeNullMetadata": false,
               "instant": false,
-              "legendFormat": "{{service}} · Eip7702",
+              "legendFormat": "{{service}} \u00b7 Eip7702",
               "range": true,
               "refId": "E",
               "useBackend": false
@@ -8766,7 +11281,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 365
+            "y": 479
           },
           "id": 100,
           "options": {
@@ -8788,7 +11303,7 @@
               "expr": "reth_transaction_pool_pending_transactions_evicted{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
-              "legendFormat": "{{service}} · PendingPool",
+              "legendFormat": "{{service}} \u00b7 PendingPool",
               "range": true,
               "refId": "A",
               "useBackend": false,
@@ -8806,7 +11321,7 @@
               "expr": "reth_transaction_pool_basefee_transactions_evicted{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
               "hide": false,
               "instant": false,
-              "legendFormat": "{{service}} · BasefeePool",
+              "legendFormat": "{{service}} \u00b7 BasefeePool",
               "range": true,
               "refId": "B"
             },
@@ -8819,7 +11334,7 @@
               "expr": "reth_transaction_pool_blob_transactions_evicted{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
               "hide": false,
               "instant": false,
-              "legendFormat": "{{service}} · BlobPool",
+              "legendFormat": "{{service}} \u00b7 BlobPool",
               "range": true,
               "refId": "C"
             },
@@ -8832,7 +11347,7 @@
               "expr": "reth_transaction_pool_queued_transactions_evicted{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
               "hide": false,
               "instant": false,
-              "legendFormat": "{{service}} · QueuedPool",
+              "legendFormat": "{{service}} \u00b7 QueuedPool",
               "range": true,
               "refId": "D"
             }
@@ -8850,7 +11365,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 141
+        "y": 255
       },
       "id": 132,
       "panels": [
@@ -8917,7 +11432,7 @@
             "overrides": []
           },
           "gridPos": {
-            "y": 293,
+            "y": 407,
             "x": 0,
             "w": 12,
             "h": 8
@@ -8943,7 +11458,7 @@
               },
               "editorMode": "builder",
               "expr": "reth_network_tracked_peers{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
-              "legendFormat": "{{service}} · Tracked Peers",
+              "legendFormat": "{{service}} \u00b7 Tracked Peers",
               "range": true,
               "refId": "A"
             }
@@ -9014,7 +11529,7 @@
             "overrides": []
           },
           "gridPos": {
-            "y": 293,
+            "y": 407,
             "x": 12,
             "w": 12,
             "h": 8
@@ -9040,7 +11555,7 @@
               },
               "editorMode": "builder",
               "expr": "reth_network_outgoing_connections{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
-              "legendFormat": "{{service}} · Outgoing Connections",
+              "legendFormat": "{{service}} \u00b7 Outgoing Connections",
               "range": true,
               "refId": "B"
             },
@@ -9052,7 +11567,7 @@
               "editorMode": "builder",
               "expr": "reth_network_incoming_connections{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
               "hide": false,
-              "legendFormat": "{{service}} · Incoming Connections",
+              "legendFormat": "{{service}} \u00b7 Incoming Connections",
               "range": true,
               "refId": "D"
             },
@@ -9064,7 +11579,7 @@
               "editorMode": "builder",
               "expr": "reth_network_connected_peers{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
               "hide": false,
-              "legendFormat": "{{service}} · Connected Peers",
+              "legendFormat": "{{service}} \u00b7 Connected Peers",
               "range": true,
               "refId": "E"
             }
@@ -9137,7 +11652,7 @@
             "overrides": []
           },
           "gridPos": {
-            "y": 301,
+            "y": 415,
             "x": 0,
             "w": 12,
             "h": 8
@@ -9166,7 +11681,7 @@
               },
               "editorMode": "builder",
               "expr": "rate(reth_p2pstream_disconnected_errors{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
-              "legendFormat": "{{service}} · P2P Stream Disconnected",
+              "legendFormat": "{{service}} \u00b7 P2P Stream Disconnected",
               "range": true,
               "refId": "A"
             },
@@ -9178,7 +11693,7 @@
               "editorMode": "builder",
               "expr": "rate(reth_network_pending_session_failures{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
               "hide": false,
-              "legendFormat": "{{service}} · Failed Pending Sessions",
+              "legendFormat": "{{service}} \u00b7 Failed Pending Sessions",
               "range": true,
               "refId": "B"
             }
@@ -9208,7 +11723,7 @@
             "overrides": []
           },
           "gridPos": {
-            "y": 301,
+            "y": 415,
             "x": 12,
             "w": 12,
             "h": 8
@@ -9241,7 +11756,7 @@
               },
               "editorMode": "builder",
               "expr": "reth_network_useless_peer{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
-              "legendFormat": "{{service}} · UselessPeer",
+              "legendFormat": "{{service}} \u00b7 UselessPeer",
               "range": true,
               "refId": "A"
             },
@@ -9253,7 +11768,7 @@
               "editorMode": "builder",
               "expr": "reth_network_subprotocol_specific{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
               "hide": false,
-              "legendFormat": "{{service}} · SubprotocolSpecific",
+              "legendFormat": "{{service}} \u00b7 SubprotocolSpecific",
               "range": true,
               "refId": "B"
             },
@@ -9265,7 +11780,7 @@
               "editorMode": "builder",
               "expr": "reth_network_already_connected{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
               "hide": false,
-              "legendFormat": "{{service}} · AlreadyConnected",
+              "legendFormat": "{{service}} \u00b7 AlreadyConnected",
               "range": true,
               "refId": "C"
             },
@@ -9277,7 +11792,7 @@
               "editorMode": "builder",
               "expr": "reth_network_client_quitting{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
               "hide": false,
-              "legendFormat": "{{service}} · ClientQuitting",
+              "legendFormat": "{{service}} \u00b7 ClientQuitting",
               "range": true,
               "refId": "D"
             },
@@ -9289,7 +11804,7 @@
               "editorMode": "builder",
               "expr": "reth_network_unexpected_identity{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
               "hide": false,
-              "legendFormat": "{{service}} · UnexpectedHandshakeIdentity",
+              "legendFormat": "{{service}} \u00b7 UnexpectedHandshakeIdentity",
               "range": true,
               "refId": "E"
             },
@@ -9301,7 +11816,7 @@
               "editorMode": "builder",
               "expr": "reth_network_disconnect_requested{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
               "hide": false,
-              "legendFormat": "{{service}} · DisconnectRequested",
+              "legendFormat": "{{service}} \u00b7 DisconnectRequested",
               "range": true,
               "refId": "F"
             },
@@ -9313,7 +11828,7 @@
               "editorMode": "builder",
               "expr": "reth_network_null_node_identity{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
               "hide": false,
-              "legendFormat": "{{service}} · NullNodeIdentity",
+              "legendFormat": "{{service}} \u00b7 NullNodeIdentity",
               "range": true,
               "refId": "G"
             },
@@ -9325,7 +11840,7 @@
               "editorMode": "builder",
               "expr": "reth_network_tcp_subsystem_error{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
               "hide": false,
-              "legendFormat": "{{service}} · TCPSubsystemError",
+              "legendFormat": "{{service}} \u00b7 TCPSubsystemError",
               "range": true,
               "refId": "H"
             },
@@ -9337,7 +11852,7 @@
               "editorMode": "builder",
               "expr": "reth_network_incompatible{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
               "hide": false,
-              "legendFormat": "{{service}} · IncompatibleP2PVersion",
+              "legendFormat": "{{service}} \u00b7 IncompatibleP2PVersion",
               "range": true,
               "refId": "I"
             },
@@ -9349,7 +11864,7 @@
               "editorMode": "builder",
               "expr": "reth_network_protocol_breach{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
               "hide": false,
-              "legendFormat": "{{service}} · ProtocolBreach",
+              "legendFormat": "{{service}} \u00b7 ProtocolBreach",
               "range": true,
               "refId": "J"
             },
@@ -9361,14 +11876,14 @@
               "editorMode": "builder",
               "expr": "reth_network_too_many_peers{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
               "hide": false,
-              "legendFormat": "{{service}} · TooManyPeers",
+              "legendFormat": "{{service}} \u00b7 TooManyPeers",
               "range": true,
               "refId": "K"
             }
           ],
           "title": "P2P Peer Disconnect Reasons",
           "type": "piechart",
-          "description": "每种 disconnect reason 的计数。空 slice 表示该类断连没发生过(健康)。只要节点稳定运行,这个图应该为空。"
+          "description": "\u6bcf\u79cd disconnect reason \u7684\u8ba1\u6570\u3002\u7a7a slice \u8868\u793a\u8be5\u7c7b\u65ad\u8fde\u6ca1\u53d1\u751f\u8fc7(\u5065\u5eb7)\u3002\u53ea\u8981\u8282\u70b9\u7a33\u5b9a\u8fd0\u884c,\u8fd9\u4e2a\u56fe\u5e94\u8be5\u4e3a\u7a7a\u3002"
         },
         {
           "datasource": {
@@ -9433,7 +11948,7 @@
             "overrides": []
           },
           "gridPos": {
-            "y": 309,
+            "y": 423,
             "x": 0,
             "w": 24,
             "h": 8
@@ -9459,7 +11974,7 @@
               },
               "editorMode": "builder",
               "expr": "reth_network_total_dial_successes{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
-              "legendFormat": "{{service}} · Total Dial Successes",
+              "legendFormat": "{{service}} \u00b7 Total Dial Successes",
               "range": true,
               "refId": "A"
             }
@@ -9477,7 +11992,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 142
+        "y": 256
       },
       "id": 106,
       "panels": [
@@ -9545,7 +12060,7 @@
             "h": 10,
             "w": 12,
             "x": 0,
-            "y": 390
+            "y": 504
           },
           "id": 107,
           "options": {
@@ -9572,7 +12087,7 @@
               "expr": "avg by (service) (delta(reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"PlainAccountState\"}[$interval]))",
               "instant": false,
               "interval": "$interval",
-              "legendFormat": "{{service}} · Account",
+              "legendFormat": "{{service}} \u00b7 Account",
               "range": true,
               "refId": "A"
             },
@@ -9586,7 +12101,7 @@
               "hide": false,
               "instant": false,
               "interval": "$interval",
-              "legendFormat": "{{service}} · Storage",
+              "legendFormat": "{{service}} \u00b7 Storage",
               "range": true,
               "refId": "B"
             },
@@ -9600,7 +12115,7 @@
               "hide": false,
               "instant": false,
               "interval": "$interval",
-              "legendFormat": "{{service}} · Bytecodes",
+              "legendFormat": "{{service}} \u00b7 Bytecodes",
               "range": true,
               "refId": "C"
             },
@@ -9614,7 +12129,7 @@
               "hide": false,
               "instant": false,
               "interval": "$interval",
-              "legendFormat": "{{service}} · Total",
+              "legendFormat": "{{service}} \u00b7 Total",
               "range": true,
               "refId": "D"
             }
@@ -9686,7 +12201,7 @@
             "h": 10,
             "w": 12,
             "x": 12,
-            "y": 390
+            "y": 504
           },
           "id": 108,
           "options": {
@@ -9713,7 +12228,7 @@
               "expr": "sum by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"PlainAccountState\"})",
               "instant": false,
               "interval": "10m",
-              "legendFormat": "{{service}} · Account",
+              "legendFormat": "{{service}} \u00b7 Account",
               "range": true,
               "refId": "A"
             },
@@ -9727,7 +12242,7 @@
               "hide": false,
               "instant": false,
               "interval": "10m",
-              "legendFormat": "{{service}} · Storage",
+              "legendFormat": "{{service}} \u00b7 Storage",
               "range": true,
               "refId": "B"
             },
@@ -9741,7 +12256,7 @@
               "hide": false,
               "instant": false,
               "interval": "10m",
-              "legendFormat": "{{service}} · Bytecodes",
+              "legendFormat": "{{service}} \u00b7 Bytecodes",
               "range": true,
               "refId": "C"
             },
@@ -9755,7 +12270,7 @@
               "hide": false,
               "instant": false,
               "interval": "10m",
-              "legendFormat": "{{service}} · Total",
+              "legendFormat": "{{service}} \u00b7 Total",
               "range": true,
               "refId": "D"
             }
@@ -9827,7 +12342,7 @@
             "h": 10,
             "w": 12,
             "x": 0,
-            "y": 400
+            "y": 514
           },
           "id": 109,
           "options": {
@@ -9924,7 +12439,7 @@
             "h": 10,
             "w": 12,
             "x": 12,
-            "y": 400
+            "y": 514
           },
           "id": 110,
           "options": {
@@ -10021,7 +12536,7 @@
             "h": 10,
             "w": 12,
             "x": 0,
-            "y": 410
+            "y": 524
           },
           "id": 111,
           "options": {
@@ -10118,7 +12633,7 @@
             "h": 10,
             "w": 12,
             "x": 12,
-            "y": 410
+            "y": 524
           },
           "id": 112,
           "options": {
@@ -10145,7 +12660,7 @@
               "expr": "avg by (service) (delta(reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Headers\"}[$interval])) + avg by (service) (delta(reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"headers\"}[$interval]))",
               "instant": false,
               "interval": "$interval",
-              "legendFormat": "{{service}} · Headers",
+              "legendFormat": "{{service}} \u00b7 Headers",
               "range": true,
               "refId": "A"
             },
@@ -10159,7 +12674,7 @@
               "hide": false,
               "instant": false,
               "interval": "$interval",
-              "legendFormat": "{{service}} · Receipts",
+              "legendFormat": "{{service}} \u00b7 Receipts",
               "range": true,
               "refId": "B"
             },
@@ -10173,7 +12688,7 @@
               "hide": false,
               "instant": false,
               "interval": "$interval",
-              "legendFormat": "{{service}} · Transactions",
+              "legendFormat": "{{service}} \u00b7 Transactions",
               "range": true,
               "refId": "C"
             }
@@ -10266,7 +12781,7 @@
             "h": 10,
             "w": 12,
             "x": 0,
-            "y": 420
+            "y": 534
           },
           "id": 113,
           "options": {
@@ -10293,7 +12808,7 @@
               "expr": "sum by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Headers\"}) + sum by (service) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"headers\"})",
               "instant": false,
               "interval": "10m",
-              "legendFormat": "{{service}} · Headers",
+              "legendFormat": "{{service}} \u00b7 Headers",
               "range": true,
               "refId": "A"
             },
@@ -10307,7 +12822,7 @@
               "hide": false,
               "instant": false,
               "interval": "10m",
-              "legendFormat": "{{service}} · Receipts",
+              "legendFormat": "{{service}} \u00b7 Receipts",
               "range": true,
               "refId": "B"
             },
@@ -10321,7 +12836,7 @@
               "hide": false,
               "instant": false,
               "interval": "10m",
-              "legendFormat": "{{service}} · Transactions",
+              "legendFormat": "{{service}} \u00b7 Transactions",
               "range": true,
               "refId": "C"
             }
@@ -10409,7 +12924,7 @@
             "h": 10,
             "w": 12,
             "x": 12,
-            "y": 420
+            "y": 534
           },
           "id": 114,
           "options": {
@@ -10506,7 +13021,7 @@
             "h": 10,
             "w": 12,
             "x": 0,
-            "y": 430
+            "y": 544
           },
           "id": 115,
           "options": {
@@ -10603,7 +13118,7 @@
             "h": 10,
             "w": 12,
             "x": 12,
-            "y": 430
+            "y": 544
           },
           "id": 116,
           "options": {
