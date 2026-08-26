@@ -1,7 +1,6 @@
 //! Forward-only proof-history execution extension for Morph.
 //!
-//! Adapted from Base commit `b2673bbd927cb34d7cfad4d448bfbd5bd30eae88`
-//! under the MIT license.
+//! Derived from an MIT-licensed upstream implementation.
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
@@ -20,7 +19,7 @@ use morph_proofs::{
 use reth_execution_types::Chain;
 use reth_exex::{ExExContext, ExExEvent, ExExNotification, ExExNotificationsStream};
 use reth_node_api::{FullNodeComponents, NodePrimitives, NodeTypes};
-use reth_provider::{BlockHashReader, BlockNumReader, BlockReader, TransactionVariant};
+use reth_provider::{BlockNumReader, BlockReader, TransactionVariant};
 pub use sync_target::{CachedBlockTrieData, SyncTarget, SyncTargetState};
 use tokio::task;
 use tracing::{debug, error, info};
@@ -189,6 +188,13 @@ where
                 "Storage behind tip, starting sync immediately"
             );
             sync_target.update_state(SyncTargetState::SyncUpTo { to: best_block });
+        } else if latest_stored > best_block {
+            info!(
+                target: "morph::proofs_exex",
+                latest_stored,
+                best_block,
+                "Proof storage ahead of canonical tip, retaining data while chain catches up"
+            );
         }
 
         let prune_task = MorphProofStoragePrunerTask::new(
@@ -222,11 +228,8 @@ where
             }
         };
 
-        let (latest_block_number, latest_block_hash) = match self
-            .storage
-            .get_latest_block_number()?
-        {
-            Some(latest) => latest,
+        let latest_block_number = match self.storage.get_latest_block_number()? {
+            Some((n, _)) => n,
             None => {
                 return Err(eyre::eyre!(
                     "Proofs storage not initialized. Please run 'morph-reth proofs init --proofs-history.storage-path <PATH>' first."
@@ -251,19 +254,10 @@ where
             }
         }
 
-        let canonical_hash = self
-            .ctx
-            .provider()
-            .block_hash(latest_block_number)?
-            .ok_or_else(|| eyre::eyre!(
-                "Proofs storage latest block {latest_block_number} is missing from the canonical chain"
-            ))?;
-        if canonical_hash != latest_block_hash {
-            return Err(eyre::eyre!(
-                "Proofs storage latest block hash mismatch at {latest_block_number}: stored {latest_block_hash}, canonical {canonical_hash}"
-            ));
-        }
-
+        // Proof storage and Reth have independent commit boundaries, so the proof tip can be
+        // ahead after an ungraceful shutdown. Let forward sync retain those blocks and resume once
+        // the canonical chain passes the stored tip. Proof RPCs independently validate the
+        // canonical anchor before serving data.
         ProofHistoryMetrics::set_window(earliest_block_number, latest_block_number);
 
         Ok(())
@@ -1144,8 +1138,6 @@ mod tests {
 
         let exex = build_test_exex(ctx, proofs.clone());
         let error = exex.ensure_initialized().expect_err("should return error");
-        // Without this the test would also pass on the later canonical-hash check,
-        // which fires for the same fixture.
         assert!(
             error.to_string().contains("exceeds the safety threshold"),
             "expected the startup prune-threshold error, got: {error}"
@@ -1153,7 +1145,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ensure_initialized_errors_when_latest_is_not_canonical() {
+    async fn ensure_initialized_allows_latest_hash_to_differ_from_canonical_chain() {
         let dir = tempdir_path();
         let store = Arc::new(MdbxProofsStorage::new(dir.as_path()).expect("env"));
         let proofs: MorphProofsStorage<Arc<MdbxProofsStorage>> = Arc::clone(&store);
@@ -1162,19 +1154,39 @@ mod tests {
             .await
             .expect("exex test context");
 
-        // Anchor proof history at the right height but the wrong hash: this is the
-        // shape of a proofs DB restored next to a mismatched chain snapshot, and it
-        // must refuse to serve rather than emit proofs for a foreign chain.
+        // Startup accepts an independently committed proof tip. Proof RPCs still validate the
+        // canonical anchor before serving data.
         let genesis = handle.genesis.num_hash();
         assert_ne!(genesis.hash, b256(0x00), "fixture must not collide");
         init_storage_at(proofs.clone(), NumHash::new(genesis.number, b256(0x00)));
 
         let exex = build_test_exex(ctx, proofs.clone());
-        let error = exex.ensure_initialized().expect_err("should return error");
-        assert!(
-            error.to_string().contains("latest block hash mismatch"),
-            "expected a canonical-hash mismatch error, got: {error}"
-        );
+        exex.ensure_initialized()
+            .expect("startup should not validate the proof tip against the canonical chain");
+    }
+
+    #[tokio::test]
+    async fn ensure_initialized_allows_proof_storage_ahead_of_canonical_chain() {
+        let dir = tempdir_path();
+        let store = Arc::new(MdbxProofsStorage::new(dir.as_path()).expect("env"));
+        let proofs: MorphProofsStorage<Arc<MdbxProofsStorage>> = Arc::clone(&store);
+
+        let (ctx, handle) = reth_exex_test_utils::test_exex_context()
+            .await
+            .expect("exex test context");
+
+        let genesis = handle.genesis.num_hash();
+        init_storage_at(proofs.clone(), genesis);
+        proofs
+            .store_trie_updates(
+                BlockWithParent::new(genesis.hash, NumHash::new(1, b256(0x01))),
+                BlockStateDiff::default(),
+            )
+            .expect("store proof tip ahead of canonical chain");
+
+        let exex = build_test_exex(ctx, proofs.clone());
+        exex.ensure_initialized()
+            .expect("proof storage may be ahead after an ungraceful shutdown");
     }
 
     #[tokio::test]
