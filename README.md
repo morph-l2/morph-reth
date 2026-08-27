@@ -129,6 +129,9 @@ cargo test --all
 
 # Run tests for a specific crate
 cargo test -p morph-consensus
+
+# Run the end-to-end scenarios, which spawn in-process Morph nodes
+cargo nextest run -p morph-node --features test-utils -E 'binary(it)'
 ```
 
 ### Development

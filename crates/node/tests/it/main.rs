@@ -8,12 +8,14 @@ mod helpers;
 
 mod block_building;
 mod consensus;
+mod dual_node_reorg;
 mod engine;
 mod evm;
 mod hardfork;
+mod invalid_payload_recovery;
 mod l1_messages;
+mod mixed_block_pressure;
 mod morph_tx;
 mod reference_index;
 mod rpc;
-mod sync;
 mod txpool;

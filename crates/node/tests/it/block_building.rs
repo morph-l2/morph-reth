@@ -153,11 +153,6 @@ const GENESIS_GAS_LIMIT: u64 = 30_000_000;
 
 /// With `--builder.gaslimit` set, each assembled header must step toward the target
 /// by go-ethereum's `CalcGasLimit` delta, and every such block must still import.
-///
-/// This covers the wiring, not just the arithmetic: the target has to travel from the
-/// node config through `MorphBuilderConfig` into the header, and `advance_empty_block`
-/// runs `submit_payload` + `update_forkchoice`, so a header the consensus rules reject
-/// fails the test rather than passing silently.
 #[tokio::test(flavor = "multi_thread")]
 async fn header_gas_limit_ramps_toward_builder_target() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -175,29 +170,21 @@ async fn header_gas_limit_ramps_toward_builder_target() -> eyre::Result<()> {
         let header = payload.block().header();
         assert_eq!(header.inner.number, block_number);
 
-        // Derived from geth's rule rather than from the implementation: the step is
-        // `parent/1024 - 1`, one below the diff header validation starts rejecting.
         let expected = parent_gas_limit + parent_gas_limit / 1024 - 1;
         assert_eq!(
             header.inner.gas_limit, expected,
             "block {block_number} should ramp from {parent_gas_limit} to {expected}"
         );
-        assert!(
-            header.inner.gas_limit < target,
-            "ramp must not overshoot the target in a single block"
-        );
+        assert!(header.inner.gas_limit < target);
 
         parent_gas_limit = header.inner.gas_limit;
     }
 
-    // First step from mainnet's 30M, pinned so a changed bound divisor is caught.
     assert_eq!(GENESIS_GAS_LIMIT + GENESIS_GAS_LIMIT / 1024 - 1, 30_029_295);
-
     Ok(())
 }
 
-/// Without `--builder.gaslimit`, headers keep copying the parent `gasLimit`. This is
-/// the default every deployment runs, so it gets its own guard.
+/// Without `--builder.gaslimit`, headers keep copying the parent `gasLimit`.
 #[tokio::test(flavor = "multi_thread")]
 async fn header_gas_limit_copies_parent_without_builder_target() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -209,10 +196,7 @@ async fn header_gas_limit_copies_parent_without_builder_target() -> eyre::Result
         let payload = advance_empty_block(&mut node).await?;
         let header = payload.block().header();
         assert_eq!(header.inner.number, block_number);
-        assert_eq!(
-            header.inner.gas_limit, GENESIS_GAS_LIMIT,
-            "gasLimit must not drift when no target is configured"
-        );
+        assert_eq!(header.inner.gas_limit, GENESIS_GAS_LIMIT);
     }
 
     Ok(())
@@ -227,19 +211,13 @@ async fn multiple_l1_messages_sequential_queue_indices() -> eyre::Result<()> {
     let mut node = nodes.pop().unwrap();
 
     let l1_msgs = L1MessageBuilder::build_sequential(0, 3);
-
     let payload = advance_block_with_l1_messages(&mut node, l1_msgs).await?;
     let block = payload.block();
 
     assert_eq!(block.body().transactions.len(), 3);
-
     for (expected_index, tx) in block.body().transactions.iter().enumerate() {
         assert!(tx.is_l1_msg());
-        assert_eq!(
-            tx.queue_index(),
-            Some(expected_index as u64),
-            "queue_index should be sequential"
-        );
+        assert_eq!(tx.queue_index(), Some(expected_index as u64));
     }
 
     Ok(())
