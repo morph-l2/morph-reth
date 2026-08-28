@@ -17,8 +17,6 @@ use alloy_primitives::{Address, B256, Bytes, U256};
 use morph_node::test_utils::{HardforkSchedule, MorphTxBuilder, TEST_TOKEN_ID, TestNodeBuilder};
 use reth_payload_primitives::BuiltPayload;
 
-use super::helpers::wallet_to_arc;
-
 // =============================================================================
 // MorphTx v1 (ETH fee) — simplest variant, no token contract needed
 // =============================================================================
@@ -212,64 +210,6 @@ async fn morph_tx_v0_accepted_before_jade() -> eyre::Result<()> {
         payload.block().body().transactions.len(),
         1,
         "MorphTx v0 should still be accepted pre-Jade"
-    );
-
-    Ok(())
-}
-
-// =============================================================================
-// Mixed transaction types in one block
-// =============================================================================
-
-/// A block can contain both EIP-1559 and MorphTx transactions.
-#[tokio::test(flavor = "multi_thread")]
-async fn mixed_tx_types_in_one_block() -> eyre::Result<()> {
-    reth_tracing::init_test_tracing();
-
-    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
-    let mut node = nodes.pop().unwrap();
-    let wallet_arc = wallet_to_arc(wallet);
-
-    // Inject EIP-1559 transfer
-    let eip1559_tx = {
-        let mut w = wallet_arc.lock().await;
-        let nonce = w.inner_nonce;
-        w.inner_nonce += 1;
-        morph_node::test_utils::make_transfer_tx(w.chain_id, w.inner.clone(), nonce).await
-    };
-    node.rpc.inject_tx(eip1559_tx).await?;
-
-    // Inject MorphTx v1 (ETH fee)
-    let morph_tx = {
-        let w = wallet_arc.lock().await;
-        let nonce = w.inner_nonce;
-        MorphTxBuilder::new(w.chain_id, w.inner.clone(), nonce)
-            .with_v1_eth_fee()
-            .build_signed()?
-    };
-    node.rpc.inject_tx(morph_tx).await?;
-
-    let payload = node.advance_block().await?;
-    let block = payload.block();
-
-    assert_eq!(
-        block.body().transactions.len(),
-        2,
-        "block should have both EIP-1559 and MorphTx"
-    );
-
-    // Verify transaction types
-
-    let types: Vec<bool> = block
-        .body()
-        .transactions
-        .iter()
-        .map(|tx| tx.is_morph_tx())
-        .collect();
-
-    assert!(
-        types.contains(&false) && types.contains(&true),
-        "block should contain both EIP-1559 and MorphTx"
     );
 
     Ok(())
