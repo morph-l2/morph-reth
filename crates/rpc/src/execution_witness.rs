@@ -8,6 +8,9 @@
 //! Blocks outside the retained window keep failing the way every other proof RPC fails there; the
 //! window never reaches back to the ZK-trie era before Jade, where an MPT witness would be
 //! meaningless anyway.
+//!
+//! Witness mode is not part of the request, matching Base and op-reth: only the legacy shape is
+//! produced, which is also what reth's default returns when no mode is given.
 
 use std::{sync::LazyLock, time::Instant};
 
@@ -64,26 +67,15 @@ fn parent_block_number(block_number: u64) -> Result<u64, ErrorObject<'static>> {
 #[cfg_attr(test, rpc(server, client, namespace = "debug"))]
 pub trait ExecutionWitnessApiOverride {
     /// Re-executes a retained canonical block and returns its execution witness.
-    ///
-    /// The optional second argument selects the witness generation mode and defaults to `legacy`,
-    /// matching the method this replaces.
     #[method(name = "executionWitness")]
-    async fn execution_witness(
-        &self,
-        block: BlockNumberOrTag,
-        mode: Option<ExecutionWitnessMode>,
-    ) -> RpcResult<ExecutionWitness>;
+    async fn execution_witness(&self, block: BlockNumberOrTag) -> RpcResult<ExecutionWitness>;
 
     /// Same as `debug_executionWitness`, addressing the block by hash.
     ///
     /// Overridden alongside the number-based method on purpose: leaving it on the default
     /// implementation would keep one entry point for the same result on the replay-based slow path.
     #[method(name = "executionWitnessByBlockHash")]
-    async fn execution_witness_by_block_hash(
-        &self,
-        hash: B256,
-        mode: Option<ExecutionWitnessMode>,
-    ) -> RpcResult<ExecutionWitness>;
+    async fn execution_witness_by_block_hash(&self, hash: B256) -> RpcResult<ExecutionWitness>;
 }
 
 /// Execution-witness RPC implementation backed exclusively by Morph proof history.
@@ -114,13 +106,16 @@ where
     async fn witness_for_block(
         &self,
         block_id: BlockId,
-        mode: Option<ExecutionWitnessMode>,
         metrics: &ProofRpcMetrics,
     ) -> RpcResult<ExecutionWitness> {
         let start = Instant::now();
         metrics.record_request();
 
-        let mode = mode.unwrap_or_default();
+        // Witness mode is not exposed on the wire, matching Base and op-reth. The proof-history
+        // provider only implements the legacy shape, so accepting a `canonical` request would
+        // return something that is neither format. Reth's default for this method is legacy too,
+        // so replacing it does not change what a caller receives.
+        let mode = ExecutionWitnessMode::default();
         let factory = self.state_provider_factory.clone();
         let eth_api = factory.eth_api().clone();
 
@@ -158,9 +153,9 @@ where
             let mut db = StateProviderDatabase::new(&state);
             let executor = factory.eth_api().evm_config().executor(&mut db);
 
-            // `mode` drives both halves: it decides which bytecodes are collected here and how the
-            // trie witness is computed below. The two must agree or the witness would describe a
-            // different execution than the codes shipped with it.
+            // The same `mode` must reach both halves: it decides which bytecodes are collected
+            // here and how the trie witness is computed below. Passing different values would ship
+            // codes that describe a different execution than the trie nodes.
             let mut record = ExecutionWitnessRecord::default();
             executor
                 .execute_with_state_closure(&block, |statedb: &State<_>| {
@@ -185,21 +180,13 @@ where
     Eth: FullEthApi + Clone + Send + Sync + 'static,
     P: MorphProofsStore + Clone + 'static,
 {
-    async fn execution_witness(
-        &self,
-        block: BlockNumberOrTag,
-        mode: Option<ExecutionWitnessMode>,
-    ) -> RpcResult<ExecutionWitness> {
-        self.witness_for_block(block.into(), mode, &EXECUTION_WITNESS_METRICS)
+    async fn execution_witness(&self, block: BlockNumberOrTag) -> RpcResult<ExecutionWitness> {
+        self.witness_for_block(block.into(), &EXECUTION_WITNESS_METRICS)
             .await
     }
 
-    async fn execution_witness_by_block_hash(
-        &self,
-        hash: B256,
-        mode: Option<ExecutionWitnessMode>,
-    ) -> RpcResult<ExecutionWitness> {
-        self.witness_for_block(hash.into(), mode, &EXECUTION_WITNESS_BY_HASH_METRICS)
+    async fn execution_witness_by_block_hash(&self, hash: B256) -> RpcResult<ExecutionWitness> {
+        self.witness_for_block(hash.into(), &EXECUTION_WITNESS_BY_HASH_METRICS)
             .await
     }
 }
@@ -238,10 +225,10 @@ mod tests {
     }
 
     #[test]
-    fn defaults_the_witness_mode_to_legacy() {
-        // `mode` is optional on the wire and resolved with `unwrap_or_default`, so the upstream
-        // default is this RPC's default. If a reth bump flipped it, callers would silently start
-        // receiving a differently shaped witness.
+    fn pins_the_witness_mode_to_legacy() {
+        // This RPC hardcodes the upstream default rather than exposing `mode`, so the two must stay
+        // the same value. If a reth bump flipped the default, callers would silently start
+        // receiving a canonical-shaped witness that this proof provider does not actually produce.
         assert_eq!(
             ExecutionWitnessMode::default(),
             ExecutionWitnessMode::Legacy

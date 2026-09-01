@@ -274,15 +274,7 @@ impl<'a, Storage: MorphProofsStore + Clone> StateProofProvider
             mode,
         )
         .map_err(ProviderError::from)
-        .map(|hm| {
-            let mut values: Vec<_> = hm.into_values().collect();
-            // A canonical witness is order-defined; the legacy one is a bag of nodes whose order
-            // follows map iteration. Same rule as reth's historical state provider.
-            if mode.is_canonical() {
-                values.sort_unstable();
-            }
-            values
-        })
+        .map(|hm| hm.into_values().collect())
     }
 }
 

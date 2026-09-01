@@ -461,22 +461,16 @@ where
         let nodes_sorted = input.nodes.into_sorted();
         let state_sorted = input.state.into_sorted();
         let (trie_factory, hashed_factory) = from_tx(storage, tx, block_number);
-        let witness = TrieWitness::new(trie_factory.clone(), hashed_factory.clone())
+        TrieWitness::new(trie_factory.clone(), hashed_factory.clone())
             .with_trie_cursor_factory(InMemoryTrieCursorFactory::new(trie_factory, &nodes_sorted))
             .with_hashed_cursor_factory(HashedPostStateCursorFactory::new(
                 hashed_factory,
                 &state_sorted,
             ))
             .with_prefix_sets_mut(input.prefix_sets)
-            .with_execution_witness_mode(mode);
-        // Only the legacy shape force-includes the root node; a canonical witness is defined
-        // without it. Mirrors reth's own historical state provider so a caller cannot tell the
-        // two witness sources apart.
-        if mode.is_canonical() {
-            witness.compute(target)
-        } else {
-            witness.always_include_root_node().compute(target)
-        }
+            .always_include_root_node()
+            .with_execution_witness_mode(mode)
+            .compute(target)
     }
 }
 

@@ -37,7 +37,7 @@ reth-revm = { workspace = true, features = ["witness"] }
 reth-storage-api.workspace = true
 reth-tasks.workspace = true
 reth-errors.workspace = true
-reth-trie-common = { workspace = true, features = ["serde"] }
+reth-trie-common.workspace = true
 reth-transaction-pool.workspace = true
 
 # Alloy

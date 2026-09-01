@@ -330,15 +330,18 @@ async fn execution_witness<B: Serialize>(
         .map_err(|error| eyre::eyre!("debug_executionWitness failed: {error}"))
 }
 
-async fn execution_witness_with_mode<B: Serialize>(
+/// Calls `debug_executionWitness` with the trailing argument reth's own signature accepts.
+///
+/// The override drops that parameter, so this pins what an existing caller sees after the swap.
+async fn execution_witness_with_extra_arg<B: Serialize>(
     client: &HttpClient,
     block: B,
-    mode: &str,
+    extra: &str,
 ) -> eyre::Result<ExecutionWitness> {
     client
-        .request("debug_executionWitness", rpc_params![block, mode])
+        .request("debug_executionWitness", rpc_params![block, extra])
         .await
-        .map_err(|error| eyre::eyre!("debug_executionWitness({mode}) failed: {error}"))
+        .map_err(|error| eyre::eyre!("debug_executionWitness({extra}) failed: {error}"))
 }
 
 async fn execution_witness_by_hash(
@@ -1340,27 +1343,14 @@ async fn proof_history_serves_execution_witness() -> eyre::Result<()> {
         "executionWitnessByBlockHash must agree with executionWitness"
     );
 
-    // `mode` stays on the wire; reth's default is `legacy`.
-    let legacy = execution_witness_with_mode(&client, "0x3", "legacy").await?;
+    // Witness mode is not a request parameter. jsonrpsee takes positional arguments off the front
+    // of the array and never rejects the leftovers, so a caller that still sends the mode reth's
+    // default accepted gets the legacy witness rather than an error.
+    let extra_arg = execution_witness_with_extra_arg(&client, "0x3", "canonical").await?;
     assert_eq!(
-        witness_contents(&legacy),
+        witness_contents(&extra_arg),
         witness_contents(&witness),
-        "explicit legacy mode must be the default"
-    );
-
-    // Canonical mode is order-defined, unlike legacy, whose node order follows map iteration.
-    let canonical = execution_witness_with_mode(&client, "0x3", "canonical").await?;
-    assert!(
-        !canonical.state.is_empty(),
-        "canonical mode must still produce a witness"
-    );
-    assert!(
-        canonical.state.windows(2).all(|pair| pair[0] <= pair[1]),
-        "canonical mode must return the state nodes sorted"
-    );
-    assert!(
-        canonical.codes.windows(2).all(|pair| pair[0] <= pair[1]),
-        "canonical mode must return the codes sorted"
+        "a trailing mode argument must be ignored, not rejected"
     );
 
     // Genesis has no parent state; clamping would silently witness the wrong state.
