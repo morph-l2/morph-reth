@@ -242,12 +242,8 @@ where
                     // authenticated Engine API module remains untouched.
                     modules
                         .replace_configured(
-                            ExecutionWitnessApiExt::new(
-                                eth_api_witness,
-                                storage.clone(),
-                                chain_spec.clone(),
-                            )
-                            .into_rpc(),
+                            ExecutionWitnessApiExt::new(eth_api_witness, storage.clone())
+                                .into_rpc(),
                         )
                         .map_err(|error| {
                             eyre::eyre!("Failed to replace historical execution witness RPCs: {error}")
