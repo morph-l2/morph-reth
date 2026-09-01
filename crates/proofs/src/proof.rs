@@ -469,6 +469,10 @@ where
             ))
             .with_prefix_sets_mut(input.prefix_sets)
             .with_execution_witness_mode(mode);
+        // Deliberate divergence from the vendored Base source, which force-includes the root node
+        // unconditionally: only the legacy shape carries it, and a canonical witness is defined
+        // without it. Aligned with reth's own `HistoricalStateProviderRef::witness` so a caller
+        // cannot tell the two witness sources apart. Keep this on Base sync conflicts.
         if mode.is_canonical() {
             witness.compute(target)
         } else {

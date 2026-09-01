@@ -6,13 +6,15 @@
 //! which stores a versioned trie per retained block and needs no replay.
 //!
 //! A proof window containing post-state snapshots `[earliest, latest]` can witness existing blocks
-//! in `[earliest + 1, latest + 1]`. Requests whose parent state is outside that window, or whose
-//! parent predates the MPT transition, are rejected.
+//! in `[earliest + 1, latest + 1]`: only the parent's post-state is needed, so the window's own tip
+//! is still a servable parent. Requests whose parent state falls outside that window are rejected.
+//!
+//! Nothing here guards the ZK-trie era before Jade, where an MPT witness would be meaningless. The
+//! retained window spans days while Jade activated months ago, so no request can reach back that
+//! far; a guard would only fire if the window were widened across the fork, and it would report a
+//! fork error where the honest answer is that such a configuration was never supported.
 
-use std::{
-    sync::{Arc, LazyLock},
-    time::Instant,
-};
+use std::{sync::LazyLock, time::Instant};
 
 use alloy_consensus::BlockHeader;
 use alloy_eips::{BlockId, BlockNumberOrTag};
@@ -24,7 +26,6 @@ use jsonrpsee::{
     proc_macros::rpc,
     types::{ErrorCode, ErrorObject},
 };
-use morph_chainspec::{hardfork::MorphHardforks, spec::MorphChainSpec};
 use morph_proofs::{MorphProofsStorage, MorphProofsStore};
 use reth_evm::{ConfigureEvm, execute::Executor};
 use reth_metrics::metrics::Label;
@@ -32,7 +33,6 @@ use reth_revm::{State, database::StateProviderDatabase, witness::ExecutionWitnes
 use reth_rpc_api::eth::helpers::FullEthApi;
 use reth_rpc_eth_api::FromEthApiError;
 use reth_rpc_eth_types::EthApiError;
-use reth_storage_api::HeaderProvider;
 use reth_trie_common::ExecutionWitnessMode;
 
 use crate::{
@@ -69,7 +69,6 @@ pub trait ExecutionWitnessApiOverride {
 #[derive(Debug)]
 pub struct ExecutionWitnessApiExt<Eth, P> {
     state_provider_factory: MorphProofStateProviderFactory<Eth, P>,
-    chain_spec: Arc<MorphChainSpec>,
 }
 
 impl<Eth, P> ExecutionWitnessApiExt<Eth, P>
@@ -78,14 +77,9 @@ where
     P: MorphProofsStore + Clone + 'static,
 {
     /// Creates the execution-witness RPC override.
-    pub const fn new(
-        eth_api: Eth,
-        storage: MorphProofsStorage<P>,
-        chain_spec: Arc<MorphChainSpec>,
-    ) -> Self {
+    pub const fn new(eth_api: Eth, storage: MorphProofsStorage<P>) -> Self {
         Self {
             state_provider_factory: MorphProofStateProviderFactory::new(eth_api, storage),
-            chain_spec,
         }
     }
 }
@@ -136,29 +130,6 @@ where
                 return Err(error);
             }
         };
-
-        let parent_header = match eth_api.provider().sealed_header_by_hash(parent_hash) {
-            Ok(Some(header)) => header,
-            Ok(None) => {
-                metrics.record_rejection();
-                return Err(
-                    Eth::Error::from_eth_err(EthApiError::HeaderNotFound(parent_id)).into(),
-                );
-            }
-            Err(error) => {
-                let result: RpcResult<ExecutionWitness> =
-                    Err(Eth::Error::from_eth_err(error).into());
-                metrics.record_response(start, &result);
-                return result;
-            }
-        };
-        if let Err(error) = ensure_mpt_parent(
-            self.chain_spec
-                .is_jade_active_at_timestamp(parent_header.timestamp()),
-        ) {
-            metrics.record_rejection();
-            return Err(error);
-        }
 
         let result = spawn_proof_task(eth_api, move || {
             let state = factory
@@ -223,7 +194,13 @@ static EXECUTION_WITNESS_BY_HASH_METRICS: LazyLock<ProofRpcMetrics> = LazyLock::
     )])
 });
 
-/// Returns the parent hash identifier a witness must be generated against.
+/// Returns the parent identifier a witness must be generated against.
+///
+/// Addressed by hash, not by `block_number - 1`: `executionWitnessByBlockHash` accepts any block
+/// still in the database, including one on an abandoned branch, and a number would then resolve to
+/// the canonical block at that height. That would replay the requested block against a sibling
+/// branch's state and return a successful but meaningless witness. A hash instead reaches the
+/// canonical check in [`MorphProofStateProviderFactory`], which rejects the request outright.
 ///
 /// Genesis is rejected rather than clamped: it has no parent state, so using its own post-state
 /// would silently produce a witness for the wrong transition.
@@ -238,18 +215,6 @@ fn parent_block_id(block_number: u64, parent_hash: B256) -> Result<BlockId, Erro
     Ok(parent_hash.into())
 }
 
-/// Rejects parent states that use the pre-MPT trie.
-fn ensure_mpt_parent(jade_active: bool) -> Result<(), ErrorObject<'static>> {
-    if !jade_active {
-        return Err(ErrorObject::owned(
-            ErrorCode::InvalidParams.code(),
-            "execution witnesses require a parent state at or after the Jade hardfork",
-            None::<()>,
-        ));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::LazyLock;
@@ -259,10 +224,7 @@ mod tests {
     use jsonrpsee::types::ErrorCode;
     use reth_trie_common::ExecutionWitnessMode;
 
-    use super::{
-        EXECUTION_WITNESS_BY_HASH_METRICS, EXECUTION_WITNESS_METRICS, ensure_mpt_parent,
-        parent_block_id,
-    };
+    use super::{EXECUTION_WITNESS_BY_HASH_METRICS, EXECUTION_WITNESS_METRICS, parent_block_id};
 
     #[test]
     fn builds_per_method_metric_handles() {
@@ -274,6 +236,8 @@ mod tests {
 
     #[test]
     fn resolves_the_parent_by_hash() {
+        // By hash, never by height: a height would silently resolve to the canonical block when the
+        // requested one sits on an abandoned branch.
         let parent_hash = B256::repeat_byte(0x11);
         assert_eq!(
             parent_block_id(1, parent_hash).expect("block 1 has a parent"),
@@ -290,17 +254,11 @@ mod tests {
 
     #[test]
     fn defaults_the_witness_mode_to_legacy() {
+        // `mode` is optional on the wire, so the upstream default is this RPC's default. A reth bump
+        // that flipped it would silently change the shape every existing caller receives.
         assert_eq!(
             ExecutionWitnessMode::default(),
             ExecutionWitnessMode::Legacy
         );
-    }
-
-    #[test]
-    fn rejects_a_parent_state_from_before_the_mpt_transition() {
-        let error = ensure_mpt_parent(false).expect_err("pre-MPT parent must be rejected");
-        assert_eq!(error.code(), ErrorCode::InvalidParams.code());
-        assert!(error.message().contains("Jade"));
-        ensure_mpt_parent(true).expect("post-transition parent must be accepted");
     }
 }
