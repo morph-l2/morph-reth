@@ -11,7 +11,8 @@ use morph_primitives::{Block, MorphHeader, MorphReceipt};
 use morph_proofs::{MdbxProofsStorage, MorphProofsStorage};
 use morph_reference_index::{ReferenceIndexConfig, ReferenceIndexRuntime};
 use morph_rpc::{
-    MorphEthApiBuilder, MorphEthConfigApiServer, MorphEthConfigHandler, ProofStatusApiExt,
+    ExecutionWitnessApiExt, ExecutionWitnessApiOverrideServer, MorphEthApiBuilder,
+    MorphEthConfigApiServer, MorphEthConfigHandler, ProofStatusApiExt,
     ProofStatusApiOverrideServer,
     eth::proofs::{EthProofApiExt, EthProofApiOverrideServer},
     morph::{MorphRpc, MorphRpcHandler, MorphRpcServer},
@@ -209,6 +210,7 @@ where
 
                 if let Some((storage, max_multi_proof_targets)) = proof_history {
                     let eth_api = registry.eth_api().clone();
+                    let eth_api_witness = registry.eth_api().clone();
                     modules
                         .replace_configured(
                             EthProofApiExt::new(
@@ -232,6 +234,17 @@ where
                         )
                         .map_err(|error| {
                             eyre::eyre!("Failed to replace auth historical proof RPCs: {error}")
+                        })?;
+                    // Route the debug-namespace witness RPCs to proof history as well. Left on
+                    // reth's default they would rebuild the parent trie by replaying changesets
+                    // backwards from the tip, which is exactly the cost this storage exists to
+                    // avoid. Auth server is deliberately untouched: witness consumers use HTTP.
+                    modules
+                        .replace_configured(
+                            ExecutionWitnessApiExt::new(eth_api_witness, storage.clone()).into_rpc(),
+                        )
+                        .map_err(|error| {
+                            eyre::eyre!("Failed to replace historical execution witness RPCs: {error}")
                         })?;
                     modules
                         .replace_configured(ProofStatusApiExt::new(storage).into_rpc())
