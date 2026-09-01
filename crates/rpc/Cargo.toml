@@ -33,7 +33,7 @@ reth-metrics.workspace = true
 metrics.workspace = true
 reth-evm.workspace = true
 reth-provider.workspace = true
-reth-revm.workspace = true
+reth-revm = { workspace = true, features = ["witness"] }
 reth-storage-api.workspace = true
 reth-tasks.workspace = true
 reth-errors.workspace = true
@@ -44,6 +44,7 @@ reth-transaction-pool.workspace = true
 alloy-consensus.workspace = true
 alloy-evm.workspace = true
 alloy-primitives.workspace = true
+alloy-rpc-types-debug.workspace = true
 alloy-rpc-types-eth.workspace = true
 alloy-serde.workspace = true
 alloy-network.workspace = true

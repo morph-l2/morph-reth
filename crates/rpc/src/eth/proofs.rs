@@ -102,10 +102,11 @@ impl ProofKeyLimit {
 /// `get_proof_*` / `get_multi_proof_*` names would allow neither without string surgery.
 #[derive(Metrics, Clone)]
 #[metrics(scope = "morph.rpc.proofs")]
-struct ProofRpcMetrics {
+pub(crate) struct ProofRpcMetrics {
     /// Requests received, counted before the request-size limits are applied.
     requests_total: Counter,
-    /// Requests refused by a request-size limit before any database work started.
+    /// Requests refused before any proof computation started, by a request-size limit or by an
+    /// unresolvable block.
     rejected_total: Counter,
     /// Requests answered with a proof.
     successful_responses_total: Counter,
@@ -124,19 +125,24 @@ static GET_MULTI_PROOF_METRICS: LazyLock<ProofRpcMetrics> = LazyLock::new(|| {
 });
 
 impl ProofRpcMetrics {
-    /// Counts a request refused by a size limit.
+    /// Counts a request refused before the proof computation started.
     ///
     /// Kept separate from `failures_total` so that
     /// `requests_total == rejected_total + successful_responses_total + failures_total` holds;
     /// previously a rejected request was counted nowhere at all.
-    fn record_rejection(&self) {
+    pub(crate) fn record_rejection(&self) {
         self.rejected_total.increment(1);
+    }
+
+    /// Counts a received request, before any limit is applied.
+    pub(crate) fn record_request(&self) {
+        self.requests_total.increment(1);
     }
 
     /// Records the outcome of a request that passed the size limits.
     ///
     /// Latency is only sampled on success, so a flood of failures cannot skew the histogram.
-    fn record_response<T>(&self, start: Instant, result: &RpcResult<T>) {
+    pub(crate) fn record_response<T>(&self, start: Instant, result: &RpcResult<T>) {
         match result {
             Ok(_) => {
                 self.latency_seconds.record(start.elapsed().as_secs_f64());
@@ -151,7 +157,7 @@ impl ProofRpcMetrics {
 ///
 /// Proof generation walks MDBX and rebuilds trie nodes synchronously with no await points, so
 /// leaving it on a runtime worker would let a handful of concurrent requests starve the Engine API.
-async fn spawn_proof_task<Eth, T, F>(eth_api: Eth, task: F) -> RpcResult<T>
+pub(crate) async fn spawn_proof_task<Eth, T, F>(eth_api: Eth, task: F) -> RpcResult<T>
 where
     Eth: FullEthApi + Send + Sync + 'static,
     F: FnOnce() -> Result<T, Eth::Error> + Send + 'static,
@@ -256,7 +262,7 @@ where
     ) -> RpcResult<EIP1186AccountProofResponse> {
         let metrics = &*GET_PROOF_METRICS;
         let start = Instant::now();
-        metrics.requests_total.increment(1);
+        metrics.record_request();
         if let Err(error) = ProofKeyLimit::check(keys.len()) {
             metrics.record_rejection();
             return Err(error);
@@ -286,7 +292,7 @@ where
     ) -> RpcResult<Vec<EIP1186AccountProofResponse>> {
         let metrics = &*GET_MULTI_PROOF_METRICS;
         let start = Instant::now();
-        metrics.requests_total.increment(1);
+        metrics.record_request();
         if let Err(error) = ProofKeyLimit::check_multi(&targets, self.max_multi_proof_targets) {
             metrics.record_rejection();
             return Err(error);

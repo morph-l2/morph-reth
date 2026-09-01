@@ -1,7 +1,7 @@
 //! Historical-proof correctness tests.
 //!
-//! These exercise `eth_getProof` and `eth_getMultiProof` against the durable
-//! proof-history index, not just RPC wiring. Each successful proof is checked
+//! These exercise `eth_getProof`, `eth_getMultiProof` and `debug_executionWitness`
+//! against the durable proof-history index, not just RPC wiring. Each successful proof is checked
 //! against that block's canonical `stateRoot`. Reference-index coverage lives
 //! in `reference_index.rs`.
 
@@ -11,6 +11,7 @@ use alloy_consensus::{SignableTransaction, TxEip1559, constants::KECCAK_EMPTY};
 use alloy_eips::{Encodable2718, NumHash, eip1898::BlockWithParent};
 use alloy_genesis::Genesis;
 use alloy_primitives::{Address, B256, Bytes, TxKind, U256};
+use alloy_rpc_types_debug::ExecutionWitness;
 use alloy_rpc_types_eth::{Block, EIP1186AccountProofResponse};
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
@@ -317,6 +318,73 @@ async fn get_multi_proof<B: Serialize>(
         .request("eth_getMultiProof", rpc_params![targets, block])
         .await
         .map_err(|error| eyre::eyre!("eth_getMultiProof failed: {error}"))
+}
+
+async fn execution_witness<B: Serialize>(
+    client: &HttpClient,
+    block: B,
+) -> eyre::Result<ExecutionWitness> {
+    client
+        .request("debug_executionWitness", rpc_params![block])
+        .await
+        .map_err(|error| eyre::eyre!("debug_executionWitness failed: {error}"))
+}
+
+/// Calls `debug_executionWitness` with the trailing argument reth's own signature accepts.
+///
+/// The override drops that parameter, so this pins what an existing caller sees after the swap.
+async fn execution_witness_with_extra_arg<B: Serialize>(
+    client: &HttpClient,
+    block: B,
+    extra: &str,
+) -> eyre::Result<ExecutionWitness> {
+    client
+        .request("debug_executionWitness", rpc_params![block, extra])
+        .await
+        .map_err(|error| eyre::eyre!("debug_executionWitness({extra}) failed: {error}"))
+}
+
+async fn execution_witness_by_hash(
+    client: &HttpClient,
+    hash: B256,
+) -> eyre::Result<ExecutionWitness> {
+    client
+        .request("debug_executionWitnessByBlockHash", rpc_params![hash])
+        .await
+        .map_err(|error| eyre::eyre!("debug_executionWitnessByBlockHash failed: {error}"))
+}
+
+async fn execution_witness_error<B: Serialize>(
+    client: &HttpClient,
+    block: B,
+) -> eyre::Result<String> {
+    match client
+        .request::<ExecutionWitness, _>("debug_executionWitness", rpc_params![block])
+        .await
+    {
+        Ok(witness) => Err(eyre::eyre!(
+            "expected debug_executionWitness to fail, got {} state nodes",
+            witness.state.len()
+        )),
+        Err(error) => Ok(error.to_string()),
+    }
+}
+
+/// Sorts every witness field so two witnesses can be compared by content.
+///
+/// A legacy witness carries trie nodes and key preimages in map-iteration order, which is not
+/// stable between calls, so an equality check on the raw response would be flaky.
+fn witness_contents(
+    witness: &ExecutionWitness,
+) -> (Vec<Bytes>, Vec<Bytes>, Vec<Bytes>, Vec<Bytes>) {
+    let mut state = witness.state.clone();
+    let mut codes = witness.codes.clone();
+    let mut keys = witness.keys.clone();
+    state.sort_unstable();
+    codes.sort_unstable();
+    keys.sort_unstable();
+    // Headers stay in the order the provider returned them: that order is part of the contract.
+    (state, codes, keys, witness.headers.clone())
 }
 
 fn verify_against_state_root(
@@ -1219,5 +1287,122 @@ async fn proof_history_db_survives_node_restart() -> eyre::Result<()> {
     // that outlives the node, and this harness drops its reth TempDatabase on node
     // drop. The ExEx-side restart guards are covered by `ensure_initialized*` tests in
     // `morph-proofs-exex`.
+    Ok(())
+}
+
+// -----------------------------------------------------------------------------
+// 9. `debug_executionWitness`: served from proof history, bounded by its window
+// -----------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn proof_history_serves_execution_witness() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let mut env = setup(LaunchOpts::default()).await?;
+    let client = rpc_client(&env.node)?;
+
+    include_transfer(&mut env.node, ACCOUNT1, 1_000).await?;
+
+    let nonce = sender_nonce(&env.node)?;
+    let setter = Address::create(&ACCOUNT0, nonce);
+    include_tx(
+        &mut env.node,
+        make_deploy_tx(CHAIN_ID, signer(0), nonce, SETTER_INIT)?,
+    )
+    .await?;
+
+    let call_block = include_call(&mut env.node, setter, slot_calldata(11)).await?;
+    wait_for_proof_tip(&client, 3).await?;
+
+    // Block 3 stores into the setter, so its witness must carry the trie nodes proving the
+    // pre-state it wrote over, the contract's bytecode, and the parent header.
+    let witness = execution_witness(&client, "0x3").await?;
+    assert!(
+        !witness.state.is_empty(),
+        "witness must carry the trie nodes touched by the block"
+    );
+    assert!(
+        !witness.codes.is_empty(),
+        "witness must carry the bytecode executed by the block"
+    );
+    assert!(
+        !witness.keys.is_empty(),
+        "witness must carry the preimages of the hashed keys it touched"
+    );
+    assert!(
+        !witness.headers.is_empty(),
+        "witness must carry at least the parent header"
+    );
+
+    // Addressing the same block by hash must be the same request, not a second code path
+    // left on reth's replay-based default.
+    let by_hash = execution_witness_by_hash(&client, call_block).await?;
+    assert_eq!(
+        witness_contents(&by_hash),
+        witness_contents(&witness),
+        "executionWitnessByBlockHash must agree with executionWitness"
+    );
+
+    // Witness mode is not a request parameter. jsonrpsee takes positional arguments off the front
+    // of the array and never rejects the leftovers, so a caller that still sends the mode reth's
+    // default accepted gets the legacy witness rather than an error.
+    let extra_arg = execution_witness_with_extra_arg(&client, "0x3", "canonical").await?;
+    assert_eq!(
+        witness_contents(&extra_arg),
+        witness_contents(&witness),
+        "a trailing mode argument must be ignored, not rejected"
+    );
+
+    // Genesis has no parent state; clamping would silently witness the wrong state.
+    let genesis = execution_witness_error(&client, "0x0").await?;
+    assert!(
+        genesis.contains("no parent state"),
+        "expected genesis rejection, got: {genesis}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn proof_history_execution_witness_is_bounded_by_the_proof_window() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    // The point of this test: reth's default `debug_executionWitness` can serve any block the
+    // chain DB still holds, so a pruned-out block failing here is what proves the RPC is bound
+    // to proof history rather than to the historical-overlay slow path.
+    let mut env = setup(LaunchOpts {
+        window: 2,
+        prune_interval: Duration::from_millis(100),
+        ..LaunchOpts::default()
+    })
+    .await?;
+    let client = rpc_client(&env.node)?;
+
+    for i in 0..5 {
+        include_transfer(&mut env.node, ACCOUNT1, 100 + i).await?;
+    }
+    wait_for_proof_tip(&client, 5).await?;
+    wait_for_window(&client, 3, 5).await?;
+
+    // A witness needs the *parent* state, so the servable range is one block narrower than the
+    // window: block 3 needs block 2, which the pruner has already dropped.
+    let pruned = execution_witness_error(&client, "0x3").await?;
+    assert_outside_window(&pruned, 2);
+
+    let at_4 = execution_witness(&client, "0x4").await?;
+    assert!(
+        !at_4.state.is_empty(),
+        "block 4 must be servable: its parent 3 is the earliest retained block"
+    );
+    let at_5 = execution_witness(&client, "0x5").await?;
+    assert!(!at_5.state.is_empty(), "the tip block must be servable");
+
+    // Beyond the tip there is no block at all.
+    let future = execution_witness_error(&client, "0x64").await?;
+    assert!(
+        future.contains("not found") || future.contains("outside the historical proof window"),
+        "expected a not-found or window error for a future block, got: {future}"
+    );
+
     Ok(())
 }

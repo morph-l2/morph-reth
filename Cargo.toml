@@ -195,6 +195,7 @@ alloy-primitives = { version = "1.6.0", default-features = false }
 alloy-provider = { version = "2.1.1", default-features = false }
 alloy-rlp = "0.3.16"
 alloy-trie = "0.9.4"
+alloy-rpc-types-debug = "2.1.1"
 alloy-rpc-types-engine = "2.1.1"
 alloy-rpc-types-eth = { version = "2.1.1" }
 alloy-serde = "2.1.1"
