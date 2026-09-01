@@ -330,18 +330,15 @@ async fn execution_witness<B: Serialize>(
         .map_err(|error| eyre::eyre!("debug_executionWitness failed: {error}"))
 }
 
-/// Calls `debug_executionWitness` with the trailing argument reth's own signature accepts.
-///
-/// The override drops that parameter, so this pins what an existing caller sees after the swap.
-async fn execution_witness_with_extra_arg<B: Serialize>(
+async fn execution_witness_with_mode<B: Serialize>(
     client: &HttpClient,
     block: B,
-    extra: &str,
+    mode: &str,
 ) -> eyre::Result<ExecutionWitness> {
     client
-        .request("debug_executionWitness", rpc_params![block, extra])
+        .request("debug_executionWitness", rpc_params![block, mode])
         .await
-        .map_err(|error| eyre::eyre!("debug_executionWitness({extra}) failed: {error}"))
+        .map_err(|error| eyre::eyre!("debug_executionWitness({mode}) failed: {error}"))
 }
 
 async fn execution_witness_by_hash(
@@ -352,6 +349,17 @@ async fn execution_witness_by_hash(
         .request("debug_executionWitnessByBlockHash", rpc_params![hash])
         .await
         .map_err(|error| eyre::eyre!("debug_executionWitnessByBlockHash failed: {error}"))
+}
+
+async fn execution_witness_by_hash_with_mode(
+    client: &HttpClient,
+    hash: B256,
+    mode: &str,
+) -> eyre::Result<ExecutionWitness> {
+    client
+        .request("debug_executionWitnessByBlockHash", rpc_params![hash, mode])
+        .await
+        .map_err(|error| eyre::eyre!("debug_executionWitnessByBlockHash({mode}) failed: {error}"))
 }
 
 async fn execution_witness_error<B: Serialize>(
@@ -1343,14 +1351,33 @@ async fn proof_history_serves_execution_witness() -> eyre::Result<()> {
         "executionWitnessByBlockHash must agree with executionWitness"
     );
 
-    // Witness mode is not a request parameter. jsonrpsee takes positional arguments off the front
-    // of the array and never rejects the leftovers, so a caller that still sends the mode reth's
-    // default accepted gets the legacy witness rather than an error.
-    let extra_arg = execution_witness_with_extra_arg(&client, "0x3", "canonical").await?;
+    let legacy = execution_witness_with_mode(&client, "0x3", "legacy").await?;
     assert_eq!(
-        witness_contents(&extra_arg),
+        witness_contents(&legacy),
         witness_contents(&witness),
-        "a trailing mode argument must be ignored, not rejected"
+        "explicit legacy mode must match the default"
+    );
+
+    let canonical = execution_witness_with_mode(&client, "0x3", "canonical").await?;
+    assert!(
+        !canonical.state.is_empty(),
+        "canonical mode must produce a witness"
+    );
+    assert!(
+        canonical.state.windows(2).all(|pair| pair[0] <= pair[1]),
+        "canonical mode must return state nodes in canonical order"
+    );
+    assert!(
+        canonical.codes.windows(2).all(|pair| pair[0] <= pair[1]),
+        "canonical mode must return bytecodes in canonical order"
+    );
+
+    let canonical_by_hash =
+        execution_witness_by_hash_with_mode(&client, call_block, "canonical").await?;
+    assert_eq!(
+        witness_contents(&canonical_by_hash),
+        witness_contents(&canonical),
+        "both witness entry points must honor canonical mode"
     );
 
     // Genesis has no parent state; clamping would silently witness the wrong state.
@@ -1378,26 +1405,37 @@ async fn proof_history_execution_witness_is_bounded_by_the_proof_window() -> eyr
     .await?;
     let client = rpc_client(&env.node)?;
 
-    for i in 0..5 {
-        include_transfer(&mut env.node, ACCOUNT1, 100 + i).await?;
+    let mut block_hashes = Vec::new();
+    for i in 0..6 {
+        block_hashes.push(include_transfer(&mut env.node, ACCOUNT1, 100 + i).await?);
     }
-    wait_for_proof_tip(&client, 5).await?;
-    wait_for_window(&client, 3, 5).await?;
+    wait_for_proof_tip(&client, 6).await?;
+    wait_for_window(&client, 4, 6).await?;
 
-    // A witness needs the *parent* state, so the servable range is one block narrower than the
-    // window: block 3 needs block 2, which the pruner has already dropped.
-    let pruned = execution_witness_error(&client, "0x3").await?;
-    assert_outside_window(&pruned, 2);
+    // Leave block 6 canonical while moving only the proof tip back to block 5. This models the
+    // normal one-block indexing lag and pins the upper bound: block 6 needs only block 5's state.
+    env.storage.unwind_history(BlockWithParent::new(
+        block_hashes[4],
+        NumHash::new(6, block_hashes[5]),
+    ))?;
+    wait_for_window(&client, 4, 5).await?;
 
-    let at_4 = execution_witness(&client, "0x4").await?;
-    assert!(
-        !at_4.state.is_empty(),
-        "block 4 must be servable: its parent 3 is the earliest retained block"
-    );
+    // A witness needs the parent state, so block 4 fails because state 3 was pruned.
+    let pruned = execution_witness_error(&client, "0x4").await?;
+    assert_outside_window(&pruned, 3);
+
     let at_5 = execution_witness(&client, "0x5").await?;
-    assert!(!at_5.state.is_empty(), "the tip block must be servable");
+    assert!(
+        !at_5.state.is_empty(),
+        "block 5 must be servable: its parent 4 is the earliest retained block"
+    );
+    let at_6 = execution_witness(&client, "0x6").await?;
+    assert!(
+        !at_6.state.is_empty(),
+        "block 6 must be servable while the proof tip is 5 because its parent state is retained"
+    );
 
-    // Beyond the tip there is no block at all.
+    // A much later block does not exist.
     let future = execution_witness_error(&client, "0x64").await?;
     assert!(
         future.contains("not found") || future.contains("outside the historical proof window"),

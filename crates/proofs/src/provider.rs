@@ -274,7 +274,13 @@ impl<'a, Storage: MorphProofsStore + Clone> StateProofProvider
             mode,
         )
         .map_err(ProviderError::from)
-        .map(|hm| hm.into_values().collect())
+        .map(|hm| {
+            let mut values: Vec<_> = hm.into_values().collect();
+            if mode.is_canonical() {
+                values.sort_unstable();
+            }
+            values
+        })
     }
 }
 

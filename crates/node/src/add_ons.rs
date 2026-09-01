@@ -238,10 +238,16 @@ where
                     // Route the debug-namespace witness RPCs to proof history as well. Left on
                     // reth's default they would rebuild the parent trie by replaying changesets
                     // backwards from the tip, which is exactly the cost this storage exists to
-                    // avoid. Auth server is deliberately untouched: witness consumers use HTTP.
+                    // avoid. This replaces the configured regular transports (HTTP and WS); the
+                    // authenticated Engine API module remains untouched.
                     modules
                         .replace_configured(
-                            ExecutionWitnessApiExt::new(eth_api_witness, storage.clone()).into_rpc(),
+                            ExecutionWitnessApiExt::new(
+                                eth_api_witness,
+                                storage.clone(),
+                                chain_spec.clone(),
+                            )
+                            .into_rpc(),
                         )
                         .map_err(|error| {
                             eyre::eyre!("Failed to replace historical execution witness RPCs: {error}")
