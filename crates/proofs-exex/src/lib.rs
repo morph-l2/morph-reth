@@ -22,7 +22,7 @@ use reth_node_api::{FullNodeComponents, NodePrimitives, NodeTypes};
 use reth_provider::{BlockNumReader, BlockReader, TransactionVariant};
 pub use sync_target::{CachedBlockTrieData, SyncTarget, SyncTargetState};
 use tokio::task;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// Default safety threshold for the gap between stored earliest block and the configured
 /// window target. When exceeded on startup, the node refuses to auto-prune and asks the
@@ -316,11 +316,11 @@ where
 
             match state {
                 SyncTargetState::Revert { revert_to } => {
-                    Self::handle_revert(&storage, collector, revert_to)?;
+                    Self::handle_revert(&storage, collector, revert_to);
                     sync_target.mark_revert_complete(&revert_to);
                 }
                 SyncTargetState::RevertThenSync { revert_to, sync_to } => {
-                    Self::handle_revert(&storage, collector, revert_to)?;
+                    Self::handle_revert(&storage, collector, revert_to);
                     sync_target.mark_revert_complete(&revert_to);
                     Self::sync_forward(
                         &sync_target,
@@ -347,14 +347,35 @@ where
         }
     }
 
+    /// Reverts proof history to `revert_to`, containing every failure.
+    ///
+    /// Nothing here may propagate: the caller runs inside a critical task whose error path is a
+    /// panic, and a reorg the store cannot represent is not a reason to take the node down. The
+    /// store legitimately refuses to unwind past its earliest block, which it must do to keep a
+    /// baseline anchor, and that refusal is reachable in normal operation: `proofs init` writes only
+    /// `EarliestBlock`, so until the first block is indexed `earliest == latest` and any reorg of the
+    /// tip is already "beyond earliest".
+    ///
+    /// Leaving proof history on the abandoned branch is safe to serve from, because
+    /// `validate_canonical_anchor` on the RPC boundary compares the stored tip against the canonical
+    /// chain and refuses every proof request once they disagree. Recovery needs a re-init, so the
+    /// failure is logged at WARN rather than swallowed.
     fn handle_revert(
         storage: &MorphProofsStorage<Storage>,
         collector: &LiveTrieCollector<'_, Node::Evm, Node::Provider, Storage>,
         revert_to: BlockWithParent,
-    ) -> eyre::Result<()> {
-        let latest = match storage.get_latest_block_number()? {
-            Some((n, _)) => n,
-            None => return Ok(()),
+    ) {
+        let latest = match storage.get_latest_block_number() {
+            Ok(Some((n, _))) => n,
+            Ok(None) => return,
+            Err(error) => {
+                warn!(
+                    target: "morph::proofs_exex",
+                    ?error,
+                    "Failed to read proof history tip during revert; proof RPCs will refuse requests until the database is re-initialized"
+                );
+                return;
+            }
         };
 
         if latest >= revert_to.block.number {
@@ -364,10 +385,15 @@ where
                 latest,
                 "Reverting proofs storage"
             );
-            collector.unwind_history(revert_to).map_err(|error| {
-                error!(target: "morph::proofs_exex", ?error, "Failed to revert proofs storage");
-                error
-            })?;
+            if let Err(error) = collector.unwind_history(revert_to) {
+                warn!(
+                    target: "morph::proofs_exex",
+                    ?error,
+                    revert_to = revert_to.block.number,
+                    latest,
+                    "Failed to revert proofs storage; it stays on the abandoned branch and proof RPCs will refuse requests until the database is re-initialized"
+                );
+            }
         } else {
             debug!(
                 target: "morph::proofs_exex",
@@ -376,17 +402,16 @@ where
                 "Revert target beyond stored blocks, skipping"
             );
         }
-        Ok(())
     }
 
     #[cfg(test)]
-    fn handle_revert_for_test(&self, revert_to: BlockWithParent) -> eyre::Result<()> {
+    fn handle_revert_for_test(&self, revert_to: BlockWithParent) {
         let collector = LiveTrieCollector::new(
             self.ctx.evm_config().clone(),
             self.ctx.provider().clone(),
             &self.storage,
         );
-        Self::handle_revert(&self.storage, &collector, revert_to)
+        Self::handle_revert(&self.storage, &collector, revert_to);
     }
 
     async fn sync_forward(
@@ -1060,8 +1085,14 @@ mod tests {
         assert_eq!(latest, 5);
     }
 
+    /// A reorg the store cannot represent must not take the node down.
+    ///
+    /// Right after `proofs init` the store holds only its anchor, so `earliest == latest` and any
+    /// reorg of the tip is already "beyond earliest" — the single most likely reorg to hit a freshly
+    /// initialized node. `handle_revert` therefore has to contain that failure: it runs inside a
+    /// critical task whose error path is a panic, so returning `Err` here would shut the node down.
     #[tokio::test]
-    async fn handle_revert_propagates_unwind_failure() {
+    async fn handle_revert_contains_unwind_failure() {
         let dir = tempdir_path();
         let store = Arc::new(MdbxProofsStorage::new(dir.as_path()).expect("env"));
         let proofs: MorphProofsStorage<Arc<MdbxProofsStorage>> = Arc::clone(&store);
@@ -1072,15 +1103,10 @@ mod tests {
             .expect("exex test context");
         let exex = build_test_exex(ctx, proofs.clone());
 
+        // Unwinding the anchor itself is what the store refuses, to keep a baseline.
         let initial_anchor = BlockWithParent::new(b256(0x00), NumHash::new(0, b256(0x00)));
-        let error = exex
-            .handle_revert_for_test(initial_anchor)
-            .expect_err("unwinding the initial anchor must fail");
+        exex.handle_revert_for_test(initial_anchor);
 
-        assert!(
-            error.to_string().contains("earliest"),
-            "unexpected unwind error: {error:?}"
-        );
         assert_eq!(
             proofs
                 .get_latest_block_number()
@@ -1088,7 +1114,7 @@ mod tests {
                 .expect("initialized")
                 .0,
             0,
-            "failed unwind must leave proof history unchanged"
+            "a contained unwind failure must leave proof history unchanged"
         );
     }
 

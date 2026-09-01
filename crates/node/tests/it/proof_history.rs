@@ -463,9 +463,16 @@ async fn multi_proof_error<B: Serialize>(
 
 fn assert_outside_window(error: &str, requested: u64) {
     assert!(
-        error.contains("outside the historical proof window")
+        error.contains("outside the retained proof window")
             && error.contains(&requested.to_string()),
         "expected window error for block {requested}, got: {error}"
+    );
+    // The window conditions are client conditions, so they must not arrive as internal server
+    // errors. `MorphEthApiError::STATE_NOT_AVAILABLE_CODE`, kept as a literal here because the test
+    // asserts the wire contract rather than the constant.
+    assert!(
+        error.contains("-32005"),
+        "expected error code -32005 for block {requested}, got: {error}"
     );
 }
 
@@ -1168,9 +1175,7 @@ async fn proof_history_reorg_replaces_old_branch() -> eyre::Result<()> {
         Err(error) => {
             let message = error.to_string();
             assert!(
-                message.to_lowercase().contains("not found")
-                    || message.contains("HeaderNotFound")
-                    || message.contains("not canonical"),
+                message.to_lowercase().contains("not found") || message.contains("HeaderNotFound"),
                 "old fork hash should be rejected, got: {message}"
             );
         }

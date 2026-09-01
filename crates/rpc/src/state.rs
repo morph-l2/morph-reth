@@ -2,16 +2,22 @@
 
 use alloy_eips::BlockId;
 use alloy_primitives::B256;
+use jsonrpsee::types::ErrorObject;
 use morph_proofs::{MorphProofsStorage, MorphProofsStore, provider::MorphProofsStateProviderRef};
 use reth_provider::{
-    BlockHashReader, BlockIdReader, ProviderError, ProviderResult, StateProvider,
-    StateProviderFactory,
+    BlockHashReader, BlockIdReader, ProviderError, StateProvider, StateProviderFactory,
 };
 use reth_rpc_api::eth::helpers::FullEthApi;
-use reth_rpc_eth_types::EthApiError;
+use reth_rpc_eth_types::{EthApiError, error::ToRpcError};
 use thiserror::Error;
+use tracing::warn;
+
+use crate::error::MorphEthApiError;
 
 /// A request cannot be served by the current durable proof window.
+///
+/// `Display` carries the full diagnosis for server-side logs; [`ToRpcError`] deliberately sends the
+/// client less than that. See [`Self::to_rpc_error`].
 #[derive(Debug, Error, PartialEq, Eq)]
 enum ProofWindowError {
     #[error("historical proof database is not initialized")]
@@ -30,6 +36,53 @@ enum ProofWindowError {
         stored: B256,
         canonical: Option<B256>,
     },
+}
+
+impl ToRpcError for ProofWindowError {
+    /// Reports every variant as `StateNotAvailable` (-32005).
+    ///
+    /// These are client conditions — a block tag this node cannot serve a proof for — so they must
+    /// not surface as internal server errors, which is what any error reaching reth through
+    /// `ProviderError` becomes: only a handful of `ProviderError` variants are specialised in
+    /// `EthApiError::from`, and the rest fall through to `Internal`. Routing through
+    /// [`EthApiError::other`] keeps the code under our control and spares clients from
+    /// string-matching on messages.
+    ///
+    /// Not EIP-4444's 4444 (`PrunedHistoryUnavailable`), which is about missing block history; what
+    /// is unavailable here is a state proof for a block whose header and body we still serve.
+    ///
+    /// `CanonicalMismatch` sends no hashes. The canonical hash is public via `eth_getBlockByNumber`,
+    /// but the stored one would tell a caller which abandoned branch this node's proof database is
+    /// stuck on, which is not otherwise observable. The full pair stays in the log line emitted at
+    /// the call site.
+    fn to_rpc_error(&self) -> ErrorObject<'static> {
+        let message = match self {
+            Self::Uninitialized => {
+                "state proof unavailable: historical proof database is not initialized".to_string()
+            }
+            Self::Outside {
+                requested,
+                earliest,
+                latest,
+            } => format!(
+                "state proof unavailable for block {requested}: outside the retained proof window [{earliest}, {latest}]"
+            ),
+            Self::CanonicalMismatch { block, .. } => {
+                format!("state proof unavailable for block {block}")
+            }
+        };
+        ErrorObject::owned(
+            MorphEthApiError::STATE_NOT_AVAILABLE_CODE,
+            message,
+            None::<()>,
+        )
+    }
+}
+
+impl From<ProofWindowError> for EthApiError {
+    fn from(error: ProofWindowError) -> Self {
+        Self::other(error)
+    }
 }
 
 fn validate_canonical_anchor(
@@ -101,21 +154,25 @@ where
     P: MorphProofsStore + Clone + 'a,
 {
     /// Returns a provider only when `block_id` is inside the durable proof window.
+    ///
+    /// Returns [`EthApiError`] rather than `ProviderError` so the window conditions keep their own
+    /// RPC error code: a `ProviderError` would be folded into `EthApiError::Internal` by reth's
+    /// blanket arm, turning a client condition into a server error. See
+    /// [`ProofWindowError::to_rpc_error`].
     pub fn state_provider(
         &'a self,
         block_id: Option<BlockId>,
-    ) -> ProviderResult<Box<dyn StateProvider + 'a>> {
+    ) -> Result<Box<dyn StateProvider + 'a>, EthApiError> {
         let block_id = block_id.unwrap_or_default();
         let block_number = self
             .eth_api
             .provider()
             .block_number_for_id(block_id)?
-            .ok_or(EthApiError::HeaderNotFound(block_id))
-            .map_err(ProviderError::other)?;
+            .ok_or(EthApiError::HeaderNotFound(block_id))?;
         if let BlockId::Hash(requested) = block_id {
             let canonical_hash = self.eth_api.provider().block_hash(block_number)?;
             if canonical_hash != Some(requested.block_hash) {
-                return Err(ProviderError::other(EthApiError::HeaderNotFound(block_id)));
+                return Err(EthApiError::HeaderNotFound(block_id));
             }
         }
 
@@ -135,14 +192,22 @@ where
             .storage
             .get_latest_block_number_with_tx(&proof_tx)
             .map_err(|error| ProviderError::Database(error.into()))?;
-        validate_window(block_number, earliest, latest.map(|(number, _)| number))
-            .map_err(ProviderError::other)?;
+        validate_window(block_number, earliest, latest.map(|(number, _)| number))?;
 
-        let (latest_number, latest_hash) =
-            latest.ok_or_else(|| ProviderError::other(ProofWindowError::Uninitialized))?;
+        let (latest_number, latest_hash) = latest.ok_or(ProofWindowError::Uninitialized)?;
         let canonical_latest_hash = self.eth_api.provider().block_hash(latest_number)?;
-        validate_canonical_anchor(latest_number, latest_hash, canonical_latest_hash)
-            .map_err(ProviderError::other)?;
+        if let Err(error) =
+            validate_canonical_anchor(latest_number, latest_hash, canonical_latest_hash)
+        {
+            // The hashes identify the branch this node's proof database is stuck on, so they stay
+            // here and never reach the caller.
+            warn!(
+                target: "morph::rpc",
+                %error,
+                "Refusing proof request: proof history is not on the canonical chain"
+            );
+            return Err(error.into());
+        }
 
         // Bytecode is content-addressed and block hashes are canonical-chain data, so a latest
         // provider is sufficient for those auxiliary reads. Account/storage trie reads below are
@@ -160,8 +225,9 @@ where
 #[cfg(test)]
 mod tests {
     use alloy_primitives::B256;
+    use reth_rpc_eth_types::error::ToRpcError;
 
-    use super::{ProofWindowError, validate_canonical_anchor, validate_window};
+    use super::{MorphEthApiError, ProofWindowError, validate_canonical_anchor, validate_window};
 
     #[test]
     fn rejects_an_empty_window() {
@@ -197,5 +263,69 @@ mod tests {
             validate_canonical_anchor(20, stored, None),
             Err(ProofWindowError::CanonicalMismatch { block: 20, .. })
         ));
+    }
+
+    #[test]
+    fn reports_every_window_condition_as_state_not_available() {
+        // Not an internal server error: these are all "this node cannot serve a proof for that
+        // block", which the client fixes by choosing another block, not by retrying.
+        for error in [
+            ProofWindowError::Uninitialized,
+            ProofWindowError::Outside {
+                requested: 9,
+                earliest: 10,
+                latest: 20,
+            },
+            ProofWindowError::CanonicalMismatch {
+                block: 20,
+                stored: B256::repeat_byte(0x11),
+                canonical: Some(B256::repeat_byte(0x22)),
+            },
+        ] {
+            assert_eq!(
+                error.to_rpc_error().code(),
+                MorphEthApiError::STATE_NOT_AVAILABLE_CODE,
+                "unexpected code for {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_the_window_bounds_in_the_client_message() {
+        // The bounds are already public through `debug_proofsSyncStatus`, and a client needs them
+        // to pick a servable block.
+        let message = ProofWindowError::Outside {
+            requested: 9,
+            earliest: 10,
+            latest: 20,
+        }
+        .to_rpc_error()
+        .message()
+        .to_string();
+        assert!(message.contains('9'), "{message}");
+        assert!(message.contains("[10, 20]"), "{message}");
+    }
+
+    #[test]
+    fn withholds_branch_hashes_from_the_client() {
+        let stored = B256::repeat_byte(0x11);
+        let canonical = B256::repeat_byte(0x22);
+        let error = ProofWindowError::CanonicalMismatch {
+            block: 20,
+            stored,
+            canonical: Some(canonical),
+        };
+
+        // `stored` would reveal which abandoned branch this node's proof database is stuck on.
+        let message = error.to_rpc_error().message().to_string();
+        assert!(
+            !message.contains(&stored.to_string()) && !message.contains(&canonical.to_string()),
+            "hashes must not reach the client: {message}"
+        );
+        assert!(message.contains("20"), "{message}");
+
+        // The full pair stays available for the server-side log line.
+        let logged = error.to_string();
+        assert!(logged.contains(&stored.to_string()), "{logged}");
     }
 }
