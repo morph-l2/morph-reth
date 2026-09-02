@@ -353,6 +353,7 @@ impl MorphPayloadBuilderCtx {
         let base_fee = builder.evm().block().basefee();
         let l1_tx_count = self.attributes().transactions.len();
         let mut executed_txs: Vec<Bytes> = Vec::with_capacity(l1_tx_count);
+        let mut saw_l2_transaction = false;
 
         for (tx_idx, tx_with_encoded) in self.attributes().transactions.iter().enumerate() {
             // The transaction is already recovered in `try_new` via `try_into_recovered()`.
@@ -366,6 +367,22 @@ impl MorphPayloadBuilderCtx {
                 return Err(PayloadBuilderError::other(
                     MorphPayloadBuilderError::BlobTransactionRejected,
                 ));
+            }
+
+            // L1 messages must precede every L2 transaction. Consensus rejects a violation
+            // post-execution (`validate_l1_messages_in_block`), but under a deterministic
+            // build the supplied list may legitimately contain L2 transactions, so catching
+            // the bad ordering here fails fast and names the actual problem — the caller's
+            // transaction list — instead of surfacing it as a block validation error after
+            // the whole block has been executed.
+            if recovered_tx.is_l1_msg() {
+                if saw_l2_transaction {
+                    return Err(PayloadBuilderError::other(
+                        MorphPayloadBuilderError::L1MessageAfterRegularTx,
+                    ));
+                }
+            } else {
+                saw_l2_transaction = true;
             }
 
             let tx_gas = recovered_tx.gas_limit();

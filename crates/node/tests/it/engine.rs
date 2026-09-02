@@ -10,7 +10,9 @@ use alloy_eips::eip2718::Decodable2718;
 use alloy_primitives::{Address, B256};
 use alloy_rpc_types_engine::PayloadAttributes;
 use jsonrpsee::core::client::ClientT;
-use morph_node::test_utils::{HardforkSchedule, MorphTxBuilder, TEST_TOKEN_ID, TestNodeBuilder};
+use morph_node::test_utils::{
+    HardforkSchedule, L1MessageBuilder, MorphTxBuilder, TEST_TOKEN_ID, TestNodeBuilder,
+};
 use morph_payload_types::{
     AssembleL2BlockParams, ExecutableL2Data, GenericResponse, MorphPayloadAttributes,
     MorphPayloadTypes, SafeL2Data,
@@ -838,6 +840,68 @@ async fn new_safe_l2_block_ignores_txpool() -> eyre::Result<()> {
         transaction_hashes(&canonical_block(&follower, 3)?),
         vec![tx_nonce1_hash],
         "derived block 3 must contain exactly the committed nonce 1"
+    );
+
+    Ok(())
+}
+
+/// A derived block reproduces a mixed L1-message + L2 transaction list exactly.
+///
+/// This pins the `SafeL2Data.transactions` contract: it is the *complete ordered* transaction
+/// list of the committed block, not an L1-message-only list. Before the txpool fix the two
+/// readings were conflated — the field was documented as L1-messages-only while the pool
+/// silently supplied the L2 half — so a mixed list was never exercised end to end.
+///
+/// It also guards the L1-before-L2 ordering check in `execute_l1_messages` against inverting:
+/// a check that rejected this legal ordering would break every derived block that carries both
+/// kinds, which is the common case on a chain with bridge traffic.
+#[tokio::test(flavor = "multi_thread")]
+async fn new_safe_l2_block_executes_l1_messages_then_l2_transactions() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let node = nodes.pop().unwrap();
+
+    let genesis_timestamp = head_timestamp(&node)?;
+
+    let mut params = AssembleL2BlockParams::empty(1);
+    params.timestamp = Some(genesis_timestamp + 1);
+    let block1 = assemble_l2_block(&node, params).await?;
+    let gas_limit = block1.gas_limit;
+    import_l2_block(&node, block1).await?;
+
+    // Block 1 was empty, so the next expected queue index is 0.
+    let l1_msg = L1MessageBuilder::new(0).build_encoded();
+    let l2_tx = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
+        .with_v1_token_fee(TEST_TOKEN_ID)
+        .build_signed()?;
+    let l1_msg_hash = tx_hash_of(&l1_msg);
+    let l2_tx_hash = tx_hash_of(&l2_tx);
+
+    let safe = SafeL2Data {
+        number: 2,
+        gas_limit,
+        base_fee_per_gas: None,
+        timestamp: genesis_timestamp + 2,
+        transactions: vec![l1_msg, l2_tx],
+        parent_hash: None,
+    };
+
+    let header: MorphHeader = node
+        .auth_server_handle()
+        .http_client()
+        .request("engine_newSafeL2Block", (safe,))
+        .await?;
+    assert_eq!(header.number(), 2);
+
+    assert_eq!(
+        transaction_hashes(&canonical_block(&node, 2)?),
+        vec![l1_msg_hash, l2_tx_hash],
+        "the derived block must contain exactly the supplied transactions, in the supplied order"
+    );
+    assert_eq!(
+        header.next_l1_msg_index, 1,
+        "the L1 message must advance next_l1_msg_index"
     );
 
     Ok(())
