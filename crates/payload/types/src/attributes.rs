@@ -8,8 +8,10 @@ use morph_primitives::MorphTxEnvelope;
 use reth_primitives_traits::{Recovered, SignerRecoverable, WithEncoded};
 use sha2::{Digest, Sha256};
 
-/// Version byte mixed into Morph payload IDs. Bumped only when the payload-attribute
-/// hashing scheme materially changes; serves as a domain separator across versions.
+/// Engine API version byte stored in Morph payload IDs.
+///
+/// Morph's custom payload methods currently use version 1. The complete payload attributes,
+/// including the txpool policy, are hashed separately from this protocol version.
 pub const MORPH_PAYLOAD_BUILDER_VERSION: u8 = 1;
 
 /// Morph-specific payload attributes for Engine API.
@@ -116,7 +118,7 @@ impl From<PayloadAttributes> for MorphPayloadAttributes {
 /// Internal payload builder attributes.
 ///
 /// This is the internal representation used by the payload builder,
-/// with decoded L1 messages and computed payload ID.
+/// with decoded supplied transactions and a computed payload ID.
 ///
 /// Implements `reth_payload_primitives::PayloadAttributes` so it can serve as the
 /// `type Attributes` in `PayloadBuilder` (v2.0.0 requires the builder attributes to
@@ -170,7 +172,7 @@ pub struct MorphPayloadBuilderAttributes {
 }
 
 impl MorphPayloadBuilderAttributes {
-    /// Build from parent hash + RPC attributes + version byte, decoding L1 messages.
+    /// Build from parent hash + RPC attributes + version byte, decoding supplied transactions.
     pub fn try_new(
         parent: B256,
         attributes: MorphPayloadAttributes,
@@ -249,7 +251,7 @@ impl MorphPayloadBuilderAttributes {
 
     /// Returns true if there are L1 messages to execute.
     pub fn has_l1_messages(&self) -> bool {
-        !self.transactions.is_empty()
+        self.transactions.iter().any(|tx| tx.value().is_l1_msg())
     }
 
     /// Returns true if the builder may append transactions from the local pool.
@@ -357,6 +359,9 @@ fn payload_id_morph(parent: &B256, attributes: &MorphPayloadAttributes, version:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_consensus::{Sealed, Signed, TxLegacy};
+    use alloy_primitives::{Signature, TxKind, U256};
+    use morph_primitives::transaction::TxL1Msg;
 
     fn create_test_attributes() -> MorphPayloadAttributes {
         MorphPayloadAttributes {
@@ -670,14 +675,49 @@ mod tests {
     }
 
     #[test]
-    fn test_builder_attributes_has_l1_messages_empty() {
-        let attrs = MorphPayloadBuilderAttributes::try_new(
+    fn test_builder_attributes_detect_only_l1_messages() {
+        let mut attrs = MorphPayloadBuilderAttributes::try_new(
             B256::ZERO,
             create_test_attributes(),
             MORPH_PAYLOAD_BUILDER_VERSION,
         )
         .unwrap();
         assert!(!attrs.has_l1_messages());
+
+        let l2_tx = MorphTxEnvelope::Legacy(Signed::new_unhashed(
+            TxLegacy {
+                chain_id: Some(1),
+                nonce: 0,
+                gas_price: 1,
+                gas_limit: 21_000,
+                to: TxKind::Call(Address::ZERO),
+                value: U256::ZERO,
+                input: Bytes::new(),
+            },
+            Signature::test_signature(),
+        ));
+        attrs.transactions.push(WithEncoded::new(
+            Bytes::new(),
+            Recovered::new_unchecked(l2_tx, Address::ZERO),
+        ));
+        assert!(
+            !attrs.has_l1_messages(),
+            "a non-empty L2-only list must not be reported as L1 messages"
+        );
+
+        let l1_msg = MorphTxEnvelope::L1Msg(Sealed::new(TxL1Msg {
+            queue_index: 0,
+            gas_limit: 21_000,
+            to: Address::ZERO,
+            value: U256::ZERO,
+            sender: Address::ZERO,
+            input: Bytes::new(),
+        }));
+        attrs.transactions.push(WithEncoded::new(
+            Bytes::new(),
+            Recovered::new_unchecked(l1_msg, Address::ZERO),
+        ));
+        assert!(attrs.has_l1_messages());
     }
 
     #[test]

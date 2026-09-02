@@ -54,6 +54,34 @@ pub struct RealMorphL2EngineApi<Provider> {
     metrics: MorphEngineApiMetrics,
 }
 
+/// Tracks the L1-derived finalized block hash from `set_block_tags` so that FCU
+/// calls can forward it to the engine tree.
+///
+/// Only finalized is cached. FCU safe is passed by the import caller, not cached or
+/// derived from the head, so reorg-capable imports never reuse a stale safe tag.
+#[derive(Debug, Default)]
+pub struct BlockTagTracker {
+    /// Last L1-derived finalized hash from `set_block_tags`. `None` means
+    /// `set_block_tags` has not yet provided a value (e.g. a validator not running
+    /// BlockTagService, or before the first L1-finalized batch).
+    finalized_hash: RwLock<Option<B256>>,
+}
+
+impl BlockTagTracker {
+    /// Caches the L1-derived finalized hash from a successful `set_block_tags` call.
+    /// `None` is ignored, so a previously-supplied finalized is preserved.
+    pub fn record_finalized_hash(&self, finalized_hash: Option<B256>) {
+        if let Some(h) = finalized_hash {
+            *self.finalized_hash.write() = Some(h);
+        }
+    }
+
+    /// Returns the last L1-derived finalized hash, or `None` if not yet set.
+    fn l1_finalized_hash(&self) -> Option<B256> {
+        *self.finalized_hash.read()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct CanonicalHead {
     number: u64,
@@ -80,34 +108,6 @@ impl TxPoolPolicy {
     /// Maps to the `no_tx_pool` flag carried by [`morph_payload_types::MorphPayloadAttributes`].
     const fn no_tx_pool(self) -> bool {
         matches!(self, Self::Exclude)
-    }
-}
-
-/// Tracks the L1-derived finalized block hash from `set_block_tags` so that FCU
-/// calls can forward it to the engine tree.
-///
-/// Only finalized is cached. FCU safe is passed by the import caller, not cached or
-/// derived from the head, so reorg-capable imports never reuse a stale safe tag.
-#[derive(Debug, Default)]
-pub struct BlockTagTracker {
-    /// Last L1-derived finalized hash from `set_block_tags`. `None` means
-    /// `set_block_tags` has not yet provided a value (e.g. a validator not running
-    /// BlockTagService, or before the first L1-finalized batch).
-    finalized_hash: RwLock<Option<B256>>,
-}
-
-impl BlockTagTracker {
-    /// Caches the L1-derived finalized hash from a successful `set_block_tags` call.
-    /// `None` is ignored, so a previously-supplied finalized is preserved.
-    pub fn record_finalized_hash(&self, finalized_hash: Option<B256>) {
-        if let Some(h) = finalized_hash {
-            *self.finalized_hash.write() = Some(h);
-        }
-    }
-
-    /// Returns the last L1-derived finalized hash, or `None` if not yet set.
-    fn l1_finalized_hash(&self) -> Option<B256> {
-        *self.finalized_hash.read()
     }
 }
 

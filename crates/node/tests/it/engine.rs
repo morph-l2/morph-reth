@@ -852,7 +852,8 @@ async fn new_safe_l2_block_ignores_txpool() -> eyre::Result<()> {
 /// readings were conflated — the field was documented as L1-messages-only while the pool
 /// silently supplied the L2 half — so a mixed list was never exercised end to end.
 ///
-/// It also guards the L1-before-L2 ordering check in `execute_l1_messages` against inverting:
+/// It also guards the L1-before-L2 ordering check in `execute_supplied_transactions` against
+/// inverting:
 /// a check that rejected this legal ordering would break every derived block that carries both
 /// kinds, which is the common case on a chain with bridge traffic.
 #[tokio::test(flavor = "multi_thread")]
@@ -902,6 +903,69 @@ async fn new_safe_l2_block_executes_l1_messages_then_l2_transactions() -> eyre::
     assert_eq!(
         header.next_l1_msg_index, 1,
         "the L1 message must advance next_l1_msg_index"
+    );
+
+    Ok(())
+}
+
+/// L1 messages reserve their full gas limit from the block gas pool.
+///
+/// Morph geth deducts an L1 message's full gas limit and deliberately does not return unused gas
+/// to `GasPool`, even though the receipt and block header report only the gas actually consumed.
+/// Accounting only the actual gas here would let a follower accept an L2 transaction that geth
+/// rejects with `ErrGasLimitReached`.
+#[tokio::test(flavor = "multi_thread")]
+async fn new_safe_l2_block_applies_l1_message_gas_pool_semantics() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let node = nodes.pop().unwrap();
+
+    let genesis_timestamp = head_timestamp(&node)?;
+    let mut params = AssembleL2BlockParams::empty(1);
+    params.timestamp = Some(genesis_timestamp + 1);
+    let block1 = assemble_l2_block(&node, params).await?;
+    let block_gas_limit = block1.gas_limit;
+    import_l2_block(&node, block1).await?;
+    let head_before = canonical_snapshot(&node)?;
+
+    // The simple L1 call consumes far less than its limit, but geth leaves only 1,000,000 gas
+    // available to later transactions. The L2 transaction therefore cannot fit despite the sum
+    // of both transactions' actual execution gas being well below the block limit.
+    let l1_msg = L1MessageBuilder::new(0)
+        .with_gas_limit(
+            block_gas_limit
+                .checked_sub(1_000_000)
+                .expect("test block gas limit exceeds reserved remainder"),
+        )
+        .build_encoded();
+    let l2_tx = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
+        .with_v1_token_fee(TEST_TOKEN_ID)
+        .with_gas_limit(2_000_000)
+        .build_signed()?;
+
+    let safe = SafeL2Data {
+        number: 2,
+        gas_limit: block_gas_limit,
+        base_fee_per_gas: None,
+        timestamp: genesis_timestamp + 2,
+        transactions: vec![l1_msg, l2_tx],
+        parent_hash: None,
+    };
+
+    let result: Result<MorphHeader, _> = node
+        .auth_server_handle()
+        .http_client()
+        .request("engine_newSafeL2Block", (safe,))
+        .await;
+    assert!(
+        result.is_err(),
+        "the L2 transaction must not use gas reserved by the preceding L1 message"
+    );
+    assert_eq!(
+        canonical_snapshot(&node)?,
+        head_before,
+        "a gas-pool violation must leave the canonical chain untouched"
     );
 
     Ok(())

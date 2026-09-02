@@ -11,9 +11,9 @@ pub enum MorphPayloadBuilderError {
     #[error("failed to recover transaction signer")]
     TransactionEcRecoverFailed,
 
-    /// Invalid sequencer transaction in forced transaction list.
-    #[error("invalid sequencer transaction: {error}")]
-    InvalidSequencerTransaction {
+    /// Invalid transaction in the caller-supplied transaction list.
+    #[error("invalid supplied transaction: {error}")]
+    InvalidSuppliedTransaction {
         /// Human-readable validation error.
         error: String,
     },
@@ -32,15 +32,15 @@ pub enum MorphPayloadBuilderError {
     /// seals the block with whatever already fits, leaving the rest for the next block.
     #[error(
         "transaction {tx_index} exceeds block gas limit during deterministic build: \
-         tx_gas={tx_gas}, cumulative_gas_used={cumulative_gas_used}, block_gas_limit={block_gas_limit}"
+         tx_gas={tx_gas}, gas_pool_used={gas_pool_used}, block_gas_limit={block_gas_limit}"
     )]
     BlockGasLimitExceeded {
         /// Index of the offending transaction in the supplied list.
         tx_index: usize,
         /// Gas limit of the offending transaction.
         tx_gas: u64,
-        /// Gas already consumed by preceding transactions.
-        cumulative_gas_used: u64,
+        /// Gas unavailable to later transactions under the block gas-pool rules.
+        gas_pool_used: u64,
         /// Gas limit of the block being built.
         block_gas_limit: u64,
     },

@@ -344,15 +344,15 @@ impl MorphPayloadBuilderCtx {
     ///   returning `ErrGasLimitReached` and rejecting the whole block.
     ///
     /// Returns the executed transaction bytes for inclusion in ExecutableL2Data.
-    fn execute_l1_messages(
+    fn execute_supplied_transactions(
         &self,
         builder: &mut impl BlockBuilder<Primitives = morph_primitives::MorphPrimitives>,
         info: &mut ExecutionInfo,
     ) -> Result<Vec<Bytes>, PayloadBuilderError> {
         let block_gas_limit = builder.evm().block().gas_limit();
         let base_fee = builder.evm().block().basefee();
-        let l1_tx_count = self.attributes().transactions.len();
-        let mut executed_txs: Vec<Bytes> = Vec::with_capacity(l1_tx_count);
+        let supplied_tx_count = self.attributes().transactions.len();
+        let mut executed_txs: Vec<Bytes> = Vec::with_capacity(supplied_tx_count);
         let mut saw_l2_transaction = false;
 
         for (tx_idx, tx_with_encoded) in self.attributes().transactions.iter().enumerate() {
@@ -401,7 +401,7 @@ impl MorphPayloadBuilderCtx {
                         MorphPayloadBuilderError::BlockGasLimitExceeded {
                             tx_index: tx_idx,
                             tx_gas,
-                            cumulative_gas_used: info.cumulative_gas_used,
+                            gas_pool_used: info.gas_pool_used,
                             block_gas_limit,
                         },
                     ));
@@ -421,6 +421,7 @@ impl MorphPayloadBuilderCtx {
                         tx_index = tx_idx,
                         tx_gas,
                         cumulative_gas_used = info.cumulative_gas_used,
+                        gas_pool_used = info.gas_pool_used,
                         block_gas_limit,
                         "L1 message would exceed remaining block gas; stopping L1 packing"
                     );
@@ -444,10 +445,10 @@ impl MorphPayloadBuilderCtx {
                         tx_index = tx_idx,
                         %error,
                         ?recovered_tx,
-                        "invalid L1 message transaction in payload attributes"
+                        "invalid supplied transaction in payload attributes"
                     );
                     return Err(PayloadBuilderError::other(
-                        MorphPayloadBuilderError::InvalidSequencerTransaction {
+                        MorphPayloadBuilderError::InvalidSuppliedTransaction {
                             error: error.to_string(),
                         },
                     ));
@@ -458,10 +459,10 @@ impl MorphPayloadBuilderCtx {
                         tx_index = tx_idx,
                         %err,
                         ?recovered_tx,
-                        "validation error in L1 message transaction"
+                        "validation error in supplied transaction"
                     );
                     return Err(PayloadBuilderError::other(
-                        MorphPayloadBuilderError::InvalidSequencerTransaction {
+                        MorphPayloadBuilderError::InvalidSuppliedTransaction {
                             error: err.to_string(),
                         },
                     ));
@@ -473,7 +474,7 @@ impl MorphPayloadBuilderCtx {
                         tx_index = tx_idx,
                         %err,
                         ?recovered_tx,
-                        "fatal EVM execution error on L1 message transaction"
+                        "fatal EVM execution error on supplied transaction"
                     );
                     return Err(PayloadBuilderError::EvmExecutionError(Box::new(err)));
                 }
@@ -484,12 +485,13 @@ impl MorphPayloadBuilderCtx {
 
             // For L1 messages, track the next L1 message index.
             // L1 gas is prepaid on L1, so no fees are collected here.
-            let gas_used = if recovered_tx.is_l1_msg() {
+            let is_l1_msg = recovered_tx.is_l1_msg();
+            if is_l1_msg {
                 // Ensure the queue index is strictly sequential
                 if let Some(queue_index) = recovered_tx.queue_index() {
                     if queue_index != info.next_l1_message_index {
                         return Err(PayloadBuilderError::other(
-                            MorphPayloadBuilderError::InvalidSequencerTransaction {
+                            MorphPayloadBuilderError::InvalidSuppliedTransaction {
                                 error: format!(
                                     "invalid L1 message queue index: expected {}, got {}",
                                     info.next_l1_message_index, queue_index
@@ -499,18 +501,18 @@ impl MorphPayloadBuilderCtx {
                     }
                     info.next_l1_message_index = queue_index + 1;
                 }
-                // Use actual gas consumed (including intrinsic gas)
-                gas_used
             } else {
                 // Calculate fees for L2 transactions: effective_tip * gas_used
                 let effective_tip = recovered_tx
                     .effective_tip_per_gas(base_fee)
                     .unwrap_or_default();
                 info.total_fees += U256::from(effective_tip) * U256::from(gas_used);
-                gas_used
-            };
+            }
 
             info.cumulative_gas_used += gas_used;
+            // Morph geth reports actual L1 execution gas in receipts but does not return unused
+            // L1-message gas to the block gas pool. Regular transactions do return unused gas.
+            info.gas_pool_used += if is_l1_msg { tx_gas } else { gas_used };
 
             // Increment transaction count
             info.transaction_count += 1;
@@ -547,10 +549,11 @@ impl MorphPayloadBuilderCtx {
             }
 
             // Check if the breaker triggers (time, gas, or DA limits)
-            if breaker.should_break(info.cumulative_gas_used, info.cumulative_da_bytes_used) {
+            if breaker.should_break(info.gas_pool_used, info.cumulative_da_bytes_used) {
                 tracing::debug!(
                     target: "payload_builder",
                     cumulative_gas_used = info.cumulative_gas_used,
+                    gas_pool_used = info.gas_pool_used,
                     cumulative_da_bytes_used = info.cumulative_da_bytes_used,
                     transaction_count = info.transaction_count,
                     elapsed = ?breaker.elapsed(),
@@ -659,6 +662,7 @@ impl MorphPayloadBuilderCtx {
 
             // Update execution info
             info.cumulative_gas_used += gas_used;
+            info.gas_pool_used += gas_used;
             info.cumulative_da_bytes_used += tx_size;
             info.transaction_count += 1;
 
@@ -679,8 +683,13 @@ impl MorphPayloadBuilderCtx {
 /// Execution information collected during payload building.
 #[derive(Debug, Default)]
 struct ExecutionInfo {
-    /// Cumulative gas used by all executed transactions.
+    /// Cumulative gas reported in transaction receipts and the block header.
     cumulative_gas_used: u64,
+    /// Gas unavailable to later transactions under Morph geth's block gas-pool rules.
+    ///
+    /// L1 messages contribute their full gas limit here, while regular transactions contribute
+    /// their actual gas used.
+    gas_pool_used: u64,
     /// Cumulative encoded L2 transaction bytes counted toward the DA packing cap.
     /// L1 messages are not included.
     cumulative_da_bytes_used: u64,
@@ -699,6 +708,7 @@ impl ExecutionInfo {
     const fn new(next_l1_message_index: u64, max_da_block_size: Option<u64>) -> Self {
         Self {
             cumulative_gas_used: 0,
+            gas_pool_used: 0,
             cumulative_da_bytes_used: 0,
             total_fees: U256::ZERO,
             next_l1_message_index,
@@ -713,7 +723,7 @@ impl ExecutionInfo {
     /// transaction with an absurd gas limit through and produce an invalid block.
     fn is_tx_over_limits(&self, tx_gas_limit: u64, tx_size: u64, block_gas_limit: u64) -> bool {
         if self
-            .cumulative_gas_used
+            .gas_pool_used
             .checked_add(tx_gas_limit)
             .is_none_or(|total_gas| total_gas > block_gas_limit)
         {
@@ -811,9 +821,9 @@ where
     // Create breaker for early exit from pool transaction execution
     let breaker = ctx.builder_config.breaker(block_gas_limit);
 
-    // Execute L1 message transactions (must be first, with sequential queue indices)
+    // Execute the supplied transactions (L1 messages must form a sequential prefix).
     let txs_all_started = Instant::now();
-    let mut executed_txs = ctx.execute_l1_messages(&mut builder, &mut info)?;
+    let mut executed_txs = ctx.execute_supplied_transactions(&mut builder, &mut info)?;
 
     // Append the best pool transactions, unless the caller demanded a deterministic build.
     //
@@ -841,6 +851,7 @@ where
                 target: "payload_builder",
                 elapsed = ?breaker.elapsed(),
                 cumulative_gas_used = info.cumulative_gas_used,
+                gas_pool_used = info.gas_pool_used,
                 cumulative_da_bytes_used = info.cumulative_da_bytes_used,
                 tx_count = executed_txs.len(),
                 "breaker stopped pool execution, finalizing payload"
@@ -995,6 +1006,7 @@ mod tests {
     fn test_execution_info_default() {
         let info = ExecutionInfo::default();
         assert_eq!(info.cumulative_gas_used, 0);
+        assert_eq!(info.gas_pool_used, 0);
         assert_eq!(info.cumulative_da_bytes_used, 0);
         assert_eq!(info.total_fees, U256::ZERO);
         assert_eq!(info.next_l1_message_index, 0);
@@ -1007,6 +1019,7 @@ mod tests {
         let info = ExecutionInfo::new(42, Some(720 * 1024));
         assert_eq!(info.next_l1_message_index, 42);
         assert_eq!(info.cumulative_gas_used, 0);
+        assert_eq!(info.gas_pool_used, 0);
         assert_eq!(info.cumulative_da_bytes_used, 0);
         assert_eq!(info.total_fees, U256::ZERO);
         assert_eq!(info.transaction_count, 0);
@@ -1032,30 +1045,30 @@ mod tests {
     #[test]
     fn test_is_tx_over_limits_within_gas() {
         let info = ExecutionInfo {
-            cumulative_gas_used: 100_000,
+            gas_pool_used: 100_000,
             ..Default::default()
         };
-        // tx_gas + cumulative = 100_000 + 21_000 = 121_000, block limit = 30_000_000
+        // tx_gas + gas_pool_used = 100_000 + 21_000 = 121_000, block limit = 30_000_000
         assert!(!info.is_tx_over_limits(21_000, 100, 30_000_000));
     }
 
     #[test]
     fn test_is_tx_over_limits_exceeds_gas_limit() {
         let info = ExecutionInfo {
-            cumulative_gas_used: 29_990_000,
+            gas_pool_used: 29_990_000,
             ..Default::default()
         };
-        // tx_gas + cumulative = 29_990_000 + 21_000 = 30_011_000 > 30_000_000
+        // tx_gas + gas_pool_used = 29_990_000 + 21_000 = 30_011_000 > 30_000_000
         assert!(info.is_tx_over_limits(21_000, 100, 30_000_000));
     }
 
     #[test]
     fn test_is_tx_over_limits_exactly_at_gas_limit() {
         let info = ExecutionInfo {
-            cumulative_gas_used: 29_979_000,
+            gas_pool_used: 29_979_000,
             ..Default::default()
         };
-        // tx_gas + cumulative = 29_979_000 + 21_000 = 30_000_000 == block limit
+        // tx_gas + gas_pool_used = 29_979_000 + 21_000 = 30_000_000 == block limit
         // Uses > comparison, so exactly at limit is NOT over
         assert!(!info.is_tx_over_limits(21_000, 100, 30_000_000));
     }
@@ -1063,10 +1076,10 @@ mod tests {
     #[test]
     fn test_is_tx_over_limits_one_over_gas_limit() {
         let info = ExecutionInfo {
-            cumulative_gas_used: 29_979_001,
+            gas_pool_used: 29_979_001,
             ..Default::default()
         };
-        // tx_gas + cumulative = 29_979_001 + 21_000 = 30_000_001 > 30_000_000
+        // tx_gas + gas_pool_used = 29_979_001 + 21_000 = 30_000_001 > 30_000_000
         assert!(info.is_tx_over_limits(21_000, 100, 30_000_000));
     }
 
@@ -1087,7 +1100,7 @@ mod tests {
     #[test]
     fn test_is_tx_over_limits_gas_sum_overflow() {
         let info = ExecutionInfo {
-            cumulative_gas_used: 1,
+            gas_pool_used: 1,
             ..Default::default()
         };
         // Wrapping would yield 0 and wrongly report "fits"; overflow must count as over.
