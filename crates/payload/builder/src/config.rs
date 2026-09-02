@@ -160,7 +160,7 @@ impl PayloadBuildingBreaker {
     /// - Time limit has been exceeded
     /// - Gas limit has been reached (leaving room for at least one minimal transaction)
     /// - DA size limit has been reached (leaving room for at least one minimal transaction)
-    pub fn should_break(&self, cumulative_gas_used: u64, cumulative_da_size_used: u64) -> bool {
+    pub fn should_break(&self, gas_pool_used: u64, cumulative_da_size_used: u64) -> bool {
         // Check time limit
         if self.start.elapsed() >= self.time_limit {
             tracing::trace!(
@@ -173,10 +173,10 @@ impl PayloadBuildingBreaker {
         }
 
         // Check gas limit - stop if remaining gas can't fit even the smallest transaction
-        if cumulative_gas_used > self.gas_limit.saturating_sub(MIN_TRANSACTION_GAS) {
+        if gas_pool_used > self.gas_limit.saturating_sub(MIN_TRANSACTION_GAS) {
             tracing::trace!(
                 target: "payload_builder",
-                cumulative_gas_used,
+                gas_pool_used,
                 gas_limit = self.gas_limit,
                 "gas limit reached"
             );

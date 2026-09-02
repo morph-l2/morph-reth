@@ -1,6 +1,6 @@
 //! Mixed L1/L2 block construction under independent resource limits.
 
-use alloy_consensus::{BlockHeader, transaction::TxHashRef};
+use alloy_consensus::{BlockHeader, Transaction, TxReceipt, transaction::TxHashRef};
 use alloy_primitives::B256;
 use alloy_primitives::{Bytes, U256};
 use alloy_rlp::Encodable;
@@ -77,6 +77,39 @@ fn l2_da_bytes(block: &Block) -> u64 {
         .sum()
 }
 
+/// Gas removed from the block gas pool by the canonical transactions.
+///
+/// L1 messages reserve their full gas limit, while regular transactions return unused gas and
+/// therefore consume only the delta reported by their cumulative receipt gas.
+fn block_gas_pool_used(node: &MorphTestNode, block: &Block) -> eyre::Result<u64> {
+    let mut previous_cumulative_gas = 0;
+    let mut gas_pool_used = 0u64;
+
+    for tx in &block.body.transactions {
+        let receipt = node
+            .inner
+            .provider
+            .receipt_by_hash(*tx.tx_hash())?
+            .ok_or_else(|| eyre::eyre!("missing receipt for transaction {}", tx.tx_hash()))?;
+        let cumulative_gas = receipt.cumulative_gas_used();
+        let tx_gas_used = cumulative_gas
+            .checked_sub(previous_cumulative_gas)
+            .ok_or_else(|| eyre::eyre!("receipt cumulative gas decreased"))?;
+        previous_cumulative_gas = cumulative_gas;
+
+        let gas_pool_charge = if tx.is_l1_msg() {
+            tx.gas_limit()
+        } else {
+            tx_gas_used
+        };
+        gas_pool_used = gas_pool_used
+            .checked_add(gas_pool_charge)
+            .ok_or_else(|| eyre::eyre!("block gas-pool usage overflowed u64"))?;
+    }
+
+    Ok(gas_pool_used)
+}
+
 /// Behavior contract:
 /// - fault pressure: one L1 message plus three independent pool transactions
 ///   cannot all fit under the block gas limit;
@@ -86,8 +119,12 @@ fn l2_da_bytes(block: &Block) -> u64 {
 async fn mixed_block_respects_gas_limit_without_losing_pool_transactions() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
+    const BLOCK_GAS_LIMIT: u64 = 110_000;
+    const L1_MESSAGE_GAS_LIMIT: u64 = 50_000;
+    const OVERFLOW_TX_GAS_LIMIT: u64 = 30_000;
+
     let (mut nodes, wallet) = TestNodeBuilder::new()
-        .with_gas_limit(80_000)
+        .with_gas_limit(BLOCK_GAS_LIMIT)
         .build()
         .await?;
     let node = nodes.pop().expect("one node requested");
@@ -103,7 +140,7 @@ async fn mixed_block_respects_gas_limit_without_losing_pool_transactions() -> ey
         .inject_tx(
             MorphTxBuilder::new(wallet.chain_id, signer_b, 0)
                 .with_v1_eth_fee()
-                .with_gas_limit(30_000)
+                .with_gas_limit(OVERFLOW_TX_GAS_LIMIT)
                 .with_fees(HIGH_FEE, HIGH_FEE)
                 .build_signed()?,
         )
@@ -113,7 +150,7 @@ async fn mixed_block_respects_gas_limit_without_losing_pool_transactions() -> ey
         .inject_tx(
             MorphTxBuilder::new(wallet.chain_id, signer_c, 0)
                 .with_v1_eth_fee()
-                .with_gas_limit(30_000)
+                .with_gas_limit(OVERFLOW_TX_GAS_LIMIT)
                 .with_fees(LOW_FEE, LOW_FEE)
                 .build_signed()?,
         )
@@ -123,7 +160,7 @@ async fn mixed_block_respects_gas_limit_without_losing_pool_transactions() -> ey
         &node,
         vec![
             L1MessageBuilder::new(0)
-                .with_gas_limit(50_000)
+                .with_gas_limit(L1_MESSAGE_GAS_LIMIT)
                 .build_encoded(),
         ],
     )
@@ -133,12 +170,14 @@ async fn mixed_block_respects_gas_limit_without_losing_pool_transactions() -> ey
 
     assert_l1_prefix(&block, 1);
     assert!(block.header.inner.gas_used <= block.header.inner.gas_limit);
-    // The excluded transaction would not have fit, so the block must genuinely be
-    // close to full rather than merely under the limit.
+    let gas_pool_used = block_gas_pool_used(&node, &block)?;
+    assert!(gas_pool_used <= block.header.inner.gas_limit);
+    // Header gasUsed intentionally excludes unused gas reserved by the L1 message, so prove the
+    // packing limit bound against reconstructed gas-pool usage instead.
     assert!(
-        block.header.inner.gas_used + 30_000 > block.header.inner.gas_limit,
-        "gas limit did not actually bind: used {} of {}",
-        block.header.inner.gas_used,
+        gas_pool_used + OVERFLOW_TX_GAS_LIMIT > block.header.inner.gas_limit,
+        "gas limit did not actually bind: gas pool used {} of {}",
+        gas_pool_used,
         block.header.inner.gas_limit
     );
     assert!(hashes.contains(&regular_hash));

@@ -8,8 +8,10 @@ use morph_primitives::MorphTxEnvelope;
 use reth_primitives_traits::{Recovered, SignerRecoverable, WithEncoded};
 use sha2::{Digest, Sha256};
 
-/// Version byte mixed into Morph payload IDs. Bumped only when the payload-attribute
-/// hashing scheme materially changes; serves as a domain separator across versions.
+/// Engine API version byte stored in Morph payload IDs.
+///
+/// Morph's custom payload methods currently use version 1. The complete payload attributes,
+/// including the txpool policy, are hashed separately from this protocol version.
 pub const MORPH_PAYLOAD_BUILDER_VERSION: u8 = 1;
 
 /// Morph-specific payload attributes for Engine API.
@@ -23,18 +25,36 @@ pub struct MorphPayloadAttributes {
     #[serde(flatten)]
     pub inner: PayloadAttributes,
 
-    /// L1 message transactions to include at the beginning of the block.
+    /// Transactions to execute at the beginning of the block, in the given order.
     ///
-    /// **IMPORTANT**: This field contains **only L1 messages** (L1→L2 deposit transactions).
-    /// L2 transactions are always pulled from the transaction pool, matching go-ethereum's behavior.
+    /// The exact meaning depends on [`Self::no_tx_pool`]:
     ///
-    /// L1 messages:
-    /// - Must have sequential queue indices
-    /// - Are never in the mempool
-    /// - Must be explicitly provided by the sequencer
-    /// - Are executed before any L2 transactions
+    /// - `no_tx_pool == false` (sequencer assembly): **only L1 messages** (L1→L2 deposits).
+    ///   They are executed first, then the builder appends the best transactions from the
+    ///   local pool. This matches go-ethereum's `AssembleL2Block`.
+    /// - `no_tx_pool == true` (derivation import): the **complete ordered transaction list**
+    ///   of the block, L1 messages first followed by the committed L2 transactions. Nothing
+    ///   is appended from the pool. This matches go-ethereum's `NewSafeL2Block`, which
+    ///   executes the decoded block via `BlockChain.ProcessBlock` and never touches the miner.
+    ///
+    /// In both cases any L1 messages present must carry strictly sequential queue indices and
+    /// must precede the L2 transactions. L1 messages are never in the mempool and must always
+    /// be supplied explicitly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transactions: Option<Vec<Bytes>>,
+
+    /// Disables txpool selection, making block building deterministic.
+    ///
+    /// When true, the builder executes exactly [`Self::transactions`] and appends nothing from
+    /// the local pool. Required by derivation (`engine_newSafeL2Block`): a follower's pool
+    /// holds gossiped transactions that the sequencer committed to *later* blocks, so
+    /// appending them to an earlier derived block forks the follower off the sequencer chain.
+    ///
+    /// This is deliberately explicit rather than inferred from `transactions.is_some()`:
+    /// sequencer assembly also supplies `transactions` whenever the block has L1 messages,
+    /// and inferring the flag there would stop the sequencer from packing the mempool at all.
+    #[serde(default)]
+    pub no_tx_pool: bool,
 
     /// Optional gas limit override used by derivation/safe import.
     #[serde(
@@ -88,6 +108,7 @@ impl From<PayloadAttributes> for MorphPayloadAttributes {
         Self {
             inner,
             transactions: None,
+            no_tx_pool: false,
             gas_limit: None,
             base_fee_per_gas: None,
         }
@@ -97,7 +118,7 @@ impl From<PayloadAttributes> for MorphPayloadAttributes {
 /// Internal payload builder attributes.
 ///
 /// This is the internal representation used by the payload builder,
-/// with decoded L1 messages and computed payload ID.
+/// with decoded supplied transactions and a computed payload ID.
 ///
 /// Implements `reth_payload_primitives::PayloadAttributes` so it can serve as the
 /// `type Attributes` in `PayloadBuilder` (v2.0.0 requires the builder attributes to
@@ -125,19 +146,23 @@ pub struct MorphPayloadBuilderAttributes {
     /// Parent beacon block root.
     pub parent_beacon_block_root: Option<B256>,
 
-    /// Decoded L1 message transactions with original encoded bytes.
+    /// Decoded transactions to execute first, with their original encoded bytes.
     ///
-    /// **IMPORTANT**: This contains **only L1 messages**, not L2 transactions.
-    /// L2 transactions are always pulled from the transaction pool.
+    /// Holds only L1 messages during sequencer assembly, and the complete ordered block
+    /// transaction list when [`Self::no_tx_pool`] is set. See
+    /// [`MorphPayloadAttributes::transactions`] for the full contract.
     ///
-    /// L1 messages are decoded and recovered during construction to avoid
-    /// repeated decoding in the payload builder.
+    /// Decoded and recovered during construction to avoid repeated decoding in the
+    /// payload builder.
     ///
     /// Skipped for serde: this is purely an internal runtime field derived from
     /// `MorphPayloadAttributes::transactions` during `try_new`. It is never
     /// serialised/deserialised as part of the PayloadAttributes trait contract.
     #[serde(skip)]
     pub transactions: Vec<WithEncoded<Recovered<MorphTxEnvelope>>>,
+
+    /// Disables txpool selection; see [`MorphPayloadAttributes::no_tx_pool`].
+    pub no_tx_pool: bool,
 
     /// Optional gas limit override propagated to EVM env construction.
     pub gas_limit: Option<u64>,
@@ -147,15 +172,16 @@ pub struct MorphPayloadBuilderAttributes {
 }
 
 impl MorphPayloadBuilderAttributes {
-    /// Build from parent hash + RPC attributes + version byte, decoding L1 messages.
+    /// Build from parent hash + RPC attributes + version byte, decoding supplied transactions.
     pub fn try_new(
         parent: B256,
         attributes: MorphPayloadAttributes,
         version: u8,
     ) -> Result<Self, alloy_rlp::Error> {
         let id = payload_id_morph(&parent, &attributes, version);
+        let no_tx_pool = attributes.no_tx_pool;
 
-        // Decode and recover L1 message transactions
+        // Decode and recover the supplied transactions
         let transactions = attributes
             .transactions
             .unwrap_or_default()
@@ -182,6 +208,7 @@ impl MorphPayloadBuilderAttributes {
             withdrawals: attributes.inner.withdrawals.unwrap_or_default().into(),
             parent_beacon_block_root: attributes.inner.parent_beacon_block_root,
             transactions,
+            no_tx_pool,
             gas_limit: attributes.gas_limit,
             base_fee_per_gas: attributes.base_fee_per_gas,
         })
@@ -224,7 +251,12 @@ impl MorphPayloadBuilderAttributes {
 
     /// Returns true if there are L1 messages to execute.
     pub fn has_l1_messages(&self) -> bool {
-        !self.transactions.is_empty()
+        self.transactions.iter().any(|tx| tx.value().is_l1_msg())
+    }
+
+    /// Returns true if the builder may append transactions from the local pool.
+    pub fn include_tx_pool(&self) -> bool {
+        !self.no_tx_pool
     }
 }
 
@@ -283,10 +315,14 @@ fn payload_id_morph(parent: &B256, attributes: &MorphPayloadAttributes, version:
         hasher.update(root.as_slice());
     }
 
-    // Hash whether L1 message list was explicitly supplied.
+    // Hash the txpool policy: an assemble and a derivation import of the same inputs are
+    // different payloads (one may append pool transactions), so they must not share an id.
+    hasher.update([u8::from(attributes.no_tx_pool)]);
+
+    // Hash whether the transaction list was explicitly supplied.
     hasher.update([u8::from(attributes.transactions.is_some())]);
 
-    // Hash L1 messages if present.
+    // Hash the supplied transactions if present.
     if let Some(txs) = &attributes.transactions {
         hasher.update(&txs.len().to_be_bytes()[..]);
         for tx in txs {
@@ -323,6 +359,9 @@ fn payload_id_morph(parent: &B256, attributes: &MorphPayloadAttributes, version:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_consensus::{Sealed, Signed, TxLegacy};
+    use alloy_primitives::{Signature, TxKind, U256};
+    use morph_primitives::transaction::TxL1Msg;
 
     fn create_test_attributes() -> MorphPayloadAttributes {
         MorphPayloadAttributes {
@@ -337,6 +376,7 @@ mod tests {
                 target_gas_limit: None,
             },
             transactions: None,
+            no_tx_pool: false,
             gas_limit: None,
             base_fee_per_gas: None,
         }
@@ -346,6 +386,66 @@ mod tests {
     fn test_default_attributes() {
         let attrs = MorphPayloadAttributes::default();
         assert!(attrs.transactions.is_none());
+        // Sequencer assembly is the default; only derivation opts out of the pool.
+        assert!(!attrs.no_tx_pool);
+    }
+
+    #[test]
+    fn test_payload_id_distinguishes_tx_pool_policy() {
+        // An assemble and a derivation import of identical inputs are different payloads:
+        // one may append pool transactions. They must not collide on the same payload id.
+        let parent = B256::random();
+        let mut with_pool = create_test_attributes();
+        with_pool.transactions = Some(vec![Bytes::from(vec![0x01])]);
+        let mut without_pool = with_pool.clone();
+        without_pool.no_tx_pool = true;
+
+        assert_ne!(
+            payload_id_morph(&parent, &with_pool, 1),
+            payload_id_morph(&parent, &without_pool, 1),
+        );
+    }
+
+    #[test]
+    fn test_no_tx_pool_defaults_false_when_absent_from_json() {
+        // Existing sequencer callers omit the field entirely and must keep packing the pool.
+        let json = r#"{
+            "timestamp": "0x499602d2",
+            "prevRandao": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "suggestedFeeRecipient": "0x0000000000000000000000000000000000000002"
+        }"#;
+
+        let attrs: MorphPayloadAttributes = serde_json::from_str(json).expect("deserialize");
+        assert!(!attrs.no_tx_pool);
+    }
+
+    #[test]
+    fn test_no_tx_pool_deserializes_from_camel_case() {
+        let json = r#"{
+            "timestamp": "0x499602d2",
+            "prevRandao": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "suggestedFeeRecipient": "0x0000000000000000000000000000000000000002",
+            "noTxPool": true
+        }"#;
+
+        let attrs: MorphPayloadAttributes = serde_json::from_str(json).expect("deserialize");
+        assert!(attrs.no_tx_pool);
+    }
+
+    #[test]
+    fn test_builder_attributes_carry_tx_pool_policy() {
+        let parent = B256::random();
+
+        let mut attrs = create_test_attributes();
+        attrs.no_tx_pool = true;
+        let built = MorphPayloadBuilderAttributes::try_new(parent, attrs, 1).expect("try_new");
+        assert!(built.no_tx_pool);
+        assert!(!built.include_tx_pool());
+
+        let built = MorphPayloadBuilderAttributes::try_new(parent, create_test_attributes(), 1)
+            .expect("try_new");
+        assert!(!built.no_tx_pool);
+        assert!(built.include_tx_pool());
     }
 
     #[test]
@@ -575,14 +675,49 @@ mod tests {
     }
 
     #[test]
-    fn test_builder_attributes_has_l1_messages_empty() {
-        let attrs = MorphPayloadBuilderAttributes::try_new(
+    fn test_builder_attributes_detect_only_l1_messages() {
+        let mut attrs = MorphPayloadBuilderAttributes::try_new(
             B256::ZERO,
             create_test_attributes(),
             MORPH_PAYLOAD_BUILDER_VERSION,
         )
         .unwrap();
         assert!(!attrs.has_l1_messages());
+
+        let l2_tx = MorphTxEnvelope::Legacy(Signed::new_unhashed(
+            TxLegacy {
+                chain_id: Some(1),
+                nonce: 0,
+                gas_price: 1,
+                gas_limit: 21_000,
+                to: TxKind::Call(Address::ZERO),
+                value: U256::ZERO,
+                input: Bytes::new(),
+            },
+            Signature::test_signature(),
+        ));
+        attrs.transactions.push(WithEncoded::new(
+            Bytes::new(),
+            Recovered::new_unchecked(l2_tx, Address::ZERO),
+        ));
+        assert!(
+            !attrs.has_l1_messages(),
+            "a non-empty L2-only list must not be reported as L1 messages"
+        );
+
+        let l1_msg = MorphTxEnvelope::L1Msg(Sealed::new(TxL1Msg {
+            queue_index: 0,
+            gas_limit: 21_000,
+            to: Address::ZERO,
+            value: U256::ZERO,
+            sender: Address::ZERO,
+            input: Bytes::new(),
+        }));
+        attrs.transactions.push(WithEncoded::new(
+            Bytes::new(),
+            Recovered::new_unchecked(l1_msg, Address::ZERO),
+        ));
+        assert!(attrs.has_l1_messages());
     }
 
     #[test]
