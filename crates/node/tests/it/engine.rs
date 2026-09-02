@@ -4,11 +4,13 @@
 //! enforcement — in particular the state-root validation gating introduced
 //! by the Jade hardfork.
 
+use alloy_consensus::transaction::TxHashRef;
 use alloy_consensus::{BlockHeader, Sealable};
+use alloy_eips::eip2718::Decodable2718;
 use alloy_primitives::{Address, B256};
 use alloy_rpc_types_engine::PayloadAttributes;
 use jsonrpsee::core::client::ClientT;
-use morph_node::test_utils::{HardforkSchedule, TestNodeBuilder};
+use morph_node::test_utils::{HardforkSchedule, MorphTxBuilder, TEST_TOKEN_ID, TestNodeBuilder};
 use morph_payload_types::{
     AssembleL2BlockParams, ExecutableL2Data, GenericResponse, MorphPayloadAttributes,
     MorphPayloadTypes, SafeL2Data,
@@ -19,7 +21,11 @@ use reth_payload_builder::BuildNewPayload;
 use reth_payload_primitives::BuiltPayload;
 use reth_provider::{BlockIdReader, BlockReaderIdExt};
 
-use super::helpers::{build_block_no_submit, craft_and_try_import_block};
+use super::helpers::{
+    assemble_l2_block, build_block_no_submit, canonical_block, canonical_snapshot,
+    craft_and_try_import_block, head_timestamp, import_l2_block, transaction_hashes,
+    wait_until_pooled,
+};
 
 /// Pre-Jade: a block with a wrong state root is still accepted.
 ///
@@ -618,6 +624,7 @@ async fn payload_builder_hash_matches_block_hash_with_nonzero_prev_randao() -> e
             target_gas_limit: None,
         },
         transactions: Some(vec![]),
+        no_tx_pool: false,
         gas_limit: None,
         base_fee_per_gas: None,
     };
@@ -662,6 +669,244 @@ async fn payload_builder_hash_matches_block_hash_with_nonzero_prev_randao() -> e
         payload.block().hash(),
         payload.executable_data.hash,
         "ExecutableL2Data hash should match the built block hash"
+    );
+
+    Ok(())
+}
+
+/// Recast a sequencer-assembled block as the `SafeL2Data` that derivation would reconstruct
+/// from an L1 batch: the same inputs, minus every execution output.
+///
+/// `parent_hash` is pinned so the follower reconstructs the block on the intended parent
+/// rather than on whatever its current head happens to be.
+fn safe_data_from(block: &ExecutableL2Data) -> SafeL2Data {
+    SafeL2Data {
+        number: block.number,
+        gas_limit: block.gas_limit,
+        base_fee_per_gas: block.base_fee_per_gas,
+        timestamp: block.timestamp,
+        transactions: block.transactions.clone(),
+        parent_hash: Some(block.parent_hash),
+    }
+}
+
+/// Hash of a raw encoded transaction.
+fn tx_hash_of(raw: &alloy_primitives::Bytes) -> B256 {
+    let mut raw = raw.as_ref();
+    *morph_primitives::MorphTxEnvelope::decode_2718(&mut raw)
+        .expect("raw transaction is decodable")
+        .tx_hash()
+}
+
+/// Transaction hashes of an assembled block, in block order.
+fn transaction_hashes_of(block: &ExecutableL2Data) -> Vec<B256> {
+    block.transactions.iter().map(tx_hash_of).collect()
+}
+
+/// Regression test for #179: `engine_newSafeL2Block` must never pull from the local txpool.
+///
+/// A derivation follower's pool holds gossiped transactions that the sequencer committed to
+/// *later* blocks. Before the fix, the safe path reused the sequencer assembly builder, which
+/// unconditionally appended the best pool transactions, so an empty committed block absorbed
+/// future transactions. The follower forked off the sequencer at that height and then stalled
+/// when those transactions were supplied again at their real heights ("nonce too low").
+///
+/// `SafeL2Data` carries no expected block hash, so nothing downstream catches the divergence —
+/// which is why the original failure surfaced 114 blocks past its cause.
+///
+/// Behavior contract:
+/// - fault: the follower derives block 1 (empty) while its pool already holds the transactions
+///   the sequencer committed to blocks 2 and 3;
+/// - evidence: derived block 1 stays empty, blocks 2 and 3 accept their committed transactions
+///   without a nonce error, and all three follower block hashes equal the sequencer's.
+#[tokio::test(flavor = "multi_thread")]
+async fn new_safe_l2_block_ignores_txpool() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().with_num_nodes(2).build().await?;
+    let follower = nodes.pop().expect("two nodes requested");
+    let sequencer = nodes.pop().expect("two nodes requested");
+
+    let genesis_timestamp = head_timestamp(&sequencer)?;
+
+    // Sequencer block 1: empty. This is the block the follower will later derive while its
+    // pool is already primed with the transactions of blocks 2 and 3.
+    let mut params = AssembleL2BlockParams::empty(1);
+    params.timestamp = Some(genesis_timestamp + 1);
+    let block1 = assemble_l2_block(&sequencer, params).await?;
+    assert!(
+        block1.transactions.is_empty(),
+        "sequencer block 1 must be empty for this scenario"
+    );
+    import_l2_block(&sequencer, block1.clone()).await?;
+
+    // Two transactions from the same sender, committed one per block. Sequential nonces are
+    // what make a premature inclusion fatal later: replaying nonce 0 at its real height fails
+    // with "nonce too low" once the follower has already consumed it.
+    let tx_nonce0 = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
+        .with_v1_token_fee(TEST_TOKEN_ID)
+        .build_signed()?;
+    let tx_nonce1 = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 1)
+        .with_v1_token_fee(TEST_TOKEN_ID)
+        .build_signed()?;
+    let tx_nonce0_hash = tx_hash_of(&tx_nonce0);
+    let tx_nonce1_hash = tx_hash_of(&tx_nonce1);
+
+    // Sequencer block 2 commits nonce 0. Each transaction is injected only when its own block
+    // is about to be built, so block 2 cannot take both.
+    sequencer.rpc.inject_tx(tx_nonce0.clone()).await?;
+    let mut params = AssembleL2BlockParams::empty(2);
+    params.timestamp = Some(genesis_timestamp + 2);
+    let block2 = assemble_l2_block(&sequencer, params).await?;
+    assert_eq!(
+        transaction_hashes_of(&block2),
+        vec![tx_nonce0_hash],
+        "sequencer block 2 must contain exactly nonce 0"
+    );
+    import_l2_block(&sequencer, block2.clone()).await?;
+
+    // Sequencer block 3 commits nonce 1.
+    sequencer.rpc.inject_tx(tx_nonce1.clone()).await?;
+    let mut params = AssembleL2BlockParams::empty(3);
+    params.timestamp = Some(genesis_timestamp + 3);
+    let block3 = assemble_l2_block(&sequencer, params).await?;
+    assert_eq!(
+        transaction_hashes_of(&block3),
+        vec![tx_nonce1_hash],
+        "sequencer block 3 must contain exactly nonce 1"
+    );
+    import_l2_block(&sequencer, block3.clone()).await?;
+
+    // Preload the follower's pool with both committed transactions, standing in for the gossip
+    // a real follower receives from the sequencer. Submitting directly keeps the precondition
+    // deterministic instead of depending on P2P timing; gossip may already have delivered
+    // them, so a duplicate rejection here is not a failure — `wait_until_pooled` is the
+    // assertion that matters. The follower never imported blocks 1-3, so nothing has evicted
+    // either transaction. This is the precondition that made the original bug fire.
+    let _ = follower.rpc.inject_tx(tx_nonce0).await;
+    let _ = follower.rpc.inject_tx(tx_nonce1).await;
+    wait_until_pooled(&follower, tx_nonce0_hash).await?;
+    wait_until_pooled(&follower, tx_nonce1_hash).await?;
+
+    // Derive block 1 on the follower. The pool holds nonce 0 and nonce 1; a builder that reads
+    // the pool would pack both here.
+    let derived1: MorphHeader = follower
+        .auth_server_handle()
+        .http_client()
+        .request("engine_newSafeL2Block", (safe_data_from(&block1),))
+        .await?;
+
+    assert!(
+        canonical_block(&follower, 1)?.body.transactions.is_empty(),
+        "derived block 1 must stay empty: the follower pool must not leak into a committed block"
+    );
+    assert_eq!(
+        derived1.hash_slow(),
+        block1.hash,
+        "derived block 1 hash must match the sequencer's"
+    );
+
+    // Both transactions must still be replayable at their committed heights. Before the fix
+    // this failed here with "nonce 0 too low", because block 1 had already consumed them.
+    let derived2: MorphHeader = follower
+        .auth_server_handle()
+        .http_client()
+        .request("engine_newSafeL2Block", (safe_data_from(&block2),))
+        .await?;
+    assert_eq!(
+        derived2.hash_slow(),
+        block2.hash,
+        "derived block 2 hash must match the sequencer's"
+    );
+    assert_eq!(
+        transaction_hashes(&canonical_block(&follower, 2)?),
+        vec![tx_nonce0_hash],
+        "derived block 2 must contain exactly the committed nonce 0"
+    );
+
+    let derived3: MorphHeader = follower
+        .auth_server_handle()
+        .http_client()
+        .request("engine_newSafeL2Block", (safe_data_from(&block3),))
+        .await?;
+    assert_eq!(
+        derived3.hash_slow(),
+        block3.hash,
+        "derived block 3 hash must match the sequencer's"
+    );
+    assert_eq!(
+        transaction_hashes(&canonical_block(&follower, 3)?),
+        vec![tx_nonce1_hash],
+        "derived block 3 must contain exactly the committed nonce 1"
+    );
+
+    Ok(())
+}
+
+/// A derived block whose transactions exceed its gas limit must be rejected, not truncated.
+///
+/// Sequencer assembly stops packing when the next transaction does not fit and seals the block
+/// with what already fits — correct when the builder chooses the contents. Derivation does not
+/// choose: the transaction list is fixed by what was committed to L1. Truncating it there would
+/// seal a *different* block, and since `SafeL2Data` carries no expected hash, nothing
+/// downstream would notice. go-ethereum reaches the same outcome structurally, because
+/// `NewSafeL2Block` executes the block via `BlockChain.ProcessBlock`, whose gas pool returns
+/// `ErrGasLimitReached` and fails the whole block.
+///
+/// Behavior contract:
+/// - fault: a `SafeL2Data` whose second transaction cannot fit the block gas limit;
+/// - evidence: the call fails and the canonical head does not advance.
+#[tokio::test(flavor = "multi_thread")]
+async fn new_safe_l2_block_rejects_transactions_over_gas_limit() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let node = nodes.pop().unwrap();
+
+    let genesis_timestamp = head_timestamp(&node)?;
+
+    let mut params = AssembleL2BlockParams::empty(1);
+    params.timestamp = Some(genesis_timestamp + 1);
+    let block1 = assemble_l2_block(&node, params).await?;
+    let block_gas_limit = block1.gas_limit;
+    import_l2_block(&node, block1).await?;
+    let head_before = canonical_snapshot(&node)?;
+
+    // First transaction fits; the second one alone exceeds the whole block gas limit, so the
+    // pair cannot be executed under it.
+    let fits = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
+        .with_v1_token_fee(TEST_TOKEN_ID)
+        .with_gas_limit(100_000)
+        .build_signed()?;
+    let overflows = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 1)
+        .with_v1_token_fee(TEST_TOKEN_ID)
+        .with_gas_limit(block_gas_limit)
+        .build_signed()?;
+
+    let safe = SafeL2Data {
+        number: 2,
+        gas_limit: block_gas_limit,
+        base_fee_per_gas: None,
+        timestamp: genesis_timestamp + 2,
+        transactions: vec![fits, overflows],
+        parent_hash: None,
+    };
+
+    let result: Result<MorphHeader, _> = node
+        .auth_server_handle()
+        .http_client()
+        .request("engine_newSafeL2Block", (safe,))
+        .await;
+    assert!(
+        result.is_err(),
+        "a derived block that cannot fit its committed transactions must be rejected, \
+         not silently truncated"
+    );
+
+    assert_eq!(
+        canonical_snapshot(&node)?,
+        head_before,
+        "a rejected safe block must leave the canonical chain untouched"
     );
 
     Ok(())

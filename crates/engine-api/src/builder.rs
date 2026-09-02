@@ -61,6 +61,28 @@ struct CanonicalHead {
     timestamp: u64,
 }
 
+/// Whether a payload build may draw transactions from the local pool.
+///
+/// A named policy rather than a bare `bool`, because the build entry points already take
+/// several positional `Option` arguments and picking the wrong one here silently forks the
+/// chain instead of failing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TxPoolPolicy {
+    /// Sequencer assembly: execute the supplied L1 messages, then pack the best pool
+    /// transactions.
+    Include,
+    /// Derivation import: execute exactly the supplied transactions and nothing else, so the
+    /// rebuilt block is byte-identical to the one the sequencer committed to L1.
+    Exclude,
+}
+
+impl TxPoolPolicy {
+    /// Maps to the `no_tx_pool` flag carried by [`morph_payload_types::MorphPayloadAttributes`].
+    const fn no_tx_pool(self) -> bool {
+        matches!(self, Self::Exclude)
+    }
+}
+
 /// Tracks the L1-derived finalized block hash from `set_block_tags` so that FCU
 /// calls can forward it to the engine tree.
 ///
@@ -152,7 +174,9 @@ where
         params: AssembleL2BlockParams,
     ) -> EngineApiResult<ExecutableL2Data> {
         let started = Instant::now();
-        let result = self.build_l2_payload(params, None, None, None).await;
+        let result = self
+            .build_l2_payload(params, None, None, None, TxPoolPolicy::Include)
+            .await;
         self.metrics
             .assemble_l2_block_duration_seconds
             .record(started.elapsed());
@@ -198,7 +222,13 @@ where
         };
 
         let result = self
-            .build_l2_payload(assemble_params, None, None, Some(parent_hash))
+            .build_l2_payload(
+                assemble_params,
+                None,
+                None,
+                Some(parent_hash),
+                TxPoolPolicy::Include,
+            )
             .await;
         self.metrics
             .assemble_l2_block_duration_seconds
@@ -491,7 +521,12 @@ where
         // resolved parent, so callers that pin a non-head parent reorg correctly.
         let parent_override = data.parent_hash;
 
-        // Assemble the block from SafeL2Data inputs.
+        // Reconstruct the block from SafeL2Data inputs. `SafeL2Data.transactions` is the
+        // complete ordered transaction list of the L1-committed block, so the build must be
+        // deterministic: TxPoolPolicy::Exclude keeps the local pool out. Without it a
+        // follower absorbs gossiped transactions that the sequencer committed to later
+        // blocks, forking off the sequencer chain (issue #179). SafeL2Data carries no
+        // expected block hash, so nothing downstream would catch such a divergence.
         let assemble_params = AssembleL2BlockParams {
             number: data.number,
             // Move transactions out of data to avoid cloning the full Vec<Bytes>.
@@ -505,6 +540,7 @@ where
                 Some(data.gas_limit),
                 data.base_fee_per_gas,
                 parent_override,
+                TxPoolPolicy::Exclude,
             )
             .await
             .inspect_err(|_| {
@@ -643,6 +679,7 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
         gas_limit_override: Option<u64>,
         base_fee_override: Option<u128>,
         parent_override: Option<B256>,
+        tx_pool_policy: TxPoolPolicy,
     ) -> EngineApiResult<MorphBuiltPayload>
     where
         Provider: HeaderProvider<Header = MorphHeader>
@@ -728,6 +765,7 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
                 target_gas_limit: None,
             },
             transactions: Some(params.transactions),
+            no_tx_pool: tx_pool_policy.no_tx_pool(),
             gas_limit: gas_limit_override,
             base_fee_per_gas: base_fee_override,
         };

@@ -1029,6 +1029,7 @@ mod tests {
                 target_gas_limit: None,
             },
             transactions: None,
+            no_tx_pool: false,
             gas_limit: None,
             base_fee_per_gas: None,
         };
@@ -1050,6 +1051,7 @@ mod tests {
                 target_gas_limit: None,
             },
             transactions: None,
+            no_tx_pool: false,
             gas_limit: None,
             base_fee_per_gas: None,
         };
@@ -1071,6 +1073,7 @@ mod tests {
                 target_gas_limit: None,
             },
             transactions: None,
+            no_tx_pool: false,
             gas_limit: None,
             base_fee_per_gas: None,
         };

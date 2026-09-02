@@ -71,11 +71,13 @@ impl<T: PoolTransaction> MorphPayloadTransactions<T> for () {
 /// Morph's payload builder.
 ///
 /// Builds L2 blocks by executing:
-/// 1. L1 message transactions from payload attributes
-/// 2. Pool transactions (L2 transactions from mempool, always included)
+/// 1. the transactions supplied in the payload attributes, in order
+/// 2. the best pool transactions — unless the attributes set `no_tx_pool`
 ///
-/// This matches go-ethereum's behavior where txpool transactions are always
-/// pulled after L1 messages are executed.
+/// Sequencer assembly supplies only L1 messages in step 1 and relies on step 2 for L2
+/// transactions, matching go-ethereum's `AssembleL2Block`. Derivation sets `no_tx_pool` and
+/// supplies the complete committed transaction list, matching go-ethereum's `NewSafeL2Block`,
+/// which executes the block through `BlockChain.ProcessBlock` rather than the miner.
 #[derive(Clone, Debug)]
 pub struct MorphPayloadBuilder<Pool, Client, Txs = ()> {
     /// The EVM configuration.
@@ -326,15 +328,20 @@ impl MorphPayloadBuilderCtx {
         BestTransactionsAttributes::new(base_fee, None)
     }
 
-    /// Executes L1 message transactions from payload attributes.
+    /// Executes the transactions supplied in the payload attributes, in order.
     ///
-    /// L1 messages are forced transactions from the L1 bridge that must be executed first.
-    /// They must have sequential queue indices and are never pulled from the transaction pool.
+    /// Under sequencer assembly these are the L1 messages from the L1 bridge, which must be
+    /// executed first and carry strictly sequential queue indices. Under a deterministic build
+    /// (`no_tx_pool`) the list is the complete committed block, so it may also contain L2
+    /// transactions after the L1 messages; those are charged fees normally.
     ///
-    /// If the next L1 message does not fit in remaining block gas, packing stops and the
-    /// leftover messages are left for the next block via `next_l1_msg_index`. A single
-    /// message larger than the whole block gas limit is skipped for this height (not
-    /// included, index not advanced) so assemble still returns a block.
+    /// Behaviour when a transaction does not fit the remaining block gas depends on the policy:
+    ///
+    /// - assembly: packing stops and the leftover messages roll over to the next block via
+    ///   `next_l1_msg_index`. A single message larger than the whole block gas limit is skipped
+    ///   for this height (not included, index not advanced) so assemble still returns a block.
+    /// - deterministic build: this is a hard error, mirroring go-ethereum's `ProcessBlock`
+    ///   returning `ErrGasLimitReached` and rejecting the whole block.
     ///
     /// Returns the executed transaction bytes for inclusion in ExecutableL2Data.
     fn execute_l1_messages(
@@ -367,6 +374,22 @@ impl MorphPayloadBuilderCtx {
             // remaining gas, and still seal the block with what already fits.
             // L1 messages are excluded from DA payload size (prepaid on L1).
             if info.is_tx_over_limits(tx_gas, 0, block_gas_limit) {
+                // A deterministic build must reproduce the committed block exactly. Dropping
+                // the tail would silently seal a *different* block, and since SafeL2Data
+                // carries no expected hash to check against, the divergence would only
+                // surface many blocks later. Reject instead, as go-ethereum's ProcessBlock
+                // does via ErrGasLimitReached.
+                if self.attributes().no_tx_pool {
+                    return Err(PayloadBuilderError::other(
+                        MorphPayloadBuilderError::BlockGasLimitExceeded {
+                            tx_index: tx_idx,
+                            tx_gas,
+                            cumulative_gas_used: info.cumulative_gas_used,
+                            block_gas_limit,
+                        },
+                    ));
+                }
+
                 if info.transaction_count == 0 {
                     tracing::warn!(
                         target: "payload_builder",
@@ -775,31 +798,42 @@ where
     let txs_all_started = Instant::now();
     let mut executed_txs = ctx.execute_l1_messages(&mut builder, &mut info)?;
 
-    // Always execute pool transactions (L2 transactions from mempool)
-    // This matches go-ethereum behavior where txpool transactions are always included
-    let best_txs = best(ctx.best_transaction_attributes(base_fee));
-    if ctx
-        .execute_pool_transactions(
-            &mut builder,
-            &mut info,
-            &mut executed_txs,
-            best_txs,
-            &breaker,
-        )?
-        .is_some()
-    {
-        // Check if it was a cancellation or just breaker triggered
-        if ctx.cancel.is_cancelled() {
-            return Ok(BuildOutcomeKind::Cancelled);
+    // Append the best pool transactions, unless the caller demanded a deterministic build.
+    //
+    // Derivation (`engine_newSafeL2Block`) sets `no_tx_pool`: a follower's pool holds
+    // gossiped transactions that the sequencer committed to *later* blocks, so appending
+    // them here would fork the follower off the sequencer chain.
+    if ctx.attributes().include_tx_pool() {
+        let best_txs = best(ctx.best_transaction_attributes(base_fee));
+        if ctx
+            .execute_pool_transactions(
+                &mut builder,
+                &mut info,
+                &mut executed_txs,
+                best_txs,
+                &breaker,
+            )?
+            .is_some()
+        {
+            // Check if it was a cancellation or just breaker triggered
+            if ctx.cancel.is_cancelled() {
+                return Ok(BuildOutcomeKind::Cancelled);
+            }
+            // Breaker triggered - continue with current transactions
+            tracing::debug!(
+                target: "payload_builder",
+                elapsed = ?breaker.elapsed(),
+                cumulative_gas_used = info.cumulative_gas_used,
+                cumulative_da_bytes_used = info.cumulative_da_bytes_used,
+                tx_count = executed_txs.len(),
+                "breaker stopped pool execution, finalizing payload"
+            );
         }
-        // Breaker triggered - continue with current transactions
+    } else {
         tracing::debug!(
             target: "payload_builder",
-            elapsed = ?breaker.elapsed(),
-            cumulative_gas_used = info.cumulative_gas_used,
-            cumulative_da_bytes_used = info.cumulative_da_bytes_used,
             tx_count = executed_txs.len(),
-            "breaker stopped pool execution, finalizing payload"
+            "skipping txpool inclusion: deterministic build requested"
         );
     }
 
