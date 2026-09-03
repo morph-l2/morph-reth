@@ -17,7 +17,7 @@ use reth_ethereum_cli::ExtendedCommand;
 use reth_provider::{
     BlockNumReader, BlockReader, DBProvider, DatabaseProviderFactory, TransactionVariant,
 };
-use tracing::{info, warn};
+use tracing::info;
 
 /// Morph-specific top-level CLI commands.
 #[derive(Debug, Subcommand)]
@@ -92,7 +92,10 @@ impl InitCommand {
             return Ok(());
         }
 
-        let chain_info = provider_factory.chain_info()?;
+        let provider = provider_factory
+            .database_provider_ro()?
+            .disable_long_read_transaction_safety();
+        let chain_info = provider.chain_info()?;
         info!(
             target: "morph::proofs",
             path = %path.display(),
@@ -101,9 +104,6 @@ impl InitCommand {
             "Initializing proof history from canonical state"
         );
 
-        let provider = provider_factory
-            .database_provider_ro()?
-            .disable_long_read_transaction_safety();
         InitializationJob::new(storage, provider.into_tx())
             .run(chain_info.best_number, chain_info.best_hash)?;
 
@@ -190,8 +190,10 @@ impl UnwindCommand {
             storage.get_earliest_block_number()?,
             storage.get_latest_block_number()?,
         ) else {
-            warn!(target: "morph::proofs", "Proof history is empty; nothing to unwind");
-            return Ok(());
+            return Err(eyre::eyre!(
+                "proof history at {} is not initialized",
+                path.display()
+            ));
         };
 
         if self.target <= earliest || self.target > latest {

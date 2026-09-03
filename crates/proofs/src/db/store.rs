@@ -26,7 +26,7 @@ use crate::{
     MorphProofsStorageResult, MorphProofsStore,
     api::{
         InitialStateAnchor, InitialStateStatus, MorphProofsBatchStore,
-        MorphProofsInitialStateStore, WriteCounts,
+        MorphProofsInitialStateStore, StorageBranchEntries, WriteCounts,
     },
     db::{
         MdbxAccountCursor, MdbxBatchSession, MdbxStorageCursor, MdbxTrieCursor,
@@ -252,6 +252,17 @@ impl MdbxProofsStorage {
             && tx.entries::<BlockChangeSet>()? == 0)
     }
 
+    /// Runs a proof-database update and commits only after the operation succeeds.
+    fn commit_update<T>(
+        &self,
+        update: impl FnOnce(&<DatabaseEnv as Database>::TXMut) -> MorphProofsStorageResult<T>,
+    ) -> MorphProofsStorageResult<T> {
+        let tx = self.env.tx_mut()?;
+        let result = update(&tx)?;
+        tx.commit()?;
+        Ok(result)
+    }
+
     /// Returns the inclusive range currently served by proof history.
     pub fn proof_window(&self) -> MorphProofsStorageResult<Option<ProofWindowBounds>> {
         self.env.view(|tx| {
@@ -317,11 +328,10 @@ impl MdbxProofsStorage {
         block_number: u64,
         hash: B256,
     ) -> MorphProofsStorageResult<()> {
-        let _ = self.env.update(|tx| {
+        self.commit_update(|tx| {
             Self::inner_set_earliest_block_number(tx, block_number, hash)?;
-            Ok::<(), DatabaseError>(())
-        })?;
-        Ok(())
+            Ok(())
+        })
     }
 
     /// Internal helper to set earliest block number hash within an existing transaction
@@ -454,75 +464,83 @@ impl MdbxProofsStorage {
     }
 
     /// Phase 1 of pruning: Calculate survivors.
-    /// Scans change sets to find the LATEST update for every key in the range.
+    ///
+    /// Scans change sets to find the LATEST update for every key in the range. The caller keeps the
+    /// write transaction open while applying the plan so a concurrent unwind cannot replace the
+    /// history between these two phases.
     fn calculate_prune_plan(
         &self,
+        tx: &impl DbTx,
         target_block: u64,
     ) -> MorphProofsStorageResult<Option<PrunePlan>> {
-        self.env.view(|tx| {
-            let Some((earliest, _)) =
-                self.inner_get_block_number_hash(tx, ProofWindowKey::EarliestBlock)?
-            else {
-                return Ok(None);
-            };
+        let Some(window) = self.inner_get_proof_window(tx)? else {
+            return Ok(None);
+        };
+        let earliest = window.earliest.number;
 
-            if earliest >= target_block {
-                return Ok(None);
+        if target_block > window.latest.number {
+            return Err(MorphProofsStorageError::PruneBeyondLatest {
+                target_block_number: target_block,
+                latest_block_number: window.latest.number,
+            });
+        }
+        if earliest >= target_block {
+            return Ok(None);
+        }
+
+        // Walk the change set in REVERSE so the first time we see a key, its block_number
+        // is by definition the latest version in [earliest+1, target_block] — the only
+        // one that must survive. This lets us use `or_insert` instead of an
+        // `and_modify(max).or_insert` per key, halving the per-insert work.
+        //
+        // HashMaps are pre-sized to bound rehash overhead. The chosen capacity is a rough
+        // average of unique keys per block; the maps grow if exceeded.
+        const PER_BLOCK_CAPACITY_HINT: usize = 4096;
+        let blocks_in_range = target_block
+            .saturating_sub(earliest)
+            .try_into()
+            .unwrap_or(usize::MAX);
+        let cap = blocks_in_range
+            .saturating_mul(PER_BLOCK_CAPACITY_HINT)
+            .min(1 << 20);
+
+        let mut acc_candidates: HashMap<StoredNibbles, u64> =
+            HashMap::with_capacity_and_hasher(cap, Default::default());
+        let mut storage_candidates: HashMap<StorageTrieKey, u64> =
+            HashMap::with_capacity_and_hasher(cap, Default::default());
+        let mut hashed_acc_candidates: HashMap<B256, u64> =
+            HashMap::with_capacity_and_hasher(cap, Default::default());
+        let mut hashed_storage_candidates: HashMap<HashedStorageKey, u64> =
+            HashMap::with_capacity_and_hasher(cap, Default::default());
+
+        let mut cs_cursor = tx.cursor_read::<BlockChangeSet>()?;
+        let walker = cs_cursor.walk_back(Some(target_block))?;
+        for row in walker {
+            let (block_number, cs) = row?;
+            if block_number <= earliest {
+                break;
             }
-
-            // Walk the change set in REVERSE so the first time we see a key, its block_number
-            // is by definition the latest version in [earliest+1, target_block] — the only
-            // one that must survive. This lets us use `or_insert` instead of an
-            // `and_modify(max).or_insert` per key, halving the per-insert work.
-            //
-            // HashMaps are pre-sized to bound rehash overhead. The chosen capacity is a rough
-            // average of unique keys per block on Base mainnet; the maps grow if exceeded.
-            const PER_BLOCK_CAPACITY_HINT: usize = 4096;
-            let blocks_in_range = target_block
-                .saturating_sub(earliest)
-                .try_into()
-                .unwrap_or(usize::MAX);
-            let cap = blocks_in_range
-                .saturating_mul(PER_BLOCK_CAPACITY_HINT)
-                .min(1 << 20);
-
-            let mut acc_candidates: HashMap<StoredNibbles, u64> =
-                HashMap::with_capacity_and_hasher(cap, Default::default());
-            let mut storage_candidates: HashMap<StorageTrieKey, u64> =
-                HashMap::with_capacity_and_hasher(cap, Default::default());
-            let mut hashed_acc_candidates: HashMap<B256, u64> =
-                HashMap::with_capacity_and_hasher(cap, Default::default());
-            let mut hashed_storage_candidates: HashMap<HashedStorageKey, u64> =
-                HashMap::with_capacity_and_hasher(cap, Default::default());
-
-            let mut cs_cursor = tx.cursor_read::<BlockChangeSet>()?;
-            let mut walker = cs_cursor.walk_back(Some(target_block))?;
-            while let Some(Ok((block_number, cs))) = walker.next() {
-                if block_number <= earliest {
-                    break;
-                }
-                for k in cs.account_trie_keys {
-                    acc_candidates.entry(k).or_insert(block_number);
-                }
-                for k in cs.storage_trie_keys {
-                    storage_candidates.entry(k).or_insert(block_number);
-                }
-                for k in cs.hashed_account_keys {
-                    hashed_acc_candidates.entry(k).or_insert(block_number);
-                }
-                for k in cs.hashed_storage_keys {
-                    hashed_storage_candidates.entry(k).or_insert(block_number);
-                }
+            for k in cs.account_trie_keys {
+                acc_candidates.entry(k).or_insert(block_number);
             }
+            for k in cs.storage_trie_keys {
+                storage_candidates.entry(k).or_insert(block_number);
+            }
+            for k in cs.hashed_account_keys {
+                hashed_acc_candidates.entry(k).or_insert(block_number);
+            }
+            for k in cs.hashed_storage_keys {
+                hashed_storage_candidates.entry(k).or_insert(block_number);
+            }
+        }
 
-            Ok(Some(PrunePlan {
-                earliest_block: earliest,
-                acc_survivors: Self::flatten_and_sort(acc_candidates),
-                storage_survivors: Self::flatten_and_sort(storage_candidates),
-                hashed_acc_survivors: Self::flatten_and_sort(hashed_acc_candidates),
-                hashed_storage_survivors: Self::flatten_and_sort(hashed_storage_candidates),
-            }))
-        })?
+        Ok(Some(PrunePlan {
+            earliest_block: earliest,
+            acc_survivors: Self::flatten_and_sort(acc_candidates),
+            storage_survivors: Self::flatten_and_sort(storage_candidates),
+            hashed_acc_survivors: Self::flatten_and_sort(hashed_acc_candidates),
+            hashed_storage_survivors: Self::flatten_and_sort(hashed_storage_candidates),
+        }))
     }
 
     /// Helper to flatten `HashMap` into a sorted Vector of survivors.
@@ -637,9 +655,10 @@ impl MdbxProofsStorage {
     ) -> MorphProofsStorageResult<HistoryDeleteBatch> {
         let mut history = HistoryDeleteBatch::default();
         let mut change_set_cursor = tx.cursor_read::<BlockChangeSet>()?;
-        let mut walker = change_set_cursor.walk_range(block_range)?;
+        let walker = change_set_cursor.walk_range(block_range)?;
 
-        while let Some(Ok((block_number, change_set))) = walker.next() {
+        for row in walker {
+            let (block_number, change_set) = row?;
             // Push (key, subkey=block_number) pairs
             history.account_trie.extend(
                 change_set
@@ -694,7 +713,8 @@ impl MdbxProofsStorage {
         let mut change_set_cursor = tx.cursor_write::<BlockChangeSet>()?;
         let mut walker = change_set_cursor.walk_range(block_range)?;
 
-        while let Some(Ok((_, _))) = walker.next() {
+        while let Some(row) = walker.next() {
+            row?;
             walker.delete_current()?;
         }
 
@@ -1063,8 +1083,9 @@ impl MorphProofsStore for MdbxProofsStorage {
         block_ref: BlockWithParent,
         block_state_diff: BlockStateDiff,
     ) -> MorphProofsStorageResult<WriteCounts> {
-        self.env
-            .update(|tx| self.store_trie_updates_append_only(tx, block_ref, block_state_diff))?
+        self.commit_update(|tx| {
+            self.store_trie_updates_append_only(tx, block_ref, block_state_diff)
+        })
     }
 
     fn fetch_trie_updates(&self, block_number: u64) -> MorphProofsStorageResult<BlockStateDiff> {
@@ -1187,14 +1208,11 @@ impl MorphProofsStore for MdbxProofsStorage {
     ) -> MorphProofsStorageResult<WriteCounts> {
         let target_block = new_earliest_block_ref.block.number;
 
-        // --- PHASE 1: READ (Calculate Deletions) ---
-        let plan = self.calculate_prune_plan(target_block)?;
-        let Some(plan) = plan else {
-            return Ok(WriteCounts::default());
-        };
+        self.commit_update(|tx| {
+            let Some(plan) = self.calculate_prune_plan(tx, target_block)? else {
+                return Ok(WriteCounts::default());
+            };
 
-        // --- PHASE 2: WRITE (Execute Deletions) ---
-        self.env.update(|tx| {
             // 1. Execute Sparse Deletions and track actual deleted rows
             let acc_deleted =
                 self.prune_history_preceding::<AccountTrieHistory, _>(tx, plan.acc_survivors)?;
@@ -1223,7 +1241,8 @@ impl MorphProofsStore for MdbxProofsStorage {
             let range = (plan.earliest_block + 1)..=target_block;
             let mut cs_cursor = tx.cursor_write::<BlockChangeSet>()?;
             let mut walker = cs_cursor.walk_range(range)?;
-            while walker.next().is_some() {
+            while let Some(row) = walker.next() {
+                row?;
                 walker.delete_current()?;
             }
 
@@ -1235,18 +1254,14 @@ impl MorphProofsStore for MdbxProofsStorage {
             )?;
 
             Ok(counts)
-        })?
+        })
     }
 
     /// Unwind the historical state to `unwind_upto_block` (inclusive), deleting all history
     /// starting from provided block. Also updates the `ProofWindow::LatestBlock` to parent of
     /// `unwind_upto_block`.
     fn unwind_history(&self, to: BlockWithParent) -> MorphProofsStorageResult<()> {
-        let history_to_delete = self
-            .env
-            .view(|tx| self.collect_history_ranged(tx, to.block.number..))??;
-
-        self.env.update(|tx| {
+        self.commit_update(|tx| {
             let proof_window = match self.inner_get_proof_window(tx)? {
                 Some(pw) => pw,
                 None => return Ok(()), // Nothing to unwind
@@ -1262,7 +1277,7 @@ impl MorphProofsStore for MdbxProofsStorage {
                     earliest_block_number: proof_window.earliest.number,
                 });
             }
-
+            let history_to_delete = self.collect_history_ranged(tx, to.block.number..)?;
             self.delete_history_ranged(tx, to.block.number.., history_to_delete)?;
 
             let new_latest_block =
@@ -1276,7 +1291,7 @@ impl MorphProofsStore for MdbxProofsStorage {
             )?;
 
             Ok(())
-        })?
+        })
     }
 
     fn replace_updates(
@@ -1287,11 +1302,10 @@ impl MorphProofsStore for MdbxProofsStorage {
         // Sort the vec list by block number
         blocks_to_add.sort_unstable_by_key(|(bwp, _)| bwp.block.number);
 
-        let history_to_delete = self
-            .env
-            .view(|tx| self.collect_history_ranged(tx, latest_common_block.number + 1..))??;
+        self.commit_update(|tx| {
+            let history_to_delete =
+                self.collect_history_ranged(tx, latest_common_block.number + 1..)?;
 
-        self.env.update(|tx| {
             // Remove the old history
             self.delete_history_ranged(tx, latest_common_block.number + 1.., history_to_delete)?;
 
@@ -1308,7 +1322,7 @@ impl MorphProofsStore for MdbxProofsStorage {
                 self.store_trie_updates_append_only(tx, block_with_parent, diff)?;
             }
             Ok(())
-        })?
+        })
     }
 
     fn set_earliest_block_number(
@@ -1368,11 +1382,11 @@ impl MorphProofsInitialStateStore for MdbxProofsStorage {
     }
 
     fn set_initial_state_anchor(&self, anchor: BlockNumHash) -> MorphProofsStorageResult<()> {
-        self.env.update(|tx| {
+        self.commit_update(|tx| {
             let mut cur = tx.cursor_write::<ProofWindow>()?;
             cur.insert(ProofWindowKey::InitialStateAnchor, &anchor.into())?;
             Ok(())
-        })?
+        })
     }
 
     fn store_account_branches(
@@ -1386,10 +1400,10 @@ impl MorphProofsInitialStateStore for MdbxProofsStorage {
 
         account_nodes.sort_by_key(|(key, _)| *key);
 
-        self.env.update(|tx| {
+        self.commit_update(|tx| {
             self.persist_history_batch(tx, 0, account_nodes, true)?;
             Ok(())
-        })?
+        })
     }
 
     fn store_storage_branches(
@@ -1404,7 +1418,7 @@ impl MorphProofsInitialStateStore for MdbxProofsStorage {
 
         storage_nodes.sort_by_key(|(key, _)| *key);
 
-        self.env.update(|tx| {
+        self.commit_update(|tx| {
             self.persist_history_batch(
                 tx,
                 0,
@@ -1414,7 +1428,26 @@ impl MorphProofsInitialStateStore for MdbxProofsStorage {
                 true,
             )?;
             Ok(())
-        })?
+        })
+    }
+
+    fn store_storage_branches_bulk(
+        &self,
+        mut entries: StorageBranchEntries,
+    ) -> MorphProofsStorageResult<()> {
+        entries.sort_unstable_by_key(|(address, _)| *address);
+        self.commit_update(|tx| {
+            for (address, mut nodes) in entries {
+                nodes.sort_unstable_by_key(|(path, _)| *path);
+                self.persist_history_batch(
+                    tx,
+                    0,
+                    nodes.into_iter().map(|(path, node)| (address, path, node)),
+                    true,
+                )?;
+            }
+            Ok(())
+        })
     }
 
     fn store_hashed_accounts(
@@ -1429,10 +1462,10 @@ impl MorphProofsInitialStateStore for MdbxProofsStorage {
         // sort the accounts by key to ensure insertion is efficient
         accounts.sort_by_key(|(key, _)| *key);
 
-        self.env.update(|tx| {
+        self.commit_update(|tx| {
             self.persist_history_batch(tx, 0, accounts, true)?;
             Ok(())
-        })?
+        })
     }
 
     fn store_hashed_storages(
@@ -1448,7 +1481,7 @@ impl MorphProofsInitialStateStore for MdbxProofsStorage {
         // sort the storages by key to ensure insertion is efficient
         storages.sort_by_key(|(key, _)| *key);
 
-        self.env.update(|tx| {
+        self.commit_update(|tx| {
             self.persist_history_batch(
                 tx,
                 0,
@@ -1458,7 +1491,28 @@ impl MorphProofsInitialStateStore for MdbxProofsStorage {
                 true,
             )?;
             Ok(())
-        })?
+        })
+    }
+
+    fn store_hashed_storages_bulk(
+        &self,
+        mut entries: Vec<(B256, Vec<(B256, U256)>)>,
+    ) -> MorphProofsStorageResult<()> {
+        entries.sort_unstable_by_key(|(address, _)| *address);
+        self.commit_update(|tx| {
+            for (address, mut storages) in entries {
+                storages.sort_unstable_by_key(|(key, _)| *key);
+                self.persist_history_batch(
+                    tx,
+                    0,
+                    storages
+                        .into_iter()
+                        .map(|(key, value)| (address, key, Some(StorageValue(value)))),
+                    true,
+                )?;
+            }
+            Ok(())
+        })
     }
 
     fn commit_initial_state(&self) -> MorphProofsStorageResult<BlockNumHash> {
@@ -2837,9 +2891,8 @@ mod tests {
         };
         store.store_trie_updates(block, state_diff).unwrap();
 
-        // Prune the entry - pass empty diff since we're just removing data
-        let next_block = BlockWithParent::new(block.block.hash, NumHash::new(2, B256::random()));
-        store.prune_earliest_state(next_block).unwrap();
+        // Prune through the stored tip.
+        store.prune_earliest_state(block).unwrap();
 
         // Verify the entry was pruned
         let tx = store.env.tx().unwrap();
@@ -2862,7 +2915,7 @@ mod tests {
 
         // Verify earliest block was updated
         let earliest = store.get_earliest_block_number().unwrap();
-        assert_eq!(earliest, Some((2, next_block.block.hash)));
+        assert_eq!(earliest, Some((1, block.block.hash)));
     }
 
     #[test]
@@ -2888,9 +2941,8 @@ mod tests {
         };
         store.store_trie_updates(block, state_diff).unwrap();
 
-        // Prune the entries
-        let next_block = BlockWithParent::new(block.block.hash, NumHash::new(2, B256::random()));
-        store.prune_earliest_state(next_block).unwrap();
+        // Prune the entries through the stored tip.
+        store.prune_earliest_state(block).unwrap();
 
         // Verify the entries were pruned
         let tx = store.env.tx().unwrap();
@@ -2923,7 +2975,6 @@ mod tests {
         let store = MdbxProofsStorage::new(dir.path()).expect("env");
         let block_1 = BlockWithParent::new(B256::ZERO, NumHash::new(1, B256::random()));
         let block_2 = BlockWithParent::new(block_1.block.hash, NumHash::new(2, B256::random()));
-        let block_3 = BlockWithParent::new(block_2.block.hash, NumHash::new(3, B256::random()));
         store.set_earliest_block_number(0, B256::ZERO).unwrap();
 
         // Insert entries for multiple blocks
@@ -2949,8 +3000,8 @@ mod tests {
         };
         store.store_trie_updates(block_2, state_diff2).unwrap();
 
-        // Prune up to block 3 (should remove blocks 1 and 2)
-        store.prune_earliest_state(block_3).unwrap();
+        // Prune up to the stored tip (should remove change sets for blocks 1 and 2).
+        store.prune_earliest_state(block_2).unwrap();
 
         // Verify the entries were pruned
         let tx = store.env.tx().unwrap();
@@ -2996,11 +3047,15 @@ mod tests {
         let store = MdbxProofsStorage::new(dir.path()).expect("env");
         store.set_earliest_block_number(1, B256::random()).unwrap();
 
-        // Prune a range where no entries exist
+        // A prune target beyond the stored tip must be rejected.
         let block_10 = BlockWithParent::new(B256::ZERO, NumHash::new(10, B256::random()));
-        store.prune_earliest_state(block_10).unwrap();
-
-        // Nothing should have been pruned, this call should not panic or error
+        assert!(matches!(
+            store.prune_earliest_state(block_10),
+            Err(MorphProofsStorageError::PruneBeyondLatest {
+                target_block_number: 10,
+                latest_block_number: 1,
+            })
+        ));
     }
 
     #[test]
@@ -3041,9 +3096,8 @@ mod tests {
         };
         store.store_trie_updates(block_2, state_diff2).unwrap();
 
-        // Now prune to block 3
-        let block_3 = BlockWithParent::new(block_2.block.hash, NumHash::new(3, B256::random()));
-        store.prune_earliest_state(block_3).unwrap();
+        // Now prune to the stored tip.
+        store.prune_earliest_state(block_2).unwrap();
 
         let tx = store.env.tx().unwrap();
         let mut cur = tx.new_cursor::<HashedAccountHistory>().unwrap();
@@ -3071,7 +3125,7 @@ mod tests {
 
         // Verify earliest block was updated
         let earliest = store.get_earliest_block_number().unwrap();
-        assert_eq!(earliest, Some((3, block_3.block.hash)));
+        assert_eq!(earliest, Some((2, block_2.block.hash)));
     }
 
     #[test]
@@ -3143,13 +3197,12 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        // Now prune to block 5, with the new initial state:
+        // Now prune to the stored tip, with the new initial state:
         // - path1 should be in removed_nodes (it was deleted in block 3)
         // - path2 should be included with its value (it still exists from block 2)
-        let block_5 = BlockWithParent::new(B256::random(), NumHash::new(5, B256::random()));
-        store.prune_earliest_state(block_5).unwrap();
+        store.prune_earliest_state(block_3).unwrap();
 
-        // Verify that all entries for path1 before block 5 were removed
+        // Verify that all entries for path1 before block 3 were removed
         let tx = store.env.tx().unwrap();
         let mut cur = tx.cursor_dup_read::<AccountTrieHistory>().unwrap();
 
@@ -3171,7 +3224,7 @@ mod tests {
             "path1 should be completely removed including tombstone"
         );
 
-        // path2 entries should be pruned (blocks < 5)
+        // path2 entries should be pruned (blocks < 3)
         // Survivor for path2 is at block 2.
         let v2 = cur
             .seek_by_key_subkey(StoredNibbles::from(path2), 0)
@@ -3218,9 +3271,8 @@ mod tests {
         };
         store.store_trie_updates(block_2, diff2).unwrap();
 
-        // Prune to block 3
-        let block_3 = BlockWithParent::new(block_2.block.hash, NumHash::new(3, B256::random()));
-        store.prune_earliest_state(block_3).unwrap();
+        // Prune to the stored tip.
+        store.prune_earliest_state(block_2).unwrap();
 
         let tx = store.env.tx().unwrap();
         let mut cur = tx.new_cursor::<HashedAccountHistory>().unwrap();
@@ -3297,9 +3349,8 @@ mod tests {
         };
         store.store_trie_updates(block_2, diff2).unwrap();
 
-        // Prune to block 3
-        let block_3 = BlockWithParent::new(block_2.block.hash, NumHash::new(3, B256::random()));
-        store.prune_earliest_state(block_3).unwrap();
+        // Prune to the stored tip.
+        store.prune_earliest_state(block_2).unwrap();
 
         let tx = store.env.tx().unwrap();
 
@@ -3496,18 +3547,23 @@ mod tests {
     }
 
     #[test]
-    fn test_prune_earliest_state_empty_window_updates_pointer() {
+    fn test_prune_earliest_state_empty_window_rejects_target_beyond_tip() {
         let dir = TempDir::new().unwrap();
         let store = MdbxProofsStorage::new(dir.path()).expect("env");
         store.set_earliest_block_number(0, B256::ZERO).unwrap();
 
         let target = BlockWithParent::new(B256::random(), NumHash::new(5, B256::random()));
 
-        // Prune empty
-        store.prune_earliest_state(target).unwrap();
+        assert!(matches!(
+            store.prune_earliest_state(target),
+            Err(MorphProofsStorageError::PruneBeyondLatest {
+                target_block_number: 5,
+                latest_block_number: 0,
+            })
+        ));
 
         let earliest = store.get_earliest_block_number().unwrap();
-        assert_eq!(earliest, Some((5, target.block.hash)));
+        assert_eq!(earliest, Some((0, B256::ZERO)));
     }
 
     #[test]
@@ -3996,6 +4052,9 @@ mod tests {
     fn replace_updates_prunes_and_adds_new_chain() {
         let dir = tempfile::TempDir::new().unwrap();
         let store = MdbxProofsStorage::new(dir.path()).expect("env");
+        store
+            .set_earliest_block_number(0, B256::ZERO)
+            .expect("set initial boundary");
 
         // Test address and helper to make diffs with distinct nonces.
         let addr = B256::from([0xAB; 32]);
@@ -4116,6 +4175,81 @@ mod tests {
                 "BlockChangeSet should reflect pruned+new chain"
             );
         }
+    }
+
+    #[test]
+    fn replace_updates_rolls_back_every_write_on_error() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = MdbxProofsStorage::new(dir.path()).expect("env");
+        store
+            .set_earliest_block_number(0, B256::ZERO)
+            .expect("set initial boundary");
+        let address = B256::repeat_byte(0xAB);
+        let make_diff = |nonce: u64| {
+            let mut state = HashedPostState::default();
+            state.accounts.insert(
+                address,
+                Some(Account {
+                    nonce,
+                    ..Default::default()
+                }),
+            );
+            BlockStateDiff {
+                sorted_trie_updates: TrieUpdatesSorted::default(),
+                sorted_post_state: state.into_sorted(),
+            }
+        };
+
+        let b1 = BlockWithParent::new(B256::ZERO, NumHash::new(1, B256::repeat_byte(0x01)));
+        let b2 = BlockWithParent::new(b1.block.hash, NumHash::new(2, B256::repeat_byte(0x02)));
+        let b3 = BlockWithParent::new(b2.block.hash, NumHash::new(3, B256::repeat_byte(0x03)));
+        store.store_trie_updates(b1, make_diff(1)).unwrap();
+        store.store_trie_updates(b2, make_diff(2)).unwrap();
+        store.store_trie_updates(b3, make_diff(3)).unwrap();
+
+        let replacement_b2 =
+            BlockWithParent::new(b1.block.hash, NumHash::new(2, B256::repeat_byte(0x12)));
+        let bad_b3 = BlockWithParent::new(
+            B256::repeat_byte(0xFF),
+            NumHash::new(3, B256::repeat_byte(0x13)),
+        );
+        let result = store.replace_updates(
+            BlockNumHash::new(1, b1.block.hash),
+            vec![(replacement_b2, make_diff(12)), (bad_b3, make_diff(13))],
+        );
+        assert!(matches!(
+            result,
+            Err(MorphProofsStorageError::OutOfOrder { .. })
+        ));
+
+        assert_eq!(
+            store.get_latest_block_number().unwrap(),
+            Some((b3.block.number, b3.block.hash))
+        );
+        let tx = store.env.tx().unwrap();
+        let mut cursor = tx.new_cursor::<HashedAccountHistory>().unwrap();
+        assert_eq!(
+            cursor
+                .seek_by_key_subkey(address, b2.block.number)
+                .unwrap()
+                .unwrap()
+                .value
+                .0
+                .unwrap()
+                .nonce,
+            2
+        );
+        assert_eq!(
+            cursor
+                .seek_by_key_subkey(address, b3.block.number)
+                .unwrap()
+                .unwrap()
+                .value
+                .0
+                .unwrap()
+                .nonce,
+            3
+        );
     }
 
     #[test]

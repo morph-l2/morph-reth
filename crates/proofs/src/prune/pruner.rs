@@ -57,14 +57,16 @@ where
     H: BlockHashReader,
 {
     fn run_inner(&self) -> MorphProofStoragePrunerResult {
+        let tx = self.provider.ro_tx()?;
         let Some(((earliest_block, _), (latest_block, _))) = self
             .provider
-            .get_earliest_block_number()?
-            .zip(self.provider.get_latest_block_number()?)
+            .get_earliest_block_number_with_tx(&tx)?
+            .zip(self.provider.get_latest_block_number_with_tx(&tx)?)
         else {
             trace!(target: "trie::pruner", "No earliest or latest block in the proof storage");
             return Ok(PrunerOutput::default());
         };
+        drop(tx);
 
         let target_earliest_block = self.target_earliest_block(latest_block);
         info!(

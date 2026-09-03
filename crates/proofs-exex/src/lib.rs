@@ -12,7 +12,7 @@ use alloy_eips::eip1898::BlockWithParent;
 use futures::TryStreamExt;
 use morph_proofs::{
     DEFAULT_PROOFS_HISTORY_WINDOW, MorphProofStoragePrunerTask, MorphProofsBatchStore,
-    MorphProofsStorage,
+    MorphProofsStorage, MorphProofsStorageError,
     live::{BatchBlock, LiveTrieCollector},
     metrics::ProofHistoryMetrics,
 };
@@ -170,6 +170,9 @@ where
     /// Main execution loop for the `ExEx`
     pub async fn run(mut self) -> eyre::Result<()> {
         self.ensure_initialized()?;
+        // A node that starts already at the tip never stores a batch, so the gauge would otherwise
+        // sit at its default 0 and read as unhealthy forever.
+        ProofHistoryMetrics::set_sync_healthy(true);
         let sync_target = self.spawn_sync_task();
 
         // If storage is behind tip, start syncing immediately rather than waiting
@@ -278,7 +281,10 @@ where
         let task_evm_config = self.ctx.evm_config().clone();
         let verification_interval = self.verification_interval;
 
-        self.ctx.task_executor().spawn_critical_task(
+        // A blocking task, not a default one: each turn holds an MDBX write transaction for up to
+        // `SYNC_BLOCKS_PER_TURN` blocks and may execute those blocks in full, which would otherwise
+        // occupy an async worker thread that the Engine API and RPC share.
+        self.ctx.task_executor().spawn_critical_blocking_task(
             "morph::proofs_exex::proofs_storage_sync_loop",
             async move {
                 let storage = task_storage.clone();
@@ -291,21 +297,27 @@ where
                     &task_collector,
                     verification_interval,
                 )
-                .await
-                .unwrap_or_else(|error| panic!("proof storage sync loop failed: {error:?}"));
+                .await;
             },
         );
 
         sync_target
     }
 
+    /// Drains pending sync states for the lifetime of the node.
+    ///
+    /// Proof history is a best-effort side index: no failure propagates out of this loop. A failed
+    /// turn is classified for observability and then abandoned; later notifications may supply
+    /// recovery work. Structural failures additionally clear the health gauge so
+    /// `debug_proofsSyncStatus` and the RPC canonical-anchor check remain the authority on whether
+    /// the index can be served.
     async fn sync_loop(
         sync_target: Arc<SyncTarget>,
         storage: MorphProofsStorage<Storage>,
         provider: Node::Provider,
         collector: &LiveTrieCollector<'_, Node::Evm, Node::Provider, Storage>,
         verification_interval: u64,
-    ) -> eyre::Result<()> {
+    ) {
         info!(target: "morph::proofs_exex", "Starting proofs storage sync loop");
 
         loop {
@@ -316,21 +328,26 @@ where
 
             match state {
                 SyncTargetState::Revert { revert_to } => {
-                    Self::handle_revert(&storage, collector, revert_to);
-                    sync_target.mark_revert_complete(&revert_to);
+                    if Self::run_revert(&storage, collector, revert_to) {
+                        sync_target.mark_revert_complete(&revert_to);
+                    }
                 }
                 SyncTargetState::RevertThenSync { revert_to, sync_to } => {
-                    Self::handle_revert(&storage, collector, revert_to);
-                    sync_target.mark_revert_complete(&revert_to);
-                    Self::sync_forward(
-                        &sync_target,
-                        &storage,
-                        &provider,
-                        collector,
-                        verification_interval,
-                        sync_to,
-                    )
-                    .await;
+                    // Only advance once the revert landed. Marking it complete would strip a revert
+                    // that arrived while this one was running, and syncing forward on the abandoned
+                    // branch would just be refused by the store's parent check.
+                    if Self::run_revert(&storage, collector, revert_to) {
+                        sync_target.mark_revert_complete(&revert_to);
+                        Self::sync_forward(
+                            &sync_target,
+                            &storage,
+                            &provider,
+                            collector,
+                            verification_interval,
+                            sync_to,
+                        )
+                        .await;
+                    }
                 }
                 SyncTargetState::SyncUpTo { to } => {
                     Self::sync_forward(
@@ -347,35 +364,59 @@ where
         }
     }
 
-    /// Reverts proof history to `revert_to`, containing every failure.
+    /// Runs a revert, classifies whatever it returns, and reports whether it landed.
     ///
-    /// Nothing here may propagate: the caller runs inside a critical task whose error path is a
-    /// panic, and a reorg the store cannot represent is not a reason to take the node down. The
-    /// store legitimately refuses to unwind past its earliest block, which it must do to keep a
+    /// Nothing propagates: a reorg the store cannot represent is not a reason to take the node down.
+    /// The caller must not treat a failed revert as done, because `mark_revert_complete` could strip
+    /// a newer revert that arrived while this one was running. A structural failure also clears the
+    /// health gauge, because the store is then left on the abandoned branch and
+    /// `validate_canonical_anchor` at the RPC boundary must refuse to serve it.
+    fn run_revert(
+        storage: &MorphProofsStorage<Storage>,
+        collector: &LiveTrieCollector<'_, Node::Evm, Node::Provider, Storage>,
+        revert_to: BlockWithParent,
+    ) -> bool {
+        let Err(error) = Self::handle_revert(storage, collector, revert_to) else {
+            ProofHistoryMetrics::set_sync_healthy(true);
+            return true;
+        };
+
+        let transient = Self::is_retryable_sync_error(&error);
+        ProofHistoryMetrics::record_sync_error(transient);
+        if transient {
+            warn!(
+                target: "morph::proofs_exex",
+                ?error,
+                revert_to = revert_to.block.number,
+                "Transient proof-history revert failure; a later reorg may reschedule recovery"
+            );
+        } else {
+            ProofHistoryMetrics::set_sync_healthy(false);
+            warn!(
+                target: "morph::proofs_exex",
+                ?error,
+                revert_to = revert_to.block.number,
+                "Proof history stays on the abandoned branch; proof RPCs refuse requests until a later reorg or re-initialization recovers it"
+            );
+        }
+        false
+    }
+
+    /// Reverts proof history to `revert_to`.
+    ///
+    /// The store legitimately refuses to unwind past its earliest block, which it must do to keep a
     /// baseline anchor, and that refusal is reachable in normal operation: `proofs init` writes only
-    /// `EarliestBlock`, so until the first block is indexed `earliest == latest` and any reorg of the
-    /// tip is already "beyond earliest".
-    ///
-    /// Leaving proof history on the abandoned branch is safe to serve from, because
-    /// `validate_canonical_anchor` on the RPC boundary compares the stored tip against the canonical
-    /// chain and refuses every proof request once they disagree. Recovery needs a re-init, so the
-    /// failure is logged at WARN rather than swallowed.
+    /// `EarliestBlock`, so until the first block is indexed `earliest == latest` and any reorg of
+    /// the tip is already "beyond earliest".
     fn handle_revert(
         storage: &MorphProofsStorage<Storage>,
         collector: &LiveTrieCollector<'_, Node::Evm, Node::Provider, Storage>,
         revert_to: BlockWithParent,
-    ) {
+    ) -> Result<(), MorphProofsStorageError> {
         let latest = match storage.get_latest_block_number() {
             Ok(Some((n, _))) => n,
-            Ok(None) => return,
-            Err(error) => {
-                warn!(
-                    target: "morph::proofs_exex",
-                    ?error,
-                    "Failed to read proof history tip during revert; proof RPCs will refuse requests until the database is re-initialized"
-                );
-                return;
-            }
+            Ok(None) => return Err(MorphProofsStorageError::NoBlocksFound),
+            Err(error) => return Err(error),
         };
 
         if latest >= revert_to.block.number {
@@ -385,15 +426,7 @@ where
                 latest,
                 "Reverting proofs storage"
             );
-            if let Err(error) = collector.unwind_history(revert_to) {
-                warn!(
-                    target: "morph::proofs_exex",
-                    ?error,
-                    revert_to = revert_to.block.number,
-                    latest,
-                    "Failed to revert proofs storage; it stays on the abandoned branch and proof RPCs will refuse requests until the database is re-initialized"
-                );
-            }
+            collector.unwind_history(revert_to)?;
         } else {
             debug!(
                 target: "morph::proofs_exex",
@@ -402,16 +435,30 @@ where
                 "Revert target beyond stored blocks, skipping"
             );
         }
+        Ok(())
     }
 
     #[cfg(test)]
-    fn handle_revert_for_test(&self, revert_to: BlockWithParent) {
+    fn handle_revert_for_test(
+        &self,
+        revert_to: BlockWithParent,
+    ) -> Result<(), MorphProofsStorageError> {
         let collector = LiveTrieCollector::new(
             self.ctx.evm_config().clone(),
             self.ctx.provider().clone(),
             &self.storage,
         );
-        Self::handle_revert(&self.storage, &collector, revert_to);
+        Self::handle_revert(&self.storage, &collector, revert_to)
+    }
+
+    #[cfg(test)]
+    fn run_revert_for_test(&self, revert_to: BlockWithParent) -> bool {
+        let collector = LiveTrieCollector::new(
+            self.ctx.evm_config().clone(),
+            self.ctx.provider().clone(),
+            &self.storage,
+        );
+        Self::run_revert(&self.storage, &collector, revert_to)
     }
 
     async fn sync_forward(
@@ -431,13 +478,17 @@ where
             let latest = match storage.get_latest_block_number() {
                 Ok(Some((n, _))) => n,
                 Ok(None) => {
+                    // The store lost its tip. Retrying cannot rebuild it, so stop and let the
+                    // health gauge and the RPC anchor check report an unusable index.
+                    ProofHistoryMetrics::record_sync_error(false);
+                    ProofHistoryMetrics::set_sync_healthy(false);
                     error!(target: "morph::proofs_exex", "No blocks stored in proofs storage during sync");
-                    Self::reschedule_sync_up_to(sync_target, target).await;
                     return;
                 }
-                Err(e) => {
-                    error!(target: "morph::proofs_exex", error = ?e, "Failed to get latest block");
-                    Self::reschedule_sync_up_to(sync_target, target).await;
+                Err(error) => {
+                    ProofHistoryMetrics::record_sync_error(true);
+                    error!(target: "morph::proofs_exex", ?error, "Failed to get latest block");
+                    Self::requeue_sync_up_to(sync_target, target).await;
                     return;
                 }
             };
@@ -464,37 +515,62 @@ where
                 let cached = sync_target.take(block_num);
                 match Self::build_batch_entry(block_num, cached, provider, verification_interval) {
                     Ok(entry) => batch.push(entry),
-                    Err(e) => {
-                        error!(target: "morph::proofs_exex", block_number = block_num, error = ?e, "Preparing block for batch failed");
-                        Self::reschedule_sync_up_to(sync_target, target).await;
+                    Err(error) => {
+                        // A block missing from the provider usually means a reorg landed mid-batch;
+                        // the notification that follows supplies the revert.
+                        ProofHistoryMetrics::record_sync_error(true);
+                        error!(target: "morph::proofs_exex", block_number = block_num, ?error, "Preparing block for batch failed");
+                        Self::requeue_sync_up_to(sync_target, target).await;
                         return;
                     }
                 }
             }
 
-            if let Err(e) = collector.execute_and_store_batch(batch) {
-                error!(target: "morph::proofs_exex", start = latest + 1, end, error = ?e, "Batch processing failed");
-                Self::reschedule_sync_up_to(sync_target, target).await;
+            if let Err(error) = collector.execute_and_store_batch(batch) {
+                let transient = Self::is_retryable_sync_error(&error);
+                ProofHistoryMetrics::record_sync_error(transient);
+                if transient {
+                    error!(target: "morph::proofs_exex", start = latest + 1, end, ?error, "Transient batch processing failure");
+                    Self::requeue_sync_up_to(sync_target, target).await;
+                } else {
+                    // The batch does not belong on the stored tip. Re-running it would fail the
+                    // same way; the recovery path is the revert a later notification brings, or a
+                    // re-initialization.
+                    ProofHistoryMetrics::set_sync_healthy(false);
+                    error!(target: "morph::proofs_exex", start = latest + 1, end, ?error, "Structural batch processing failure; waiting for a later notification");
+                }
                 return;
             }
+            ProofHistoryMetrics::set_sync_healthy(true);
 
             info!(target: "morph::proofs_exex", latest_stored = latest, target, "Batch processed, yielding");
             task::yield_now().await;
         }
     }
 
-    /// Re-arm a forward-sync target after a transient failure.
+    /// Re-arm a forward-sync target after a transient failure, then back off.
     ///
-    /// `take_state()` already consumed the original `SyncUpTo`, so returning
-    /// without this would leave the loop blocked on `notified()` until the next
-    /// chain event. If a revert or a newer tip arrived during the backoff, leave
-    /// that pending work in place instead of overwriting it with a stale target.
-    async fn reschedule_sync_up_to(sync_target: &SyncTarget, target: u64) {
+    /// `take_state()` already consumed the original `SyncUpTo`, so returning without this would
+    /// leave the loop parked on `notified()` until the next chain event. Requeueing puts the failed
+    /// target back as the base and merges anything that arrived while it ran on top, so a newer
+    /// notification still wins.
+    async fn requeue_sync_up_to(sync_target: &SyncTarget, target: u64) {
+        sync_target.requeue_state(SyncTargetState::SyncUpTo { to: target });
         tokio::time::sleep(SYNC_RETRY_DELAY).await;
-        if sync_target.has_pending_state() {
-            return;
-        }
-        sync_target.update_state(SyncTargetState::SyncUpTo { to: target });
+    }
+
+    /// Whether re-running the same work could succeed.
+    ///
+    /// Storage and provider I/O can fail for reasons that clear on their own. Every other variant
+    /// means the work does not belong where it was applied, and only a reorg or a re-initialization
+    /// changes that.
+    const fn is_retryable_sync_error(error: &MorphProofsStorageError) -> bool {
+        matches!(
+            error,
+            MorphProofsStorageError::DatabaseError(_)
+                | MorphProofsStorageError::ProviderError(_)
+                | MorphProofsStorageError::TryLockError
+        )
     }
 
     fn build_batch_entry(
@@ -1105,7 +1181,16 @@ mod tests {
 
         // Unwinding the anchor itself is what the store refuses, to keep a baseline.
         let initial_anchor = BlockWithParent::new(b256(0x00), NumHash::new(0, b256(0x00)));
-        exex.handle_revert_for_test(initial_anchor);
+        assert!(matches!(
+            exex.handle_revert_for_test(initial_anchor),
+            Err(MorphProofsStorageError::UnwindBeyondEarliest { .. })
+        ));
+        // The sync loop keys `mark_revert_complete` off this, so a contained failure must never
+        // report success: doing so would strip a reorg that queued up while the revert was running.
+        assert!(
+            !exex.run_revert_for_test(initial_anchor),
+            "a failed revert must not be reported as landed"
+        );
 
         assert_eq!(
             proofs

@@ -92,6 +92,12 @@ fn main() {
                     .proofs_history_storage_path
                     .clone()
                     .unwrap_or_else(|| datadir.data_dir().join("historical-proofs"));
+                if !path.is_dir() {
+                    return Err(eyre::eyre!(
+                        "proof history directory {} does not exist; run `morph-reth proofs init` first, or check --proofs-history.storage-path",
+                        path.display()
+                    ));
+                }
                 info!(
                     target: "morph::proofs",
                     path = %path.display(),

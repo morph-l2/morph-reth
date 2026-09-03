@@ -31,7 +31,7 @@ use reth_provider::{
     BlockWriter, CanonChainTracker, ChainSpecProvider, DBProvider, DatabaseProviderFactory,
 };
 use reth_prune_types::PruneMode;
-use reth_rpc_builder::Identity;
+use reth_rpc_builder::{Identity, RethRpcModule};
 use reth_rpc_eth_api::RpcNodeCore;
 use reth_tracing::tracing;
 use std::sync::Arc;
@@ -212,7 +212,8 @@ where
                     let eth_api = registry.eth_api().clone();
                     let eth_api_witness = registry.eth_api().clone();
                     modules
-                        .replace_configured(
+                        .add_or_replace_if_module_configured(
+                            RethRpcModule::Eth,
                             EthProofApiExt::new(
                                 eth_api.clone(),
                                 storage.clone(),
@@ -238,18 +239,21 @@ where
                     // Route the debug-namespace witness RPCs to proof history as well. Left on
                     // reth's default they would rebuild the parent trie by replaying changesets
                     // backwards from the tip, which is exactly the cost this storage exists to
-                    // avoid. This replaces the configured regular transports (HTTP and WS); the
-                    // authenticated Engine API module remains untouched.
+                    // avoid. Only transports that explicitly enable the debug namespace receive
+                    // these methods; the authenticated Engine API module remains untouched.
                     modules
-                        .replace_configured(
-                            ExecutionWitnessApiExt::new(eth_api_witness, storage.clone())
-                                .into_rpc(),
+                        .add_or_replace_if_module_configured(
+                            RethRpcModule::Debug,
+                            ExecutionWitnessApiExt::new(eth_api_witness, storage.clone()).into_rpc(),
                         )
                         .map_err(|error| {
                             eyre::eyre!("Failed to replace historical execution witness RPCs: {error}")
                         })?;
                     modules
-                        .replace_configured(ProofStatusApiExt::new(storage).into_rpc())
+                        .add_or_replace_if_module_configured(
+                            RethRpcModule::Debug,
+                            ProofStatusApiExt::new(storage).into_rpc(),
+                        )
                         .map_err(|error| {
                             eyre::eyre!("Failed to register debug_proofsSyncStatus: {error}")
                         })?;
@@ -337,8 +341,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::ensure_reference_index_pruning_compatible;
     use reth_prune_types::PruneMode;
+
+    use super::ensure_reference_index_pruning_compatible;
 
     #[test]
     fn reference_index_accepts_no_bodies_history_pruning() {

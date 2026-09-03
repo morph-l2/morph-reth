@@ -113,6 +113,16 @@ pub enum MorphProofsStorageError {
         /// The earliest stored block number
         earliest_block_number: u64,
     },
+    /// A prune target cannot move the earliest block beyond the current tip.
+    #[error(
+        "Attempted to prune to block {target_block_number} beyond latest stored block {latest_block_number}"
+    )]
+    PruneBeyondLatest {
+        /// Requested new earliest block.
+        target_block_number: u64,
+        /// Current latest block.
+        latest_block_number: u64,
+    },
     /// Error occurred while interacting with the database.
     #[error(transparent)]
     DatabaseError(DatabaseError),

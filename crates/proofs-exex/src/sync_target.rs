@@ -48,23 +48,75 @@ pub enum SyncTargetState {
 }
 
 impl SyncTargetState {
+    /// The revert that removes the most blocks. A shallower target would leave blocks from the
+    /// abandoned branch in place, and the following append would write proofs that mix two chains.
+    const fn deeper_revert(current: BlockWithParent, new: BlockWithParent) -> BlockWithParent {
+        if new.block.number <= current.block.number {
+            new
+        } else {
+            current
+        }
+    }
+
+    /// The furthest forward target. Committed tips only ever move forward, so keeping the maximum
+    /// avoids dropping catch-up work when two notifications merge.
+    const fn further_sync(current: u64, new: u64) -> u64 {
+        if new >= current { new } else { current }
+    }
+
+    /// Merge a newly arrived state into the pending one.
+    ///
+    /// Reverts must never be weakened by a merge: two reorg notifications can land before the sync
+    /// loop consumes either, and taking the later one would silently skip the deeper rollback.
     const fn apply_next(&mut self, new: Self) {
         *self = match (&*self, new) {
-            // If we are just syncing to tip already, replace with the new state.
+            (Self::SyncUpTo { to: current }, Self::SyncUpTo { to: new }) => Self::SyncUpTo {
+                to: Self::further_sync(*current, new),
+            },
             (Self::SyncUpTo { .. }, new) => new,
 
-            // If the new state is a revert, replace with the new state.
-            (_, Self::Revert { revert_to }) => Self::Revert { revert_to },
-            (_, Self::RevertThenSync { revert_to, sync_to }) => {
-                Self::RevertThenSync { revert_to, sync_to }
-            }
-
-            // If we're currently reverting, replace the sync to value with the new
-            // state.
             (
-                Self::RevertThenSync { revert_to, .. } | Self::Revert { revert_to },
-                Self::SyncUpTo { to },
+                Self::RevertThenSync {
+                    revert_to: current, ..
+                }
+                | Self::Revert { revert_to: current },
+                Self::Revert { revert_to: new },
+            ) => Self::Revert {
+                revert_to: Self::deeper_revert(*current, new),
+            },
+            (
+                Self::RevertThenSync {
+                    revert_to: current_revert,
+                    ..
+                },
+                Self::RevertThenSync {
+                    revert_to: new_revert,
+                    sync_to: new_sync,
+                },
             ) => Self::RevertThenSync {
+                revert_to: Self::deeper_revert(*current_revert, new_revert),
+                // A reorg can lower the canonical head, so the latest notification owns the
+                // forward target even while an older, deeper revert remains necessary.
+                sync_to: new_sync,
+            },
+            (
+                Self::Revert { revert_to: current },
+                Self::RevertThenSync {
+                    revert_to: new,
+                    sync_to,
+                },
+            ) => Self::RevertThenSync {
+                revert_to: Self::deeper_revert(*current, new),
+                sync_to,
+            },
+
+            (Self::RevertThenSync { revert_to, sync_to }, Self::SyncUpTo { to }) => {
+                Self::RevertThenSync {
+                    revert_to: *revert_to,
+                    sync_to: Self::further_sync(*sync_to, to),
+                }
+            }
+            (Self::Revert { revert_to }, Self::SyncUpTo { to }) => Self::RevertThenSync {
                 revert_to: *revert_to,
                 sync_to: to,
             },
@@ -117,6 +169,21 @@ impl SyncTarget {
         self.notify.notify_one();
     }
 
+    /// Requeue a state the sync loop consumed but could not finish.
+    ///
+    /// The failed state becomes the base and anything that arrived while it was running is merged
+    /// on top, so a newer notification still wins where the two disagree. Doing it under the lock
+    /// avoids the check-then-act race of testing `has_pending_state()` first.
+    pub fn requeue_state(&self, mut failed: SyncTargetState) {
+        let mut state = self.state.lock().expect("SyncTarget lock poisoned");
+        if let Some(newer) = state.take() {
+            failed.apply_next(newer);
+        }
+        *state = Some(failed);
+        drop(state);
+        self.notify.notify_one();
+    }
+
     /// Take the current pending state, leaving `None` in its place.
     ///
     /// Used by the sync loop to consume the next action to perform.
@@ -137,17 +204,29 @@ impl SyncTarget {
         let mut state = self.state.lock().expect("SyncTarget lock poisoned");
         match &*state {
             Some(SyncTargetState::RevertThenSync { revert_to, sync_to })
-                if revert_to.block.number >= reverted_to.block.number =>
+                if Self::revert_is_covered(revert_to, reverted_to) =>
             {
                 *state = Some(SyncTargetState::SyncUpTo { to: *sync_to });
             }
             Some(SyncTargetState::Revert { revert_to })
-                if revert_to.block.number >= reverted_to.block.number =>
+                if Self::revert_is_covered(revert_to, reverted_to) =>
             {
                 *state = None;
             }
             _ => {}
         }
+    }
+
+    /// Whether the revert just completed already removed everything `pending` asks for.
+    ///
+    /// A shallower pending target is covered because the deeper completed revert deleted its range
+    /// too. At an equal height the hashes must match: a same-height target on a different branch is
+    /// a distinct reorg that still has to run, and dropping it would leave the stored tip anchored
+    /// to the wrong branch.
+    fn revert_is_covered(pending: &BlockWithParent, completed: &BlockWithParent) -> bool {
+        pending.block.number > completed.block.number
+            || (pending.block.number == completed.block.number
+                && pending.block.hash == completed.block.hash)
     }
 
     /// Check if there is a pending state without consuming it.
@@ -381,6 +460,44 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn apply_next_keeps_deeper_pending_revert() {
+        let mut state = SyncTargetState::Revert {
+            revert_to: block_with_parent(3),
+        };
+        state.apply_next(SyncTargetState::Revert {
+            revert_to: block_with_parent(8),
+        });
+        assert!(matches!(
+            state,
+            SyncTargetState::Revert { revert_to } if revert_to.block.number == 3
+        ));
+    }
+
+    #[test]
+    fn apply_next_keeps_deeper_revert_and_latest_reorg_target() {
+        let mut state = SyncTargetState::RevertThenSync {
+            revert_to: block_with_parent(3),
+            sync_to: 30,
+        };
+        state.apply_next(SyncTargetState::RevertThenSync {
+            revert_to: block_with_parent(8),
+            sync_to: 20,
+        });
+        assert!(matches!(
+            state,
+            SyncTargetState::RevertThenSync { revert_to, sync_to: 20 }
+            if revert_to.block.number == 3
+        ));
+    }
+
+    #[test]
+    fn apply_next_keeps_furthest_sync_target() {
+        let mut state = SyncTargetState::SyncUpTo { to: 30 };
+        state.apply_next(SyncTargetState::SyncUpTo { to: 20 });
+        assert!(matches!(state, SyncTargetState::SyncUpTo { to: 30 }));
+    }
+
     // ---- SyncTarget state management tests ----
 
     #[test]
@@ -445,6 +562,68 @@ mod tests {
         target.mark_revert_complete(&block_with_parent(5));
         let state = target.take_state().expect("should have state");
         assert!(matches!(state, SyncTargetState::SyncUpTo { to: 20 }));
+    }
+
+    #[test]
+    fn mark_revert_complete_keeps_same_height_revert_on_another_branch() {
+        let target = SyncTarget::new();
+        let other_branch = BlockWithParent::new(b256(4), NumHash::new(5, b256(0xFE)));
+        target.update_state(SyncTargetState::Revert {
+            revert_to: other_branch,
+        });
+
+        // The completed revert reached height 5 on a different branch, so the pending one is still
+        // outstanding and must not be stripped.
+        target.mark_revert_complete(&block_with_parent(5));
+        assert!(matches!(
+            target.take_state(),
+            Some(SyncTargetState::Revert { revert_to }) if revert_to.block.hash == b256(0xFE)
+        ));
+    }
+
+    #[test]
+    fn requeue_state_restores_work_when_nothing_newer_arrived() {
+        let target = SyncTarget::new();
+        // The loop consumed the state, so nothing is pending while the work runs.
+        target.requeue_state(SyncTargetState::SyncUpTo { to: 100 });
+        assert!(matches!(
+            target.take_state(),
+            Some(SyncTargetState::SyncUpTo { to: 100 })
+        ));
+    }
+
+    #[test]
+    fn requeue_state_lets_a_newer_reorg_win_over_the_failed_target() {
+        let target = SyncTarget::new();
+        // A reorg landed while the consumed SyncUpTo was running. Its forward target belongs to
+        // the abandoned branch, so the revert must replace it rather than merge with it.
+        target.update_state(SyncTargetState::Revert {
+            revert_to: block_with_parent(80),
+        });
+
+        target.requeue_state(SyncTargetState::SyncUpTo { to: 100 });
+
+        assert!(matches!(
+            target.take_state(),
+            Some(SyncTargetState::Revert { revert_to }) if revert_to.block.number == 80
+        ));
+    }
+
+    #[test]
+    fn requeue_state_keeps_the_deeper_revert_when_both_are_reverts() {
+        let target = SyncTarget::new();
+        target.update_state(SyncTargetState::Revert {
+            revert_to: block_with_parent(70),
+        });
+
+        target.requeue_state(SyncTargetState::Revert {
+            revert_to: block_with_parent(80),
+        });
+
+        assert!(matches!(
+            target.take_state(),
+            Some(SyncTargetState::Revert { revert_to }) if revert_to.block.number == 70
+        ));
     }
 
     #[test]

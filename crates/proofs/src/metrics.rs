@@ -42,8 +42,16 @@ pub struct ProofHistoryMetrics {
     pub earliest_block: Gauge,
     /// Latest block currently served by proof history.
     pub latest_block: Gauge,
+    /// Whether proof-history synchronization is able to make progress (1 healthy, 0 halted).
+    pub sync_healthy: Gauge,
+    /// Sync failures a retry can clear (storage or provider I/O), for reverts and forward sync.
+    pub sync_transient_errors_total: Counter,
+    /// Sync failures a retry cannot clear; recovery needs a reorg or a re-initialization.
+    pub sync_structural_errors_total: Counter,
     /// Number of prune failures.
     pub prune_errors_total: Counter,
+    /// Consecutive periodic prune failures since the latest successful run.
+    pub prune_consecutive_failures: Gauge,
     /// Number of unwind failures.
     pub unwind_errors_total: Counter,
 }
@@ -87,8 +95,29 @@ impl ProofHistoryMetrics {
         metrics.latest_block.set(latest as f64);
     }
 
+    /// Updates the proof-history synchronization health gauge.
+    pub fn set_sync_healthy(healthy: bool) {
+        Self::default().sync_healthy.set(u8::from(healthy) as f64);
+    }
+
+    /// Records a revert or forward-sync failure, split by whether retrying can clear it.
+    pub fn record_sync_error(transient: bool) {
+        let metrics = Self::default();
+        if transient {
+            metrics.sync_transient_errors_total.increment(1);
+        } else {
+            metrics.sync_structural_errors_total.increment(1);
+        }
+    }
+
     pub(crate) fn record_prune_error() {
         Self::default().prune_errors_total.increment(1);
+    }
+
+    pub(crate) fn set_prune_consecutive_failures(failures: u64) {
+        Self::default()
+            .prune_consecutive_failures
+            .set(failures as f64);
     }
 
     pub(crate) fn record_unwind_error() {

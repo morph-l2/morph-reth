@@ -40,7 +40,7 @@ use reth_provider::{
     AccountReader, BlockReaderIdExt, DBProvider, DatabaseProviderFactory, ReceiptProvider,
     providers::BlockchainProvider,
 };
-use reth_rpc_server_types::RpcModuleSelection;
+use reth_rpc_server_types::{RethRpcModule, RpcModuleSelection};
 use reth_tasks::Runtime;
 use reth_transaction_pool::TransactionPool;
 use reth_trie::{AccountProof, EMPTY_ROOT_HASH};
@@ -76,6 +76,7 @@ struct LaunchOpts {
     prune_interval: Duration,
     verification_interval: u64,
     max_multi_proof_targets: usize,
+    enable_debug_api: bool,
 }
 
 impl Default for LaunchOpts {
@@ -87,6 +88,7 @@ impl Default for LaunchOpts {
             prune_interval: Duration::from_secs(3600),
             verification_interval: 0,
             max_multi_proof_targets: DEFAULT_MAX_MULTI_PROOF_TARGETS,
+            enable_debug_api: true,
         }
     }
 }
@@ -153,7 +155,11 @@ async fn launch_node(
             RpcServerArgs::default()
                 .with_unused_ports()
                 .with_http()
-                .with_http_api(RpcModuleSelection::All),
+                .with_http_api(if opts.enable_debug_api {
+                    RpcModuleSelection::All
+                } else {
+                    RpcModuleSelection::from([RethRpcModule::Eth])
+                }),
         );
     let node = MorphNode::default();
     let exex_storage = storage.clone();
@@ -590,6 +596,35 @@ async fn reopen_proofs(
 // -----------------------------------------------------------------------------
 // 1 + 2. Multi-block historical queries and independent cryptographic verification
 // -----------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn proof_history_respects_debug_namespace_configuration() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let mut env = setup(LaunchOpts {
+        enable_debug_api: false,
+        ..LaunchOpts::default()
+    })
+    .await?;
+    let client = rpc_client(&env.node)?;
+    let block_hash = include_transfer(&mut env.node, ACCOUNT1, 1_000).await?;
+    wait_for_proof_latest(&env.storage, 1, block_hash).await?;
+
+    get_verified_proof(&client, ACCOUNT1, vec![], "0x1").await?;
+
+    for method in ["debug_proofsSyncStatus", "debug_executionWitness"] {
+        let error = client
+            .request::<serde_json::Value, _>(method, rpc_params![])
+            .await
+            .expect_err("debug method must not be exposed when debug is disabled");
+        assert!(
+            error.to_string().contains("Method not found"),
+            "unexpected error for {method}: {error}"
+        );
+    }
+
+    Ok(())
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn proof_history_multi_block_account_and_storage() -> eyre::Result<()> {

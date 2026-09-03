@@ -8,7 +8,10 @@ use tokio::{
 };
 use tracing::{info, warn};
 
-use crate::{MorphProofsStorage, MorphProofsStore, prune::MorphProofStoragePruner};
+use crate::{
+    MorphProofsStorage, MorphProofsStore, metrics::ProofHistoryMetrics,
+    prune::MorphProofStoragePruner,
+};
 
 /// Number of blocks pruned per MDBX write transaction.
 ///
@@ -60,6 +63,7 @@ where
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         let pruner = Arc::new(self.pruner);
+        let mut consecutive_failures = 0u64;
         loop {
             tokio::select! {
                 _ = &mut signal => {
@@ -68,8 +72,32 @@ where
                 }
                 _ = interval.tick() => {
                     let pruner = Arc::clone(&pruner);
-                    if let Err(e) = tokio::task::spawn_blocking(move || pruner.run()).await {
-                        warn!(target: "trie::pruner_task", err=%e, "Pruner blocking task failed");
+                    match tokio::task::spawn_blocking(move || pruner.try_run()).await {
+                        Ok(Ok(_)) => {
+                            consecutive_failures = 0;
+                            ProofHistoryMetrics::set_prune_consecutive_failures(0);
+                        }
+                        Ok(Err(error)) => {
+                            consecutive_failures = consecutive_failures.saturating_add(1);
+                            ProofHistoryMetrics::set_prune_consecutive_failures(consecutive_failures);
+                            warn!(
+                                target: "trie::pruner_task",
+                                ?error,
+                                consecutive_failures,
+                                "Periodic proof-history prune failed"
+                            );
+                        }
+                        Err(error) => {
+                            consecutive_failures = consecutive_failures.saturating_add(1);
+                            ProofHistoryMetrics::record_prune_error();
+                            ProofHistoryMetrics::set_prune_consecutive_failures(consecutive_failures);
+                            warn!(
+                                target: "trie::pruner_task",
+                                ?error,
+                                consecutive_failures,
+                                "Pruner blocking task failed"
+                            );
+                        }
                     }
                 }
             }

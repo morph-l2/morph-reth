@@ -1,10 +1,10 @@
 //! Initialization job for proofs storage. Handles storing the existing state into the proofs
 //! storage.
 
-use std::{collections::HashMap, time::Instant};
+use std::time::Instant;
 
 use alloy_eips::BlockNumHash;
-use alloy_primitives::{B256, U256};
+use alloy_primitives::B256;
 use derive_more::Constructor;
 use reth_db::{
     DatabaseError,
@@ -80,9 +80,10 @@ macro_rules! define_dup_cursor_iter {
                 }
 
                 // If no more duplicates, find the next key with values
-                let Some(Ok((next_key, _))) = self.0.next_no_dup().transpose() else {
-                    // If no more entries, return None
-                    return None;
+                let next_key = match self.0.next_no_dup() {
+                    Ok(Some((next_key, _))) => next_key,
+                    Ok(None) => return None,
+                    Err(error) => return Some(Err(error)),
                 };
 
                 // If found, seek to the first duplicate for this key
@@ -424,17 +425,22 @@ impl<C> InitTable for HashedStoragesInit<C> {
         store: &impl MorphProofsInitialStateStore,
         entries: impl IntoIterator<Item = (Self::Key, Self::Value)>,
     ) -> Result<(), MorphProofsStorageError> {
-        let entries_iter = entries.into_iter();
-        let mut by_address: HashMap<B256, Vec<(B256, U256)>> =
-            HashMap::with_capacity(entries_iter.size_hint().0);
+        let mut grouped = Vec::new();
+        let mut current_address = None;
+        let mut current_slots = Vec::new();
 
-        for (address, entry) in entries_iter {
-            by_address
-                .entry(address)
-                .or_default()
-                .push((entry.key, entry.value));
+        for (address, entry) in entries {
+            if current_address.as_ref() != Some(&address)
+                && let Some(address) = current_address.replace(address)
+            {
+                grouped.push((address, std::mem::take(&mut current_slots)));
+            }
+            current_slots.push((entry.key, entry.value));
         }
-        store.store_hashed_storages_bulk(by_address.into_iter().collect())?;
+        if let Some(address) = current_address {
+            grouped.push((address, current_slots));
+        }
+        store.store_hashed_storages_bulk(grouped)?;
 
         Ok(())
     }
@@ -466,23 +472,173 @@ impl<C> InitTable for PackedStoragesTrieInit<C> {
         store: &impl MorphProofsInitialStateStore,
         entries: impl IntoIterator<Item = (Self::Key, Self::Value)>,
     ) -> Result<(), MorphProofsStorageError> {
-        let entries_iter = entries.into_iter();
-        let mut by_address: HashMap<B256, Vec<(Nibbles, Option<BranchNodeCompact>)>> =
-            HashMap::with_capacity(entries_iter.size_hint().0);
+        let mut grouped = Vec::new();
+        let mut current_address = None;
+        let mut current_nodes = Vec::new();
 
-        for (hashed_address, storage_entry) in entries_iter {
-            by_address
-                .entry(hashed_address)
-                .or_default()
-                .push((storage_entry.nibbles.0, Some(storage_entry.node)));
+        for (address, entry) in entries {
+            if current_address.as_ref() != Some(&address)
+                && let Some(address) = current_address.replace(address)
+            {
+                grouped.push((address, std::mem::take(&mut current_nodes)));
+            }
+            current_nodes.push((entry.nibbles.0, Some(entry.node)));
         }
-        store.store_storage_branches_bulk(by_address.into_iter().collect())?;
+        if let Some(address) = current_address {
+            grouped.push((address, current_nodes));
+        }
+        store.store_storage_branches_bulk(grouped)?;
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
+    use alloy_primitives::U256;
+
+    use super::*;
+    use crate::MorphProofsStorageResult;
+
+    #[derive(Debug, Default)]
+    struct RecordingStore {
+        hashed_storage_addresses: Mutex<Vec<B256>>,
+        storage_trie_addresses: Mutex<Vec<B256>>,
+    }
+
+    impl MorphProofsInitialStateStore for RecordingStore {
+        fn initial_state_anchor(&self) -> MorphProofsStorageResult<InitialStateAnchor> {
+            Ok(InitialStateAnchor::default())
+        }
+
+        fn set_initial_state_anchor(&self, _anchor: BlockNumHash) -> MorphProofsStorageResult<()> {
+            Ok(())
+        }
+
+        fn store_account_branches(
+            &self,
+            _account_nodes: Vec<(Nibbles, Option<BranchNodeCompact>)>,
+        ) -> MorphProofsStorageResult<()> {
+            Ok(())
+        }
+
+        fn store_storage_branches(
+            &self,
+            _hashed_address: B256,
+            _storage_nodes: Vec<(Nibbles, Option<BranchNodeCompact>)>,
+        ) -> MorphProofsStorageResult<()> {
+            Ok(())
+        }
+
+        fn store_storage_branches_bulk(
+            &self,
+            entries: crate::api::StorageBranchEntries,
+        ) -> MorphProofsStorageResult<()> {
+            self.storage_trie_addresses
+                .lock()
+                .unwrap()
+                .extend(entries.into_iter().map(|(address, _)| address));
+            Ok(())
+        }
+
+        fn store_hashed_accounts(
+            &self,
+            _accounts: Vec<(B256, Option<Account>)>,
+        ) -> MorphProofsStorageResult<()> {
+            Ok(())
+        }
+
+        fn store_hashed_storages(
+            &self,
+            _hashed_address: B256,
+            _storages: Vec<(B256, U256)>,
+        ) -> MorphProofsStorageResult<()> {
+            Ok(())
+        }
+
+        fn store_hashed_storages_bulk(
+            &self,
+            entries: Vec<(B256, Vec<(B256, U256)>)>,
+        ) -> MorphProofsStorageResult<()> {
+            self.hashed_storage_addresses
+                .lock()
+                .unwrap()
+                .extend(entries.into_iter().map(|(address, _)| address));
+            Ok(())
+        }
+
+        fn commit_initial_state(&self) -> MorphProofsStorageResult<BlockNumHash> {
+            Ok(BlockNumHash::default())
+        }
+    }
+
+    #[test]
+    fn hashed_storage_batches_preserve_source_address_order() {
+        let store = RecordingStore::default();
+        let addresses = [
+            B256::repeat_byte(1),
+            B256::repeat_byte(2),
+            B256::repeat_byte(3),
+        ];
+        let entries = vec![
+            (
+                addresses[0],
+                StorageEntry {
+                    key: B256::repeat_byte(0x11),
+                    value: U256::from(1),
+                },
+            ),
+            (
+                addresses[0],
+                StorageEntry {
+                    key: B256::repeat_byte(0x12),
+                    value: U256::from(2),
+                },
+            ),
+            (
+                addresses[1],
+                StorageEntry {
+                    key: B256::repeat_byte(0x21),
+                    value: U256::from(3),
+                },
+            ),
+            (
+                addresses[2],
+                StorageEntry {
+                    key: B256::repeat_byte(0x31),
+                    value: U256::from(4),
+                },
+            ),
+        ];
+
+        <HashedStoragesInit<()> as InitTable>::store_entries(&store, entries).unwrap();
+        assert_eq!(*store.hashed_storage_addresses.lock().unwrap(), addresses);
+    }
+
+    #[test]
+    fn storage_trie_batches_preserve_source_address_order() {
+        let store = RecordingStore::default();
+        let addresses = [
+            B256::repeat_byte(1),
+            B256::repeat_byte(2),
+            B256::repeat_byte(3),
+        ];
+        let entry = |nibble| PackedStorageTrieEntry {
+            nibbles: PackedStoredNibblesSubKey::from(Nibbles::from_nibbles_unchecked([nibble])),
+            node: BranchNodeCompact::default(),
+        };
+        let entries = vec![
+            (addresses[0], entry(1)),
+            (addresses[0], entry(2)),
+            (addresses[1], entry(3)),
+            (addresses[2], entry(4)),
+        ];
+
+        <PackedStoragesTrieInit<()> as InitTable>::store_entries(&store, entries).unwrap();
+        assert_eq!(*store.storage_trie_addresses.lock().unwrap(), addresses);
+    }
+
     macro_rules! proof_storage_init_tests {
         ($mod_name:ident, $storage:ident) => {
             mod $mod_name {
