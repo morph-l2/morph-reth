@@ -21,6 +21,7 @@ echo "  - ${RETH_DATA_DIR}/rocksdb"
 echo "  - ${RETH_DATA_DIR}/static_files"
 echo "  - ${RETH_DATA_DIR}/exex"
 echo "  - ${RETH_DATA_DIR}/morph"
+echo "  - ${RETH_DATA_DIR}/historical-proofs"
 echo "  - ${NODE_HOME}/data"
 echo
 echo "This keeps:"
@@ -45,6 +46,7 @@ rm -rf \
   "${RETH_DATA_DIR}/static_files" \
   "${RETH_DATA_DIR}/exex" \
   "${RETH_DATA_DIR}/morph" \
+  "${RETH_DATA_DIR}/historical-proofs" \
   "${NODE_HOME}/data"
 mkdir -p "${RETH_DATA_DIR}" "${NODE_HOME}/data"
 

@@ -19,7 +19,7 @@ services:
     pid: host
     command: >
       node
-      --chain morph
+      --chain mainnet
       --datadir /var/lib/morph-reth/data
       --metrics 0.0.0.0:9001
       --log.file.directory /var/lib/morph-reth/logs

@@ -14,9 +14,12 @@ up to date.
 
 The [`docker-compose.yml`](./docker-compose.yml) in this directory brings up a
 local morph-reth node together with Prometheus and Grafana. The `morph-reth`
-service runs with `--chain morph` and exposes metrics on port `9001`,
+service runs against Morph mainnet with `--chain mainnet` and exposes metrics on port `9001`,
 which Prometheus scrapes with the labels defined in
 [`prometheus/prometheus.yml`](./prometheus/prometheus.yml).
+
+To monitor Hoodi instead, change the service argument to `--chain hoodi` and
+set the Prometheus `chain` label to `hoodi`.
 
 ```bash
 ./etc/generate-jwt.sh
@@ -26,6 +29,11 @@ docker compose -f etc/docker-compose.yml up -d
 Grafana is available at <http://localhost:3000> (default admin/admin) and
 will auto-provision the unified Morph dashboard from
 [`grafana/dashboards/`](./grafana/dashboards/).
+
+The dashboard's **Proof History** and **Execution Extension Runtime** rows
+require the node to run with `--proofs-history`. The example Compose stack does
+not enable proof history by default, so those panels are expected to be empty
+unless the flag is added to the `morph-reth` service command.
 
 ### Grafana
 

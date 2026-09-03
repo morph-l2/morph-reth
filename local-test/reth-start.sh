@@ -37,7 +37,6 @@ args=(
   --authrpc.jwtsecret "${JWT_SECRET}"
   --log.file.directory "$(dirname "${RETH_LOG_FILE}")"
   --log.file.filter info
-  --rpc.eth-proof-window 1209600
   # Local testing: explicitly avoid external IP probes such as icanhazip.com.
   --nat none
   # Batch MDBX writes so they don't compete with Tendermint's LevelDB fsyncs

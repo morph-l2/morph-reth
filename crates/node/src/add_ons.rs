@@ -8,9 +8,13 @@ use alloy_hardforks::ForkCondition;
 use morph_chainspec::{MorphHardfork, MorphHardforks};
 use morph_evm::MorphEvmConfig;
 use morph_primitives::{Block, MorphHeader, MorphReceipt};
+use morph_proofs::{MdbxProofsStorage, MorphProofsStorage};
 use morph_reference_index::{ReferenceIndexConfig, ReferenceIndexRuntime};
 use morph_rpc::{
-    MorphEthApiBuilder, MorphEthConfigApiServer, MorphEthConfigHandler,
+    ExecutionWitnessApiExt, ExecutionWitnessApiOverrideServer, MorphEthApiBuilder,
+    MorphEthConfigApiServer, MorphEthConfigHandler, ProofStatusApiExt,
+    ProofStatusApiOverrideServer,
+    eth::proofs::{EthProofApiExt, EthProofApiOverrideServer},
     morph::{MorphRpc, MorphRpcHandler, MorphRpcServer},
 };
 use reth_chain_state::CanonStateSubscriptions;
@@ -27,9 +31,10 @@ use reth_provider::{
     BlockWriter, CanonChainTracker, ChainSpecProvider, DBProvider, DatabaseProviderFactory,
 };
 use reth_prune_types::PruneMode;
-use reth_rpc_builder::Identity;
+use reth_rpc_builder::{Identity, RethRpcModule};
 use reth_rpc_eth_api::RpcNodeCore;
 use reth_tracing::tracing;
+use std::sync::Arc;
 
 /// Morph node add-ons for RPC and Engine API.
 ///
@@ -48,6 +53,12 @@ pub struct MorphAddOns<
 > {
     /// Inner RPC add-ons from reth.
     inner: RpcAddOns<N, EthB, PVB, NoopEngineApiBuilder, EVB, RpcMiddleware, AuthHttpMiddleware>,
+    /// Optional storage plus the `eth_getMultiProof` account-target limit, used to replace the
+    /// historical proof RPCs on the normal and auth servers.
+    ///
+    /// Held as one unit because the limit is only ever enforced by the RPC that this storage
+    /// installs; there is no way to configure one without the other.
+    proof_history: Option<(MorphProofsStorage<Arc<MdbxProofsStorage>>, usize)>,
 }
 
 impl<N> MorphAddOns<NodeAdapter<N>, MorphEthApiBuilder>
@@ -69,7 +80,19 @@ where
                 Identity::default(),
                 Identity::default(),
             ),
+            proof_history: None,
         }
+    }
+
+    /// Attach initialized proof-history storage, and the account-target limit its
+    /// `eth_getMultiProof` override enforces, to the RPC add-ons.
+    pub fn with_proof_history(
+        mut self,
+        storage: MorphProofsStorage<Arc<MdbxProofsStorage>>,
+        max_multi_proof_targets: usize,
+    ) -> Self {
+        self.proof_history = Some((storage, max_multi_proof_targets));
+        self
     }
 }
 
@@ -173,6 +196,7 @@ where
 
         let morph_rpc_ctx = MorphRpc::new(reference_index_handle, provider.clone());
         let reference_rpc_handler = MorphRpcHandler::new(morph_rpc_ctx);
+        let proof_history = self.proof_history;
 
         // Use launch_add_ons_with to register custom Engine API and eth_config
         self.inner
@@ -180,8 +204,61 @@ where
                 let reth_node_builder::rpc::RpcModuleContainer {
                     modules,
                     auth_module,
+                    registry,
                     ..
                 } = container;
+
+                if let Some((storage, max_multi_proof_targets)) = proof_history {
+                    let eth_api = registry.eth_api().clone();
+                    let eth_api_witness = registry.eth_api().clone();
+                    modules
+                        .add_or_replace_if_module_configured(
+                            RethRpcModule::Eth,
+                            EthProofApiExt::new(
+                                eth_api.clone(),
+                                storage.clone(),
+                                max_multi_proof_targets,
+                            )
+                            .into_rpc(),
+                        )
+                        .map_err(|error| {
+                            eyre::eyre!("Failed to replace normal historical proof RPCs: {error}")
+                        })?;
+                    auth_module
+                        .replace_auth_methods(
+                            EthProofApiExt::new(
+                                eth_api,
+                                storage.clone(),
+                                max_multi_proof_targets,
+                            )
+                            .into_rpc(),
+                        )
+                        .map_err(|error| {
+                            eyre::eyre!("Failed to replace auth historical proof RPCs: {error}")
+                        })?;
+                    // Route the debug-namespace witness RPCs to proof history as well. Left on
+                    // reth's default they would rebuild the parent trie by replaying changesets
+                    // backwards from the tip, which is exactly the cost this storage exists to
+                    // avoid. Only transports that explicitly enable the debug namespace receive
+                    // these methods; the authenticated Engine API module remains untouched.
+                    modules
+                        .add_or_replace_if_module_configured(
+                            RethRpcModule::Debug,
+                            ExecutionWitnessApiExt::new(eth_api_witness, storage.clone()).into_rpc(),
+                        )
+                        .map_err(|error| {
+                            eyre::eyre!("Failed to replace historical execution witness RPCs: {error}")
+                        })?;
+                    modules
+                        .add_or_replace_if_module_configured(
+                            RethRpcModule::Debug,
+                            ProofStatusApiExt::new(storage).into_rpc(),
+                        )
+                        .map_err(|error| {
+                            eyre::eyre!("Failed to register debug_proofsSyncStatus: {error}")
+                        })?;
+                    tracing::info!(target: "morph::node", "Historical proof RPCs registered");
+                }
 
                 // Register Morph eth_config handler (EIP-7910 + morph extension)
                 // This provides eth_config on HTTP/WS/IPC for morphnode compatibility.
@@ -264,8 +341,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::ensure_reference_index_pruning_compatible;
     use reth_prune_types::PruneMode;
+
+    use super::ensure_reference_index_pruning_compatible;
 
     #[test]
     fn reference_index_accepts_no_bodies_history_pruning() {
