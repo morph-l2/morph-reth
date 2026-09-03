@@ -551,7 +551,7 @@ where
     /// Re-arm a forward-sync target after a transient failure, then back off.
     ///
     /// `take_state()` already consumed the original `SyncUpTo`, so returning without this would
-    /// leave the loop parked on `notified()` until the next chain event. Requeueing puts the failed
+    /// leave the loop parked on `notified()` until the next chain event. Requeuing puts the failed
     /// target back as the base and merges anything that arrived while it ran on top, so a newer
     /// notification still wins.
     async fn requeue_sync_up_to(sync_target: &SyncTarget, target: u64) {
