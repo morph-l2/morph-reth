@@ -480,8 +480,7 @@ pub async fn advance_empty_block(node: &mut MorphTestNode) -> eyre::Result<Morph
         .send_new_payload(BuildNewPayload {
             attributes: rpc_attrs,
             parent_hash: head_hash,
-            cache: None,
-            state_root_handle: None,
+            resources: Default::default(),
         })
         .await?
         .map_err(|e| eyre::eyre!("payload build failed: {e}"))?;

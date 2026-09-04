@@ -628,8 +628,7 @@ async fn payload_builder_hash_matches_block_hash_with_nonzero_prev_randao() -> e
         .send_new_payload(BuildNewPayload {
             attributes: rpc_attrs,
             parent_hash: head_hash,
-            cache: None,
-            state_root_handle: None,
+            resources: Default::default(),
         })
         .await?
         .map_err(|e| eyre::eyre!("payload build failed: {e}"))?;

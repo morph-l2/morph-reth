@@ -10,7 +10,7 @@ use revm::{
     context_interface::{Block, journaled_state::account::JournaledAccountTr, result::ResultGas},
     handler::{EvmTr, FrameTr, Handler, MainnetHandler, post_execution, pre_execution, validation},
     inspector::{Inspector, InspectorHandler},
-    interpreter::{Gas, InitialAndFloorGas, interpreter::EthInterpreter},
+    interpreter::{Gas, GasTracker, InitialAndFloorGas, interpreter::EthInterpreter},
 };
 
 use crate::{
@@ -85,8 +85,8 @@ where
     fn apply_eip7702_auth_list(
         &self,
         evm: &mut Self::Evm,
-        init_and_floor_gas: &mut InitialAndFloorGas,
-    ) -> Result<u64, Self::Error> {
+        init_and_floor_gas: &mut GasTracker,
+    ) -> Result<Option<u64>, Self::Error> {
         pre_execution::apply_eip7702_auth_list(evm.ctx(), init_and_floor_gas)
     }
 
@@ -166,17 +166,21 @@ where
         evm: &mut Self::Evm,
         exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
         eip7702_refund: i64,
-    ) {
+    ) -> Result<(), Self::Error> {
         // L1 message tx follows go-ethereum semantics: no gas refunds.
         // Keep gas_used as actual consumed gas without applying post-exec refund.
         if evm.ctx_ref().tx().is_l1_msg() {
             // revm::Gas::used() subtracts `refunded` by default.
             // For L1 messages we must zero it out, otherwise gas_used is undercounted.
             exec_result.gas_mut().set_refund(0);
-            return;
+            return Ok(());
         }
-        let spec = (*evm.ctx().cfg().spec()).into();
-        post_execution::refund(spec, exec_result.gas_mut(), eip7702_refund);
+        post_execution::refund(
+            evm.ctx().cfg().gas_params(),
+            exec_result.gas_mut(),
+            eip7702_refund,
+        );
+        Ok(())
     }
 
     #[inline]
@@ -270,6 +274,7 @@ where
                 disable_eip7623,
                 is_amsterdam_eip8037,
                 tx_gas_limit_cap,
+                None,
             )
             .unwrap_or_else(|_| InitialAndFloorGas::new(tx.gas_limit(), 0));
 
@@ -283,6 +288,7 @@ where
             disable_eip7623,
             is_amsterdam_eip8037,
             tx_gas_limit_cap,
+            None,
         )
         .map_err(MorphInvalidTransaction::EthInvalidTransaction)?;
 
@@ -806,7 +812,13 @@ where
         ..Default::default()
     };
     let mut h = MorphEvmHandler::<DB, I>::new();
-    h.execution(evm, &InitialAndFloorGas::new(0, 0))
+    let init_and_floor_gas = InitialAndFloorGas::new(0, 0);
+    let mut gas = h.tx_gas(evm, &init_and_floor_gas);
+    let checkpoint = evm.ctx().journal_mut().checkpoint();
+    match h.execution(evm, checkpoint, &mut gas)? {
+        Some(res) => Ok(res),
+        None => h.runtime_oog_result(evm, &init_and_floor_gas, &mut gas),
+    }
 }
 
 /// Query ERC20 `balanceOf(address)` via an internal EVM call.

@@ -11,7 +11,7 @@ use morph_chainspec::{
 use morph_payload_types::{MorphExecutionData, MorphPayloadTypes};
 use morph_primitives::{MorphHeader, MorphPrimitives};
 use parking_lot::Mutex;
-use reth_chain_state::{ExecutedBlock, StateTrieOverlayManager};
+use reth_chain_state::ExecutedBlock;
 use reth_chainspec::EthChainSpec;
 use reth_engine_tree::tree::payload_validator::TreeCtx;
 use reth_engine_tree::tree::{
@@ -25,7 +25,6 @@ use reth_engine_tree::tree::{
 };
 use reth_errors::{ConsensusError, ProviderResult};
 use reth_evm::{ConfigureEvm, revm::context::Block as _};
-use reth_execution_cache::SavedCache;
 use reth_node_api::{
     AddOnsContext, FullNodeComponents, InvalidPayloadAttributesError, NewPayloadError, NodeTypes,
     PayloadAttributes, PayloadTypes, PayloadValidator,
@@ -37,9 +36,11 @@ use reth_node_builder::{
 use reth_payload_primitives::BuiltPayloadExecutedBlock;
 use reth_primitives_traits::{RecoveredBlock, SealedBlock};
 use reth_provider::{
-    BlockExecutionOutput, BlockReader, ChainSpecProvider, StateProviderFactory, StateReader,
-    StateRootProvider,
+    BlockExecutionOutput, BlockNumReader, BlockReader, ChainSpecProvider, DatabaseProviderFactory,
+    PruneCheckpointReader, StageCheckpointReader, StateProviderFactory, StateReader,
+    StateRootProvider, StorageSettingsCache, TryIntoHistoricalStateProvider,
 };
+use reth_storage_overlay::OverlayManager;
 use reth_tracing::tracing;
 use std::{collections::VecDeque, sync::Arc};
 
@@ -106,8 +107,7 @@ where
         self,
         ctx: &AddOnsContext<'_, Node>,
         tree_config: reth_node_api::TreeConfig,
-        changeset_cache: reth_trie_db::ChangesetCache,
-        state_trie_overlays: StateTrieOverlayManager<MorphPrimitives>,
+        overlay_manager: OverlayManager<MorphPrimitives>,
     ) -> eyre::Result<Self::EngineValidator> {
         let validator = self.payload_validator_builder.build(ctx).await?;
         let data_dir = ctx
@@ -131,8 +131,7 @@ where
             validator,
             tree_config,
             invalid_block_hook,
-            changeset_cache,
-            state_trie_overlays,
+            overlay_manager,
             ctx.node.task_executor().clone(),
         )
         .with_state_root_strategy(state_root_strategy);
@@ -349,19 +348,15 @@ where
         self.inner.on_inserted_executed_block(block)
     }
 
-    fn cache_for(&self, block_hash: B256) -> Option<SavedCache> {
-        self.inner.cache_for(block_hash)
-    }
-
-    fn payload_state_root_handle_for(
+    fn payload_builder_resources(
         &self,
         parent_hash: B256,
         parent_header: &MorphHeader,
         timestamp: u64,
         state: &mut EngineApiTreeState<MorphPrimitives>,
-    ) -> Option<PayloadStateRootHandle> {
+    ) -> reth_payload_builder::PayloadBuilderResources {
         self.inner
-            .payload_state_root_handle_for(parent_hash, parent_header, timestamp, state)
+            .payload_builder_resources(parent_hash, parent_header, timestamp, state)
     }
 }
 
@@ -395,12 +390,19 @@ impl MorphStateRootStrategy {
 
 impl<P, Evm> StateRootStrategy<MorphPrimitives, P, Evm> for MorphStateRootStrategy
 where
-    P: BlockReader<Header = MorphHeader>
+    P: DatabaseProviderFactory
+        + BlockReader<Header = MorphHeader>
         + StateProviderFactory
         + StateReader
         + Clone
         + Send
         + Sync
+        + 'static,
+    P::Provider: BlockNumReader
+        + PruneCheckpointReader
+        + StageCheckpointReader
+        + StorageSettingsCache
+        + TryIntoHistoricalStateProvider
         + 'static,
     Evm: ConfigureEvm<Primitives = MorphPrimitives> + 'static,
     DefaultStateRootStrategy: StateRootStrategy<MorphPrimitives, P, Evm>,
@@ -439,7 +441,20 @@ struct PreJadeStateRootJob<P> {
 
 impl<P> StateRootJob<MorphPrimitives> for PreJadeStateRootJob<P>
 where
-    P: BlockReader + StateProviderFactory + StateReader + Clone + Send + Sync + 'static,
+    P: DatabaseProviderFactory
+        + BlockReader
+        + StateProviderFactory
+        + StateReader
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+    P::Provider: BlockNumReader
+        + PruneCheckpointReader
+        + StageCheckpointReader
+        + StorageSettingsCache
+        + TryIntoHistoricalStateProvider
+        + 'static,
 {
     fn name(&self) -> &'static str {
         "morph-pre-jade-trusted-header"
@@ -643,7 +658,7 @@ mod tests {
 
         let state = HashedPostState::from_hashed_storage(
             hashed_address,
-            HashedStorage::from_iter(false, [(hashed_slot, U256::from_be_bytes(expected.0))]),
+            HashedStorage::from_iter([(hashed_slot, U256::from_be_bytes(expected.0))]),
         );
 
         assert_eq!(
@@ -826,7 +841,7 @@ mod tests {
         let hashed_slot = keccak256(B256::from(L2_MESSAGE_QUEUE_WITHDRAW_TRIE_ROOT_SLOT));
         let state = HashedPostState::from_hashed_storage(
             wrong_address,
-            HashedStorage::from_iter(false, [(hashed_slot, U256::from_be_bytes([0x11; 32]))]),
+            HashedStorage::from_iter([(hashed_slot, U256::from_be_bytes([0x11; 32]))]),
         );
         assert!(
             MorphEngineValidator::updated_withdraw_trie_root_from_sorted_hashed_state(
@@ -843,7 +858,7 @@ mod tests {
         let wrong_slot = keccak256(B256::from(alloy_primitives::U256::from(999)));
         let state = HashedPostState::from_hashed_storage(
             hashed_address,
-            HashedStorage::from_iter(false, [(wrong_slot, U256::from_be_bytes([0x22; 32]))]),
+            HashedStorage::from_iter([(wrong_slot, U256::from_be_bytes([0x22; 32]))]),
         );
         assert!(
             MorphEngineValidator::updated_withdraw_trie_root_from_sorted_hashed_state(
@@ -954,7 +969,7 @@ mod tests {
         let actual = B256::from([0xff; 32]);
         let state = HashedPostState::from_hashed_storage(
             hashed_address,
-            HashedStorage::from_iter(false, [(hashed_slot, U256::from_be_bytes(actual.0))]),
+            HashedStorage::from_iter([(hashed_slot, U256::from_be_bytes(actual.0))]),
         );
 
         let result = validator.validate_withdraw_trie_root_update(block.hash(), || {
@@ -984,7 +999,7 @@ mod tests {
         let hashed_slot = keccak256(B256::from(L2_MESSAGE_QUEUE_WITHDRAW_TRIE_ROOT_SLOT));
         let state = HashedPostState::from_hashed_storage(
             hashed_address,
-            HashedStorage::from_iter(false, [(hashed_slot, U256::from_be_bytes(actual.0))]),
+            HashedStorage::from_iter([(hashed_slot, U256::from_be_bytes(actual.0))]),
         );
 
         let block = empty_recovered_block_with_hash(hash);

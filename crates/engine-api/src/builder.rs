@@ -737,8 +737,7 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
         let build_input = BuildNewPayload {
             attributes: rpc_attributes,
             parent_hash,
-            cache: None,
-            state_root_handle: None,
+            resources: Default::default(),
         };
         let _ = self
             .payload_builder

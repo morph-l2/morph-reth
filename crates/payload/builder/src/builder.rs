@@ -910,7 +910,6 @@ where
         // Keep unsorted; conversion to sorted is deferred until required.
         hashed_state: Arc::new(hashed_state),
         trie_updates: Arc::new(trie_updates),
-        changed_paths: None,
     };
 
     let payload = MorphBuiltPayload::new(
