@@ -48,14 +48,73 @@ pub struct TokenFeeInfo {
     pub balance_slot: Option<U256>,
 }
 
-#[derive(Clone, Debug)]
-struct TokenRegistryEntry {
+/// Fee-token registry metadata without any caller-specific balance state.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TokenRegistryEntry {
     token_address: Address,
     is_active: bool,
     decimals: u8,
     price_ratio: U256,
     scale: U256,
     balance_slot: Option<U256>,
+}
+
+impl TokenRegistryEntry {
+    /// Load fee-token metadata without reading a caller's token balance.
+    pub(crate) fn load<DB: RevmDatabase>(
+        db: &mut DB,
+        token_id: u16,
+    ) -> Result<Option<Self>, DB::Error> {
+        read_registry_entry(db, token_id)
+    }
+
+    /// Return whether this registry entry can currently pay transaction fees.
+    pub(crate) const fn is_active(&self) -> bool {
+        self.is_active
+    }
+
+    /// Resolve the caller's balance to produce complete fee information.
+    pub(crate) fn load_for_caller<DB: Database>(
+        self,
+        db: &mut DB,
+        caller: Address,
+        hardfork: MorphHardfork,
+    ) -> Result<TokenFeeInfo, DB::Error> {
+        let balance = read_token_balance_with_fallback(
+            db,
+            self.token_address,
+            caller,
+            self.balance_slot,
+            hardfork,
+        )?;
+        Ok(self.into_fee_info(caller, balance))
+    }
+
+    fn load_storage_only<DB: RevmDatabase>(
+        self,
+        db: &mut DB,
+        caller: Address,
+    ) -> Result<TokenFeeInfo, DB::Error> {
+        let balance = if let Some(slot) = self.balance_slot {
+            read_balance_from_storage(db, self.token_address, caller, slot)?
+        } else {
+            U256::ZERO
+        };
+        Ok(self.into_fee_info(caller, balance))
+    }
+
+    fn into_fee_info(self, caller: Address, balance: U256) -> TokenFeeInfo {
+        TokenFeeInfo {
+            token_address: self.token_address,
+            is_active: self.is_active,
+            decimals: self.decimals,
+            price_ratio: self.price_ratio,
+            scale: self.scale,
+            caller,
+            balance,
+            balance_slot: self.balance_slot,
+        }
+    }
 }
 
 impl TokenFeeInfo {
@@ -70,29 +129,12 @@ impl TokenFeeInfo {
         caller: Address,
         hardfork: MorphHardfork,
     ) -> Result<Option<Self>, DB::Error> {
-        let entry = match read_registry_entry(db, token_id)? {
+        let entry = match TokenRegistryEntry::load(db, token_id)? {
             Some(e) => e,
             None => return Ok(None),
         };
 
-        let balance = read_token_balance_with_fallback(
-            db,
-            entry.token_address,
-            caller,
-            entry.balance_slot,
-            hardfork,
-        )?;
-
-        Ok(Some(Self {
-            token_address: entry.token_address,
-            is_active: entry.is_active,
-            decimals: entry.decimals,
-            price_ratio: entry.price_ratio,
-            scale: entry.scale,
-            caller,
-            balance,
-            balance_slot: entry.balance_slot,
-        }))
+        entry.load_for_caller(db, caller, hardfork).map(Some)
     }
 
     /// Storage-only variant of [`Self::load_for_caller`].
@@ -115,27 +157,12 @@ impl TokenFeeInfo {
         token_id: u16,
         caller: Address,
     ) -> Result<Option<Self>, DB::Error> {
-        let entry = match read_registry_entry(db, token_id)? {
+        let entry = match TokenRegistryEntry::load(db, token_id)? {
             Some(e) => e,
             None => return Ok(None),
         };
 
-        let balance = if let Some(slot) = entry.balance_slot {
-            read_balance_from_storage(db, entry.token_address, caller, slot)?
-        } else {
-            U256::ZERO
-        };
-
-        Ok(Some(Self {
-            token_address: entry.token_address,
-            is_active: entry.is_active,
-            decimals: entry.decimals,
-            price_ratio: entry.price_ratio,
-            scale: entry.scale,
-            caller,
-            balance,
-            balance_slot: entry.balance_slot,
-        }))
+        entry.load_storage_only(db, caller).map(Some)
     }
 
     /// Calculate the token amount required for a given ETH amount.
