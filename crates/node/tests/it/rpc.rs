@@ -786,3 +786,39 @@ async fn estimate_gas_reports_insufficient_funds_for_transfer() -> eyre::Result<
 
     Ok(())
 }
+
+/// `eth_estimateGas` rejects a request specifying an unregistered fee token ID.
+#[tokio::test(flavor = "multi_thread")]
+async fn estimate_gas_rejects_unregistered_fee_token() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+
+    advance_chain(1, &mut node, wallet_to_arc(wallet)).await?;
+
+    let client = node
+        .rpc_client()
+        .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
+
+    let sender = Address::random();
+    let recipient = Address::random();
+
+    let params = (serde_json::json!({
+        "from": sender,
+        "to": recipient,
+        "value": "0x0",
+        "feeTokenID": "0xffff", // 65535, unregistered
+    }),);
+
+    let result: Result<Value, _> = client.request("eth_estimateGas", params).await;
+
+    let err = result.expect_err("eth_estimateGas must fail for unregistered fee token");
+    let err_str = err.to_string();
+    assert!(
+        err_str.contains("Token with ID 65535 is not registered"),
+        "expected 'Token with ID 65535 is not registered', got: {err_str}"
+    );
+
+    Ok(())
+}
