@@ -281,9 +281,10 @@ where
             // Calculate intrinsic gas (same as normal transactions). If intrinsic gas
             // > gas_limit, fall back to gas_limit (matching go-ethereum's behavior for
             // L1 messages, which prepay gas on L1 and must always execute).
-            let initial_and_floor = validation::validate_initial_tx_gas(
+            let initial_and_floor = validation::validate_initial_tx_gas_with_gas_params(
                 tx,
                 spec,
+                cfg.gas_params(),
                 disable_eip7623,
                 is_amsterdam_eip8037,
                 tx_gas_limit_cap,
@@ -295,9 +296,10 @@ where
         }
 
         // Normal transaction validation
-        let initial_and_floor = validation::validate_initial_tx_gas(
+        let initial_and_floor = validation::validate_initial_tx_gas_with_gas_params(
             tx,
             spec,
+            cfg.gas_params(),
             disable_eip7623,
             is_amsterdam_eip8037,
             tx_gas_limit_cap,
@@ -1039,7 +1041,7 @@ mod tests {
     use morph_primitives::MORPH_TX_TYPE_ID;
     use revm::{
         context::{BlockEnv, TxEnv},
-        context_interface::result::InvalidTransaction,
+        context_interface::{cfg::gas_params::GasId, result::InvalidTransaction},
         database::{CacheDB, EmptyDB},
         inspector::NoOpInspector,
         state::{AccountInfo, Bytecode},
@@ -1098,6 +1100,41 @@ mod tests {
             err,
             EVMError::Transaction(MorphInvalidTransaction::EthInvalidTransaction(
                 InvalidTransaction::GasPriceLessThanBasefee
+            ))
+        ));
+    }
+
+    #[test]
+    fn validate_initial_tx_gas_uses_configured_gas_params() {
+        let mut evm = MorphEvm::new(
+            MorphContext::new(CacheDB::new(EmptyDB::default()), MorphHardfork::default()),
+            NoOpInspector,
+        );
+        let mut gas_params = evm.cfg.gas_params.clone();
+        gas_params.override_gas([(GasId::tx_base_stipend(), 30_000)]);
+        evm.cfg.set_gas_params(gas_params);
+        evm.tx = MorphTxEnv {
+            inner: TxEnv {
+                gas_limit: 25_000,
+                kind: TxKind::Call(Address::ZERO),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let err = <MorphEvmHandler<_, _> as Handler>::validate_initial_tx_gas(
+            &MorphEvmHandler::default(),
+            &mut evm,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            EVMError::Transaction(MorphInvalidTransaction::EthInvalidTransaction(
+                InvalidTransaction::CallGasCostMoreThanGasLimit {
+                    initial_gas: 30_000,
+                    gas_limit: 25_000,
+                }
             ))
         ));
     }

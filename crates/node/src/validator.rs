@@ -9,13 +9,14 @@ use morph_chainspec::{
     MorphHardforks,
 };
 use morph_payload_types::{MorphExecutionData, MorphPayloadTypes};
-use morph_primitives::{MorphHeader, MorphPrimitives};
+use morph_primitives::{MorphHeader, MorphPrimitives, MorphTxEnvelope};
 use parking_lot::Mutex;
 use reth_chain_state::ExecutedBlock;
 use reth_chainspec::EthChainSpec;
 use reth_engine_tree::tree::payload_validator::TreeCtx;
 use reth_engine_tree::tree::{
-    BasicEngineValidator, CacheWaitDurations, EngineApiTreeState, EngineValidator, WaitForCaches,
+    BasicEngineValidator, CacheWaitDurations, EngineApiTreeState, EngineValidator,
+    TxPoolPrewarmSource, TxPoolPrewarmTransaction, TxPoolPrewarmTransactions, WaitForCaches,
     error::{InsertBlockError, InsertBlockErrorKind},
     state_root_strategy::{
         DefaultStateRootStrategy, LazyHashedPostState, PayloadStateRootHandle,
@@ -42,6 +43,9 @@ use reth_provider::{
 };
 use reth_storage_overlay::OverlayManager;
 use reth_tracing::tracing;
+use reth_transaction_pool::{
+    BestTransactions, BestTransactionsAttributes, PoolTransaction, TransactionPool,
+};
 use std::{collections::VecDeque, sync::Arc};
 
 /// Builder for Morph engine validator (payload validation).
@@ -124,7 +128,8 @@ where
             dyn StateRootStrategy<MorphPrimitives, Node::Provider, Node::Evm>,
         > = Arc::new(MorphStateRootStrategy::new(chain_spec.clone()));
         let tree_config = strict_morph_tree_config(tree_config);
-        let validator = BasicEngineValidator::new(
+        let txpool_prewarming = tree_config.txpool_prewarming();
+        let mut validator = BasicEngineValidator::new(
             provider.clone(),
             Arc::new(ctx.node.consensus().clone()),
             ctx.node.evm_config().clone(),
@@ -136,12 +141,64 @@ where
         )
         .with_state_root_strategy(state_root_strategy);
 
+        if txpool_prewarming {
+            validator = validator
+                .with_txpool_prewarming(MorphTxPoolPrewarmSource::new(ctx.node.pool().clone()));
+        }
+
         Ok(MorphTreeEngineValidator::new(
             validator,
             provider,
             chain_spec,
             post_execution_validator,
         ))
+    }
+}
+
+/// [`TransactionPool`]-backed candidate source for engine cache prewarming.
+#[derive(Debug)]
+struct MorphTxPoolPrewarmSource<P>(P);
+
+impl<P> MorphTxPoolPrewarmSource<P> {
+    const fn new(pool: P) -> Self {
+        Self(pool)
+    }
+}
+
+impl<P> TxPoolPrewarmSource<MorphPrimitives> for MorphTxPoolPrewarmSource<P>
+where
+    P: TransactionPool<Transaction: PoolTransaction<Consensus = MorphTxEnvelope>>
+        + Clone
+        + Send
+        + Sync
+        + std::fmt::Debug
+        + 'static,
+{
+    fn best_transactions(
+        &self,
+        parent_hash: B256,
+    ) -> Option<TxPoolPrewarmTransactions<MorphPrimitives>> {
+        let block_info = self.0.block_info();
+        if block_info.last_seen_block_hash != parent_hash {
+            return None;
+        }
+
+        let mut best = self
+            .0
+            .best_transactions_with_attributes(BestTransactionsAttributes::new(
+                block_info.pending_basefee,
+                block_info
+                    .pending_blob_fee
+                    .map(|fee| u64::try_from(fee).unwrap_or(u64::MAX)),
+            ));
+        best.allow_updates_out_of_order();
+        best.skip_blobs();
+
+        Some(Box::new(best.map(|transaction| TxPoolPrewarmTransaction {
+            hash: *transaction.hash(),
+            sender: transaction.sender(),
+            transaction: transaction.transaction.clone_into_consensus(),
+        })))
     }
 }
 
