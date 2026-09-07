@@ -116,6 +116,7 @@ impl<Spec> TryIntoTxEnv<MorphTxEnv, Spec, MorphBlockEnv> for MorphTransactionReq
         if inner.chain_id.is_none() {
             inner.chain_id = Some(evm_env.cfg_env.chain_id);
         }
+        let legacy_gas_price = inner.gas_price;
 
         // Match geth's `ToMessage`, which keys MorphTx detection off the Morph
         // fields alone (`isMorphTxArgs`) and ignores `gasPrice`. The rule that a
@@ -144,6 +145,12 @@ impl<Spec> TryIntoTxEnv<MorphTxEnv, Spec, MorphBlockEnv> for MorphTransactionReq
             tx_env.reference = reference;
             tx_env.memo = memo.clone();
             tx_env.inner.tx_type = morph_primitives::MORPH_TX_TYPE_ID;
+            // geth's `ToMessage` maps legacy `gasPrice` to both EIP-1559 caps.
+            // Preserve that shape so fallback MorphTx encoding produces the
+            // same L1 data fee.
+            if let Some(gas_price) = legacy_gas_price {
+                tx_env.inner.gas_priority_fee = Some(gas_price);
+            }
             tx_env.version = Some(morph_tx_version(
                 explicit_version,
                 reference.as_ref(),
@@ -300,6 +307,7 @@ fn normalize_reference(reference: Option<B256>) -> Option<B256> {
 mod tests {
     use super::*;
     use crate::types::transaction::MorphRpcTransaction;
+    use alloy_eips::eip2718::Decodable2718;
     use alloy_primitives::{Address, B256, Bytes, address};
     use alloy_rpc_types_eth::{TransactionInfo, TransactionInput, TransactionRequest};
     use morph_chainspec::MorphHardfork;
@@ -591,6 +599,19 @@ mod tests {
         assert_eq!(tx_env.fee_limit, Some(U256::from(1000000)));
         // The legacy gas price is still what the EVM prices the call with.
         assert_eq!(tx_env.inner.gas_price, 1_000_000_000);
+        assert_eq!(tx_env.inner.gas_priority_fee, Some(1_000_000_000));
+
+        let encoded = tx_env
+            .rlp_bytes
+            .as_ref()
+            .expect("Morph simulation should carry L1 fee bytes");
+        let envelope =
+            MorphTxEnvelope::decode_2718(&mut encoded.as_ref()).expect("RLP should decode");
+        let MorphTxEnvelope::Morph(signed) = envelope else {
+            panic!("expected Morph envelope");
+        };
+        assert_eq!(signed.tx().max_fee_per_gas, 1_000_000_000);
+        assert_eq!(signed.tx().max_priority_fee_per_gas, 1_000_000_000);
     }
 
     #[test]

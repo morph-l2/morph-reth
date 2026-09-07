@@ -866,21 +866,19 @@ async fn simulation_rpcs_keep_fee_token_with_legacy_gas_price() -> eyre::Result<
     let result: Result<Value, _> = client.request("eth_estimateGas", (request.clone(),)).await;
     let err = result
         .expect_err("eth_estimateGas must not drop feeTokenID when gasPrice is set")
-        .to_string()
-        .to_lowercase();
+        .to_string();
     assert!(
-        err.contains("token"),
-        "eth_estimateGas must be rejected over the fee token, got: {err}"
+        err.contains("invalid fee token"),
+        "expected 'invalid fee token', got: {err}"
     );
 
     let result: Result<Value, _> = client.request("eth_call", (request, "latest")).await;
     let err = result
         .expect_err("eth_call must not drop feeTokenID when gasPrice is set")
-        .to_string()
-        .to_lowercase();
+        .to_string();
     assert!(
-        err.contains("token"),
-        "eth_call must be rejected over the fee token, got: {err}"
+        err.contains("Token with ID 65535 is not registered"),
+        "expected 'Token with ID 65535 is not registered', got: {err}"
     );
 
     Ok(())
