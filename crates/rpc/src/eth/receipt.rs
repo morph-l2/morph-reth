@@ -148,8 +148,11 @@ struct MorphTxReceiptFields {
 /// Extracts Morph-specific fee fields from a receipt.
 ///
 /// morph-geth's `eth_` RPC keeps Morph receipt extension keys present for
-/// every receipt. Numeric metadata that is absent in storage is exposed as
-/// zero, while `reference` / `memo` remain null unless populated by MorphTx v1.
+/// every receipt. `version` is a value type there, so an unset version is
+/// still `"0x0"`. Pointer metadata (`feeTokenID`, `feeRate`, `tokenScale`,
+/// `feeLimit`, `reference`, `memo`) stays `null` unless storage populated it.
+/// MorphTx v1 paying ETH stores `fee_token_id = Some(0)`, which must remain
+/// `"0x0"` so clients can distinguish it from a non-MorphTx `null`.
 fn morph_tx_receipt_fields(receipt: &MorphReceipt) -> MorphTxReceiptFields {
     match receipt {
         MorphReceipt::Legacy(r)
@@ -159,19 +162,15 @@ fn morph_tx_receipt_fields(receipt: &MorphReceipt) -> MorphTxReceiptFields {
         | MorphReceipt::Morph(r) => MorphTxReceiptFields {
             l1_fee: r.l1_fee,
             version: Some(r.version.unwrap_or_default()),
-            fee_token_id: Some(r.fee_token_id.unwrap_or_default()),
-            fee_rate: Some(r.fee_rate.unwrap_or_default()),
-            token_scale: Some(r.token_scale.unwrap_or_default()),
-            fee_limit: Some(r.fee_limit.unwrap_or_default()),
+            fee_token_id: r.fee_token_id,
+            fee_rate: r.fee_rate,
+            token_scale: r.token_scale,
+            fee_limit: r.fee_limit,
             reference: r.reference,
             memo: r.memo.clone(),
         },
         MorphReceipt::L1Msg(_) => MorphTxReceiptFields {
             version: Some(0),
-            fee_token_id: Some(0),
-            fee_rate: Some(U256::ZERO),
-            token_scale: Some(U256::ZERO),
-            fee_limit: Some(U256::ZERO),
             ..Default::default()
         },
     }
@@ -249,11 +248,13 @@ mod tests {
         let fields = morph_tx_receipt_fields(&receipt);
 
         assert_eq!(fields.l1_fee, U256::ZERO);
+        // geth's version field is a value type, so non-MorphTx receipts still
+        // expose "0x0". Pointer fee metadata is absent and must stay None.
         assert_eq!(fields.version, Some(0));
-        assert_eq!(fields.fee_token_id, Some(0));
-        assert_eq!(fields.fee_rate, Some(U256::ZERO));
-        assert_eq!(fields.token_scale, Some(U256::ZERO));
-        assert_eq!(fields.fee_limit, Some(U256::ZERO));
+        assert!(fields.fee_token_id.is_none());
+        assert!(fields.fee_rate.is_none());
+        assert!(fields.token_scale.is_none());
+        assert!(fields.fee_limit.is_none());
         assert!(fields.reference.is_none());
         assert!(fields.memo.is_none());
     }
@@ -277,7 +278,7 @@ mod tests {
     }
 
     #[test]
-    fn morph_tx_receipt_fields_defaults_absent_numeric_metadata_to_zero() {
+    fn morph_tx_receipt_fields_keeps_absent_fee_metadata_none() {
         let receipt = MorphReceipt::Eip1559(MorphTransactionReceipt {
             inner: Receipt {
                 status: alloy_consensus::Eip658Value::Eip658(true),
@@ -297,11 +298,13 @@ mod tests {
         let fields = morph_tx_receipt_fields(&receipt);
 
         assert_eq!(fields.l1_fee, U256::from(123));
+        // Match geth: version is a value type and always "0x0" when unset.
         assert_eq!(fields.version, Some(0));
-        assert_eq!(fields.fee_token_id, Some(0));
-        assert_eq!(fields.fee_rate, Some(U256::ZERO));
-        assert_eq!(fields.token_scale, Some(U256::ZERO));
-        assert_eq!(fields.fee_limit, Some(U256::ZERO));
+        // Pointer fields stay None so JSON serializes as null, not "0x0".
+        assert!(fields.fee_token_id.is_none());
+        assert!(fields.fee_rate.is_none());
+        assert!(fields.token_scale.is_none());
+        assert!(fields.fee_limit.is_none());
         assert!(fields.reference.is_none());
         assert!(fields.memo.is_none());
     }
@@ -457,10 +460,86 @@ mod tests {
             .expect("converter must produce one receipt per input");
 
         assert_eq!(rpc.inner.inner.tx_type(), MorphTxType::Eip1559);
-        assert_eq!(
-            serde_json::to_value(&rpc).unwrap().get("type"),
-            Some(&serde_json::json!("0x2"))
-        );
+        let json = serde_json::to_value(&rpc).unwrap();
+        assert_eq!(json.get("type"), Some(&serde_json::json!("0x2")));
+        // geth emits version as a value type ("0x0") even for non-MorphTx.
+        assert_eq!(json.get("version"), Some(&serde_json::json!("0x0")));
+        // Absent Morph fee pointers must be JSON null, not "0x0", so clients
+        // like `@morph-network/viem` can use `feeTokenID != null`.
+        for field in ["feeTokenID", "feeRate", "tokenScale", "feeLimit"] {
+            assert_eq!(json.get(field), Some(&serde_json::Value::Null), "{field}");
+        }
+    }
+
+    #[test]
+    fn morph_tx_v1_eth_fee_serializes_fee_token_id_zero_not_null() {
+        use alloy_consensus::{Signed, transaction::Recovered};
+        use alloy_primitives::{B256, Signature, U256, address};
+        use morph_primitives::{MorphPrimitives, MorphTxEnvelope, TxMorph};
+        use reth_primitives_traits::TransactionMeta;
+        use reth_rpc_convert::transaction::{ConvertReceiptInput, ReceiptConverter};
+
+        let signer = address!("0000000000000000000000000000000000000099");
+        let envelope = MorphTxEnvelope::Morph(Signed::new_unchecked(
+            TxMorph {
+                chain_id: 2818,
+                nonce: 0,
+                gas_limit: 21_000,
+                max_fee_per_gas: 2_000_000_000,
+                max_priority_fee_per_gas: 1_000_000,
+                version: 1,
+                fee_token_id: 0,
+                ..Default::default()
+            },
+            Signature::new(U256::ZERO, U256::ZERO, false),
+            B256::ZERO,
+        ));
+        let recovered: Recovered<&MorphTxEnvelope> = Recovered::new_unchecked(&envelope, signer);
+
+        let receipt = MorphReceipt::Morph(MorphTransactionReceipt {
+            inner: Receipt {
+                status: alloy_consensus::Eip658Value::Eip658(true),
+                cumulative_gas_used: 21_000,
+                logs: vec![],
+            },
+            l1_fee: U256::from(100),
+            version: Some(1),
+            fee_token_id: Some(0),
+            fee_rate: None,
+            token_scale: None,
+            fee_limit: Some(U256::ZERO),
+            reference: None,
+            memo: None,
+        });
+
+        let rpc = MorphReceiptConverter
+            .convert_receipts(vec![ConvertReceiptInput::<'_, MorphPrimitives> {
+                receipt,
+                tx: recovered,
+                gas_used: 21_000,
+                next_log_index: 0,
+                meta: TransactionMeta {
+                    tx_hash: B256::ZERO,
+                    index: 0,
+                    block_hash: B256::ZERO,
+                    block_number: 42,
+                    base_fee: Some(1_000_000_000),
+                    excess_blob_gas: None,
+                    timestamp: 1_700_000_000,
+                },
+            }])
+            .expect("morph converter should not fail")
+            .pop()
+            .expect("converter must produce one receipt per input");
+
+        let json = serde_json::to_value(&rpc).unwrap();
+        // MorphTx v1 paying ETH stores fee_token_id = 0, which must remain a
+        // quantity so it is distinguishable from a non-MorphTx null.
+        assert_eq!(json.get("feeTokenID"), Some(&serde_json::json!("0x0")));
+        assert_eq!(json.get("version"), Some(&serde_json::json!("0x1")));
+        assert_eq!(json.get("feeLimit"), Some(&serde_json::json!("0x0")));
+        assert_eq!(json.get("feeRate"), Some(&serde_json::Value::Null));
+        assert_eq!(json.get("tokenScale"), Some(&serde_json::Value::Null));
     }
 
     /// Companion test: L1 message receipts must come back from the
@@ -515,15 +594,21 @@ mod tests {
             .pop()
             .expect("converter must produce one receipt per input");
 
-        // L1 messages have no MorphTx metadata, but RPC compatibility with
-        // morph-geth still exposes absent numeric extension fields as zero.
+        // L1 messages have no MorphTx metadata. geth leaves the pointer fee
+        // fields nil (JSON null) and still emits version as the value "0x0".
         assert_eq!(rpc.l1_fee, U256::ZERO);
         assert_eq!(rpc.version, Some(U64::ZERO));
-        assert_eq!(rpc.fee_token_id, Some(U64::ZERO));
-        assert_eq!(rpc.fee_rate, Some(U256::ZERO));
-        assert_eq!(rpc.token_scale, Some(U256::ZERO));
-        assert_eq!(rpc.fee_limit, Some(U256::ZERO));
+        assert!(rpc.fee_token_id.is_none());
+        assert!(rpc.fee_rate.is_none());
+        assert!(rpc.token_scale.is_none());
+        assert!(rpc.fee_limit.is_none());
         assert!(rpc.reference.is_none());
         assert!(rpc.memo.is_none());
+
+        let json = serde_json::to_value(&rpc).unwrap();
+        assert_eq!(json.get("version"), Some(&serde_json::json!("0x0")));
+        for field in ["feeTokenID", "feeRate", "tokenScale", "feeLimit"] {
+            assert_eq!(json.get(field), Some(&serde_json::Value::Null), "{field}");
+        }
     }
 }
