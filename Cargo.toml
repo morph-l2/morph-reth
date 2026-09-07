@@ -160,7 +160,6 @@ reth-trie = { git = "https://github.com/paradigmxyz/reth", tag = "v2.5.2" }
 reth-transaction-pool = { git = "https://github.com/paradigmxyz/reth", tag = "v2.5.2" }
 reth-zstd-compressors = { version = "0.6.0", default-features = false }
 reth-execution-cache = { git = "https://github.com/paradigmxyz/reth", tag = "v2.5.2" }
-reth-trie-db = { git = "https://github.com/paradigmxyz/reth", tag = "v2.5.2" }
 reth-trie-parallel = { git = "https://github.com/paradigmxyz/reth", tag = "v2.5.2" }
 reth-trie-sparse = { git = "https://github.com/paradigmxyz/reth", tag = "v2.5.2", default-features = false }
 

@@ -202,7 +202,11 @@ impl From<SpecId> for MorphHardfork {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_evm::revm::context_interface::cfg::gas_params::GasParams;
+    use alloy_evm::revm::{
+        context::{Cfg, CfgEnv},
+        context_interface::cfg::gas_params::GasParams,
+        primitives::eip7702,
+    };
 
     #[test]
     fn test_morph_hardfork_to_specid_mapping() {
@@ -238,27 +242,45 @@ mod tests {
                 0,
                 "MorphHardfork {fork:?} must not enable EIP-8037 state gas"
             );
+
+            // `MorphEvmHandler::validate_initial_tx_gas` derives its EIP-2780 intrinsic-gas
+            // info from this flag. It must stay disabled for every Morph hardfork.
+            let cfg = CfgEnv::<MorphHardfork>::default().with_spec_and_mainnet_gas_params(fork);
+            assert!(
+                !cfg.is_amsterdam_eip2780_enabled(),
+                "MorphHardfork {fork:?} must not enable EIP-2780 intrinsic gas"
+            );
         }
+
+        // Positive control: the EIP-2780 flag really is derived from the spec, so the
+        // per-fork assertions above are not vacuously true.
+        assert!(
+            CfgEnv::<MorphHardfork>::default()
+                .with_spec_and_mainnet_gas_params(SpecId::AMSTERDAM)
+                .is_amsterdam_eip2780_enabled(),
+            "EIP-2780 flag is no longer spec-derived; the guard above would be vacuous"
+        );
     }
 
+    /// The whole EIP-7702 per-authorization refund must be the *regular* refund, i.e.
+    /// `PER_EMPTY_ACCOUNT_COST - PER_AUTH_BASE_COST` with nothing diverted elsewhere.
+    ///
+    /// revm 42 removed `tx_eip7702_state_refund` / `tx_eip7702_auth_refund`, so the
+    /// invariant can no longer be written as "regular == total"; asserting the full
+    /// per-auth delta against revm's own constants is the equivalent that survives.
     #[test]
     fn test_eip7702_refund_stays_regular_for_morph_specs() {
         for spec in [SpecId::CANCUN, SpecId::PRAGUE, SpecId::OSAKA] {
             let params = GasParams::new_spec(spec);
-            assert_eq!(
-                params.tx_eip7702_state_gas_bytecode(),
-                0,
-                "spec={spec:?}: Morph must not route EIP-7702 refunds to state gas"
-            );
             let expected_auth_refund = if spec.is_enabled_in(SpecId::PRAGUE) {
-                12500
+                eip7702::PER_EMPTY_ACCOUNT_COST - eip7702::PER_AUTH_BASE_COST
             } else {
                 0
             };
             assert_eq!(
                 params.tx_eip7702_auth_refund_regular(),
                 expected_auth_refund,
-                "spec={spec:?}: Morph EIP-7702 refunds must match expected regular refund"
+                "spec={spec:?}: the full EIP-7702 per-auth refund must stay in the regular refund"
             );
         }
     }

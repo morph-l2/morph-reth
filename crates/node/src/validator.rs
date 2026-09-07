@@ -164,6 +164,11 @@ fn strict_morph_tree_config(tree_config: reth_node_api::TreeConfig) -> reth_node
 /// State execution, caching and trie maintenance remain entirely upstream. This
 /// wrapper preserves the parent-aware L1 queue invariant and the optional
 /// consensus-layer withdraw-trie-root cross-check.
+///
+/// Every [`EngineValidator`] method must be forwarded to `inner`, including the
+/// ones that carry a default body in the trait: a missing forward silently
+/// replaces upstream behaviour with the empty default instead of failing to
+/// compile. Re-check this impl against the trait on every reth upgrade.
 pub struct MorphTreeEngineValidator<P, Evm>
 where
     Evm: ConfigureEvm,
@@ -346,6 +351,10 @@ where
         block: BuiltPayloadExecutedBlock<MorphPrimitives>,
     ) -> ProviderResult<ExecutedBlock<MorphPrimitives>> {
         self.inner.on_inserted_executed_block(block)
+    }
+
+    fn on_canonical_head_changed(&self, hash: B256, state: &EngineApiTreeState<MorphPrimitives>) {
+        self.inner.on_canonical_head_changed(hash, state);
     }
 
     fn payload_builder_resources(
