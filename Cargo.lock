@@ -5158,7 +5158,6 @@ dependencies = [
  "reth-tracing",
  "reth-transaction-pool",
  "reth-trie",
- "reth-trie-db",
  "serde",
  "serde_json",
  "tokio",
