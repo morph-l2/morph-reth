@@ -11,4 +11,4 @@ scrape_configs:
         labels:
           service: morph-reth
           role: sequencer
-          chain: morph
+          chain: mainnet

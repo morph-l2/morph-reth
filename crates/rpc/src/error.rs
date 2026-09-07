@@ -88,6 +88,14 @@ pub enum MorphEthApiError {
     InvalidFeeToken,
 }
 
+impl MorphEthApiError {
+    /// JSON-RPC error code reported for [`Self::StateNotAvailable`].
+    ///
+    /// Exposed so other error types that mean the same thing to a client can report it without
+    /// duplicating the literal. Used by the historical-proof window errors in [`crate::state`].
+    pub const STATE_NOT_AVAILABLE_CODE: i32 = -32005;
+}
+
 /// Converts [`MorphEthApiError`] to a JSON-RPC error object.
 impl From<MorphEthApiError> for jsonrpsee::types::ErrorObject<'static> {
     fn from(err: MorphEthApiError) -> Self {
@@ -114,7 +122,7 @@ impl From<MorphEthApiError> for jsonrpsee::types::ErrorObject<'static> {
                 None::<()>,
             ),
             MorphEthApiError::StateNotAvailable => jsonrpsee::types::ErrorObject::owned(
-                -32005,
+                MorphEthApiError::STATE_NOT_AVAILABLE_CODE,
                 "State not available for block",
                 None::<()>,
             ),
