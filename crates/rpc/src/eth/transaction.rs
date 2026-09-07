@@ -116,14 +116,19 @@ impl<Spec> TryIntoTxEnv<MorphTxEnv, Spec, MorphBlockEnv> for MorphTransactionReq
         if inner.chain_id.is_none() {
             inner.chain_id = Some(evm_env.cfg_env.chain_id);
         }
+        let legacy_gas_price = inner.gas_price;
 
-        // Match geth: legacy gas_price takes precedence over Morph-specific
-        // fields, so the request is treated as a standard transaction.
-        let is_morph_tx = inner.gas_price.is_none()
-            && (explicit_version.is_some()
-                || fee_token_id.is_some_and(|id| id.to::<u64>() > 0)
-                || is_nonzero_reference(reference.as_ref())
-                || memo.as_ref().is_some_and(|m| !m.is_empty()));
+        // Match geth's `ToMessage`, which keys MorphTx detection off the Morph
+        // fields alone (`isMorphTxArgs`) and ignores `gasPrice`. The rule that a
+        // legacy `gasPrice` forces a standard transaction lives in geth's
+        // `toTransaction`, so it only applies when building a real transaction —
+        // see `try_build_morph_tx_from_request`. Honouring it here would make
+        // `eth_call` / `eth_estimateGas` silently price a token-fee request as an
+        // ETH transaction.
+        let is_morph_tx = explicit_version.is_some()
+            || fee_token_id.is_some_and(|id| id.to::<u64>() > 0)
+            || is_nonzero_reference(reference.as_ref())
+            || memo.as_ref().is_some_and(|m| !m.is_empty());
 
         let inner_tx_env = inner.try_into_tx_env(evm_env).map_err(EthApiError::from)?;
 
@@ -140,6 +145,12 @@ impl<Spec> TryIntoTxEnv<MorphTxEnv, Spec, MorphBlockEnv> for MorphTransactionReq
             tx_env.reference = reference;
             tx_env.memo = memo.clone();
             tx_env.inner.tx_type = morph_primitives::MORPH_TX_TYPE_ID;
+            // geth's `ToMessage` maps legacy `gasPrice` to both EIP-1559 caps.
+            // Preserve that shape so fallback MorphTx encoding produces the
+            // same L1 data fee.
+            if let Some(gas_price) = legacy_gas_price {
+                tx_env.inner.gas_priority_fee = Some(gas_price);
+            }
             tx_env.version = Some(morph_tx_version(
                 explicit_version,
                 reference.as_ref(),
@@ -296,6 +307,7 @@ fn normalize_reference(reference: Option<B256>) -> Option<B256> {
 mod tests {
     use super::*;
     use crate::types::transaction::MorphRpcTransaction;
+    use alloy_eips::eip2718::Decodable2718;
     use alloy_primitives::{Address, B256, Bytes, address};
     use alloy_rpc_types_eth::{TransactionInfo, TransactionInput, TransactionRequest};
     use morph_chainspec::MorphHardfork;
@@ -413,6 +425,33 @@ mod tests {
         assert!(
             !tx_env.rlp_bytes.unwrap().is_empty(),
             "RLP bytes should not be empty"
+        );
+    }
+
+    /// `gasPrice`-only RPC requests are typed Legacy by `minimal_tx_type()`,
+    /// but L1 fee sizing must still use an EIP-1559 envelope (geth
+    /// `asUnsignedTx` post-London). See #189.
+    #[test]
+    fn gas_price_only_request_encodes_eip1559_envelope_for_l1_fee() {
+        let request = MorphTransactionRequest {
+            inner: create_basic_transaction_request(),
+            fee_token_id: None,
+            fee_limit: None,
+            version: None,
+            reference: None,
+            memo: None,
+        };
+        let evm_env = create_evm_env(false);
+        let tx_env = request
+            .try_into_tx_env(&evm_env)
+            .expect("conversion should succeed");
+
+        assert_eq!(tx_env.inner.tx_type, 0, "gasPrice-only request is Legacy");
+        let encoded = tx_env.rlp_bytes.expect("rlp_bytes must be populated");
+        assert_eq!(
+            encoded.first().copied(),
+            Some(0x02),
+            "simulation L1-fee encoding must be EIP-1559"
         );
     }
 
@@ -562,8 +601,12 @@ mod tests {
         }
     }
 
+    /// Simulation paths keep the Morph fields even when the request carries a
+    /// legacy `gasPrice`, matching geth's `ToMessage`. The inverse rule applies to
+    /// real transaction construction, covered by
+    /// `try_build_morph_tx_treats_gas_price_with_morph_fields_as_standard_tx`.
     #[test]
-    fn test_morph_tx_env_treats_gas_price_with_morph_fields_as_standard_tx() {
+    fn test_morph_tx_env_keeps_morph_fields_with_legacy_gas_price() {
         let request = MorphTransactionRequest {
             inner: create_basic_transaction_request(),
             fee_token_id: Some(U64::from(1)),
@@ -576,14 +619,26 @@ mod tests {
         let evm_env = create_evm_env(false);
         let tx_env = request
             .try_into_tx_env(&evm_env)
-            .expect("gas_price should force the standard transaction path");
+            .expect("conversion should succeed");
 
-        assert_ne!(tx_env.inner.tx_type, morph_primitives::MORPH_TX_TYPE_ID);
-        assert!(tx_env.fee_token_id.is_none());
-        assert!(tx_env.fee_limit.is_none());
-        assert!(tx_env.reference.is_none());
-        assert!(tx_env.memo.is_none());
-        assert!(tx_env.version.is_none());
+        assert_eq!(tx_env.inner.tx_type, morph_primitives::MORPH_TX_TYPE_ID);
+        assert_eq!(tx_env.fee_token_id, Some(1));
+        assert_eq!(tx_env.fee_limit, Some(U256::from(1000000)));
+        // The legacy gas price is still what the EVM prices the call with.
+        assert_eq!(tx_env.inner.gas_price, 1_000_000_000);
+        assert_eq!(tx_env.inner.gas_priority_fee, Some(1_000_000_000));
+
+        let encoded = tx_env
+            .rlp_bytes
+            .as_ref()
+            .expect("Morph simulation should carry L1 fee bytes");
+        let envelope =
+            MorphTxEnvelope::decode_2718(&mut encoded.as_ref()).expect("RLP should decode");
+        let MorphTxEnvelope::Morph(signed) = envelope else {
+            panic!("expected Morph envelope");
+        };
+        assert_eq!(signed.tx().max_fee_per_gas, 1_000_000_000);
+        assert_eq!(signed.tx().max_priority_fee_per_gas, 1_000_000_000);
     }
 
     #[test]
