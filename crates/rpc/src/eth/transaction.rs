@@ -428,6 +428,33 @@ mod tests {
         );
     }
 
+    /// `gasPrice`-only RPC requests are typed Legacy by `minimal_tx_type()`,
+    /// but L1 fee sizing must still use an EIP-1559 envelope (geth
+    /// `asUnsignedTx` post-London). See #189.
+    #[test]
+    fn gas_price_only_request_encodes_eip1559_envelope_for_l1_fee() {
+        let request = MorphTransactionRequest {
+            inner: create_basic_transaction_request(),
+            fee_token_id: None,
+            fee_limit: None,
+            version: None,
+            reference: None,
+            memo: None,
+        };
+        let evm_env = create_evm_env(false);
+        let tx_env = request
+            .try_into_tx_env(&evm_env)
+            .expect("conversion should succeed");
+
+        assert_eq!(tx_env.inner.tx_type, 0, "gasPrice-only request is Legacy");
+        let encoded = tx_env.rlp_bytes.expect("rlp_bytes must be populated");
+        assert_eq!(
+            encoded.first().copied(),
+            Some(0x02),
+            "simulation L1-fee encoding must be EIP-1559"
+        );
+    }
+
     /// Test that MorphTx encoding includes all Morph-specific fields when disable_fee_charge is
     /// false.
     ///
