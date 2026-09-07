@@ -8,21 +8,15 @@ use morph_chainspec::hardfork::MorphHardfork;
 use revm::{
     Context, Inspector,
     context::{CfgEnv, ContextError, Evm, FrameStack, Journal},
-    context_interface::host::LoadError,
     handler::{
         EthFrame, EvmTr, FrameInitOrResult, FrameTr, ItemOrResult, instructions::EthInstructions,
     },
     inspector::InspectorEvmTr,
     interpreter::{
         Host, Instruction, InstructionContext, InstructionExecResult, InstructionResult,
-        gas::{BLOCKHASH, WARM_STORAGE_READ_COST},
-        interpreter::EthInterpreter,
-        interpreter_types::{RuntimeFlag, StackTr},
+        gas::BLOCKHASH, interpreter::EthInterpreter, interpreter_types::StackTr,
     },
-    primitives::{
-        BLOCK_HASH_HISTORY,
-        hardfork::SpecId::{BERLIN, ISTANBUL},
-    },
+    primitives::BLOCK_HASH_HISTORY,
 };
 
 /// The Morph EVM context type.
@@ -83,159 +77,6 @@ fn blockhash_morph<DB: Database>(
     Ok(())
 }
 
-/// Morph custom SLOAD opcode.
-///
-/// Fixes `original_value` corruption caused by revm's `mark_warm_with_transaction_id()`.
-///
-/// When token fee deduction marks storage slots cold, the main tx's first SLOAD
-/// triggers `mark_warm_with_transaction_id()` which resets `original_value = present_value`,
-/// losing the true DB-committed original. This makes SSTORE see "clean" slots (2900 gas)
-/// instead of "dirty" (100 gas), causing a 2800 gas mismatch vs go-eth.
-///
-/// The DB read hits the State cache (O(1)) and only triggers on cold SLOADs.
-fn sload_morph<DB: Database>(
-    context: InstructionContext<'_, MorphContext<DB>, EthInterpreter>,
-) -> InstructionExecResult {
-    let Some(([], index)) = StackTr::popn_top::<0>(&mut context.interpreter.stack) else {
-        return Err(InstructionResult::StackUnderflow);
-    };
-
-    let target = context.interpreter.input.target_address;
-    let key = *index;
-
-    let additional_cold_cost = context.host.gas_params().cold_storage_additional_cost();
-    let skip_cold = context.interpreter.gas.remaining() < additional_cold_cost;
-    let res = context.host.sload_skip_cold_load(target, key, skip_cold);
-
-    match res {
-        Ok(storage) => {
-            if storage.is_cold {
-                // Read the true committed value from DB (hits State<DB> cache, O(1)).
-                // This matches go-eth's GetCommittedState() returning the un-modified DB value.
-                let db_original = context.host.journaled_state.database.storage(target, key);
-                if let Ok(db_original) = db_original
-                    && let Some(acc) = context.host.journaled_state.inner.state.get_mut(&target)
-                    && let Some(slot) = acc.storage.get_mut(&key)
-                    && slot.original_value != db_original
-                {
-                    slot.original_value = db_original;
-                }
-
-                if !context
-                    .interpreter
-                    .gas
-                    .record_regular_cost(additional_cold_cost)
-                {
-                    return Err(InstructionResult::OutOfGas);
-                }
-            }
-
-            *index = storage.data;
-        }
-        Err(LoadError::ColdLoadSkipped) => return Err(InstructionResult::OutOfGas),
-        Err(LoadError::DBError) => return Err(InstructionResult::FatalExternalError),
-    }
-    Ok(())
-}
-
-/// Morph custom SSTORE opcode.
-///
-/// Twin of [`sload_morph`]: revm's standard SSTORE warms a cold slot through
-/// the same `mark_warm_with_transaction_id()` path as SLOAD, so forced-cold
-/// token-fee slots need the same `original_value` restoration before
-/// `sstore_dynamic_gas()` reads it for EIP-2200 accounting.
-///
-/// Without this, a main tx that writes a fee-deducted slot WITHOUT first
-/// SLOADing it sees a "clean" slot (2900 gas SSTORE_RESET, no refund)
-/// instead of a "dirty" slot (100 gas SLOAD_GAS plus refund), causing the
-/// same 2800-gas-per-write divergence vs go-eth that `sload_morph` fixes.
-///
-/// Uses DB-direct lookup (no per-tx runtime map needed).
-fn sstore_morph<DB: Database>(
-    context: InstructionContext<'_, MorphContext<DB>, EthInterpreter>,
-) -> InstructionExecResult {
-    if context.interpreter.runtime_flag.is_static() {
-        return Err(InstructionResult::StateChangeDuringStaticCall);
-    }
-
-    let Some([index, value]) = StackTr::popn::<2>(&mut context.interpreter.stack) else {
-        return Err(InstructionResult::StackUnderflow);
-    };
-
-    let target = context.interpreter.input.target_address;
-    let spec_id = context.interpreter.runtime_flag.spec_id();
-
-    if spec_id.is_enabled_in(ISTANBUL)
-        && context.interpreter.gas.remaining() <= context.host.gas_params().call_stipend()
-    {
-        return Err(InstructionResult::ReentrancySentryOOG);
-    }
-
-    if !context
-        .interpreter
-        .gas
-        .record_regular_cost(context.host.gas_params().sstore_static_gas())
-    {
-        return Err(InstructionResult::OutOfGas);
-    }
-
-    let mut state_load = if spec_id.is_enabled_in(BERLIN) {
-        let additional_cold_cost = context.host.gas_params().cold_storage_additional_cost();
-        let skip_cold = context.interpreter.gas.remaining() < additional_cold_cost;
-        match context
-            .host
-            .sstore_skip_cold_load(target, index, value, skip_cold)
-        {
-            Ok(load) => load,
-            Err(LoadError::ColdLoadSkipped) => {
-                return Err(InstructionResult::OutOfGas);
-            }
-            Err(LoadError::DBError) => {
-                return Err(InstructionResult::FatalExternalError);
-            }
-        }
-    } else {
-        let Some(load) = context.host.sstore(target, index, value) else {
-            return Err(InstructionResult::FatalExternalError);
-        };
-        load
-    };
-
-    // Morph fix: on cold access, restore original_value from the DB-committed value.
-    // Mirrors sload_morph. Only fires on cold path; zero overhead on warm SSTOREs.
-    if state_load.is_cold {
-        let db_original = context.host.journaled_state.database.storage(target, index);
-        if let Ok(db_original) = db_original
-            && state_load.data.original_value != db_original
-        {
-            state_load.data.original_value = db_original;
-            if let Some(acc) = context.host.journaled_state.inner.state.get_mut(&target)
-                && let Some(slot) = acc.storage.get_mut(&index)
-            {
-                slot.original_value = db_original;
-            }
-        }
-    }
-
-    let is_istanbul = spec_id.is_enabled_in(ISTANBUL);
-    let dynamic_gas = context.host.gas_params().sstore_dynamic_gas(
-        is_istanbul,
-        &state_load.data,
-        state_load.is_cold,
-    );
-    if !context.interpreter.gas.record_regular_cost(dynamic_gas) {
-        return Err(InstructionResult::OutOfGas);
-    }
-
-    context.interpreter.gas.record_refund(
-        context
-            .host
-            .gas_params()
-            .sstore_refund(is_istanbul, &state_load.data),
-    );
-    Ok(())
-}
-
 /// MorphEvm extends the Evm with Morph specific types and logic.
 #[derive(Debug, derive_more::Deref, derive_more::DerefMut)]
 #[expect(clippy::type_complexity)]
@@ -282,22 +123,26 @@ impl<DB: Database, I> MorphEvm<DB, I> {
         let precompiles = MorphPrecompiles::new_with_spec(spec);
         let mut instructions = EthInstructions::new_mainnet_with_spec(spec.into());
 
+        // SLOAD (0x54) and SSTORE (0x55) are deliberately NOT overridden.
+        //
+        // Token fee deduction leaves the caller's fee-token slot with the DB-committed
+        // `original_value`, the deducted `present_value` and `is_cold = true` — the same
+        // triple morph-geth has, where EIP-2200 `GetCommittedState` and the EIP-2929
+        // access list are independent. revm <= 41 conflated the two and re-baselined
+        // `original_value` whenever a slot was cold, which forced Morph to hand-write both
+        // opcodes just to restore it. bluealloy/revm#3746 (revm-state 42) keys that
+        // re-baseline on the transaction boundary instead, so the native instructions now
+        // produce geth-equivalent gas on their own.
+        //
+        // `morph_tx_v0_token_fee_transfer_to_fee_token_contract_gas_regression` is the
+        // tripwire: it fails by exactly 2800 gas if that stops holding.
+
         // Morph custom BLOCKHASH implementation (matches Morph geth).
         instructions.insert_instruction(
             0x40,
             Instruction::new(blockhash_morph::<DB>),
             BLOCKHASH as u16,
         );
-        // Morph custom SLOAD: fixes original_value corruption from token fee deduction.
-        instructions.insert_instruction(
-            0x54,
-            Instruction::new(sload_morph::<DB>),
-            WARM_STORAGE_READ_COST as u16,
-        );
-        // Morph custom SSTORE: same original_value fix on the SSTORE cold path.
-        // Static gas = 0 because sstore_morph manages all gas accounting itself
-        // (static + dynamic + refund).
-        instructions.insert_instruction(0x55, Instruction::new(sstore_morph::<DB>), 0);
         // SELFDESTRUCT is disabled in Morph
         instructions.insert_instruction(0xff, Instruction::unknown(), 0);
         // BLOBHASH is disabled in Morph
