@@ -516,10 +516,8 @@ where
 
         let token_registry_entry =
             TokenRegistryEntry::load(evm.ctx_mut().journal_mut().db_mut(), token_id)?
-                .ok_or(MorphInvalidTransaction::TokenNotRegistered(token_id))?;
-        if !token_registry_entry.is_active() {
-            return Err(MorphInvalidTransaction::TokenNotActive(token_id).into());
-        }
+                .ok_or(MorphInvalidTransaction::TokenNotRegistered(token_id))?
+                .ensure_usable(token_id)?;
 
         // Simulations validate token eligibility but skip balance lookup and fee deduction.
         if is_fee_charge_disabled {
@@ -1081,6 +1079,17 @@ mod tests {
         token: Address,
         is_active: bool,
     ) {
+        insert_test_fee_token_config(db, token_id, token, is_active, U256::from(1), U256::from(1));
+    }
+
+    fn insert_test_fee_token_config(
+        db: &mut CacheDB<EmptyDB>,
+        token_id: u16,
+        token: Address,
+        is_active: bool,
+        price_ratio: U256,
+        scale: U256,
+    ) {
         let mut token_id_bytes = [0u8; 32];
         token_id_bytes[30..32].copy_from_slice(&token_id.to_be_bytes());
         let base = compute_mapping_slot(U256::from(151), &token_id_bytes);
@@ -1099,6 +1108,14 @@ mod tests {
             L2_TOKEN_REGISTRY_ADDRESS,
             base + U256::from(2),
             U256::from_be_bytes(status),
+        )
+        .unwrap();
+        db.insert_account_storage(L2_TOKEN_REGISTRY_ADDRESS, base + U256::from(3), scale)
+            .unwrap();
+        db.insert_account_storage(
+            L2_TOKEN_REGISTRY_ADDRESS,
+            compute_mapping_slot(U256::from(153), &token_id_bytes),
+            price_ratio,
         )
         .unwrap();
     }
@@ -1433,6 +1450,44 @@ mod tests {
             err,
             EVMError::Transaction(MorphInvalidTransaction::TokenNotActive(42))
         ));
+    }
+
+    #[test]
+    fn validate_and_deduct_token_fee_rejects_invalid_config_in_simulation() {
+        let caller = address!("1000000000000000000000000000000000000001");
+        let token = address!("2000000000000000000000000000000000000002");
+        let token_id = 42u16;
+
+        for (case, price_ratio, scale) in [
+            ("zero price ratio", U256::ZERO, U256::from(1)),
+            ("zero scale", U256::from(1), U256::ZERO),
+        ] {
+            let mut db = CacheDB::new(EmptyDB::default());
+            db.insert_account_info(
+                caller,
+                AccountInfo {
+                    balance: U256::from(1_000_000),
+                    ..Default::default()
+                },
+            );
+            insert_test_fee_token_config(&mut db, token_id, token, true, price_ratio, scale);
+            let mut evm = token_fee_simulation_evm(db, caller, token_id);
+
+            let err = MorphEvmHandler::default()
+                .validate_against_state_and_deduct_caller(
+                    &mut evm,
+                    &mut InitialAndFloorGas::default(),
+                )
+                .unwrap_err();
+
+            assert!(
+                matches!(
+                    err,
+                    EVMError::Transaction(MorphInvalidTransaction::InvalidTokenConfig(42))
+                ),
+                "{case} must be rejected"
+            );
+        }
     }
 
     #[test]

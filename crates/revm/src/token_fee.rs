@@ -68,9 +68,15 @@ impl TokenRegistryEntry {
         read_registry_entry(db, token_id)
     }
 
-    /// Return whether this registry entry can currently pay transaction fees.
-    pub(crate) const fn is_active(&self) -> bool {
-        self.is_active
+    /// Reject registry entries that cannot produce a valid token-denominated fee.
+    pub(crate) fn ensure_usable(self, token_id: u16) -> Result<Self, MorphInvalidTransaction> {
+        if !self.is_active {
+            return Err(MorphInvalidTransaction::TokenNotActive(token_id));
+        }
+        if self.price_ratio.is_zero() || self.scale.is_zero() {
+            return Err(MorphInvalidTransaction::InvalidTokenConfig(token_id));
+        }
+        Ok(self)
     }
 
     /// Resolve the caller's balance to produce complete fee information.

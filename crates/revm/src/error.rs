@@ -23,6 +23,10 @@ pub enum MorphInvalidTransaction {
     #[error("Token with ID {0} is not active for gas payment")]
     TokenNotActive(u16),
 
+    /// Token has an invalid price ratio or scale.
+    #[error("Token with ID {0} has invalid fee configuration")]
+    InvalidTokenConfig(u16),
+
     #[error("Token transfer failed: {reason}")]
     TokenTransferFailed {
         /// Token transfer failure reason.
@@ -103,6 +107,12 @@ mod tests {
             "Token with ID 3 is not active for gas payment"
         );
 
+        let err = MorphInvalidTransaction::InvalidTokenConfig(3);
+        assert_eq!(
+            err.to_string(),
+            "Token with ID 3 has invalid fee configuration"
+        );
+
         let err = MorphInvalidTransaction::TokenTransferFailed {
             reason: "balance too low".into(),
         };
@@ -122,6 +132,7 @@ mod tests {
         assert!(!MorphInvalidTransaction::TokenNotRegistered(1).is_nonce_too_low());
         assert!(!MorphInvalidTransaction::TokenIdZeroNotSupported.is_nonce_too_low());
         assert!(!MorphInvalidTransaction::TokenNotActive(1).is_nonce_too_low());
+        assert!(!MorphInvalidTransaction::InvalidTokenConfig(1).is_nonce_too_low());
 
         // Wrapped Ethereum nonce-too-low should be detected
         let eth_err = InvalidTransaction::NonceTooLow { tx: 5, state: 10 };
