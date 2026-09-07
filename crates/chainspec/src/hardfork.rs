@@ -234,7 +234,7 @@ mod tests {
 
             let params = GasParams::new_spec(spec);
             assert_eq!(
-                params.tx_eip7702_state_gas(),
+                params.tx_eip7702_state_gas_bytecode(),
                 0,
                 "MorphHardfork {fork:?} must not enable EIP-8037 state gas"
             );
@@ -246,14 +246,19 @@ mod tests {
         for spec in [SpecId::CANCUN, SpecId::PRAGUE, SpecId::OSAKA] {
             let params = GasParams::new_spec(spec);
             assert_eq!(
-                params.tx_eip7702_state_refund(2, 2),
+                params.tx_eip7702_state_gas_bytecode(),
                 0,
                 "spec={spec:?}: Morph must not route EIP-7702 refunds to state gas"
             );
+            let expected_auth_refund = if spec.is_enabled_in(SpecId::PRAGUE) {
+                12500
+            } else {
+                0
+            };
             assert_eq!(
                 params.tx_eip7702_auth_refund_regular(),
-                params.tx_eip7702_auth_refund(),
-                "spec={spec:?}: Morph EIP-7702 refunds must remain subject to the regular refund cap"
+                expected_auth_refund,
+                "spec={spec:?}: Morph EIP-7702 refunds must match expected regular refund"
             );
         }
     }

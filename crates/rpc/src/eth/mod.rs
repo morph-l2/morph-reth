@@ -43,6 +43,7 @@ pub struct MorphRpcTypes;
 impl RpcTypes for MorphRpcTypes {
     type Header = RpcHeader<MorphHeader>;
     type Receipt = MorphRpcReceipt;
+    type Log = alloy_rpc_types_eth::Log;
     type TransactionResponse = MorphRpcTransaction;
     type TransactionRequest = MorphTransactionRequest;
 }
