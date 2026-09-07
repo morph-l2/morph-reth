@@ -280,6 +280,7 @@ pub(crate) async fn advance_block_with_l1_messages(
             target_gas_limit: None,
         },
         transactions: Some(l1_messages),
+        no_tx_pool: false,
         gas_limit: None,
         base_fee_per_gas: None,
     };
@@ -354,6 +355,7 @@ pub(crate) async fn build_block_no_submit(
             target_gas_limit: None,
         },
         transactions: Some(l1_messages),
+        no_tx_pool: false,
         gas_limit: None,
         base_fee_per_gas: None,
     };
@@ -479,6 +481,7 @@ pub(crate) async fn expect_payload_build_failure(
             target_gas_limit: None,
         },
         transactions: Some(l1_messages),
+        no_tx_pool: false,
         gas_limit: None,
         base_fee_per_gas: None,
     };
