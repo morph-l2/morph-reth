@@ -10,7 +10,7 @@ use morph_evm::MorphEvmConfig;
 use morph_primitives::{Block, MorphHeader, MorphReceipt};
 use morph_reference_index::{ReferenceIndexConfig, ReferenceIndexRuntime};
 use morph_rpc::{
-    MorphEthApiBuilder, MorphEthConfigApiServer, MorphEthConfigHandler,
+    MorphEthApiBuilder,
     morph::{MorphRpc, MorphRpcHandler, MorphRpcServer},
 };
 use reth_chain_state::CanonStateSubscriptions;
@@ -27,8 +27,11 @@ use reth_provider::{
     BlockWriter, CanonChainTracker, ChainSpecProvider, DBProvider, DatabaseProviderFactory,
 };
 use reth_prune_types::PruneMode;
-use reth_rpc_builder::Identity;
-use reth_rpc_eth_api::RpcNodeCore;
+use reth_rpc_builder::{Identity, RethRpcModule};
+use reth_rpc_eth_api::{
+    RpcNodeCore,
+    helpers::config::{EthConfigApiServer, EthConfigHandler},
+};
 use reth_tracing::tracing;
 
 /// Morph node add-ons for RPC and Engine API.
@@ -167,9 +170,9 @@ where
             "Morph reference index background runtime started"
         );
 
-        // Create Morph eth_config handler (EIP-7910 + morph extension)
+        // Upstream EIP-7910 `eth_config` (no Morph extension; morphnode no longer reads it).
         let eth_config_handler =
-            MorphEthConfigHandler::new(ctx.node.provider().clone(), ctx.node.evm_config().clone());
+            EthConfigHandler::new(ctx.node.provider().clone(), ctx.node.evm_config().clone());
 
         let morph_rpc_ctx = MorphRpc::new(reference_index_handle, provider.clone());
         let reference_rpc_handler = MorphRpcHandler::new(morph_rpc_ctx);
@@ -183,13 +186,9 @@ where
                     ..
                 } = container;
 
-                // Register Morph eth_config handler (EIP-7910 + morph extension)
-                // This provides eth_config on HTTP/WS/IPC for morphnode compatibility.
-                tracing::debug!(target: "morph::node", "Registering Morph eth_config handler");
                 modules
-                    .merge_configured(eth_config_handler.into_rpc())
+                    .merge_if_module_configured(RethRpcModule::Eth, eth_config_handler.into_rpc())
                     .map_err(|e| eyre::eyre!("Failed to register eth_config handler: {}", e))?;
-                tracing::info!(target: "morph::node", "Morph eth_config handler registered successfully");
 
                 // The namespace remains registered while the index catches up; handlers return
                 // a structured unavailable/behind error until the durable cursor is live.

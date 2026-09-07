@@ -5334,7 +5334,6 @@ dependencies = [
  "reth-node-builder",
  "reth-primitives-traits",
  "reth-provider",
- "reth-revm",
  "reth-rpc",
  "reth-rpc-convert",
  "reth-rpc-eth-api",
