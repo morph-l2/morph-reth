@@ -93,7 +93,7 @@ where
 
         operation_durations.execution_duration_seconds = start.elapsed();
 
-        let hashed_state = state_provider.hashed_post_state(&execution_result.state);
+        let hashed_state = state_provider.hashed_post_state(&execution_result.state)?;
         let (state_root, trie_updates) =
             state_provider.state_root_with_updates(hashed_state.clone())?;
 
@@ -407,7 +407,7 @@ where
 
         let execution_result = block_executor.execute(block)?;
 
-        let hashed_state = state_provider.hashed_post_state(&execution_result.state);
+        let hashed_state = state_provider.hashed_post_state(&execution_result.state)?;
         let (state_root, trie_updates) =
             state_provider.state_root_with_updates(hashed_state.clone())?;
 

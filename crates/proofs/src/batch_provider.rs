@@ -275,8 +275,10 @@ impl<S: MorphProofsBatchSession> StateProofProvider for MorphProofsBatchStatePro
 impl<S: MorphProofsBatchSession> HashedPostStateProvider
     for MorphProofsBatchStateProviderRef<'_, S>
 {
-    fn hashed_post_state(&self, bundle_state: &BundleState) -> HashedPostState {
-        HashedPostState::from_bundle_state::<KeccakKeyHasher>(bundle_state.state())
+    fn hashed_post_state(&self, bundle_state: &BundleState) -> ProviderResult<HashedPostState> {
+        Ok(HashedPostState::from_bundle_state::<KeccakKeyHasher>(
+            bundle_state.state(),
+        ))
     }
 }
 

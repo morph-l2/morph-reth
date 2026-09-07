@@ -519,7 +519,7 @@ mod tests {
             .with_accounts([(hashed_address, Some(account))])
             .with_storages([(
                 hashed_address,
-                HashedStorage::from_iter(false, [(keccak256(slot), value)]),
+                HashedStorage::from_iter([(keccak256(slot), value)]),
             )]);
 
         let (state_root, trie_updates) =

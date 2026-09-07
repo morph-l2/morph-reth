@@ -291,8 +291,10 @@ impl<'a, Storage: MorphProofsStore + Clone> StateProofProvider
 impl<'a, Storage: MorphProofsStore> HashedPostStateProvider
     for MorphProofsStateProviderRef<'a, Storage>
 {
-    fn hashed_post_state(&self, bundle_state: &BundleState) -> HashedPostState {
-        HashedPostState::from_bundle_state::<KeccakKeyHasher>(bundle_state.state())
+    fn hashed_post_state(&self, bundle_state: &BundleState) -> ProviderResult<HashedPostState> {
+        Ok(HashedPostState::from_bundle_state::<KeccakKeyHasher>(
+            bundle_state.state(),
+        ))
     }
 }
 
