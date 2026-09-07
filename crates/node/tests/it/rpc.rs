@@ -786,3 +786,102 @@ async fn estimate_gas_reports_insufficient_funds_for_transfer() -> eyre::Result<
 
     Ok(())
 }
+
+/// Simulation RPCs reject requests specifying an unregistered fee token ID.
+#[tokio::test(flavor = "multi_thread")]
+async fn simulation_rpcs_reject_unregistered_fee_token() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+
+    advance_chain(1, &mut node, wallet_to_arc(wallet)).await?;
+
+    let client = node
+        .rpc_client()
+        .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
+
+    let sender = Address::random();
+    let recipient = Address::random();
+
+    let request = serde_json::json!({
+        "from": sender,
+        "to": recipient,
+        "value": "0x0",
+        "feeTokenID": "0xffff", // 65535, unregistered
+    });
+
+    let result: Result<Value, _> = client.request("eth_estimateGas", (request.clone(),)).await;
+
+    let err = result.expect_err("eth_estimateGas must fail for unregistered fee token");
+    let err_str = err.to_string();
+    assert!(
+        err_str.contains("Token with ID 65535 is not registered"),
+        "expected 'Token with ID 65535 is not registered', got: {err_str}"
+    );
+
+    let result: Result<Value, _> = client.request("eth_call", (request, "latest")).await;
+    let err = result.expect_err("eth_call must fail for unregistered fee token");
+    let err_str = err.to_string();
+    assert!(
+        err_str.contains("Token with ID 65535 is not registered"),
+        "expected 'Token with ID 65535 is not registered', got: {err_str}"
+    );
+
+    Ok(())
+}
+
+/// A legacy `gasPrice` must not strip `feeTokenID` on simulation RPCs.
+///
+/// geth applies the "legacy gasPrice forces a standard transaction" rule only in
+/// `toTransaction` (real transaction construction), never in `ToMessage`, so
+/// `eth_call` / `eth_estimateGas` keep the fee token. Dropping it made morph-reth
+/// silently price a token-fee request as an ETH transaction: with an unregistered
+/// token the request succeeded with `0x5208` instead of being rejected.
+#[tokio::test(flavor = "multi_thread")]
+async fn simulation_rpcs_keep_fee_token_with_legacy_gas_price() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+
+    advance_chain(1, &mut node, wallet_to_arc(wallet)).await?;
+
+    let client = node
+        .rpc_client()
+        .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
+
+    let sender = Address::random();
+    let recipient = Address::random();
+
+    // A non-zero legacy gasPrice previously forced the standard-transaction path.
+    let request = serde_json::json!({
+        "from": sender,
+        "to": recipient,
+        "value": "0x0",
+        "gasPrice": "0x3b9aca00",
+        "feeTokenID": "0xffff", // 65535, unregistered
+    });
+
+    let result: Result<Value, _> = client.request("eth_estimateGas", (request.clone(),)).await;
+    let err = result
+        .expect_err("eth_estimateGas must not drop feeTokenID when gasPrice is set")
+        .to_string()
+        .to_lowercase();
+    assert!(
+        err.contains("token"),
+        "eth_estimateGas must be rejected over the fee token, got: {err}"
+    );
+
+    let result: Result<Value, _> = client.request("eth_call", (request, "latest")).await;
+    let err = result
+        .expect_err("eth_call must not drop feeTokenID when gasPrice is set")
+        .to_string()
+        .to_lowercase();
+    assert!(
+        err.contains("token"),
+        "eth_call must be rejected over the fee token, got: {err}"
+    );
+
+    Ok(())
+}

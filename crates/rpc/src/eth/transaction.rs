@@ -117,13 +117,17 @@ impl<Spec> TryIntoTxEnv<MorphTxEnv, Spec, MorphBlockEnv> for MorphTransactionReq
             inner.chain_id = Some(evm_env.cfg_env.chain_id);
         }
 
-        // Match geth: legacy gas_price takes precedence over Morph-specific
-        // fields, so the request is treated as a standard transaction.
-        let is_morph_tx = inner.gas_price.is_none()
-            && (explicit_version.is_some()
-                || fee_token_id.is_some_and(|id| id.to::<u64>() > 0)
-                || is_nonzero_reference(reference.as_ref())
-                || memo.as_ref().is_some_and(|m| !m.is_empty()));
+        // Match geth's `ToMessage`, which keys MorphTx detection off the Morph
+        // fields alone (`isMorphTxArgs`) and ignores `gasPrice`. The rule that a
+        // legacy `gasPrice` forces a standard transaction lives in geth's
+        // `toTransaction`, so it only applies when building a real transaction —
+        // see `try_build_morph_tx_from_request`. Honouring it here would make
+        // `eth_call` / `eth_estimateGas` silently price a token-fee request as an
+        // ETH transaction.
+        let is_morph_tx = explicit_version.is_some()
+            || fee_token_id.is_some_and(|id| id.to::<u64>() > 0)
+            || is_nonzero_reference(reference.as_ref())
+            || memo.as_ref().is_some_and(|m| !m.is_empty());
 
         let inner_tx_env = inner.try_into_tx_env(evm_env).map_err(EthApiError::from)?;
 
@@ -562,8 +566,12 @@ mod tests {
         }
     }
 
+    /// Simulation paths keep the Morph fields even when the request carries a
+    /// legacy `gasPrice`, matching geth's `ToMessage`. The inverse rule applies to
+    /// real transaction construction, covered by
+    /// `try_build_morph_tx_treats_gas_price_with_morph_fields_as_standard_tx`.
     #[test]
-    fn test_morph_tx_env_treats_gas_price_with_morph_fields_as_standard_tx() {
+    fn test_morph_tx_env_keeps_morph_fields_with_legacy_gas_price() {
         let request = MorphTransactionRequest {
             inner: create_basic_transaction_request(),
             fee_token_id: Some(U64::from(1)),
@@ -576,14 +584,13 @@ mod tests {
         let evm_env = create_evm_env(false);
         let tx_env = request
             .try_into_tx_env(&evm_env)
-            .expect("gas_price should force the standard transaction path");
+            .expect("conversion should succeed");
 
-        assert_ne!(tx_env.inner.tx_type, morph_primitives::MORPH_TX_TYPE_ID);
-        assert!(tx_env.fee_token_id.is_none());
-        assert!(tx_env.fee_limit.is_none());
-        assert!(tx_env.reference.is_none());
-        assert!(tx_env.memo.is_none());
-        assert!(tx_env.version.is_none());
+        assert_eq!(tx_env.inner.tx_type, morph_primitives::MORPH_TX_TYPE_ID);
+        assert_eq!(tx_env.fee_token_id, Some(1));
+        assert_eq!(tx_env.fee_limit, Some(U256::from(1000000)));
+        // The legacy gas price is still what the EVM prices the call with.
+        assert_eq!(tx_env.inner.gas_price, 1_000_000_000);
     }
 
     #[test]
