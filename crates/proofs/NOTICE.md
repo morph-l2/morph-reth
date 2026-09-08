@@ -1,0 +1,32 @@
+# Attribution
+
+The versioned trie storage and proof-history algorithms in this crate are adapted from
+the Base repository at commit `b2673bbd927cb34d7cfad4d448bfbd5bd30eae88`:
+
+<https://github.com/base/base/tree/b2673bbd927cb34d7cfad4d448bfbd5bd30eae88/crates/execution/trie>
+
+The adapted code is used under Base's MIT license. Morph-specific changes include an
+MDBX-only surface, durable chain-identity metadata, and integration with Morph's node,
+RPC, and lifecycle rules.
+
+## Base MIT License
+
+Copyright (c) 2025 Base
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

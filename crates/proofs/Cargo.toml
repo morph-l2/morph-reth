@@ -1,0 +1,49 @@
+[package]
+name = "morph-proofs"
+description = "Bounded historical MPT storage for Morph eth_getProof"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+alloy-eips.workspace = true
+alloy-primitives.workspace = true
+auto_impl.workspace = true
+bincode = { workspace = true, features = ["serde"] }
+bytes.workspace = true
+derive_more.workspace = true
+metrics.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+tracing.workspace = true
+
+reth-codecs.workspace = true
+reth-db = { workspace = true, features = ["mdbx"] }
+reth-evm.workspace = true
+reth-execution-errors.workspace = true
+reth-metrics.workspace = true
+reth-primitives-traits.workspace = true
+reth-provider.workspace = true
+reth-revm = { workspace = true, features = ["witness"] }
+reth-tasks.workspace = true
+reth-trie = { workspace = true, features = ["serde"] }
+reth-trie-common = { workspace = true, features = ["serde"] }
+
+[dev-dependencies]
+alloy-primitives = { workspace = true, features = ["rand"] }
+mockall.workspace = true
+reth-db = { workspace = true, features = ["test-utils"] }
+reth-db-api = { workspace = true, features = ["test-utils"] }
+reth-storage-errors.workspace = true
+tempfile.workspace = true
+
+[features]
+default = []
+test-utils = []
