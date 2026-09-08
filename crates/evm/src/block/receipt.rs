@@ -92,10 +92,10 @@ pub(crate) struct MorphReceiptTxFields {
     pub version: u8,
     /// Token ID for fee payment
     pub fee_token_id: u16,
-    /// Exchange rate for the fee token
-    pub fee_rate: U256,
-    /// Scale factor for the token
-    pub token_scale: U256,
+    /// Exchange rate for the fee token, absent when paying with ETH
+    pub fee_rate: Option<U256>,
+    /// Scale factor for the token, absent when paying with ETH
+    pub token_scale: Option<U256>,
     /// Fee limit specified in the transaction
     pub fee_limit: U256,
     /// Reference key for transaction indexing
@@ -422,8 +422,8 @@ mod tests {
         let fields = MorphReceiptTxFields {
             version: 0,
             fee_token_id: 1,
-            fee_rate: U256::from(2_000_000_000u64),
-            token_scale: U256::from(10u64).pow(U256::from(18u64)),
+            fee_rate: Some(U256::from(2_000_000_000u64)),
+            token_scale: Some(U256::from(10u64).pow(U256::from(18u64))),
             fee_limit: U256::from(1000u64),
             reference: None,
             memo: None,
