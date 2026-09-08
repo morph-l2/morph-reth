@@ -32,6 +32,7 @@ use reth_tasks::{
 use std::{fmt, marker::PhantomData, sync::Arc, time::Duration};
 
 pub mod call;
+pub mod proofs;
 pub mod receipt;
 pub mod transaction;
 
