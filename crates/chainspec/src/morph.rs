@@ -22,7 +22,9 @@ pub static MORPH_MAINNET: LazyLock<Arc<MorphChainSpec>> = LazyLock::new(|| {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{MORPH_MAINNET_CHAIN_ID, hardfork::MorphHardforks};
+    use crate::{
+        MORPH_MAINNET_CHAIN_ID, MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK, hardfork::MorphHardforks,
+    };
     use alloy_primitives::address;
     use reth_chainspec::EthChainSpec;
 
@@ -43,6 +45,24 @@ mod tests {
         assert_eq!(
             MORPH_MAINNET.fee_vault_address(),
             Some(address!("530000000000000000000000000000000000000a"))
+        );
+    }
+
+    #[test]
+    fn test_morph_mainnet_payload_limit_matches_genesis() {
+        // The bundled genesis JSON is the single source of the consensus limit:
+        // it carries the same 720 KiB value as morph-geth's built-in config and
+        // the preset uses it unchanged.
+        let genesis: Genesis = serde_json::from_str(include_str!("../res/genesis/mainnet.json"))
+            .expect("mainnet genesis should parse");
+        let genesis_limit = crate::MorphGenesisInfo::extract_from(&genesis.config.extra_fields)
+            .expect("mainnet morph config should parse")
+            .morph_chain_info
+            .max_tx_payload_bytes_per_block;
+        assert_eq!(genesis_limit, MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK);
+        assert_eq!(
+            MORPH_MAINNET.max_tx_payload_bytes_per_block(),
+            genesis_limit
         );
     }
 
