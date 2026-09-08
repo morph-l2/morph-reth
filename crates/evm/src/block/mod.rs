@@ -153,8 +153,8 @@ where
             return Ok(Some(MorphReceiptTxFields {
                 version,
                 fee_token_id: 0,
-                fee_rate: U256::ZERO,
-                token_scale: U256::ZERO,
+                fee_rate: None,
+                token_scale: None,
                 fee_limit,
                 reference,
                 memo,
@@ -174,8 +174,8 @@ where
         Ok(token_info.map(|info| MorphReceiptTxFields {
             version,
             fee_token_id,
-            fee_rate: info.price_ratio,
-            token_scale: info.scale,
+            fee_rate: Some(info.price_ratio),
+            token_scale: Some(info.scale),
             fee_limit,
             reference,
             memo,

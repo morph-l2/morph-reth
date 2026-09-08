@@ -301,6 +301,46 @@ async fn transaction_receipt_exposes_morph_fields_over_rpc() -> eyre::Result<()>
     Ok(())
 }
 
+/// MorphTx v1 pays directly in ETH when `feeTokenID` is zero, so no token
+/// exchange rate or scale applies to its receipt.
+#[tokio::test(flavor = "multi_thread")]
+async fn morph_tx_v1_eth_receipt_omits_token_exchange_metadata() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+
+    let raw_tx = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
+        .with_v1_eth_fee()
+        .build_signed()?;
+    node.rpc.inject_tx(raw_tx).await?;
+
+    let payload = node.advance_block().await?;
+    let tx_hash = *payload
+        .block()
+        .body()
+        .transactions
+        .first()
+        .unwrap()
+        .tx_hash();
+    let client = node
+        .rpc_client()
+        .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
+
+    let receipt: Value = client
+        .request("eth_getTransactionReceipt", (tx_hash,))
+        .await?;
+
+    assert_eq!(receipt["type"].as_str(), Some("0x7f"));
+    assert_eq!(receipt["version"].as_str(), Some("0x1"));
+    assert_eq!(receipt["feeTokenID"].as_str(), Some("0x0"));
+    assert_eq!(receipt["feeLimit"].as_str(), Some("0x0"));
+    assert!(receipt["feeRate"].is_null());
+    assert!(receipt["tokenScale"].is_null());
+
+    Ok(())
+}
+
 /// Standard (non-MorphTx) receipts must keep Morph fee pointers as JSON null.
 ///
 /// `@morph-network/viem` and indexers treat `feeTokenID != null` as "this is an
