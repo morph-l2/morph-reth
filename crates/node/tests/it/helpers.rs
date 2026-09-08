@@ -280,6 +280,7 @@ pub(crate) async fn advance_block_with_l1_messages(
             target_gas_limit: None,
         },
         transactions: Some(l1_messages),
+        no_tx_pool: false,
         gas_limit: None,
         base_fee_per_gas: None,
     };
@@ -290,8 +291,7 @@ pub(crate) async fn advance_block_with_l1_messages(
         .send_new_payload(BuildNewPayload {
             attributes: rpc_attrs,
             parent_hash: head_hash,
-            cache: None,
-            state_root_handle: None,
+            resources: Default::default(),
         })
         .await?
         .map_err(|e| eyre::eyre!("payload build failed: {e}"))?;
@@ -355,6 +355,7 @@ pub(crate) async fn build_block_no_submit(
             target_gas_limit: None,
         },
         transactions: Some(l1_messages),
+        no_tx_pool: false,
         gas_limit: None,
         base_fee_per_gas: None,
     };
@@ -365,8 +366,7 @@ pub(crate) async fn build_block_no_submit(
         .send_new_payload(BuildNewPayload {
             attributes: rpc_attrs,
             parent_hash: head_hash,
-            cache: None,
-            state_root_handle: None,
+            resources: Default::default(),
         })
         .await?
         .map_err(|e| eyre::eyre!("payload build failed: {e}"))?;
@@ -481,6 +481,7 @@ pub(crate) async fn expect_payload_build_failure(
             target_gas_limit: None,
         },
         transactions: Some(l1_messages),
+        no_tx_pool: false,
         gas_limit: None,
         base_fee_per_gas: None,
     };
@@ -491,8 +492,7 @@ pub(crate) async fn expect_payload_build_failure(
         .send_new_payload(BuildNewPayload {
             attributes: rpc_attrs,
             parent_hash: head_hash,
-            cache: None,
-            state_root_handle: None,
+            resources: Default::default(),
         })
         .await?
     {

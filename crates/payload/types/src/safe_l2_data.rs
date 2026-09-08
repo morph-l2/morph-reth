@@ -35,7 +35,10 @@ pub struct SafeL2Data {
     #[serde(with = "alloy_serde::quantity")]
     pub timestamp: u64,
 
-    /// RLP-encoded transactions.
+    /// Complete ordered list of RLP-encoded block transactions.
+    ///
+    /// L1 messages, when present, form a prefix followed by the committed L2 transactions.
+    /// Derivation executes exactly this list and never appends transactions from the local pool.
     #[serde(default)]
     pub transactions: Vec<Bytes>,
 

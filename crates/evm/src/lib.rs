@@ -57,6 +57,7 @@
 
 // reth_ethereum_primitives is explicitly depended on to ensure feature unification
 // for NodePrimitives trait bounds that require serde features.
+use alloy_rpc_types_eth as _;
 use reth_ethereum_primitives as _;
 
 mod config;

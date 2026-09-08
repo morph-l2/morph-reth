@@ -32,6 +32,7 @@ use reth_tasks::{
 use std::{fmt, marker::PhantomData, sync::Arc, time::Duration};
 
 pub mod call;
+pub mod proofs;
 pub mod receipt;
 pub mod transaction;
 
@@ -43,6 +44,7 @@ pub struct MorphRpcTypes;
 impl RpcTypes for MorphRpcTypes {
     type Header = RpcHeader<MorphHeader>;
     type Receipt = MorphRpcReceipt;
+    type Log = alloy_rpc_types_eth::Log;
     type TransactionResponse = MorphRpcTransaction;
     type TransactionRequest = MorphTransactionRequest;
 }
