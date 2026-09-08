@@ -13,7 +13,7 @@ pub mod types;
 
 pub use error::MorphEthApiError;
 pub use eth::{MorphEthApi, MorphEthApiBuilder, MorphRpcConverter, MorphRpcTypes};
-pub use eth_config::{MorphEthConfigApiServer, MorphEthConfigHandler};
+pub use eth_config::MorphEthConfigHandler;
 pub use execution_witness::{ExecutionWitnessApiExt, ExecutionWitnessApiOverrideServer};
 pub use morph::{MorphRpc, MorphRpcHandler, MorphRpcServer, ReferenceQueryArgs};
 pub use proof_status::{ProofStatusApiExt, ProofStatusApiOverrideServer, ProofsSyncStatus};
