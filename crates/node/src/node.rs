@@ -209,6 +209,8 @@ impl PayloadAttributesBuilder<MorphPayloadAttributes, MorphHeader>
             },
             // No L1 transactions in local mining mode
             transactions: None,
+            // Local mining exists to produce blocks from the pool.
+            no_tx_pool: false,
             gas_limit: None,
             base_fee_per_gas: None,
         }

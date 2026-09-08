@@ -92,6 +92,11 @@ pub struct MorphBlockExecutor<DB: Database, I> {
     receipts: Vec<MorphReceipt>,
     /// Total gas used by executed transactions
     gas_used: u64,
+    /// Gas unavailable to later transactions in this block.
+    ///
+    /// Unlike receipt gas, L1 messages reserve their full gas limit because Morph geth does not
+    /// return their unused gas to the block gas pool.
+    gas_pool_used: u64,
     /// Cached hardfork for this block (constant across all transactions).
     /// Set in `apply_pre_execution_changes`, reused in `commit_transaction`.
     hardfork: MorphHardfork,
@@ -119,6 +124,7 @@ where
             receipt_builder,
             receipts: Vec::new(),
             gas_used: 0,
+            gas_pool_used: 0,
             hardfork: MorphHardfork::default(),
         }
     }
@@ -227,8 +233,14 @@ where
     ) -> Result<Self::Result, BlockExecutionError> {
         let (tx_env, recovered) = tx.into_parts();
 
-        // Validate gas limit fits in remaining block gas.
-        let block_available_gas = self.evm.block().gas_limit() - self.gas_used;
+        // Validate gas limit against the geth-compatible block gas pool. Receipt gas cannot be
+        // used here: L1 messages report their actual execution cost in receipts but reserve their
+        // full gas limit for block packing.
+        let block_available_gas = self
+            .evm
+            .block()
+            .gas_limit()
+            .saturating_sub(self.gas_pool_used);
         if recovered.tx().gas_limit() > block_available_gas {
             return Err(BlockExecutionError::msg(format!(
                 "transaction gas limit {} exceeds block available gas {}",
@@ -274,6 +286,15 @@ where
         // them as a single number, so use the unified `tx_gas_used` getter.
         let gas_used = result.gas().tx_gas_used();
         self.gas_used += gas_used;
+
+        // Morph geth's L1-message path deducts the full transaction gas limit from GasPool and
+        // deliberately skips the refund path. Regular transactions return unused gas, so their
+        // net gas-pool charge is the actual gas used.
+        self.gas_pool_used += if recovered.tx().is_l1_msg() {
+            recovered.tx().gas_limit()
+        } else {
+            gas_used
+        };
 
         // Get MorphTx-specific fields using the recovered transaction. Errors here
         // are tracing-only — the trait API no longer permits us to surface errors
