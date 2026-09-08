@@ -470,6 +470,7 @@ pub async fn advance_empty_block(node: &mut MorphTestNode) -> eyre::Result<Morph
             target_gas_limit: None,
         },
         transactions: Some(vec![]),
+        no_tx_pool: false,
         gas_limit: None,
         base_fee_per_gas: None,
     };
@@ -688,6 +689,7 @@ pub fn morph_payload_attributes(timestamp: u64) -> morph_payload_types::MorphPay
             target_gas_limit: None,
         },
         transactions: None,
+        no_tx_pool: false,
         gas_limit: None,
         base_fee_per_gas: None,
     }
