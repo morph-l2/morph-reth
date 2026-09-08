@@ -481,8 +481,7 @@ pub async fn advance_empty_block(node: &mut MorphTestNode) -> eyre::Result<Morph
         .send_new_payload(BuildNewPayload {
             attributes: rpc_attrs,
             parent_hash: head_hash,
-            cache: None,
-            state_root_handle: None,
+            resources: Default::default(),
         })
         .await?
         .map_err(|e| eyre::eyre!("payload build failed: {e}"))?;
@@ -907,6 +906,7 @@ pub struct MorphTxBuilder {
     version: u8,
     fee_token_id: u16,
     fee_limit: U256,
+    access_list: alloy_eips::eip2930::AccessList,
     reference: Option<B256>,
     memo: Option<Bytes>,
 }
@@ -930,6 +930,7 @@ impl MorphTxBuilder {
             version: 0,
             fee_token_id: 0,
             fee_limit: U256::ZERO,
+            access_list: Default::default(),
             reference: None,
             memo: None,
         }
@@ -1001,6 +1002,12 @@ impl MorphTxBuilder {
         self
     }
 
+    /// Set the addresses and storage slots warmed before execution.
+    pub fn with_access_list(mut self, access_list: alloy_eips::eip2930::AccessList) -> Self {
+        self.access_list = access_list;
+        self
+    }
+
     /// Set an optional reference (v1 only).
     pub fn with_reference(mut self, reference: B256) -> Self {
         self.reference = Some(reference);
@@ -1039,7 +1046,7 @@ impl MorphTxBuilder {
             max_priority_fee_per_gas: self.max_priority_fee_per_gas,
             to: self.to,
             value: self.value,
-            access_list: Default::default(),
+            access_list: self.access_list,
             version: self.version,
             fee_token_id: self.fee_token_id,
             fee_limit: self.fee_limit,

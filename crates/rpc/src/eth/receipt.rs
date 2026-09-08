@@ -28,7 +28,17 @@ where
     N: NodePrimitives<Receipt = MorphReceipt>,
 {
     type RpcReceipt = MorphRpcReceipt;
+    type RpcLog = alloy_rpc_types_eth::Log;
     type Error = reth_rpc_eth_types::EthApiError;
+
+    fn convert_log(
+        &self,
+        log: Log,
+        _receipt: &<N as NodePrimitives>::Receipt,
+        _header: &reth_primitives_traits::SealedHeader<<N as NodePrimitives>::BlockHeader>,
+    ) -> Result<Self::RpcLog, Self::Error> {
+        Ok(log)
+    }
 
     fn convert_receipts(
         &self,

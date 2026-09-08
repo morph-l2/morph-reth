@@ -969,3 +969,46 @@ async fn simulation_rpcs_keep_fee_token_with_legacy_gas_price() -> eyre::Result<
 
     Ok(())
 }
+
+/// Native Reth 2.5.2 `eth_getProof` and `eth_getMultiProof` succeed on latest without proof-history.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_get_proof_and_get_multi_proof_succeed_on_latest() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+    let sender = wallet.inner.address();
+
+    advance_chain(1, &mut node, wallet_to_arc(wallet)).await?;
+
+    let client = node
+        .rpc_client()
+        .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
+
+    // 1. eth_getProof on latest
+    let proof: Value = client
+        .request("eth_getProof", (sender, Vec::<String>::new(), "latest"))
+        .await?;
+    assert_eq!(
+        proof["address"].as_str().unwrap().to_lowercase(),
+        sender.to_string().to_lowercase()
+    );
+    assert!(proof["accountProof"].is_array());
+
+    // 2. eth_getMultiProof on latest
+    let multi_proof: Value = client
+        .request(
+            "eth_getMultiProof",
+            (vec![(sender, Vec::<B256>::new())], "latest"),
+        )
+        .await?;
+    assert!(multi_proof.is_array());
+    assert_eq!(multi_proof.as_array().unwrap().len(), 1);
+    assert_eq!(
+        multi_proof[0]["address"].as_str().unwrap().to_lowercase(),
+        sender.to_string().to_lowercase()
+    );
+    assert!(multi_proof[0]["accountProof"].is_array());
+
+    Ok(())
+}

@@ -15,7 +15,7 @@ use reth_revm::{
 };
 use reth_trie::{
     StateRoot, StorageRoot,
-    hashed_cursor::HashedCursor,
+    hashed_cursor::{HashedCursor, zero_destroyed_account_storage},
     proof::{self, Proof},
     witness::TrieWitness,
 };
@@ -26,7 +26,8 @@ use reth_trie_common::{
 };
 
 use crate::{
-    MorphProofsStorage, MorphProofsStorageError, MorphProofsStore,
+    MorphProofsHashedAccountCursorFactory, MorphProofsStorage, MorphProofsStorageError,
+    MorphProofsStore,
     proof::{
         DatabaseProof, DatabaseStateRoot, DatabaseStorageProof, DatabaseStorageRoot,
         DatabaseTrieWitness,
@@ -291,8 +292,17 @@ impl<'a, Storage: MorphProofsStore + Clone> StateProofProvider
 impl<'a, Storage: MorphProofsStore> HashedPostStateProvider
     for MorphProofsStateProviderRef<'a, Storage>
 {
-    fn hashed_post_state(&self, bundle_state: &BundleState) -> HashedPostState {
-        HashedPostState::from_bundle_state::<KeccakKeyHasher>(bundle_state.state())
+    fn hashed_post_state(&self, bundle_state: &BundleState) -> ProviderResult<HashedPostState> {
+        let mut hashed_state =
+            HashedPostState::from_bundle_state::<KeccakKeyHasher>(bundle_state.state());
+        let tx = self.ensure_tx()?;
+        zero_destroyed_account_storage(
+            &MorphProofsHashedAccountCursorFactory::new(self.storage, &tx, self.block_number),
+            bundle_state.state(),
+            &mut hashed_state,
+        )
+        .map_err(ProviderError::from)?;
+        Ok(hashed_state)
     }
 }
 
@@ -328,10 +338,16 @@ impl<'a, Storage: MorphProofsStore> BytecodeReader for MorphProofsStateProviderR
 
 #[cfg(test)]
 mod tests {
+    use alloy_eips::BlockNumHash;
+    use alloy_primitives::U256;
     use reth_provider::noop::NoopProvider;
+    use reth_revm::{
+        db::{AccountStatus, BundleAccount},
+        state::AccountInfo,
+    };
 
     use super::*;
-    use crate::InMemoryProofsStorage;
+    use crate::{InMemoryProofsStorage, MorphProofsInitialStateStore};
 
     #[test]
     fn test_morph_proofs_state_provider_ref_debug() {
@@ -345,6 +361,41 @@ mod tests {
         assert_eq!(
             format!("{provider:?}"),
             "MorphProofsStateProviderRef { storage: InMemoryProofsStorage { inner: RwLock { data: InMemoryStorageInner { account_branches: {}, storage_branches: {}, hashed_accounts: {}, hashed_storages: {}, trie_updates: {}, post_states: {}, earliest_block: None, anchor_block: None } } }, block_number: 42 }"
+        );
+    }
+
+    #[test]
+    fn hashed_post_state_zeros_parent_storage_for_destroyed_account() {
+        let address = Address::repeat_byte(0x11);
+        let hashed_address = keccak256(address);
+        let hashed_slot = B256::repeat_byte(0x22);
+        let storage = InMemoryProofsStorage::new();
+        storage
+            .set_initial_state_anchor(BlockNumHash::new(0, B256::repeat_byte(0x01)))
+            .unwrap();
+        storage
+            .store_hashed_storages(hashed_address, vec![(hashed_slot, U256::from(1))])
+            .unwrap();
+        storage.commit_initial_state().unwrap();
+
+        let mut bundle_state = BundleState::default();
+        bundle_state.state.insert(
+            address,
+            BundleAccount::new(
+                Some(AccountInfo::default()),
+                None,
+                Default::default(),
+                AccountStatus::Destroyed,
+            ),
+        );
+        let provider =
+            MorphProofsStateProviderRef::new(Box::<NoopProvider>::default(), &storage, 0);
+
+        let hashed_state = provider.hashed_post_state(&bundle_state).unwrap();
+
+        assert_eq!(
+            hashed_state.storages[&hashed_address].storage[&hashed_slot],
+            U256::ZERO
         );
     }
 }

@@ -141,15 +141,22 @@ where
             // The same `mode` must reach both halves: it decides which bytecodes are collected
             // here and how the trie witness is computed below. Passing different values would ship
             // codes that describe a different execution than the trie nodes.
-            let mut record = ExecutionWitnessRecord::default();
+            // Since reth 2.5.2 the record is built from the post-execution state inside the
+            // closure; the provider result is unwrapped only after execution succeeded.
+            let mut witness = None;
             executor
                 .execute_with_state_closure(&block, |statedb: &State<_>| {
-                    record.record_executed_state(statedb, mode);
+                    witness = Some(ExecutionWitnessRecord::new(statedb).into_execution_witness(
+                        &*state,
+                        factory.eth_api().provider(),
+                        block_number,
+                        mode,
+                    ));
                 })
                 .map_err(|error| Eth::Error::from_eth_err(EthApiError::Internal(error.into())))?;
 
-            record
-                .into_execution_witness(&*state, factory.eth_api().provider(), block_number, mode)
+            witness
+                .expect("state closure is called after successful execution")
                 .map_err(Eth::Error::from_eth_err)
         })
         .await;

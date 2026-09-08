@@ -19,7 +19,7 @@ use reth_revm::{
 };
 use reth_trie::{
     StateRoot, StorageRoot, TrieType,
-    hashed_cursor::{HashedCursor, HashedPostStateCursorFactory},
+    hashed_cursor::{HashedCursor, HashedPostStateCursorFactory, zero_destroyed_account_storage},
     metrics::TrieRootMetrics,
     proof,
     trie_cursor::InMemoryTrieCursorFactory,
@@ -275,8 +275,16 @@ impl<S: MorphProofsBatchSession> StateProofProvider for MorphProofsBatchStatePro
 impl<S: MorphProofsBatchSession> HashedPostStateProvider
     for MorphProofsBatchStateProviderRef<'_, S>
 {
-    fn hashed_post_state(&self, bundle_state: &BundleState) -> HashedPostState {
-        HashedPostState::from_bundle_state::<KeccakKeyHasher>(bundle_state.state())
+    fn hashed_post_state(&self, bundle_state: &BundleState) -> ProviderResult<HashedPostState> {
+        let mut hashed_state =
+            HashedPostState::from_bundle_state::<KeccakKeyHasher>(bundle_state.state());
+        zero_destroyed_account_storage(
+            &MorphProofsBatchHashedAccountCursorFactory::new(self.session, self.block_number),
+            bundle_state.state(),
+            &mut hashed_state,
+        )
+        .map_err(ProviderError::from)?;
+        Ok(hashed_state)
     }
 }
 
@@ -309,5 +317,62 @@ impl<S: MorphProofsBatchSession> StateProvider for MorphProofsBatchStateProvider
 impl<S: MorphProofsBatchSession> BytecodeReader for MorphProofsBatchStateProviderRef<'_, S> {
     fn bytecode_by_hash(&self, code_hash: &B256) -> ProviderResult<Option<Bytecode>> {
         self.latest.bytecode_by_hash(code_hash)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy_eips::BlockNumHash;
+    use alloy_primitives::U256;
+    use reth_provider::noop::NoopProvider;
+    use reth_revm::{
+        db::{AccountStatus, BundleAccount},
+        state::AccountInfo,
+    };
+
+    use super::*;
+    use crate::{InMemoryProofsStorage, MorphProofsBatchStore, MorphProofsInitialStateStore};
+
+    #[test]
+    fn hashed_post_state_zeros_parent_storage_for_destroyed_account() {
+        let address = Address::repeat_byte(0x11);
+        let hashed_address = keccak256(address);
+        let hashed_slot = B256::repeat_byte(0x22);
+        let storage = InMemoryProofsStorage::new();
+        storage
+            .set_initial_state_anchor(BlockNumHash::new(0, B256::repeat_byte(0x01)))
+            .unwrap();
+        storage
+            .store_hashed_storages(hashed_address, vec![(hashed_slot, U256::from(1))])
+            .unwrap();
+        storage.commit_initial_state().unwrap();
+
+        let mut bundle_state = BundleState::default();
+        bundle_state.state.insert(
+            address,
+            BundleAccount::new(
+                Some(AccountInfo::default()),
+                None,
+                Default::default(),
+                AccountStatus::Destroyed,
+            ),
+        );
+
+        storage
+            .with_batch_session(|session| {
+                let provider = MorphProofsBatchStateProviderRef::new(
+                    Box::<NoopProvider>::default(),
+                    session,
+                    0,
+                );
+                let hashed_state = provider.hashed_post_state(&bundle_state).unwrap();
+
+                assert_eq!(
+                    hashed_state.storages[&hashed_address].storage[&hashed_slot],
+                    U256::ZERO
+                );
+                Ok(())
+            })
+            .unwrap();
     }
 }

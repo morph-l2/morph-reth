@@ -7,10 +7,13 @@ use revm::{
         Cfg, ContextTr, JournalTr, Transaction,
         result::{EVMError, ExecutionResult, InvalidTransaction},
     },
-    context_interface::{Block, journaled_state::account::JournaledAccountTr, result::ResultGas},
+    context_interface::{
+        Block, cfg::gas_params::Eip2780TxInfo, journaled_state::account::JournaledAccountTr,
+        result::ResultGas,
+    },
     handler::{EvmTr, FrameTr, Handler, MainnetHandler, post_execution, pre_execution, validation},
     inspector::{Inspector, InspectorHandler},
-    interpreter::{Gas, InitialAndFloorGas, interpreter::EthInterpreter},
+    interpreter::{Gas, GasTracker, InitialAndFloorGas, interpreter::EthInterpreter},
 };
 
 use crate::{
@@ -85,8 +88,8 @@ where
     fn apply_eip7702_auth_list(
         &self,
         evm: &mut Self::Evm,
-        init_and_floor_gas: &mut InitialAndFloorGas,
-    ) -> Result<u64, Self::Error> {
+        init_and_floor_gas: &mut GasTracker,
+    ) -> Result<Option<u64>, Self::Error> {
         pre_execution::apply_eip7702_auth_list(evm.ctx(), init_and_floor_gas)
     }
 
@@ -166,17 +169,21 @@ where
         evm: &mut Self::Evm,
         exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
         eip7702_refund: i64,
-    ) {
+    ) -> Result<(), Self::Error> {
         // L1 message tx follows go-ethereum semantics: no gas refunds.
         // Keep gas_used as actual consumed gas without applying post-exec refund.
         if evm.ctx_ref().tx().is_l1_msg() {
             // revm::Gas::used() subtracts `refunded` by default.
             // For L1 messages we must zero it out, otherwise gas_used is undercounted.
             exec_result.gas_mut().set_refund(0);
-            return;
+            return Ok(());
         }
-        let spec = (*evm.ctx().cfg().spec()).into();
-        post_execution::refund(spec, exec_result.gas_mut(), eip7702_refund);
+        post_execution::refund(
+            evm.ctx().cfg().gas_params(),
+            exec_result.gas_mut(),
+            eip7702_refund,
+        );
+        Ok(())
     }
 
     #[inline]
@@ -258,18 +265,30 @@ where
         let disable_eip7623 = cfg.is_eip7623_disabled();
         let is_amsterdam_eip8037 = cfg.is_amsterdam_eip8037_enabled();
         let tx_gas_limit_cap = cfg.tx_gas_limit_cap();
+        // Derive the EIP-2780 intrinsic-gas info the same way revm's own handler does
+        // rather than hardcoding `None`. Every Morph hardfork maps below AMSTERDAM today
+        // (asserted by `test_morph_hardforks_do_not_enable_amsterdam_state_gas`), so this
+        // is `None` in practice — but a hardcoded `None` would silently diverge from
+        // upstream intrinsic gas the moment that mapping changes.
+        let eip2780 = cfg.is_amsterdam_eip2780_enabled().then(|| Eip2780TxInfo {
+            value: tx.value(),
+            // Self-transfer: a `Call` whose recipient is the sender itself.
+            is_self_transfer: tx.kind().to() == Some(&tx.caller()),
+        });
 
         // For L1 message transactions, handle intrinsic gas specially
         if tx.is_l1_msg() {
             // Calculate intrinsic gas (same as normal transactions). If intrinsic gas
             // > gas_limit, fall back to gas_limit (matching go-ethereum's behavior for
             // L1 messages, which prepay gas on L1 and must always execute).
-            let initial_and_floor = validation::validate_initial_tx_gas(
+            let initial_and_floor = validation::validate_initial_tx_gas_with_gas_params(
                 tx,
                 spec,
+                cfg.gas_params(),
                 disable_eip7623,
                 is_amsterdam_eip8037,
                 tx_gas_limit_cap,
+                eip2780,
             )
             .unwrap_or_else(|_| InitialAndFloorGas::new(tx.gas_limit(), 0));
 
@@ -277,12 +296,14 @@ where
         }
 
         // Normal transaction validation
-        let initial_and_floor = validation::validate_initial_tx_gas(
+        let initial_and_floor = validation::validate_initial_tx_gas_with_gas_params(
             tx,
             spec,
+            cfg.gas_params(),
             disable_eip7623,
             is_amsterdam_eip8037,
             tx_gas_limit_cap,
+            eip2780,
         )
         .map_err(MorphInvalidTransaction::EthInvalidTransaction)?;
 
@@ -803,7 +824,17 @@ where
         ..Default::default()
     };
     let mut h = MorphEvmHandler::<DB, I>::new();
-    h.execution(evm, &InitialAndFloorGas::new(0, 0))
+    let init_and_floor_gas = InitialAndFloorGas::new(0, 0);
+    let mut gas = h.tx_gas(evm, &init_and_floor_gas);
+    // `execution` owns this checkpoint: it commits once the runtime gas phase is done, or
+    // unwinds to it when that phase runs out of gas. The `None` arm is only reachable
+    // under EIP-2780 (AMSTERDAM), which Morph never enables, so it is unreachable today;
+    // it is kept faithful to upstream so a future hardfork mapping cannot silently skip it.
+    let checkpoint = evm.ctx().journal_mut().checkpoint();
+    match h.execution(evm, checkpoint, &mut gas)? {
+        Some(res) => Ok(res),
+        None => h.runtime_oog_result(evm, &init_and_floor_gas, &mut gas),
+    }
 }
 
 /// Query ERC20 `balanceOf(address)` via an internal EVM call.
@@ -1010,7 +1041,7 @@ mod tests {
     use morph_primitives::MORPH_TX_TYPE_ID;
     use revm::{
         context::{BlockEnv, TxEnv},
-        context_interface::result::InvalidTransaction,
+        context_interface::{cfg::gas_params::GasId, result::InvalidTransaction},
         database::{CacheDB, EmptyDB},
         inspector::NoOpInspector,
         state::{AccountInfo, Bytecode},
@@ -1180,6 +1211,41 @@ mod tests {
             err,
             EVMError::Transaction(MorphInvalidTransaction::EthInvalidTransaction(
                 InvalidTransaction::GasPriceLessThanBasefee
+            ))
+        ));
+    }
+
+    #[test]
+    fn validate_initial_tx_gas_uses_configured_gas_params() {
+        let mut evm = MorphEvm::new(
+            MorphContext::new(CacheDB::new(EmptyDB::default()), MorphHardfork::default()),
+            NoOpInspector,
+        );
+        let mut gas_params = evm.cfg.gas_params.clone();
+        gas_params.override_gas([(GasId::tx_base_stipend(), 30_000)]);
+        evm.cfg.set_gas_params(gas_params);
+        evm.tx = MorphTxEnv {
+            inner: TxEnv {
+                gas_limit: 25_000,
+                kind: TxKind::Call(Address::ZERO),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let err = <MorphEvmHandler<_, _> as Handler>::validate_initial_tx_gas(
+            &MorphEvmHandler::default(),
+            &mut evm,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            EVMError::Transaction(MorphInvalidTransaction::EthInvalidTransaction(
+                InvalidTransaction::CallGasCostMoreThanGasLimit {
+                    initial_gas: 30_000,
+                    gas_limit: 25_000,
+                }
             ))
         ));
     }

@@ -38,7 +38,7 @@ use reth_node_core::args::{DiscoveryArgs, NetworkArgs, RpcServerArgs};
 use reth_payload_primitives::BuiltPayload;
 use reth_provider::{
     AccountReader, BlockReaderIdExt, DBProvider, DatabaseProviderFactory, ReceiptProvider,
-    providers::BlockchainProvider,
+    StateProviderFactory, providers::BlockchainProvider,
 };
 use reth_rpc_server_types::{RethRpcModule, RpcModuleSelection};
 use reth_tasks::Runtime;
@@ -483,8 +483,10 @@ fn assert_outside_window(error: &str, requested: u64) {
 }
 
 fn sender_nonce(node: &MorphTestNode) -> eyre::Result<u64> {
+    // Since reth 2.5.2 account reads go through a state provider, not BlockchainProvider itself.
     node.inner
         .provider
+        .latest()?
         .basic_account(&ACCOUNT0)?
         .map(|account| account.nonce)
         .ok_or_else(|| eyre::eyre!("missing genesis sender {ACCOUNT0}"))
