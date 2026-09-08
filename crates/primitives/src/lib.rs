@@ -62,6 +62,7 @@ pub use transaction::{
 #[non_exhaustive]
 pub struct MorphPrimitives;
 
+#[cfg(feature = "reth-codec")]
 impl reth_primitives_traits::NodePrimitives for MorphPrimitives {
     type Block = Block;
     type BlockHeader = MorphHeader;

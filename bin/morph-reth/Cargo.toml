@@ -20,17 +20,26 @@ morph-chainspec = { workspace = true, features = ["cli"] }
 morph-consensus.workspace = true
 morph-evm.workspace = true
 morph-node.workspace = true
+morph-proofs.workspace = true
+morph-proofs-exex.workspace = true
 
 # Reth CLI
+reth-chainspec.workspace = true
 reth-cli.workspace = true
+reth-cli-commands.workspace = true
+reth-cli-runner.workspace = true
 reth-cli-util.workspace = true
 reth-ethereum-cli.workspace = true
 reth-node-builder.workspace = true
+reth-provider.workspace = true
 reth-rpc-server-types.workspace = true
+reth-tasks.workspace = true
 
 # Other
+alloy-consensus.workspace = true
 alloy-primitives.workspace = true
 clap.workspace = true
+eyre.workspace = true
 tracing.workspace = true
 
 [features]

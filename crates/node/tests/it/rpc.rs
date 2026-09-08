@@ -9,7 +9,7 @@ use alloy_primitives::{Address, B256, Bytes, Sealable, TxKind, U256};
 use alloy_signer::SignerSync;
 use jsonrpsee::core::client::ClientT;
 use morph_node::test_utils::{
-    MorphTestNode, MorphTxBuilder, TEST_TOKEN_ID, TestNodeBuilder, advance_chain,
+    MorphTestNode, MorphTxBuilder, TEST_TOKEN_ID, TestNodeBuilder, advance_chain, make_transfer_tx,
 };
 use morph_primitives::MorphTxEnvelope;
 use reth_payload_primitives::BuiltPayload;
@@ -297,6 +297,92 @@ async fn transaction_receipt_exposes_morph_fields_over_rpc() -> eyre::Result<()>
             .is_some_and(|value| value != "0x0"),
         "l1Fee should be serialized as a non-zero quantity for calldata txs"
     );
+
+    Ok(())
+}
+
+/// MorphTx v1 pays directly in ETH when `feeTokenID` is zero, so no token
+/// exchange rate or scale applies to its receipt.
+#[tokio::test(flavor = "multi_thread")]
+async fn morph_tx_v1_eth_receipt_omits_token_exchange_metadata() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+
+    let raw_tx = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
+        .with_v1_eth_fee()
+        .build_signed()?;
+    node.rpc.inject_tx(raw_tx).await?;
+
+    let payload = node.advance_block().await?;
+    let tx_hash = *payload
+        .block()
+        .body()
+        .transactions
+        .first()
+        .unwrap()
+        .tx_hash();
+    let client = node
+        .rpc_client()
+        .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
+
+    let receipt: Value = client
+        .request("eth_getTransactionReceipt", (tx_hash,))
+        .await?;
+
+    assert_eq!(receipt["type"].as_str(), Some("0x7f"));
+    assert_eq!(receipt["version"].as_str(), Some("0x1"));
+    assert_eq!(receipt["feeTokenID"].as_str(), Some("0x0"));
+    assert_eq!(receipt["feeLimit"].as_str(), Some("0x0"));
+    assert!(receipt["feeRate"].is_null());
+    assert!(receipt["tokenScale"].is_null());
+
+    Ok(())
+}
+
+/// Standard (non-MorphTx) receipts must keep Morph fee pointers as JSON null.
+///
+/// `@morph-network/viem` and indexers treat `feeTokenID != null` as "this is an
+/// alt-fee transaction". Filling `"0x0"` would misclassify every EIP-1559 tx.
+#[tokio::test(flavor = "multi_thread")]
+async fn standard_transaction_receipt_exposes_null_fee_fields_over_rpc() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+
+    let raw_tx = make_transfer_tx(wallet.chain_id, wallet.inner.clone(), 0).await;
+    node.rpc.inject_tx(raw_tx).await?;
+
+    let payload = node.advance_block().await?;
+    let tx_hash = *payload
+        .block()
+        .body()
+        .transactions
+        .first()
+        .unwrap()
+        .tx_hash();
+    let client = node
+        .rpc_client()
+        .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
+
+    let receipt: Value = client
+        .request("eth_getTransactionReceipt", (tx_hash,))
+        .await?;
+
+    assert_ne!(receipt["type"].as_str(), Some("0x7f"));
+    // geth's version field is a value type, so unset receipts still emit "0x0".
+    assert_eq!(receipt["version"].as_str(), Some("0x0"));
+    for field in ["feeTokenID", "feeRate", "tokenScale", "feeLimit"] {
+        assert!(
+            receipt[field].is_null(),
+            "{field} must be JSON null for non-MorphTx receipts, got {}",
+            receipt[field]
+        );
+    }
+    assert!(receipt["reference"].is_null());
+    assert!(receipt["memo"].is_null());
 
     Ok(())
 }
@@ -782,6 +868,103 @@ async fn estimate_gas_reports_insufficient_funds_for_transfer() -> eyre::Result<
     assert!(
         err_str.contains("insufficient funds for transfer"),
         "expected 'insufficient funds for transfer', got: {err_str}"
+    );
+
+    Ok(())
+}
+
+/// Simulation RPCs reject requests specifying an unregistered fee token ID.
+#[tokio::test(flavor = "multi_thread")]
+async fn simulation_rpcs_reject_unregistered_fee_token() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+
+    advance_chain(1, &mut node, wallet_to_arc(wallet)).await?;
+
+    let client = node
+        .rpc_client()
+        .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
+
+    let sender = Address::random();
+    let recipient = Address::random();
+
+    let request = serde_json::json!({
+        "from": sender,
+        "to": recipient,
+        "value": "0x0",
+        "feeTokenID": "0xffff", // 65535, unregistered
+    });
+
+    let result: Result<Value, _> = client.request("eth_estimateGas", (request.clone(),)).await;
+
+    let err = result.expect_err("eth_estimateGas must fail for unregistered fee token");
+    let err_str = err.to_string();
+    assert!(
+        err_str.contains("Token with ID 65535 is not registered"),
+        "expected 'Token with ID 65535 is not registered', got: {err_str}"
+    );
+
+    let result: Result<Value, _> = client.request("eth_call", (request, "latest")).await;
+    let err = result.expect_err("eth_call must fail for unregistered fee token");
+    let err_str = err.to_string();
+    assert!(
+        err_str.contains("Token with ID 65535 is not registered"),
+        "expected 'Token with ID 65535 is not registered', got: {err_str}"
+    );
+
+    Ok(())
+}
+
+/// A legacy `gasPrice` must not strip `feeTokenID` on simulation RPCs.
+///
+/// geth applies the "legacy gasPrice forces a standard transaction" rule only in
+/// `toTransaction` (real transaction construction), never in `ToMessage`, so
+/// `eth_call` / `eth_estimateGas` keep the fee token. Dropping it made morph-reth
+/// silently price a token-fee request as an ETH transaction: with an unregistered
+/// token the request succeeded with `0x5208` instead of being rejected.
+#[tokio::test(flavor = "multi_thread")]
+async fn simulation_rpcs_keep_fee_token_with_legacy_gas_price() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+
+    advance_chain(1, &mut node, wallet_to_arc(wallet)).await?;
+
+    let client = node
+        .rpc_client()
+        .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
+
+    let sender = Address::random();
+    let recipient = Address::random();
+
+    // A non-zero legacy gasPrice previously forced the standard-transaction path.
+    let request = serde_json::json!({
+        "from": sender,
+        "to": recipient,
+        "value": "0x0",
+        "gasPrice": "0x3b9aca00",
+        "feeTokenID": "0xffff", // 65535, unregistered
+    });
+
+    let result: Result<Value, _> = client.request("eth_estimateGas", (request.clone(),)).await;
+    let err = result
+        .expect_err("eth_estimateGas must not drop feeTokenID when gasPrice is set")
+        .to_string();
+    assert!(
+        err.contains("invalid fee token"),
+        "expected 'invalid fee token', got: {err}"
+    );
+
+    let result: Result<Value, _> = client.request("eth_call", (request, "latest")).await;
+    let err = result
+        .expect_err("eth_call must not drop feeTokenID when gasPrice is set")
+        .to_string();
+    assert!(
+        err.contains("Token with ID 65535 is not registered"),
+        "expected 'Token with ID 65535 is not registered', got: {err}"
     );
 
     Ok(())
