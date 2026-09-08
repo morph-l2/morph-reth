@@ -291,7 +291,7 @@ impl TestNodeBuilder {
     pub fn with_max_tx_payload_bytes(mut self, max_bytes: u64) -> Self {
         self.morph_args
             .get_or_insert_with(MorphArgs::default)
-            .max_tx_payload_bytes = max_bytes;
+            .max_tx_payload_bytes = Some(max_bytes);
         self
     }
 

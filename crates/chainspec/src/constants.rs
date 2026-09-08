@@ -16,8 +16,8 @@ pub const MORPH_BASE_FEE: u64 = 1_000_000;
 ///
 /// Matches morph-geth `params.MorphMaxTxPayloadBytesPerBlock` (`720 * 1024`).
 /// `720 KiB = 120 KiB × 6`, sized so one uncompressed L2 block fits in a 6-blob
-/// batch (`6 × 4096 × 31 = 761_856` usable bytes). Enforced on import by Morph
-/// consensus and used as the sequencer packing default.
+/// batch (`6 × 4096 × 31 = 761_856` usable bytes). Used when a custom genesis
+/// omits the limit and by the built-in mainnet and Hoodi chain specs.
 pub const MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK: u64 = 720 * 1024;
 
 /// Default priority fee returned by `eth_maxPriorityFeePerGas` when the gas

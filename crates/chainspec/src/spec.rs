@@ -47,10 +47,10 @@ pub(crate) fn make_genesis_header(genesis: &Genesis, state_root: B256) -> MorphH
     MorphHeader::from(inner)
 }
 
-/// Configuration for building a genesis header.
+/// Configuration for building a predefined [`MorphChainSpec`] from genesis.
 ///
-/// This allows customization of the genesis header construction,
-/// particularly for networks that use ZK-trie state roots instead of MPT.
+/// This allows predefined networks to preserve their historical genesis JSON
+/// while supplying runtime values that are maintained in morph-geth presets.
 #[derive(Default)]
 pub struct GenesisConfig {
     /// Custom state root to use (e.g., ZK-trie state root).
@@ -61,6 +61,12 @@ pub struct GenesisConfig {
     ///
     /// Required when `state_root` is provided.
     pub genesis_hash: Option<B256>,
+
+    /// Runtime payload limit override for predefined networks.
+    ///
+    /// Mainnet and Hoodi retain their historical genesis JSON unchanged, while
+    /// their built-in chain specs use the current 720 KiB consensus limit.
+    pub max_tx_payload_bytes_per_block: Option<u64>,
 }
 
 impl GenesisConfig {
@@ -71,6 +77,15 @@ impl GenesisConfig {
     pub fn with_state_root(mut self, state_root: B256, genesis_hash: B256) -> Self {
         self.state_root = Some(state_root);
         self.genesis_hash = Some(genesis_hash);
+        self
+    }
+
+    /// Overrides the payload limit parsed from genesis for a predefined network.
+    pub const fn with_max_tx_payload_bytes_per_block(
+        mut self,
+        max_tx_payload_bytes_per_block: u64,
+    ) -> Self {
+        self.max_tx_payload_bytes_per_block = Some(max_tx_payload_bytes_per_block);
         self
     }
 }
@@ -247,8 +262,12 @@ impl MorphChainSpec {
     /// let spec = MorphChainSpec::from_genesis_with_config(genesis, config);
     /// ```
     pub fn from_genesis_with_config(genesis: Genesis, config: GenesisConfig) -> Self {
-        let chain_info = MorphGenesisInfo::extract_from(&genesis.config.extra_fields)
+        let mut chain_info = MorphGenesisInfo::extract_from(&genesis.config.extra_fields)
             .expect("failed to extract morph genesis info");
+        if let Some(max_tx_payload_bytes_per_block) = config.max_tx_payload_bytes_per_block {
+            chain_info.morph_chain_info.max_tx_payload_bytes_per_block =
+                max_tx_payload_bytes_per_block;
+        }
 
         // Build hardforks using the unified logic
         let hardforks = build_hardforks(&genesis, &chain_info);
@@ -300,6 +319,11 @@ impl MorphChainSpec {
     /// Returns the fee vault address.
     pub fn fee_vault_address(&self) -> Option<Address> {
         self.info.morph_chain_info.fee_vault_address
+    }
+
+    /// Returns the maximum accepted L2 transaction payload bytes per block.
+    pub const fn max_tx_payload_bytes_per_block(&self) -> u64 {
+        self.info.morph_chain_info.max_tx_payload_bytes_per_block()
     }
 }
 
@@ -710,6 +734,7 @@ mod tests {
             chainspec.fee_vault_address(),
             Some(address!("530000000000000000000000000000000000000a"))
         );
+        assert_eq!(chainspec.max_tx_payload_bytes_per_block(), 122_880);
     }
 
     #[test]
@@ -720,6 +745,10 @@ mod tests {
         let config = chainspec.chain_config();
         // Test genesis includes morph config with fee vault address
         assert!(config.is_fee_vault_enabled());
+        assert_eq!(
+            config.max_tx_payload_bytes_per_block(),
+            crate::MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK
+        );
     }
 
     #[test]
@@ -852,5 +881,6 @@ mod tests {
             config.fee_vault_address,
             Some(address!("530000000000000000000000000000000000000a"))
         );
+        assert_eq!(config.max_tx_payload_bytes_per_block(), 122_880);
     }
 }

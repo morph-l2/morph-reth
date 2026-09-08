@@ -1,8 +1,8 @@
 //! Morph Mainnet chain specification.
 
 use crate::{
-    MORPH_MAINNET_GENESIS_HASH, MORPH_MAINNET_GENESIS_STATE_ROOT, MorphChainSpec,
-    spec::GenesisConfig,
+    MORPH_MAINNET_GENESIS_HASH, MORPH_MAINNET_GENESIS_STATE_ROOT,
+    MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK, MorphChainSpec, spec::GenesisConfig,
 };
 use alloy_genesis::Genesis;
 use std::sync::{Arc, LazyLock};
@@ -12,9 +12,11 @@ pub static MORPH_MAINNET: LazyLock<Arc<MorphChainSpec>> = LazyLock::new(|| {
     let genesis: Genesis = serde_json::from_str(include_str!("../res/genesis/mainnet.json"))
         .expect("Failed to parse Morph Mainnet genesis");
 
-    // Use ZK-trie state root (hardcoded constant from go-ethereum)
+    // Preserve the historical genesis JSON while matching morph-geth's built-in
+    // mainnet config, which applies the current 720 KiB runtime limit.
     let config = GenesisConfig::default()
-        .with_state_root(MORPH_MAINNET_GENESIS_STATE_ROOT, MORPH_MAINNET_GENESIS_HASH);
+        .with_state_root(MORPH_MAINNET_GENESIS_STATE_ROOT, MORPH_MAINNET_GENESIS_HASH)
+        .with_max_tx_payload_bytes_per_block(MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK);
 
     MorphChainSpec::from_genesis_with_config(genesis, config).into()
 });
@@ -43,6 +45,21 @@ mod tests {
         assert_eq!(
             MORPH_MAINNET.fee_vault_address(),
             Some(address!("530000000000000000000000000000000000000a"))
+        );
+    }
+
+    #[test]
+    fn test_morph_mainnet_payload_limit_preserves_genesis() {
+        let genesis: Genesis = serde_json::from_str(include_str!("../res/genesis/mainnet.json"))
+            .expect("mainnet genesis should parse");
+        let genesis_limit = crate::MorphGenesisInfo::extract_from(&genesis.config.extra_fields)
+            .expect("mainnet morph config should parse")
+            .morph_chain_info
+            .max_tx_payload_bytes_per_block;
+        assert_eq!(genesis_limit, 122_880);
+        assert_eq!(
+            MORPH_MAINNET.max_tx_payload_bytes_per_block(),
+            MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK
         );
     }
 
