@@ -1,8 +1,7 @@
 //! Morph Hoodi (testnet) chain specification.
 
 use crate::{
-    MORPH_HOODI_GENESIS_HASH, MORPH_HOODI_GENESIS_STATE_ROOT, MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK,
-    MorphChainSpec, spec::GenesisConfig,
+    MORPH_HOODI_GENESIS_HASH, MORPH_HOODI_GENESIS_STATE_ROOT, MorphChainSpec, spec::GenesisConfig,
 };
 use alloy_genesis::Genesis;
 use std::sync::{Arc, LazyLock};
@@ -12,11 +11,9 @@ pub static MORPH_HOODI: LazyLock<Arc<MorphChainSpec>> = LazyLock::new(|| {
     let genesis: Genesis = serde_json::from_str(include_str!("../res/genesis/hoodi.json"))
         .expect("Failed to parse Morph Hoodi genesis");
 
-    // Preserve the historical genesis JSON while matching morph-geth's built-in
-    // Hoodi config, which applies the current 720 KiB runtime limit.
+    // Use ZK-trie state root (hardcoded constant from go-ethereum)
     let config = GenesisConfig::default()
-        .with_state_root(MORPH_HOODI_GENESIS_STATE_ROOT, MORPH_HOODI_GENESIS_HASH)
-        .with_max_tx_payload_bytes_per_block(MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK);
+        .with_state_root(MORPH_HOODI_GENESIS_STATE_ROOT, MORPH_HOODI_GENESIS_HASH);
 
     MorphChainSpec::from_genesis_with_config(genesis, config).into()
 });
@@ -24,7 +21,9 @@ pub static MORPH_HOODI: LazyLock<Arc<MorphChainSpec>> = LazyLock::new(|| {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{MORPH_HOODI_CHAIN_ID, hardfork::MorphHardforks};
+    use crate::{
+        MORPH_HOODI_CHAIN_ID, MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK, hardfork::MorphHardforks,
+    };
     use alloy_primitives::address;
     use reth_chainspec::EthChainSpec;
 
@@ -49,18 +48,18 @@ mod tests {
     }
 
     #[test]
-    fn test_morph_hoodi_payload_limit_preserves_genesis() {
+    fn test_morph_hoodi_payload_limit_matches_genesis() {
+        // The bundled genesis JSON is the single source of the consensus limit:
+        // it carries the same 720 KiB value as morph-geth's built-in config and
+        // the preset uses it unchanged.
         let genesis: Genesis = serde_json::from_str(include_str!("../res/genesis/hoodi.json"))
-            .expect("Hoodi genesis should parse");
+            .expect("hoodi genesis should parse");
         let genesis_limit = crate::MorphGenesisInfo::extract_from(&genesis.config.extra_fields)
-            .expect("Hoodi morph config should parse")
+            .expect("hoodi morph config should parse")
             .morph_chain_info
             .max_tx_payload_bytes_per_block;
-        assert_eq!(genesis_limit, 122_880);
-        assert_eq!(
-            MORPH_HOODI.max_tx_payload_bytes_per_block(),
-            MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK
-        );
+        assert_eq!(genesis_limit, MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK);
+        assert_eq!(MORPH_HOODI.max_tx_payload_bytes_per_block(), genesis_limit);
     }
 
     #[test]
