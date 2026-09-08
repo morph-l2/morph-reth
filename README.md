@@ -165,9 +165,7 @@ label (`eth_getProof` / `eth_getMultiProof`) rather than by separate metric name
 can be split per method or summed. `requests_total` is counted before the request-size limits are
 applied and equals `rejected_total + successful_responses_total + failures_total`.
 
-Note that `eth_getMultiProof` exists **only** while `--proofs-history` is enabled, because Reth
-`v2.4.0` has no native implementation to fall back to. `eth_getProof` remains available either way,
-served by Reth itself when proof history is off.
+Note that starting from Reth `v2.5.2`, `eth_getMultiProof` is supported natively by Reth (subject to `--rpc.eth-proof-window`). When `--proofs-history` is enabled, both `eth_getProof` and `eth_getMultiProof` are overridden to serve from the dedicated 7-day proof-history database with Morph request limits and metrics.
 
 For cold copies, stop the source node and copy the complete chain data directory, including
 `historical-proofs`, as one consistent unit. Startup validates the proof database schema, chain ID,
