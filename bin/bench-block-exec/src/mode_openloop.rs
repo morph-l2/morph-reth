@@ -441,8 +441,7 @@ pub async fn run_external_producer(args: ExternalProducerArgs) -> eyre::Result<(
     }
 
     println!(
-        "External producer complete: imported={} blocks / {} txs",
-        imported_blocks, cumulative_txs
+        "External producer complete: imported={imported_blocks} blocks / {cumulative_txs} txs"
     );
     Ok(())
 }

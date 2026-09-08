@@ -7,10 +7,13 @@ use revm::{
         Cfg, ContextTr, JournalTr, Transaction,
         result::{EVMError, ExecutionResult, InvalidTransaction},
     },
-    context_interface::{Block, journaled_state::account::JournaledAccountTr, result::ResultGas},
+    context_interface::{
+        Block, cfg::gas_params::Eip2780TxInfo, journaled_state::account::JournaledAccountTr,
+        result::ResultGas,
+    },
     handler::{EvmTr, FrameTr, Handler, MainnetHandler, post_execution, pre_execution, validation},
     inspector::{Inspector, InspectorHandler},
-    interpreter::{Gas, InitialAndFloorGas, interpreter::EthInterpreter},
+    interpreter::{Gas, GasTracker, InitialAndFloorGas, interpreter::EthInterpreter},
 };
 
 use crate::{
@@ -18,7 +21,7 @@ use crate::{
     error::MorphHaltReason,
     evm::MorphContext,
     l1block::L1BlockInfo,
-    token_fee::{TokenFeeInfo, compute_mapping_slot_for_address, encode_balance_of_calldata},
+    token_fee::{TokenRegistryEntry, compute_mapping_slot_for_address, encode_balance_of_calldata},
     tx::MorphTxExt,
 };
 
@@ -85,8 +88,8 @@ where
     fn apply_eip7702_auth_list(
         &self,
         evm: &mut Self::Evm,
-        init_and_floor_gas: &mut InitialAndFloorGas,
-    ) -> Result<u64, Self::Error> {
+        init_and_floor_gas: &mut GasTracker,
+    ) -> Result<Option<u64>, Self::Error> {
         pre_execution::apply_eip7702_auth_list(evm.ctx(), init_and_floor_gas)
     }
 
@@ -166,17 +169,21 @@ where
         evm: &mut Self::Evm,
         exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
         eip7702_refund: i64,
-    ) {
+    ) -> Result<(), Self::Error> {
         // L1 message tx follows go-ethereum semantics: no gas refunds.
         // Keep gas_used as actual consumed gas without applying post-exec refund.
         if evm.ctx_ref().tx().is_l1_msg() {
             // revm::Gas::used() subtracts `refunded` by default.
             // For L1 messages we must zero it out, otherwise gas_used is undercounted.
             exec_result.gas_mut().set_refund(0);
-            return;
+            return Ok(());
         }
-        let spec = (*evm.ctx().cfg().spec()).into();
-        post_execution::refund(spec, exec_result.gas_mut(), eip7702_refund);
+        post_execution::refund(
+            evm.ctx().cfg().gas_params(),
+            exec_result.gas_mut(),
+            eip7702_refund,
+        );
+        Ok(())
     }
 
     #[inline]
@@ -258,18 +265,30 @@ where
         let disable_eip7623 = cfg.is_eip7623_disabled();
         let is_amsterdam_eip8037 = cfg.is_amsterdam_eip8037_enabled();
         let tx_gas_limit_cap = cfg.tx_gas_limit_cap();
+        // Derive the EIP-2780 intrinsic-gas info the same way revm's own handler does
+        // rather than hardcoding `None`. Every Morph hardfork maps below AMSTERDAM today
+        // (asserted by `test_morph_hardforks_do_not_enable_amsterdam_state_gas`), so this
+        // is `None` in practice — but a hardcoded `None` would silently diverge from
+        // upstream intrinsic gas the moment that mapping changes.
+        let eip2780 = cfg.is_amsterdam_eip2780_enabled().then(|| Eip2780TxInfo {
+            value: tx.value(),
+            // Self-transfer: a `Call` whose recipient is the sender itself.
+            is_self_transfer: tx.kind().to() == Some(&tx.caller()),
+        });
 
         // For L1 message transactions, handle intrinsic gas specially
         if tx.is_l1_msg() {
             // Calculate intrinsic gas (same as normal transactions). If intrinsic gas
             // > gas_limit, fall back to gas_limit (matching go-ethereum's behavior for
             // L1 messages, which prepay gas on L1 and must always execute).
-            let initial_and_floor = validation::validate_initial_tx_gas(
+            let initial_and_floor = validation::validate_initial_tx_gas_with_gas_params(
                 tx,
                 spec,
+                cfg.gas_params(),
                 disable_eip7623,
                 is_amsterdam_eip8037,
                 tx_gas_limit_cap,
+                eip2780,
             )
             .unwrap_or_else(|_| InitialAndFloorGas::new(tx.gas_limit(), 0));
 
@@ -277,12 +296,14 @@ where
         }
 
         // Normal transaction validation
-        let initial_and_floor = validation::validate_initial_tx_gas(
+        let initial_and_floor = validation::validate_initial_tx_gas_with_gas_params(
             tx,
             spec,
+            cfg.gas_params(),
             disable_eip7623,
             is_amsterdam_eip8037,
             tx_gas_limit_cap,
+            eip2780,
         )
         .map_err(MorphInvalidTransaction::EthInvalidTransaction)?;
 
@@ -489,10 +510,38 @@ where
 
         let caller_addr = evm.ctx_ref().tx().caller();
         let is_call = evm.ctx_ref().tx().kind().is_call();
+        let is_fee_charge_disabled = evm.ctx_ref().cfg().is_fee_charge_disabled();
 
-        // Simulation paths must not touch token balance: skip the token
-        // fee deduction, keep only nonce/code validation and the nonce bump.
-        if evm.ctx_ref().cfg().is_fee_charge_disabled() {
+        // Real transactions must cover the transferred ETH value before token metadata is loaded.
+        // Simulations retain reth's existing value-check behavior and only add token eligibility.
+        if !is_fee_charge_disabled {
+            let tx_value = evm.ctx_ref().tx().value();
+            if !tx_value.is_zero() {
+                let caller_eth_balance = *evm
+                    .ctx_mut()
+                    .journal_mut()
+                    .load_account_mut(caller_addr)?
+                    .data
+                    .balance();
+                if caller_eth_balance < tx_value {
+                    return Err(MorphInvalidTransaction::EthInvalidTransaction(
+                        InvalidTransaction::LackOfFundForMaxFee {
+                            fee: Box::new(tx_value),
+                            balance: Box::new(caller_eth_balance),
+                        },
+                    )
+                    .into());
+                }
+            }
+        }
+
+        let token_registry_entry =
+            TokenRegistryEntry::load(evm.ctx_mut().journal_mut().db_mut(), token_id)?
+                .ok_or(MorphInvalidTransaction::TokenNotRegistered(token_id))?
+                .ensure_usable(token_id)?;
+
+        // Simulations validate token eligibility but skip balance lookup and fee deduction.
+        if is_fee_charge_disabled {
             if is_call {
                 let mut caller = evm
                     .ctx_mut()
@@ -504,51 +553,20 @@ where
             return Ok(());
         }
 
-        let beneficiary = evm.ctx_ref().block().beneficiary();
         let hardfork = *evm.ctx_ref().cfg().spec();
-        let tx_value = evm.ctx_ref().tx().value();
+
+        let token_fee_info = token_registry_entry.load_for_caller(
+            evm.ctx_mut().journal_mut().db_mut(),
+            caller_addr,
+            hardfork,
+        )?;
+
+        let beneficiary = evm.ctx_ref().block().beneficiary();
         let rlp_bytes = evm.ctx_ref().tx().rlp_bytes.clone().unwrap_or_default();
         let gas_limit = evm.ctx_ref().tx().gas_limit();
         let fee_limit_from_tx = evm.ctx_ref().tx().fee_limit.unwrap_or_default();
         let basefee = evm.ctx_ref().block().basefee() as u128;
         let effective_gas_price = evm.ctx_ref().tx().effective_gas_price(basefee);
-
-        // Check that caller has enough ETH to cover the value transfer.
-        // This matches go-ethereum's buyAltTokenGas() which checks
-        // state.GetBalance(from) >= value before proceeding.
-        // Without this, the tx would proceed to EVM execution and fail there
-        // (consuming gas), whereas go-ethereum rejects at the preCheck stage
-        // (not consuming gas).
-        if !tx_value.is_zero() {
-            let caller_eth_balance = *evm
-                .ctx_mut()
-                .journal_mut()
-                .load_account_mut(caller_addr)?
-                .data
-                .balance();
-            if caller_eth_balance < tx_value {
-                return Err(MorphInvalidTransaction::EthInvalidTransaction(
-                    InvalidTransaction::LackOfFundForMaxFee {
-                        fee: Box::new(tx_value),
-                        balance: Box::new(caller_eth_balance),
-                    },
-                )
-                .into());
-            }
-        }
-
-        // Fetch token fee info from Token Registry
-        let token_fee_info = TokenFeeInfo::load_for_caller(
-            evm.ctx_mut().journal_mut().db_mut(),
-            token_id,
-            caller_addr,
-            hardfork,
-        )?
-        .ok_or(MorphInvalidTransaction::TokenNotRegistered(token_id))?;
-
-        if !token_fee_info.is_active {
-            return Err(MorphInvalidTransaction::TokenNotActive(token_id).into());
-        }
 
         // Get RLP-encoded transaction bytes for L1 fee calculation
         // Fetch L1 block info per-tx (same rationale as validate_and_deduct_eth_fee).
@@ -806,7 +824,17 @@ where
         ..Default::default()
     };
     let mut h = MorphEvmHandler::<DB, I>::new();
-    h.execution(evm, &InitialAndFloorGas::new(0, 0))
+    let init_and_floor_gas = InitialAndFloorGas::new(0, 0);
+    let mut gas = h.tx_gas(evm, &init_and_floor_gas);
+    // `execution` owns this checkpoint: it commits once the runtime gas phase is done, or
+    // unwinds to it when that phase runs out of gas. The `None` arm is only reachable
+    // under EIP-2780 (AMSTERDAM), which Morph never enables, so it is unreachable today;
+    // it is kept faithful to upstream so a future hardfork mapping cannot silently skip it.
+    let checkpoint = evm.ctx().journal_mut().checkpoint();
+    match h.execution(evm, checkpoint, &mut gas)? {
+        Some(res) => Ok(res),
+        None => h.runtime_oog_result(evm, &init_and_floor_gas, &mut gas),
+    }
 }
 
 /// Query ERC20 `balanceOf(address)` via an internal EVM call.
@@ -1004,16 +1032,23 @@ fn calculate_caller_fee_with_l1_cost(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::MorphBlockEnv;
-    use alloy_primitives::{Bytes, TxKind, address, keccak256};
+    use crate::{
+        MorphBlockEnv,
+        token_fee::{L2_TOKEN_REGISTRY_ADDRESS, compute_mapping_slot},
+    };
+    use alloy_primitives::{B256, Bytes, TxKind, address, keccak256};
     use morph_chainspec::hardfork::MorphHardfork;
     use morph_primitives::MORPH_TX_TYPE_ID;
     use revm::{
         context::{BlockEnv, TxEnv},
-        context_interface::result::InvalidTransaction,
+        context_interface::{cfg::gas_params::GasId, result::InvalidTransaction},
         database::{CacheDB, EmptyDB},
         inspector::NoOpInspector,
         state::{AccountInfo, Bytecode},
+    };
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
     };
 
     fn mutating_return_code(write_value: u8, return_value: u8) -> Bytes {
@@ -1034,6 +1069,113 @@ mod tests {
             0x00, // PUSH1 offset 0
             0xf3, // RETURN
         ])
+    }
+
+    #[derive(Debug)]
+    struct TokenAccessTrackingDb {
+        inner: CacheDB<EmptyDB>,
+        token: Address,
+        token_accessed: Arc<AtomicBool>,
+    }
+
+    impl revm::Database for TokenAccessTrackingDb {
+        type Error = std::convert::Infallible;
+
+        fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
+            if address == self.token {
+                self.token_accessed.store(true, Ordering::Relaxed);
+            }
+            revm::Database::basic(&mut self.inner, address)
+        }
+
+        fn code_by_hash(&mut self, code_hash: B256) -> Result<Bytecode, Self::Error> {
+            revm::Database::code_by_hash(&mut self.inner, code_hash)
+        }
+
+        fn storage(&mut self, address: Address, index: U256) -> Result<U256, Self::Error> {
+            if address == self.token {
+                self.token_accessed.store(true, Ordering::Relaxed);
+            }
+            revm::Database::storage(&mut self.inner, address, index)
+        }
+
+        fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error> {
+            revm::Database::block_hash(&mut self.inner, number)
+        }
+    }
+
+    fn insert_test_fee_token(
+        db: &mut CacheDB<EmptyDB>,
+        token_id: u16,
+        token: Address,
+        is_active: bool,
+    ) {
+        insert_test_fee_token_config(db, token_id, token, is_active, U256::from(1), U256::from(1));
+    }
+
+    fn insert_test_fee_token_config(
+        db: &mut CacheDB<EmptyDB>,
+        token_id: u16,
+        token: Address,
+        is_active: bool,
+        price_ratio: U256,
+        scale: U256,
+    ) {
+        let mut token_id_bytes = [0u8; 32];
+        token_id_bytes[30..32].copy_from_slice(&token_id.to_be_bytes());
+        let base = compute_mapping_slot(U256::from(151), &token_id_bytes);
+
+        db.insert_account_storage(
+            L2_TOKEN_REGISTRY_ADDRESS,
+            base,
+            U256::from_be_bytes(token.into_word().0),
+        )
+        .unwrap();
+
+        let mut status = [0u8; 32];
+        status[30] = 18;
+        status[31] = u8::from(is_active);
+        db.insert_account_storage(
+            L2_TOKEN_REGISTRY_ADDRESS,
+            base + U256::from(2),
+            U256::from_be_bytes(status),
+        )
+        .unwrap();
+        db.insert_account_storage(L2_TOKEN_REGISTRY_ADDRESS, base + U256::from(3), scale)
+            .unwrap();
+        db.insert_account_storage(
+            L2_TOKEN_REGISTRY_ADDRESS,
+            compute_mapping_slot(U256::from(153), &token_id_bytes),
+            price_ratio,
+        )
+        .unwrap();
+    }
+
+    fn token_fee_simulation_evm<DB>(
+        db: DB,
+        caller: Address,
+        token_id: u16,
+    ) -> MorphEvm<DB, NoOpInspector>
+    where
+        DB: alloy_evm::Database,
+    {
+        let mut evm = MorphEvm::new(
+            MorphContext::new(db, MorphHardfork::default()),
+            NoOpInspector,
+        );
+        evm.cfg.disable_fee_charge = true;
+        evm.tx = MorphTxEnv {
+            inner: TxEnv {
+                tx_type: MORPH_TX_TYPE_ID,
+                gas_limit: 21_000,
+                caller,
+                kind: TxKind::Call(Address::ZERO),
+                ..Default::default()
+            },
+            fee_token_id: Some(token_id),
+            ..Default::default()
+        };
+        evm
     }
 
     #[test]
@@ -1069,6 +1211,41 @@ mod tests {
             err,
             EVMError::Transaction(MorphInvalidTransaction::EthInvalidTransaction(
                 InvalidTransaction::GasPriceLessThanBasefee
+            ))
+        ));
+    }
+
+    #[test]
+    fn validate_initial_tx_gas_uses_configured_gas_params() {
+        let mut evm = MorphEvm::new(
+            MorphContext::new(CacheDB::new(EmptyDB::default()), MorphHardfork::default()),
+            NoOpInspector,
+        );
+        let mut gas_params = evm.cfg.gas_params.clone();
+        gas_params.override_gas([(GasId::tx_base_stipend(), 30_000)]);
+        evm.cfg.set_gas_params(gas_params);
+        evm.tx = MorphTxEnv {
+            inner: TxEnv {
+                gas_limit: 25_000,
+                kind: TxKind::Call(Address::ZERO),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let err = <MorphEvmHandler<_, _> as Handler>::validate_initial_tx_gas(
+            &MorphEvmHandler::default(),
+            &mut evm,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            EVMError::Transaction(MorphInvalidTransaction::EthInvalidTransaction(
+                InvalidTransaction::CallGasCostMoreThanGasLimit {
+                    initial_gas: 30_000,
+                    gas_limit: 25_000,
+                }
             ))
         ));
     }
@@ -1289,5 +1466,126 @@ mod tests {
         let new_balance =
             calculate_caller_fee_with_l1_cost(balance, tx, block, cfg, l1_data_fee).unwrap();
         assert_eq!(new_balance, balance);
+    }
+
+    #[test]
+    fn validate_and_deduct_token_fee_rejects_unregistered_token_in_simulation() {
+        let caller = address!("1000000000000000000000000000000000000001");
+        let mut db = CacheDB::new(EmptyDB::default());
+        db.insert_account_info(
+            caller,
+            AccountInfo {
+                balance: U256::from(1_000_000),
+                ..Default::default()
+            },
+        );
+        let mut evm = token_fee_simulation_evm(db, caller, 65535);
+
+        let err = MorphEvmHandler::default()
+            .validate_against_state_and_deduct_caller(&mut evm, &mut InitialAndFloorGas::default())
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            EVMError::Transaction(MorphInvalidTransaction::TokenNotRegistered(65535))
+        ));
+    }
+
+    #[test]
+    fn validate_and_deduct_token_fee_rejects_inactive_token_in_simulation() {
+        let caller = address!("1000000000000000000000000000000000000001");
+        let token = address!("2000000000000000000000000000000000000002");
+        let token_id = 42u16;
+
+        let mut db = CacheDB::new(EmptyDB::default());
+        db.insert_account_info(
+            caller,
+            AccountInfo {
+                balance: U256::from(1_000_000),
+                ..Default::default()
+            },
+        );
+        insert_test_fee_token(&mut db, token_id, token, false);
+        let mut evm = token_fee_simulation_evm(db, caller, token_id);
+
+        let err = MorphEvmHandler::default()
+            .validate_against_state_and_deduct_caller(&mut evm, &mut InitialAndFloorGas::default())
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            EVMError::Transaction(MorphInvalidTransaction::TokenNotActive(42))
+        ));
+    }
+
+    #[test]
+    fn validate_and_deduct_token_fee_rejects_invalid_config_in_simulation() {
+        let caller = address!("1000000000000000000000000000000000000001");
+        let token = address!("2000000000000000000000000000000000000002");
+        let token_id = 42u16;
+
+        for (case, price_ratio, scale) in [
+            ("zero price ratio", U256::ZERO, U256::from(1)),
+            ("zero scale", U256::from(1), U256::ZERO),
+        ] {
+            let mut db = CacheDB::new(EmptyDB::default());
+            db.insert_account_info(
+                caller,
+                AccountInfo {
+                    balance: U256::from(1_000_000),
+                    ..Default::default()
+                },
+            );
+            insert_test_fee_token_config(&mut db, token_id, token, true, price_ratio, scale);
+            let mut evm = token_fee_simulation_evm(db, caller, token_id);
+
+            let err = MorphEvmHandler::default()
+                .validate_against_state_and_deduct_caller(
+                    &mut evm,
+                    &mut InitialAndFloorGas::default(),
+                )
+                .unwrap_err();
+
+            assert!(
+                matches!(
+                    err,
+                    EVMError::Transaction(MorphInvalidTransaction::InvalidTokenConfig(42))
+                ),
+                "{case} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn token_fee_simulation_does_not_load_caller_token_balance() {
+        let caller = address!("1000000000000000000000000000000000000001");
+        let token = address!("2000000000000000000000000000000000000002");
+        let token_id = 42u16;
+        let token_accessed = Arc::new(AtomicBool::new(false));
+        let mut inner = CacheDB::new(EmptyDB::default());
+        inner.insert_account_info(
+            caller,
+            AccountInfo {
+                balance: U256::from(1_000_000),
+                ..Default::default()
+            },
+        );
+        insert_test_fee_token(&mut inner, token_id, token, true);
+
+        let db = TokenAccessTrackingDb {
+            inner,
+            token,
+            token_accessed: Arc::clone(&token_accessed),
+        };
+        let mut evm = token_fee_simulation_evm(db, caller, token_id);
+
+        MorphEvmHandler::default()
+            .validate_against_state_and_deduct_caller(&mut evm, &mut InitialAndFloorGas::default())
+            .unwrap();
+
+        assert!(
+            !token_accessed.load(Ordering::Relaxed),
+            "simulation must not query the fee-token contract or its balance storage"
+        );
     }
 }

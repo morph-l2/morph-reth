@@ -26,7 +26,9 @@ pub(crate) struct WriteGenesisArgs {
     /// Max transactions per block. 0 = use 10,000,000 (effectively unlimited).
     #[arg(long, default_value = "10000")]
     pub max_tx_per_block: u64,
-    /// Compatibility payload-size field written to the Morph genesis config.
+    /// Consensus payload-size limit written to the Morph genesis config.
+    ///
+    /// morph-reth enforces this value on both block building and import.
     #[arg(long, default_value_t = MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK)]
     pub max_tx_payload_bytes: u64,
     /// Pre-deploy BenchToken bytecode (hex). If set, deploys at BENCH_TOKEN_ADDR.

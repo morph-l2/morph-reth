@@ -18,6 +18,7 @@ morph-evm.workspace = true
 morph-payload-builder.workspace = true
 morph-payload-types.workspace = true
 morph-primitives = { workspace = true, features = ["reth-codec"] }
+morph-proofs.workspace = true
 morph-reference-index.workspace = true
 morph-rpc.workspace = true
 morph-txpool.workspace = true
@@ -40,12 +41,12 @@ reth-payload-primitives.workspace = true
 reth-primitives-traits.workspace = true
 reth-prune-types.workspace = true
 reth-provider.workspace = true
+reth-storage-overlay.workspace = true
 reth-rpc-builder.workspace = true
 reth-rpc-eth-api.workspace = true
 reth-transaction-pool.workspace = true
 reth-tracing.workspace = true
 reth-trie.workspace = true
-reth-trie-db.workspace = true
 
 # Alloy
 alloy-consensus.workspace = true
@@ -71,6 +72,8 @@ serde_json.workspace = true
 
 # Optional: E2E testing framework
 reth-e2e-test-utils = { workspace = true, optional = true }
+reth-rpc-server-types = { workspace = true, optional = true }
+reth-tasks = { workspace = true, optional = true }
 alloy-rlp = { workspace = true, optional = true }
 alloy-signer = { workspace = true, optional = true }
 alloy-signer-local = { workspace = true, optional = true }
@@ -85,17 +88,24 @@ reth-db = { workspace = true, features = ["test-utils"] }
 reth-e2e-test-utils.workspace = true
 reth-node-core.workspace = true
 reth-payload-primitives.workspace = true
-reth-tasks.workspace = true
 reth-tracing.workspace = true
+reth-transaction-pool.workspace = true
+reth-trie.workspace = true
 alloy-consensus.workspace = true
+alloy-eips.workspace = true
 alloy-primitives.workspace = true
+alloy-signer.workspace = true
+alloy-signer-local.workspace = true
+alloy-rpc-types-debug.workspace = true
 alloy-rpc-types-engine.workspace = true
 alloy-rpc-types-eth.workspace = true
 jsonrpsee.workspace = true
 morph-chainspec.workspace = true
 morph-payload-types.workspace = true
 morph-primitives.workspace = true
+morph-proofs-exex.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 
 [[test]]
 name = "it"
@@ -106,6 +116,8 @@ required-features = ["test-utils"]
 default = []
 test-utils = [
     "dep:reth-e2e-test-utils",
+    "dep:reth-rpc-server-types",
+    "dep:reth-tasks",
     "dep:alloy-signer",
     "dep:alloy-rlp",
     "dep:alloy-signer-local",

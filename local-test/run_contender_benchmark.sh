@@ -231,7 +231,7 @@ for run in $(seq 1 "$RUNS"); do
         --http --http.addr 127.0.0.1 --http.port "$HTTP_PORT" --http.api web3,debug,eth,txpool,net \
         --authrpc.addr 127.0.0.1 --authrpc.port "$AUTHRPC_PORT" --authrpc.jwtsecret "$JWT_SECRET" \
         --port "$P2P_PORT" --disable-discovery --nat none \
-        --builder.deadline 12 --morph.benchmark-disable-tx-payload-limit \
+        --builder.deadline 12 --morph.builder-use-reth-deadline \
         --engine.persistence-threshold 2 --engine.memory-block-buffer-target 2 \
         --txpool.pending-max-count 30000000 --txpool.pending-max-size 8192 \
         --txpool.basefee-max-count 30000000 --txpool.basefee-max-size 8192 \

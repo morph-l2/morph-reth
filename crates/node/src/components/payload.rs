@@ -20,7 +20,7 @@ use reth_transaction_pool::blobstore::InMemoryBlobStore;
 pub struct MorphPayloadBuilderBuilder {
     /// Configuration for the payload builder.
     config: MorphBuilderConfig,
-    /// Whether reth's outer payload deadline also controls Morph's per-transaction breaker.
+    /// Whether reth's `--builder.deadline` also bounds Morph's per-transaction breaker.
     use_reth_deadline: bool,
 }
 
@@ -60,6 +60,22 @@ fn apply_payload_builder_config(
     config
 }
 
+fn apply_chain_payload_limit(
+    mut config: MorphBuilderConfig,
+    chain_max_tx_payload_bytes: u64,
+) -> eyre::Result<MorphBuilderConfig> {
+    let max_da_block_size = config
+        .max_da_block_size
+        .unwrap_or(chain_max_tx_payload_bytes);
+    eyre::ensure!(
+        max_da_block_size <= chain_max_tx_payload_bytes,
+        "--morph.max-tx-payload-bytes ({max_da_block_size}) exceeds the chain consensus limit \
+         ({chain_max_tx_payload_bytes})"
+    );
+    config = config.with_max_da_block_size(max_da_block_size);
+    Ok(config)
+}
+
 impl<Node>
     PayloadBuilderBuilder<
         Node,
@@ -80,10 +96,15 @@ where
         pool: morph_txpool::MorphTransactionPool<Node::Provider, InMemoryBlobStore>,
         evm_config: MorphEvmConfig,
     ) -> eyre::Result<Self::PayloadBuilder> {
+        let chain_max_tx_payload_bytes = ctx.chain_spec().max_tx_payload_bytes_per_block();
+        let config = apply_chain_payload_limit(self.config, chain_max_tx_payload_bytes)?;
+        let max_da_block_size = config
+            .max_da_block_size
+            .expect("chain payload limit is always applied");
+
         let reth_config = ctx.payload_builder_config();
         let desired_gas_limit = reth_config.gas_limit();
-        let config =
-            apply_payload_builder_config(self.config, &reth_config, self.use_reth_deadline);
+        let config = apply_payload_builder_config(config, &reth_config, self.use_reth_deadline);
         let transaction_breaker_deadline = config.time_limit;
 
         let builder =
@@ -93,6 +114,8 @@ where
             target: "morph::node",
             ?desired_gas_limit,
             ?transaction_breaker_deadline,
+            max_da_block_size,
+            chain_max_tx_payload_bytes,
             "Payload builder initialized"
         );
 
@@ -128,5 +151,34 @@ mod tests {
         let config =
             apply_payload_builder_config(MorphBuilderConfig::default(), &reth_config, false);
         assert_eq!(config.time_limit, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn chain_limit_is_the_default_builder_limit() {
+        let config = apply_chain_payload_limit(MorphBuilderConfig::default(), 1024).unwrap();
+        assert_eq!(config.max_da_block_size, Some(1024));
+    }
+
+    #[test]
+    fn builder_limit_can_be_lower_than_chain_limit() {
+        let config = apply_chain_payload_limit(
+            MorphBuilderConfig::default().with_max_da_block_size(512),
+            1024,
+        )
+        .unwrap();
+        assert_eq!(config.max_da_block_size, Some(512));
+    }
+
+    #[test]
+    fn builder_limit_cannot_exceed_chain_limit() {
+        let err = apply_chain_payload_limit(
+            MorphBuilderConfig::default().with_max_da_block_size(1025),
+            1024,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("exceeds the chain consensus limit")
+        );
     }
 }

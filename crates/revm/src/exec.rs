@@ -49,10 +49,17 @@ where
         &mut self,
     ) -> Result<ExecResultAndState<Self::ExecutionResult, Self::State>, Self::Error> {
         let mut h = MorphEvmHandler::new();
-        h.run(self).map(|result| {
-            let state = self.finalize();
-            ExecResultAndState::new(result, state)
-        })
+        h.run(self)
+            // An execution error can leave loaded accounts and warm-state data in
+            // the journal. Clear it before this EVM is reused, matching revm's
+            // mainnet replay implementation.
+            .inspect_err(|_| {
+                let _ = self.finalize();
+            })
+            .map(|result| {
+                let state = self.finalize();
+                ExecResultAndState::new(result, state)
+            })
     }
 }
 
@@ -124,5 +131,63 @@ where
         self.inner.ctx.set_tx(tx.into());
         let mut h = MorphEvmHandler::new();
         h.inspect_run_system_call(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::TxKind;
+    use morph_chainspec::MorphHardfork;
+    use revm::{
+        context::{BlockEnv, TxEnv},
+        context_interface::result::InvalidTransaction,
+        database::{CacheDB, EmptyDB},
+        handler::EvmTr,
+        inspector::NoOpInspector,
+    };
+
+    #[test]
+    fn replay_clears_journal_after_execution_error() {
+        let caller = Address::repeat_byte(0x11);
+        let mut evm = MorphEvm::new(
+            MorphContext::new(CacheDB::new(EmptyDB::default()), MorphHardfork::default()),
+            NoOpInspector,
+        );
+        evm.block = MorphBlockEnv {
+            inner: BlockEnv {
+                gas_limit: 30_000_000,
+                ..Default::default()
+            },
+        };
+        evm.tx = MorphTxEnv {
+            inner: TxEnv {
+                caller,
+                gas_limit: 21_000,
+                gas_price: 1,
+                kind: TxKind::Call(Address::ZERO),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let result = evm.replay();
+
+        assert!(matches!(
+            result,
+            Err(EVMError::Transaction(
+                MorphInvalidTransaction::EthInvalidTransaction(
+                    InvalidTransaction::LackOfFundForMaxFee { .. }
+                )
+            ))
+        ));
+        assert!(
+            evm.ctx_ref().journal().state.is_empty(),
+            "failed replay must not leak loaded account state"
+        );
+        assert!(
+            evm.ctx_ref().journal().journal.is_empty(),
+            "failed replay must not leak journal entries"
+        );
     }
 }

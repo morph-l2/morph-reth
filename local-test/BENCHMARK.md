@@ -61,8 +61,7 @@ Common overrides:
 | `OPENLOOP_DURATION_SECS` | `120` | Active submission duration |
 | `OPENLOOP_DRAIN_SECS` | `600` | Maximum time to import all accepted transactions after submission ends |
 | `RECEIVER_MODE` | `unique` | `unique` grows state per transaction; `legacy-small-set` reproduces the archived runner's batch-local repeated recipients |
-| `BENCHMARK_DISABLE_TX_PAYLOAD_LIMIT` | `1` | Disable both builder and import-side DA payload bounds; benchmark only |
-| `BENCHMARK_GENESIS_MAX_TX_PAYLOAD_BYTES` | `1073741824` | Compatibility value recorded in generated genesis; not enforced when the bypass is enabled |
+| `BENCHMARK_GENESIS_MAX_TX_PAYLOAD_BYTES` | `1073741824` | Consensus payload limit written to the generated genesis; morph-reth enforces it on both block building and import. Set `737280` for the production 720 KiB envelope |
 | `BENCHMARK_BUILDER_DEADLINE_SECS` | `12` | Fixed payload-building deadline for very large synthetic blocks |
 | `BENCHMARK_TXPOOL_MAX_COUNT` | `30000000` | Per-subpool count ceiling for high-rate open-loop runs |
 | `P2P_PORT` | `30313` | Isolated P2P listener port for the benchmark node |
@@ -85,10 +84,13 @@ state-growth workload.
 
 Fixed-size modes require 100% inclusion. Requests that do not fit under the configured gas limit or
 builder deadline fail the run instead of reporting the smaller assembled block as though it
-represented the requested block size. The default runner explicitly disables the DA-derived payload
-limit on both block building and import, so its 50k/100k results measure the execution path rather
-than production-valid block capacity. Set `BENCHMARK_DISABLE_TX_PAYLOAD_LIMIT=0` to test the normal
-720 KiB behavior.
+represented the requested block size. The payload limit is not bypassed in the node: morph-reth reads
+`config.morph.maxTxPayloadBytesPerBlock` from the benchmark genesis for both block building and
+import, and the runner writes a 1 GiB value there by default, so its 50k/100k results measure the
+execution path rather than production-valid block capacity. Set
+`BENCHMARK_GENESIS_MAX_TX_PAYLOAD_BYTES=737280` to test the normal 720 KiB behavior. The runner also
+passes `--morph.builder-use-reth-deadline` so the Morph builder honours `--builder.deadline` instead
+of its 1 s production budget when assembling very large synthetic blocks.
 
 The benchmark uses the sequential V1 Morph Engine methods because each run only extends the current
 head. The V2 methods add explicit-parent/reorg behavior, which this workload does not exercise.
@@ -100,7 +102,7 @@ their latest block number, state root, receipts root, and deterministic funded-s
 
 - This is a synthetic execution-engine ceiling test, not a production TPS forecast. It disables
   discovery and transaction backup and raises the block gas, RPC, and txpool limits far above normal
-  deployment values. By default it also disables the 720 KiB builder and import payload checks;
+  deployment values. By default it also raises the genesis payload limit far above 720 KiB;
   blocks produced in this mode can exceed the Morph DA envelope and are not production-valid. It
   does not include consensus networking, proving, or L1 data costs.
 - The supported runner is reth-only. The archived April 2026 reth/geth report was produced by an

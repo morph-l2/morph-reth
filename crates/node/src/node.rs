@@ -80,15 +80,14 @@ impl MorphNode {
     where
         N: FullNodeTypes<Types = Self>,
     {
-        Self::components_with_consensus(
-            MorphPayloadBuilderBuilder::new(payload_builder_config),
-            MorphConsensusBuilder::default(),
-        )
+        Self::components_with_payload_builder(MorphPayloadBuilderBuilder::new(
+            payload_builder_config,
+        ))
     }
 
-    fn components_with_consensus<N>(
+    /// Returns a [`ComponentsBuilder`] for a Morph node using a pre-configured payload builder.
+    pub fn components_with_payload_builder<N>(
         payload_builder: MorphPayloadBuilderBuilder,
-        consensus_builder: MorphConsensusBuilder,
     ) -> ComponentsBuilder<
         N,
         MorphPoolBuilder,
@@ -106,7 +105,7 @@ impl MorphNode {
             .executor(MorphExecutorBuilder::default())
             .payload(BasicPayloadServiceBuilder::new(payload_builder))
             .network(EthereumNetworkBuilder::default())
-            .consensus(consensus_builder)
+            .consensus(MorphConsensusBuilder::default())
     }
 }
 
@@ -136,17 +135,15 @@ where
     type AddOns = MorphAddOns<NodeAdapter<N>>;
 
     fn components_builder(&self) -> Self::ComponentsBuilder {
-        if self.args.benchmark_disable_tx_payload_limit {
-            Self::components_with_consensus(
-                MorphPayloadBuilderBuilder::new(MorphBuilderConfig::default()).with_reth_deadline(),
-                MorphConsensusBuilder::default().without_tx_payload_size_limit(),
-            )
-        } else {
-            Self::components(
-                MorphBuilderConfig::default()
-                    .with_max_da_block_size(self.args.max_tx_payload_bytes),
-            )
+        let mut config = MorphBuilderConfig::default();
+        if let Some(max_tx_payload_bytes) = self.args.max_tx_payload_bytes {
+            config = config.with_max_da_block_size(max_tx_payload_bytes);
         }
+        let mut payload_builder = MorphPayloadBuilderBuilder::new(config);
+        if self.args.builder_use_reth_deadline {
+            payload_builder = payload_builder.with_reth_deadline();
+        }
+        Self::components_with_payload_builder(payload_builder)
     }
 
     fn add_ons(&self) -> Self::AddOns {
@@ -235,6 +232,8 @@ impl PayloadAttributesBuilder<MorphPayloadAttributes, MorphHeader>
             },
             // No L1 transactions in local mining mode
             transactions: None,
+            // Local mining exists to produce blocks from the pool.
+            no_tx_pool: false,
             gas_limit: None,
             base_fee_per_gas: None,
         }

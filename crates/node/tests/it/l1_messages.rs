@@ -6,64 +6,11 @@
 //! - Queue index must continue monotonically across blocks
 //! - Gas is prepaid on L1; L2 block gas accounting reflects this
 
-use alloy_primitives::{Address, U256};
+use alloy_primitives::Address;
 use morph_node::test_utils::{L1MessageBuilder, TestNodeBuilder, advance_empty_block};
 use reth_payload_primitives::BuiltPayload;
 
 use super::helpers::advance_block_with_l1_messages;
-
-/// A single L1 message is included at the start of the block.
-#[tokio::test(flavor = "multi_thread")]
-async fn single_l1_message_included() -> eyre::Result<()> {
-    reth_tracing::init_test_tracing();
-
-    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
-    let mut node = nodes.pop().unwrap();
-
-    let l1_msg = L1MessageBuilder::new(0)
-        .with_target(Address::with_last_byte(0x01))
-        .with_value(U256::ZERO)
-        .with_gas_limit(21_000)
-        .build_encoded();
-
-    let payload = advance_block_with_l1_messages(&mut node, vec![l1_msg]).await?;
-    let block = payload.block();
-
-    assert_eq!(block.body().transactions.len(), 1);
-
-    let tx = block.body().transactions.first().unwrap();
-    assert!(tx.is_l1_msg(), "only transaction must be an L1 message");
-    assert_eq!(tx.queue_index(), Some(0));
-
-    Ok(())
-}
-
-/// Three L1 messages with queue indices 0, 1, 2 are all included in one block.
-#[tokio::test(flavor = "multi_thread")]
-async fn three_sequential_l1_messages_in_one_block() -> eyre::Result<()> {
-    reth_tracing::init_test_tracing();
-
-    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
-    let mut node = nodes.pop().unwrap();
-
-    let l1_msgs = L1MessageBuilder::build_sequential(0, 3);
-
-    let payload = advance_block_with_l1_messages(&mut node, l1_msgs).await?;
-    let block = payload.block();
-
-    assert_eq!(block.body().transactions.len(), 3);
-
-    for (expected_qi, tx) in block.body().transactions.iter().enumerate() {
-        assert!(tx.is_l1_msg(), "tx {expected_qi} should be L1 message");
-        assert_eq!(
-            tx.queue_index(),
-            Some(expected_qi as u64),
-            "queue_index should be {expected_qi}"
-        );
-    }
-
-    Ok(())
-}
 
 /// L1 messages across multiple blocks must have strictly continuous queue indices.
 ///

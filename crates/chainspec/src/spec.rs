@@ -301,6 +301,11 @@ impl MorphChainSpec {
     pub fn fee_vault_address(&self) -> Option<Address> {
         self.info.morph_chain_info.fee_vault_address
     }
+
+    /// Returns the maximum accepted L2 transaction payload bytes per block.
+    pub const fn max_tx_payload_bytes_per_block(&self) -> u64 {
+        self.info.morph_chain_info.max_tx_payload_bytes_per_block()
+    }
 }
 
 impl From<ChainSpec> for MorphChainSpec {
@@ -710,6 +715,7 @@ mod tests {
             chainspec.fee_vault_address(),
             Some(address!("530000000000000000000000000000000000000a"))
         );
+        assert_eq!(chainspec.max_tx_payload_bytes_per_block(), 122_880);
     }
 
     #[test]
@@ -720,6 +726,10 @@ mod tests {
         let config = chainspec.chain_config();
         // Test genesis includes morph config with fee vault address
         assert!(config.is_fee_vault_enabled());
+        assert_eq!(
+            config.max_tx_payload_bytes_per_block(),
+            crate::MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK
+        );
     }
 
     #[test]
@@ -852,5 +862,6 @@ mod tests {
             config.fee_vault_address,
             Some(address!("530000000000000000000000000000000000000a"))
         );
+        assert_eq!(config.max_tx_payload_bytes_per_block(), 122_880);
     }
 }

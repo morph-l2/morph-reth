@@ -30,7 +30,10 @@ OPENLOOP_TARGET_TPS=${OPENLOOP_TARGET_TPS:-200000}
 OPENLOOP_DURATION_SECS=${OPENLOOP_DURATION_SECS:-120}
 OPENLOOP_DRAIN_SECS=${OPENLOOP_DRAIN_SECS:-600}
 RECEIVER_MODE=${RECEIVER_MODE:-unique}
-BENCHMARK_DISABLE_TX_PAYLOAD_LIMIT=${BENCHMARK_DISABLE_TX_PAYLOAD_LIMIT:-1}
+# Consensus payload limit written into the generated genesis. morph-reth reads
+# `config.morph.maxTxPayloadBytesPerBlock` for both block building and import,
+# so this single value is the enforced limit; set it to 737280 to benchmark the
+# production 720 KiB envelope.
 BENCHMARK_GENESIS_MAX_TX_PAYLOAD_BYTES=${BENCHMARK_GENESIS_MAX_TX_PAYLOAD_BYTES:-1073741824}
 BENCHMARK_BUILDER_DEADLINE_SECS=${BENCHMARK_BUILDER_DEADLINE_SECS:-12}
 BENCHMARK_TXPOOL_MAX_COUNT=${BENCHMARK_TXPOOL_MAX_COUNT:-30000000}
@@ -94,14 +97,6 @@ prepare() {
     require_command jq
     require_command openssl
 
-    case "$BENCHMARK_DISABLE_TX_PAYLOAD_LIMIT" in
-        0|1) ;;
-        *)
-            echo "BENCHMARK_DISABLE_TX_PAYLOAD_LIMIT must be 0 or 1" >&2
-            exit 1
-            ;;
-    esac
-
     case "$RECEIVER_MODE" in
         unique|legacy-small-set) ;;
         *)
@@ -138,13 +133,6 @@ prepare() {
         --bench-token-code "$token_code" \
         --bench-swap-code "$swap_code"
 
-    local payload_limit_disabled=false
-    local enforced_max_tx_payload_bytes=737280
-    if [[ "$BENCHMARK_DISABLE_TX_PAYLOAD_LIMIT" == "1" ]]; then
-        payload_limit_disabled=true
-        enforced_max_tx_payload_bytes=null
-    fi
-
     jq -n \
         --arg created_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         --arg git_commit "$(git rev-parse HEAD)" \
@@ -164,14 +152,12 @@ prepare() {
         --argjson openloop_target_tps "$OPENLOOP_TARGET_TPS" \
         --argjson openloop_duration_secs "$OPENLOOP_DURATION_SECS" \
         --argjson openloop_drain_secs "$OPENLOOP_DRAIN_SECS" \
-        --argjson payload_limit_disabled "$payload_limit_disabled" \
-        --argjson enforced_max_tx_payload_bytes "$enforced_max_tx_payload_bytes" \
-        --argjson genesis_max_tx_payload_bytes "$(jq -er '.config.morph.maxTxPayloadBytesPerBlock' "$GENESIS")" \
+        --argjson max_tx_payload_bytes "$(jq -er '.config.morph.maxTxPayloadBytesPerBlock' "$GENESIS")" \
         --argjson builder_deadline_secs "$BENCHMARK_BUILDER_DEADLINE_SECS" \
         --argjson txpool_max_count "$BENCHMARK_TXPOOL_MAX_COUNT" \
         --arg node_log_level "info" \
         --arg uname "$(uname -a)" \
-        '{created_at:$created_at,git_commit:$git_commit,dirty_files:($git_dirty|tonumber),profile:$profile,reth_version:$reth_version,uname:$uname,modes:$modes,workloads:$workloads,receiver_mode:$receiver_mode,senders:$senders,runs:$runs,consensus:{tx_payload_limit_disabled:$payload_limit_disabled,enforced_max_tx_payload_bytes:$enforced_max_tx_payload_bytes,genesis_compatibility_max_tx_payload_bytes:$genesis_max_tx_payload_bytes},node:{builder_deadline_secs:$builder_deadline_secs,txpool_max_count:$txpool_max_count,log_level:$node_log_level},exec:{block_sizes:$exec_block_sizes,blocks:$exec_blocks},sustained:{txs_per_block:$sustained_txs_per_block,blocks:$sustained_blocks,warmup_blocks:$sustained_warmup_blocks},openloop:{target_tps:$openloop_target_tps,duration_secs:$openloop_duration_secs,drain_secs:$openloop_drain_secs}}' \
+        '{created_at:$created_at,git_commit:$git_commit,dirty_files:($git_dirty|tonumber),profile:$profile,reth_version:$reth_version,uname:$uname,modes:$modes,workloads:$workloads,receiver_mode:$receiver_mode,senders:$senders,runs:$runs,consensus:{max_tx_payload_bytes:$max_tx_payload_bytes},node:{builder_deadline_secs:$builder_deadline_secs,txpool_max_count:$txpool_max_count,log_level:$node_log_level},exec:{block_sizes:$exec_block_sizes,blocks:$exec_blocks},sustained:{txs_per_block:$sustained_txs_per_block,blocks:$sustained_blocks,warmup_blocks:$sustained_warmup_blocks},openloop:{target_tps:$openloop_target_tps,duration_secs:$openloop_duration_secs,drain_secs:$openloop_drain_secs}}' \
         > "$RESULTS_DIR/metadata.json"
 }
 
@@ -197,10 +183,6 @@ wait_for_rpc() {
 
 start_reth() {
     local run_name=$1
-    local benchmark_payload_arg=
-    if [[ "$BENCHMARK_DISABLE_TX_PAYLOAD_LIMIT" == "1" ]]; then
-        benchmark_payload_arg=--morph.benchmark-disable-tx-payload-limit
-    fi
     cleanup_node
     rm -rf -- "$DATA_DIR"
     mkdir -p "$DATA_DIR" "$RESULTS_DIR/logs"
@@ -212,8 +194,7 @@ start_reth() {
         --http --http.addr 127.0.0.1 --http.port "$HTTP_PORT" --http.api "web3,debug,eth,txpool,net" \
         --authrpc.addr 127.0.0.1 --authrpc.port "$AUTHRPC_PORT" --authrpc.jwtsecret "$JWT_SECRET" \
         --port "$P2P_PORT" --disable-discovery --nat none \
-        --builder.deadline "$BENCHMARK_BUILDER_DEADLINE_SECS" \
-        ${benchmark_payload_arg:+"$benchmark_payload_arg"} \
+        --builder.deadline "$BENCHMARK_BUILDER_DEADLINE_SECS" --morph.builder-use-reth-deadline \
         --engine.persistence-threshold 2 --engine.memory-block-buffer-target 2 \
         --txpool.pending-max-count "$BENCHMARK_TXPOOL_MAX_COUNT" --txpool.pending-max-size 8192 \
         --txpool.basefee-max-count "$BENCHMARK_TXPOOL_MAX_COUNT" --txpool.basefee-max-size 8192 \
