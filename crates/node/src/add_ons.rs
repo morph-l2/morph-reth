@@ -12,7 +12,7 @@ use morph_proofs::{MdbxProofsStorage, MorphProofsStorage};
 use morph_reference_index::{ReferenceIndexConfig, ReferenceIndexRuntime};
 use morph_rpc::{
     ExecutionWitnessApiExt, ExecutionWitnessApiOverrideServer, MorphEthApiBuilder,
-    ProofStatusApiExt, ProofStatusApiOverrideServer,
+    MorphEthConfigHandler, ProofStatusApiExt, ProofStatusApiOverrideServer,
     eth::proofs::{EthProofApiExt, EthProofApiOverrideServer},
     morph::{MorphRpc, MorphRpcHandler, MorphRpcServer},
 };
@@ -193,8 +193,10 @@ where
         );
 
         // Upstream EIP-7910 `eth_config` (no Morph extension; morphnode no longer reads it).
-        let eth_config_handler =
-            EthConfigHandler::new(ctx.node.provider().clone(), ctx.node.evm_config().clone());
+        let eth_config_handler = MorphEthConfigHandler::new(EthConfigHandler::new(
+            ctx.node.provider().clone(),
+            ctx.node.evm_config().clone(),
+        ));
 
         let morph_rpc_ctx = MorphRpc::new(reference_index_handle, provider.clone());
         let reference_rpc_handler = MorphRpcHandler::new(morph_rpc_ctx);
