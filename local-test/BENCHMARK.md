@@ -65,6 +65,8 @@ Common overrides:
 | `BENCHMARK_BUILDER_DEADLINE_SECS` | `12` | Fixed payload-building deadline for very large synthetic blocks |
 | `BENCHMARK_TXPOOL_MAX_COUNT` | `30000000` | Per-subpool count ceiling for high-rate open-loop runs |
 | `P2P_PORT` | `30313` | Isolated P2P listener port for the benchmark node |
+| `RETH_EXTRA_ARGS` | empty | Extra flags appended verbatim to the `morph-reth node` command line, e.g. `--engine.txpool-prewarming` for A/B runs; recorded in `metadata.json` under `node.extra_args` |
+| `NODE_LOG_FILTER` | `info` | Node stdout tracing filter, e.g. `info,engine::tree::txpool_prewarm=debug` |
 
 ## Interpreting results
 

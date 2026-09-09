@@ -39,6 +39,11 @@ BENCHMARK_BUILDER_DEADLINE_SECS=${BENCHMARK_BUILDER_DEADLINE_SECS:-12}
 BENCHMARK_TXPOOL_MAX_COUNT=${BENCHMARK_TXPOOL_MAX_COUNT:-30000000}
 START_TIMEOUT_SECS=${START_TIMEOUT_SECS:-30}
 BUILD=${BUILD:-1}
+# Extra flags appended verbatim (space separated) to the morph-reth node command
+# line, e.g. RETH_EXTRA_ARGS="--engine.txpool-prewarming" for A/B comparisons.
+RETH_EXTRA_ARGS=${RETH_EXTRA_ARGS:-}
+# tracing filter for node stdout, e.g. "info,engine::tree::txpool_prewarm=debug".
+NODE_LOG_FILTER=${NODE_LOG_FILTER:-info}
 
 NODE_PID=""
 NODE_LOG=""
@@ -155,9 +160,10 @@ prepare() {
         --argjson max_tx_payload_bytes "$(jq -er '.config.morph.maxTxPayloadBytesPerBlock' "$GENESIS")" \
         --argjson builder_deadline_secs "$BENCHMARK_BUILDER_DEADLINE_SECS" \
         --argjson txpool_max_count "$BENCHMARK_TXPOOL_MAX_COUNT" \
-        --arg node_log_level "info" \
+        --arg node_log_level "$NODE_LOG_FILTER" \
+        --arg node_extra_args "$RETH_EXTRA_ARGS" \
         --arg uname "$(uname -a)" \
-        '{created_at:$created_at,git_commit:$git_commit,dirty_files:($git_dirty|tonumber),profile:$profile,reth_version:$reth_version,uname:$uname,modes:$modes,workloads:$workloads,receiver_mode:$receiver_mode,senders:$senders,runs:$runs,consensus:{max_tx_payload_bytes:$max_tx_payload_bytes},node:{builder_deadline_secs:$builder_deadline_secs,txpool_max_count:$txpool_max_count,log_level:$node_log_level},exec:{block_sizes:$exec_block_sizes,blocks:$exec_blocks},sustained:{txs_per_block:$sustained_txs_per_block,blocks:$sustained_blocks,warmup_blocks:$sustained_warmup_blocks},openloop:{target_tps:$openloop_target_tps,duration_secs:$openloop_duration_secs,drain_secs:$openloop_drain_secs}}' \
+        '{created_at:$created_at,git_commit:$git_commit,dirty_files:($git_dirty|tonumber),profile:$profile,reth_version:$reth_version,uname:$uname,modes:$modes,workloads:$workloads,receiver_mode:$receiver_mode,senders:$senders,runs:$runs,consensus:{max_tx_payload_bytes:$max_tx_payload_bytes},node:{builder_deadline_secs:$builder_deadline_secs,txpool_max_count:$txpool_max_count,log_level:$node_log_level,extra_args:$node_extra_args},exec:{block_sizes:$exec_block_sizes,blocks:$exec_blocks},sustained:{txs_per_block:$sustained_txs_per_block,blocks:$sustained_blocks,warmup_blocks:$sustained_warmup_blocks},openloop:{target_tps:$openloop_target_tps,duration_secs:$openloop_duration_secs,drain_secs:$openloop_drain_secs}}' \
         > "$RESULTS_DIR/metadata.json"
 }
 
@@ -187,9 +193,11 @@ start_reth() {
     rm -rf -- "$DATA_DIR"
     mkdir -p "$DATA_DIR" "$RESULTS_DIR/logs"
     NODE_LOG="$RESULTS_DIR/logs/${run_name}-node.log"
+    local -a RETH_EXTRA_ARGS_ARR=()
+    if [[ -n "$RETH_EXTRA_ARGS" ]]; then read -r -a RETH_EXTRA_ARGS_ARR <<< "$RETH_EXTRA_ARGS"; fi
     "$RETH_BIN" node \
         --chain "$GENESIS" --datadir "$DATA_DIR" \
-        --color never --log.stdout.format log-fmt --log.stdout.filter info \
+        --color never --log.stdout.format log-fmt --log.stdout.filter "$NODE_LOG_FILTER" \
         --log.file.max-files 0 \
         --http --http.addr 127.0.0.1 --http.port "$HTTP_PORT" --http.api "web3,debug,eth,txpool,net" \
         --authrpc.addr 127.0.0.1 --authrpc.port "$AUTHRPC_PORT" --authrpc.jwtsecret "$JWT_SECRET" \
@@ -202,6 +210,7 @@ start_reth() {
         --txpool.max-account-slots 1000000 --txpool.additional-validation-tasks 12 \
         --txpool.max-batch-size 128 --txpool.disable-transactions-backup \
         --rpc.max-request-size 1024 --rpc.max-response-size 1024 --rpc.max-connections 1000 \
+        ${RETH_EXTRA_ARGS_ARR[@]+"${RETH_EXTRA_ARGS_ARR[@]}"} \
         >"$NODE_LOG" 2>&1 &
     NODE_PID=$!
     wait_for_rpc
