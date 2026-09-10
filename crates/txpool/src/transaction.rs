@@ -1,7 +1,8 @@
 //! Pool transaction type for Morph L2.
 
 use alloy_consensus::{
-    BlobTransactionValidationError, Typed2718, transaction::Recovered, transaction::TxHashRef,
+    BlobTransactionValidationError, Transaction as _, Typed2718, transaction::Recovered,
+    transaction::TxHashRef,
 };
 use alloy_eips::{
     eip2930::AccessList, eip7594::BlobTransactionSidecarVariant, eip7702::SignedAuthorization,
@@ -25,6 +26,13 @@ pub struct MorphPooledTransaction {
     #[deref]
     inner: EthPooledTransaction<MorphTxEnvelope>,
 
+    /// Maximum amount of **ETH** this transaction can debit from the sender.
+    ///
+    /// Equal to `inner.cost` for every transaction that pays gas in ETH. For a MorphTx
+    /// (`0x7F`) with `fee_token_id > 0` the gas fee is settled in an ERC20 token, so the
+    /// only ETH the sender must hold is `value`. See [`PoolTransaction::cost`].
+    cost: U256,
+
     /// Cached EIP-2718 encoded bytes of the transaction, lazily computed.
     encoded_2718: OnceLock<Bytes>,
 }
@@ -32,8 +40,21 @@ pub struct MorphPooledTransaction {
 impl MorphPooledTransaction {
     /// Create a new instance of [`MorphPooledTransaction`].
     pub fn new(transaction: Recovered<MorphTxEnvelope>, encoded_length: usize) -> Self {
+        let uses_token_fee = transaction.fee_token_id().is_some_and(|id| id > 0);
+        let inner = EthPooledTransaction::new(transaction, encoded_length);
+        // Gas is paid in an ERC20 token, so the ETH-denominated cost is `value` alone.
+        // Mirrors go-ethereum's `executableTxFilter`, which sets `txCost = nil` for
+        // `IsMorphTxWithAltFee()` and only requires `costLimit >= value`
+        // (core/tx_pool.go:1657-1698).
+        let cost = if uses_token_fee {
+            inner.transaction().value()
+        } else {
+            inner.cost
+        };
+
         Self {
-            inner: EthPooledTransaction::new(transaction, encoded_length),
+            inner,
+            cost,
             encoded_2718: Default::default(),
         }
     }
@@ -94,8 +115,17 @@ impl PoolTransaction for MorphPooledTransaction {
         self.inner.transaction.signer_ref()
     }
 
+    /// Maximum amount of ETH this transaction can debit from the sender.
+    ///
+    /// The pool compares this against the sender's **ETH** balance to decide whether a
+    /// transaction is spendable (`ENOUGH_BALANCE` in `TxState`), which in turn decides
+    /// whether it lands in the pending or the queued sub-pool. Returning the inherited
+    /// `gas_limit * max_fee_per_gas + value` for a token-fee MorphTx would strand every
+    /// zero-ETH token payer in the queued sub-pool, where `best_transactions()` never
+    /// sees them — the exact user morph's ERC20 gas payment exists for. Token
+    /// affordability is validated separately by `MorphTransactionValidator`.
     fn cost(&self) -> &U256 {
-        &self.inner.cost
+        &self.cost
     }
 
     fn encoded_length(&self) -> usize {
@@ -384,5 +414,67 @@ mod tests {
         let tx = create_legacy_pooled_tx();
         // encoded_length is set during construction
         assert!(tx.encoded_length() > 0);
+    }
+
+    fn create_morph_pooled_tx_with(fee_token_id: u16, value: U256) -> MorphPooledTransaction {
+        use morph_primitives::TxMorph;
+        let tx = TxMorph {
+            chain_id: 1337,
+            nonce: 0,
+            gas_limit: 21000,
+            max_fee_per_gas: 2_000_000_000,
+            max_priority_fee_per_gas: 1_000_000_000,
+            to: TxKind::Call(Address::repeat_byte(0x02)),
+            value,
+            access_list: Default::default(),
+            version: 0,
+            fee_token_id,
+            fee_limit: U256::from(1000u64),
+            reference: None,
+            memo: None,
+            input: Bytes::new(),
+        };
+        let sig = Signature::test_signature();
+        let envelope = MorphTxEnvelope::Morph(Signed::new_unhashed(tx, sig));
+        let recovered = Recovered::new_unchecked(envelope, Address::repeat_byte(0xcc));
+        let len = recovered.encode_2718_len();
+        MorphPooledTransaction::new(recovered, len)
+    }
+
+    /// A MorphTx paying gas in an ERC20 token must report an ETH cost of `value` only.
+    ///
+    /// The pool compares `cost()` against the sender's ETH balance to set the
+    /// `ENOUGH_BALANCE` state bit, which decides pending vs. queued. Charging the
+    /// ETH gas budget here would strand every zero-ETH token payer in the queued
+    /// sub-pool, where the block builder never sees them.
+    #[test]
+    fn token_fee_morph_tx_cost_excludes_eth_gas_budget() {
+        let value = U256::from(7u64);
+        let tx = create_morph_pooled_tx_with(1, value);
+
+        assert_eq!(*tx.cost(), value);
+
+        // The inherited ETH gas budget would have been orders of magnitude larger.
+        let eth_gas_budget = U256::from(21_000u64) * U256::from(2_000_000_000u64);
+        assert!(*tx.cost() < eth_gas_budget);
+    }
+
+    /// `fee_token_id == 0` is the ETH-fee MorphTx path (reference/memo only), so it keeps
+    /// the inherited `gas_limit * max_fee_per_gas + value` cost.
+    #[test]
+    fn eth_fee_morph_tx_keeps_full_cost() {
+        let value = U256::from(7u64);
+        let tx = create_morph_pooled_tx_with(0, value);
+
+        let expected = U256::from(21_000u64) * U256::from(2_000_000_000u64) + value;
+        assert_eq!(*tx.cost(), expected);
+    }
+
+    /// Non-MorphTx transactions are untouched by the token-fee carve-out.
+    #[test]
+    fn legacy_tx_keeps_full_cost() {
+        let tx = create_legacy_pooled_tx();
+        let expected = U256::from(21_000u64) * U256::from(1_000_000_000u64) + U256::from(100u64);
+        assert_eq!(*tx.cost(), expected);
     }
 }
