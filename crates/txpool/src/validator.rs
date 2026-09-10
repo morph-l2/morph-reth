@@ -25,7 +25,8 @@ use reth_revm::database::StateProviderDatabase;
 use reth_storage_api::{BlockReaderIdExt, StateProviderFactory};
 use reth_transaction_pool::{
     EthPoolTransaction, EthTransactionValidator, PoolTransaction, TransactionOrigin,
-    TransactionValidationOutcome, TransactionValidator,
+    TransactionValidationOutcome, TransactionValidator, error::InvalidPoolTransactionError,
+    validate::ForkTracker,
 };
 use std::sync::{
     Arc,
@@ -341,9 +342,7 @@ where
             return TransactionValidationOutcome::Invalid(transaction, err);
         }
 
-        let outcome = self
-            .inner
-            .validate_one_with_state(origin, transaction, state);
+        let outcome = self.validate_inner_with_state(origin, transaction, state);
         if outcome.is_invalid() || outcome.is_error() {
             tracing::trace!(target: "morph::txpool", ?outcome, "tx pool validation failed");
             return outcome;
@@ -407,6 +406,57 @@ where
         }
 
         outcome
+    }
+
+    /// Runs the inner [`EthTransactionValidator`] pipeline with Morph's intrinsic-gas rule.
+    ///
+    /// This mirrors reth's own `validate_one_with_provider` — stateless checks, then fetch
+    /// (and cache) a state provider, then stateful checks — with one deliberate deviation:
+    /// a stateless rejection of [`InvalidPoolTransactionError::IntrinsicGasTooLow`] is
+    /// re-adjudicated against [`intrinsic_gas_is_sufficient`], which omits the EIP-7623
+    /// calldata floor.
+    ///
+    /// Morph disables EIP-7623 during execution (`CfgEnv::disable_eip7623`, set at every
+    /// construction site in `morph_evm::MorphEvmConfig`), matching morph-geth, whose
+    /// `IntrinsicGas` has no floor term at all (core/state_transition.go:152-200). The pool
+    /// still applied the floor because `MorphChainSpec` activates Prague at Viridian time so
+    /// EIP-7702 works, and reth's `ensure_intrinsic_gas` derives its `SpecId` from that same
+    /// flag. The result was that transactions carrying large calldata with a gas limit set
+    /// from the real execution cost were rejected as `intrinsic gas too low` even though
+    /// both clients execute them fine — a 4 KiB-calldata transaction needs 86_536 gas to
+    /// execute but 184_840 to clear the floor.
+    ///
+    /// Only the floor is dropped. `initial_total_gas` is recomputed with the same revm
+    /// helper and the same `SpecId` selection reth uses, so a genuinely underfunded
+    /// transaction is still rejected here, with the same error.
+    fn validate_inner_with_state(
+        &self,
+        origin: TransactionOrigin,
+        transaction: Tx,
+        state: &mut Option<Box<dyn reth_storage_api::AccountInfoReader + Send>>,
+    ) -> TransactionValidationOutcome<Tx> {
+        match self.inner.validate_stateless(origin, &transaction) {
+            Ok(()) => {}
+            Err(InvalidPoolTransactionError::IntrinsicGasTooLow)
+                if intrinsic_gas_is_sufficient(&transaction, self.inner.fork_tracker()) => {}
+            Err(err) => return TransactionValidationOutcome::Invalid(transaction, err),
+        }
+
+        if state.is_none() {
+            match self.client().latest() {
+                Ok(new_state) => {
+                    *state =
+                        Some(Box::new(new_state)
+                            as Box<dyn reth_storage_api::AccountInfoReader + Send>);
+                }
+                Err(err) => {
+                    return TransactionValidationOutcome::Error(*transaction.hash(), Box::new(err));
+                }
+            }
+        }
+
+        let state = state.as_ref().expect("provider is set");
+        self.inner.validate_stateful(origin, transaction, state)
     }
 
     /// Validates MorphTx (0x7F) ERC20 token balance and fee_limit.
@@ -527,6 +577,60 @@ fn is_l1_message(tx: &impl Typed2718) -> bool {
 /// Helper function to check if a transaction is a MorphTx (0x7F).
 fn is_morph_tx(tx: &impl Typed2718) -> bool {
     tx.ty() == morph_primitives::MORPH_TX_TYPE_ID
+}
+
+/// Returns `true` if `transaction`'s gas limit covers its intrinsic gas under Morph rules.
+///
+/// A copy of reth's `ensure_intrinsic_gas` with the EIP-7623 `floor_gas` comparison removed,
+/// because Morph disables EIP-7623 during execution. The `SpecId` selection is kept identical
+/// to reth's so `initial_total_gas` — the part Morph does enforce — cannot drift from the
+/// upstream computation.
+fn intrinsic_gas_is_sufficient<Tx: EthPoolTransaction>(
+    transaction: &Tx,
+    fork_tracker: &ForkTracker,
+) -> bool {
+    use reth_revm::revm::primitives::hardfork::SpecId;
+
+    let spec_id = if fork_tracker.is_amsterdam_activated() {
+        SpecId::AMSTERDAM
+    } else if fork_tracker.is_prague_activated() {
+        SpecId::PRAGUE
+    } else if fork_tracker.is_shanghai_activated() {
+        SpecId::SHANGHAI
+    } else {
+        SpecId::MERGE
+    };
+
+    // EIP-2780 replaces the flat intrinsic base cost with a decomposed one that depends on
+    // `tx.to` and `tx.value`. No Morph hardfork maps to AMSTERDAM today, so this is `None`
+    // in practice; deriving it anyway keeps the computation aligned with reth's.
+    let eip2780 = fork_tracker.is_amsterdam_activated().then(|| {
+        reth_revm::revm::context_interface::cfg::gas_params::Eip2780TxInfo {
+            value: transaction.value(),
+            is_self_transfer: transaction.kind().to() == Some(&transaction.sender()),
+        }
+    });
+
+    let gas = reth_revm::revm::interpreter::gas::calculate_initial_tx_gas(
+        spec_id,
+        transaction.input(),
+        transaction.is_create(),
+        transaction
+            .access_list()
+            .map(|l| l.len())
+            .unwrap_or_default() as u64,
+        transaction
+            .access_list()
+            .map(|l| l.iter().map(|i| i.storage_keys.len()).sum::<usize>())
+            .unwrap_or_default() as u64,
+        transaction
+            .authorization_list()
+            .map(|l| l.len())
+            .unwrap_or_default() as u64,
+        eip2780,
+    );
+
+    transaction.gas_limit() >= gas.initial_total_gas()
 }
 
 #[cfg(test)]
@@ -721,6 +825,90 @@ mod tests {
             TransactionValidationOutcome::Error(_, err) => {
                 panic!("Expected valid transaction, got error: {err:?}");
             }
+        }
+    }
+
+    /// Builds a validator whose fork tracker reports Prague (Morph's Viridian).
+    fn prague_validator(
+        signer: alloy_primitives::Address,
+    ) -> MorphTransactionValidator<
+        MockEthProvider<MorphPrimitives, MorphChainSpec>,
+        crate::MorphPooledTransaction,
+        MorphEvmConfig,
+    > {
+        let client = new_mock_provider();
+        client.add_account(signer, ExtendedAccount::new(0, U256::from(10u128.pow(18))));
+        let morph_evm_config = MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone());
+        let eth_validator: EthTransactionValidator<
+            _,
+            crate::MorphPooledTransaction,
+            MorphEvmConfig,
+        > = EthTransactionValidatorBuilder::new(client, morph_evm_config)
+            .set_prague(true)
+            .disable_balance_check()
+            .build::<crate::MorphPooledTransaction, _>(InMemoryBlobStore::default());
+        MorphTransactionValidator::new(eth_validator)
+    }
+
+    /// Legacy transaction carrying `calldata_len` non-zero calldata bytes.
+    fn calldata_tx(
+        signer: alloy_primitives::Address,
+        calldata_len: usize,
+        gas_limit: u64,
+    ) -> crate::MorphPooledTransaction {
+        let tx = TxLegacy {
+            chain_id: Some(2818),
+            nonce: 0,
+            gas_limit,
+            to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
+            value: U256::ZERO,
+            input: vec![0x01u8; calldata_len].into(),
+            gas_price: 2_000_000_000,
+        };
+        let signed_tx = Signed::new_unchecked(tx, Signature::test_signature(), B256::ZERO);
+        let recovered = Recovered::new_unchecked(MorphTxEnvelope::Legacy(signed_tx), signer);
+        let len = recovered.encode_2718_len();
+        crate::MorphPooledTransaction::new(recovered, len)
+    }
+
+    /// Morph disables EIP-7623, so the pool must not apply its calldata floor.
+    ///
+    /// 4096 non-zero calldata bytes cost `21_000 + 16 * 4096 = 86_536` gas to execute on
+    /// both clients, but the EIP-7623 floor would demand `21_000 + 10 * (4 * 4096) =
+    /// 184_840`. reth's `ensure_intrinsic_gas` picks `SpecId::PRAGUE` because MorphChainSpec
+    /// activates Prague at Viridian, so before this fix the transaction was rejected as
+    /// `intrinsic gas too low` while morph-geth accepted and packed it.
+    #[test]
+    fn viridian_pool_accepts_calldata_below_eip7623_floor() {
+        let signer = address!("0000000000000000000000000000000000000001");
+        let validator = prague_validator(signer);
+
+        assert!(
+            validator.inner.fork_tracker().is_prague_activated(),
+            "test must exercise the Prague/Viridian path"
+        );
+
+        let pooled_tx = calldata_tx(signer, 4096, 86_536);
+        match validator.validate_one(TransactionOrigin::External, pooled_tx) {
+            TransactionValidationOutcome::Valid { .. } => {}
+            other => panic!("expected the transaction to be admitted, got: {other:?}"),
+        }
+    }
+
+    /// Dropping the EIP-7623 floor must not weaken the real intrinsic-gas check.
+    #[test]
+    fn viridian_pool_still_rejects_underfunded_intrinsic_gas() {
+        let signer = address!("0000000000000000000000000000000000000001");
+        let validator = prague_validator(signer);
+
+        // One gas below the 86_536 the transaction actually needs.
+        let pooled_tx = calldata_tx(signer, 4096, 86_535);
+        match validator.validate_one(TransactionOrigin::External, pooled_tx) {
+            TransactionValidationOutcome::Invalid(
+                _,
+                InvalidPoolTransactionError::IntrinsicGasTooLow,
+            ) => {}
+            other => panic!("expected IntrinsicGasTooLow, got: {other:?}"),
         }
     }
 
