@@ -429,6 +429,28 @@ where
     /// Only the floor is dropped. `initial_total_gas` is recomputed with the same revm
     /// helper and the same `SpecId` selection reth uses, so a genuinely underfunded
     /// transaction is still rejected here, with the same error.
+    ///
+    /// # Interim measure — see morph-l2/morph-reth#201
+    ///
+    /// This is scoped to the interval before Morph adopts EIP-7623, **not** a permanent
+    /// opinion that the floor never applies. morph-geth implements EIP-7623 on its unmerged
+    /// `eip7623` branch, and does so by introducing a new hardfork (`nextForkTime`, ordered
+    /// after Jade) that enables the floor in execution and in its own pool. So the two
+    /// clients gate the same rule at different points: reth's pool keys off Prague, which
+    /// `MorphChainSpec` maps to Viridian and is already live, while geth's branch keys off
+    /// a fork that is not scheduled on any network yet.
+    ///
+    /// When that fork lands, do not revert this — the pool would go back to applying the
+    /// floor one hardfork early. Gate [`intrinsic_gas_is_sufficient`] on the new fork's
+    /// activation instead, alongside the matching change to `disable_eip7623` in
+    /// `morph_evm::MorphEvmConfig` and geth's L1-message exemption. #201 has the checklist.
+    ///
+    /// The copied `validate_one_with_provider` skeleton below is the cost of upstream having
+    /// no knob for this: `ensure_intrinsic_gas` takes only the `ForkTracker`, even though
+    /// `max_initcode_size` and `tx_gas_limit_cap` on that tracker already come from the EVM
+    /// config. If upstream gains an equivalent switch, this method collapses to one builder
+    /// call. **On every reth upgrade, re-read upstream's `validate_one_with_provider` and
+    /// `ensure_intrinsic_gas` and confirm this still mirrors them.**
     fn validate_inner_with_state(
         &self,
         origin: TransactionOrigin,
@@ -585,6 +607,11 @@ fn is_morph_tx(tx: &impl Typed2718) -> bool {
 /// because Morph disables EIP-7623 during execution. The `SpecId` selection is kept identical
 /// to reth's so `initial_total_gas` — the part Morph does enforce — cannot drift from the
 /// upstream computation.
+///
+/// Dropping the floor is unconditional only until Morph adopts EIP-7623. At that point this
+/// must become a fork gate rather than a deletion, or the pool reverts to applying the floor
+/// a hardfork before execution does. See morph-l2/morph-reth#201 and the note on
+/// [`MorphTransactionValidator::validate_inner_with_state`].
 fn intrinsic_gas_is_sufficient<Tx: EthPoolTransaction>(
     transaction: &Tx,
     fork_tracker: &ForkTracker,
@@ -878,6 +905,9 @@ mod tests {
     /// 184_840`. reth's `ensure_intrinsic_gas` picks `SpecId::PRAGUE` because MorphChainSpec
     /// activates Prague at Viridian, so before this fix the transaction was rejected as
     /// `intrinsic gas too low` while morph-geth accepted and packed it.
+    ///
+    /// Keep this test when Morph adopts EIP-7623 and add its post-fork mirror, so both
+    /// sides of the boundary stay pinned. See morph-l2/morph-reth#201.
     #[test]
     fn viridian_pool_accepts_calldata_below_eip7623_floor() {
         let signer = address!("0000000000000000000000000000000000000001");
