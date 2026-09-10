@@ -25,7 +25,7 @@ use reth_revm::database::StateProviderDatabase;
 use reth_storage_api::{BlockReaderIdExt, StateProviderFactory};
 use reth_transaction_pool::{
     EthPoolTransaction, EthTransactionValidator, PoolTransaction, TransactionOrigin,
-    TransactionValidationOutcome, TransactionValidator,
+    TransactionValidationOutcome, TransactionValidator, error::InvalidPoolTransactionError,
 };
 use std::sync::{
     Arc,
@@ -341,6 +341,29 @@ where
             return TransactionValidationOutcome::Invalid(transaction, err);
         }
 
+        // Token-fee MorphTx reports only its ETH value through cost(), so reth's
+        // cost() - value() fee-cap check sees zero. Preserve the configured local
+        // fee cap using the gas budget, independently of the pool's ETH budget.
+        if is_morph_tx
+            && self
+                .inner
+                .local_transactions_config()
+                .is_local(origin, transaction.sender_ref())
+            && let Some(tx_fee_cap_wei) = self.inner.tx_fee_cap().filter(|cap| *cap != 0)
+        {
+            let max_tx_fee_wei = U256::from(transaction.gas_limit())
+                .saturating_mul(U256::from(transaction.max_fee_per_gas()));
+            if max_tx_fee_wei > U256::from(tx_fee_cap_wei) {
+                return TransactionValidationOutcome::Invalid(
+                    transaction,
+                    InvalidPoolTransactionError::ExceedsFeeCap {
+                        max_tx_fee_wei: max_tx_fee_wei.saturating_to(),
+                        tx_fee_cap_wei,
+                    },
+                );
+            }
+        }
+
         let outcome = self
             .inner
             .validate_one_with_state(origin, transaction, state);
@@ -532,7 +555,7 @@ fn is_morph_tx(tx: &impl Typed2718) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_consensus::{Signed, TxEip1559, TxLegacy};
+    use alloy_consensus::{Sealable, Signed, TxEip1559, TxLegacy};
     use alloy_eips::eip2718::Encodable2718;
     use alloy_primitives::{B256, Signature, TxKind, address};
     use morph_chainspec::{MORPH_MAINNET, MorphChainSpec};
@@ -544,6 +567,7 @@ mod tests {
     use reth_primitives_traits::Recovered;
     use reth_provider::test_utils::{ExtendedAccount, MockEthProvider};
     use reth_transaction_pool::{
+        CoinbaseTipOrdering, LocalTransactionConfig, Pool, TransactionPool,
         blobstore::InMemoryBlobStore, validate::EthTransactionValidatorBuilder,
     };
 
@@ -604,6 +628,241 @@ mod tests {
                 token_balance,
             ),
         ])
+    }
+
+    type TokenFeeValidator = MorphTransactionValidator<
+        MockEthProvider<MorphPrimitives, MorphChainSpec>,
+        crate::MorphPooledTransaction,
+        MorphEvmConfig,
+    >;
+
+    /// Registered token with a 1:1 price ratio at an Emerald-active head.
+    fn token_fee_validator(
+        eth_balance: U256,
+        token_balance: U256,
+        fee_cap: u128,
+        local_config: LocalTransactionConfig,
+    ) -> TokenFeeValidator {
+        let client = new_mock_provider();
+        let signer = address!("0000000000000000000000000000000000000001");
+        let token = address!("5300000000000000000000000000000000000042");
+        let balance_slot = U256::from(7);
+        let header = morph_primitives::MorphHeader::from(alloy_consensus::Header {
+            number: 1,
+            timestamp: 1_767_765_600,
+            gas_limit: 30_000_000,
+            base_fee_per_gas: Some(10),
+            ..Default::default()
+        });
+        client.add_block(
+            header.hash_slow(),
+            morph_primitives::Block {
+                header,
+                body: Default::default(),
+            },
+        );
+        client.add_account(signer, ExtendedAccount::new(0, eth_balance));
+        client.add_account(
+            L2_TOKEN_REGISTRY_ADDRESS,
+            token_registry_account(1, token, balance_slot, token_balance),
+        );
+        client.add_account(
+            token,
+            ExtendedAccount::new(0, U256::ZERO).extend_storage([(
+                storage_key(compute_mapping_slot_for_address(balance_slot, signer)),
+                token_balance,
+            )]),
+        );
+        let inner = EthTransactionValidatorBuilder::new(
+            client,
+            MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone()),
+        )
+        .disable_balance_check()
+        .with_custom_tx_type(morph_primitives::MORPH_TX_TYPE_ID)
+        .set_tx_fee_cap(fee_cap)
+        .with_local_transactions_config(local_config)
+        .build::<crate::MorphPooledTransaction, _>(InMemoryBlobStore::default());
+        MorphTransactionValidator::new(inner)
+    }
+
+    /// Maximum gas fee is 2,100,000 wei; value remains denominated in ETH.
+    fn token_fee_transaction(nonce: u64, value: U256) -> crate::MorphPooledTransaction {
+        let tx = TxMorph {
+            chain_id: 2818,
+            nonce,
+            gas_limit: 21_000,
+            max_fee_per_gas: 100,
+            max_priority_fee_per_gas: 10,
+            to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
+            value,
+            fee_token_id: 1,
+            fee_limit: U256::ZERO,
+            ..Default::default()
+        };
+        let recovered = Recovered::new_unchecked(
+            MorphTxEnvelope::Morph(Signed::new_unhashed(tx, Signature::test_signature())),
+            address!("0000000000000000000000000000000000000001"),
+        );
+        let len = recovered.encode_2718_len();
+        crate::MorphPooledTransaction::new(recovered, len)
+    }
+
+    #[test]
+    fn token_fee_transaction_above_local_fee_cap_is_rejected() {
+        // The effective gas price is 20, so only the maximum fee budget exceeds this cap.
+        let validator = token_fee_validator(
+            U256::ZERO,
+            U256::from(10_000_000),
+            500_000,
+            Default::default(),
+        );
+        let outcome = validator.validate_one(
+            TransactionOrigin::Local,
+            token_fee_transaction(0, U256::ZERO),
+        );
+        assert!(
+            matches!(
+                outcome,
+                TransactionValidationOutcome::Invalid(
+                    _,
+                    InvalidPoolTransactionError::ExceedsFeeCap {
+                        max_tx_fee_wei: 2_100_000,
+                        tx_fee_cap_wei: 500_000,
+                    }
+                )
+            ),
+            "{outcome:?}"
+        );
+    }
+
+    #[test]
+    fn token_fee_cap_accepts_zero_or_sufficient_cap_without_counting_value() {
+        for cap in [0, 2_100_000, 2_100_001] {
+            let validator = token_fee_validator(
+                U256::from(7),
+                U256::from(10_000_000),
+                cap,
+                Default::default(),
+            );
+            let outcome = validator.validate_one(
+                TransactionOrigin::Local,
+                token_fee_transaction(0, U256::from(7)),
+            );
+            assert!(
+                matches!(outcome, TransactionValidationOutcome::Valid { .. }),
+                "cap={cap}: {outcome:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn token_fee_cap_respects_local_transaction_configuration() {
+        let local_sender = LocalTransactionConfig {
+            local_addresses: [address!("0000000000000000000000000000000000000001")]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        for (origin, config, should_reject) in [
+            (
+                TransactionOrigin::External,
+                LocalTransactionConfig::default(),
+                false,
+            ),
+            (TransactionOrigin::External, local_sender.clone(), true),
+            (
+                TransactionOrigin::Local,
+                LocalTransactionConfig {
+                    no_exemptions: true,
+                    ..Default::default()
+                },
+                false,
+            ),
+            (
+                TransactionOrigin::External,
+                LocalTransactionConfig {
+                    no_exemptions: true,
+                    ..local_sender
+                },
+                false,
+            ),
+        ] {
+            let validator = token_fee_validator(U256::ZERO, U256::from(10_000_000), 100, config);
+            let outcome = validator.validate_one(origin, token_fee_transaction(0, U256::ZERO));
+            if should_reject {
+                assert!(
+                    matches!(
+                        outcome,
+                        TransactionValidationOutcome::Invalid(
+                            _,
+                            InvalidPoolTransactionError::ExceedsFeeCap { .. }
+                        )
+                    ),
+                    "{outcome:?}"
+                );
+            } else {
+                assert!(
+                    matches!(outcome, TransactionValidationOutcome::Valid { .. }),
+                    "{outcome:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn token_fee_transaction_with_zero_eth_is_pending_and_selectable() {
+        let validator = token_fee_validator(
+            U256::ZERO,
+            U256::from(10_000_000),
+            2_100_000,
+            Default::default(),
+        );
+        let pool = Pool::new(
+            validator,
+            CoinbaseTipOrdering::default(),
+            InMemoryBlobStore::default(),
+            Default::default(),
+        );
+        let added = futures::executor::block_on(pool.add_transaction(
+            TransactionOrigin::Local,
+            token_fee_transaction(0, U256::ZERO),
+        ))
+        .unwrap();
+        let all = pool.all_transactions();
+        assert_eq!(all.pending.len(), 1);
+        assert!(all.queued.is_empty());
+        let best: Vec<_> = pool.best_transactions().map(|tx| *tx.hash()).collect();
+        assert_eq!(best, [added.hash]);
+    }
+
+    #[test]
+    fn token_fee_transactions_still_reserve_cumulative_eth_value() {
+        let validator = token_fee_validator(
+            U256::from(10),
+            U256::from(10_000_000),
+            2_100_000,
+            Default::default(),
+        );
+        let pool = Pool::new(
+            validator,
+            CoinbaseTipOrdering::default(),
+            InMemoryBlobStore::default(),
+            Default::default(),
+        );
+        for nonce in [0, 1] {
+            futures::executor::block_on(pool.add_transaction(
+                TransactionOrigin::Local,
+                token_fee_transaction(nonce, U256::from(7)),
+            ))
+            .unwrap();
+        }
+        let all = pool.all_transactions();
+        assert_eq!(all.pending.len(), 1);
+        assert_eq!(all.pending[0].nonce(), 0);
+        assert_eq!(all.queued.len(), 1);
+        assert_eq!(all.queued[0].nonce(), 1);
+        let best: Vec<_> = pool.best_transactions().map(|tx| tx.nonce()).collect();
+        assert_eq!(best, [0]);
     }
 
     #[test]
