@@ -9,9 +9,9 @@
 //! - MorphTx (0x7F) ERC20 token balance validation
 
 use crate::MorphTxError;
-use alloy_consensus::{BlockHeader, Transaction};
+use alloy_consensus::{BlockHeader, Sealable, Transaction};
 use alloy_eips::{Encodable2718, Typed2718};
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{Address, B256, U256};
 use morph_chainspec::hardfork::{MorphHardfork, MorphHardforks};
 use morph_primitives::MorphTxEnvelope;
 use morph_revm::{L1BlockInfo, MorphBlockEnv, MorphEvmEnv};
@@ -22,15 +22,12 @@ use reth_primitives_traits::{
     Block, BlockTy, GotExpected, HeaderTy, SealedBlock, transaction::error::InvalidTransactionError,
 };
 use reth_revm::database::StateProviderDatabase;
-use reth_storage_api::{BlockReaderIdExt, StateProviderFactory};
+use reth_storage_api::{BlockReaderIdExt, StateProviderBox, StateProviderFactory};
 use reth_transaction_pool::{
     EthPoolTransaction, EthTransactionValidator, PoolTransaction, TransactionOrigin,
     TransactionValidationOutcome, TransactionValidator, error::InvalidPoolTransactionError,
 };
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
-};
+use std::sync::Arc;
 
 /// EIP-3860 max initcode size (`2 * MAX_CODE_SIZE = 2 * 24 576 = 49 152` bytes).
 ///
@@ -41,64 +38,103 @@ use std::sync::{
 /// `validate_one_with_state` for why we can't rely on reth's Shanghai-gated check.
 const MAX_INITCODE_SIZE: usize = reth_revm::revm::primitives::eip3860::MAX_INITCODE_SIZE;
 
-/// Tracks L1 block info for the current chain head.
+/// A complete set of fee-validation inputs for one block.
+#[derive(Debug)]
+struct MorphValidationHead {
+    hash: B256,
+    number: u64,
+    timestamp: u64,
+    base_fee_per_gas: Option<u64>,
+    l1_block_info: L1BlockInfo,
+    evm_env: MorphEvmEnv,
+}
+
+/// Tracks L1 fee parameters and the matching block environment.
 ///
-/// This is used to cache L1 fee parameters and update them when the chain head changes.
+/// A complete head is published atomically. Readers retain an immutable snapshot while
+/// later canonical updates prepare and publish a replacement.
 #[derive(Debug, Default)]
 pub struct MorphL1BlockInfo {
-    /// The current L1 block info.
-    l1_block_info: RwLock<L1BlockInfo>,
-    /// Current block base fee per gas.
-    base_fee_per_gas: RwLock<Option<u64>>,
-    /// Current block timestamp.
-    timestamp: AtomicU64,
-    /// Current block number.
-    number: AtomicU64,
-    /// The head block's EVM environment, as `ConfigureEvm` would build it for execution.
-    ///
-    /// A call-mode fee token's `balanceOf` is evaluated in this, so admission resolves the
-    /// same balance the execution layer would rather than one under a default environment.
-    evm_env: RwLock<MorphEvmEnv>,
+    head: RwLock<Option<Arc<MorphValidationHead>>>,
 }
 
 impl MorphL1BlockInfo {
-    /// Creates a new instance with default values.
+    /// Creates an uninitialized tracker. Validation returns an error until a head is published.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Returns the current L1 block info.
+    /// Returns the current L1 block info, or its default before initialization.
     pub fn l1_block_info(&self) -> L1BlockInfo {
-        *self.l1_block_info.read()
+        self.head
+            .read()
+            .as_ref()
+            .map(|head| head.l1_block_info)
+            .unwrap_or_default()
     }
 
-    /// Updates the L1 block info.
-    pub fn update(
+    /// Publishes fee parameters and the environment for the supplied header together.
+    ///
+    /// `info` must be read from this header's post-state and `evm_env` must be built
+    /// for the same header. Partial updates are not supported.
+    pub fn update<H: BlockHeader + Sealable>(
         &self,
         info: L1BlockInfo,
-        timestamp: u64,
-        number: u64,
-        base_fee_per_gas: Option<u64>,
+        header: &H,
+        evm_env: MorphEvmEnv,
     ) {
-        *self.l1_block_info.write() = info;
-        *self.base_fee_per_gas.write() = base_fee_per_gas;
-        self.timestamp.store(timestamp, Ordering::Relaxed);
-        self.number.store(number, Ordering::Relaxed);
+        *self.head.write() = Some(Arc::new(MorphValidationHead {
+            hash: header.hash_slow(),
+            number: header.number(),
+            timestamp: header.timestamp(),
+            base_fee_per_gas: header.base_fee_per_gas(),
+            l1_block_info: info,
+            evm_env,
+        }));
     }
 
-    /// Returns the current block timestamp.
+    /// Returns the current block timestamp, or zero before initialization.
     pub fn timestamp(&self) -> u64 {
-        self.timestamp.load(Ordering::Relaxed)
+        self.head
+            .read()
+            .as_ref()
+            .map(|head| head.timestamp)
+            .unwrap_or_default()
     }
 
-    /// Returns the current block number.
+    /// Returns the current block number, or zero before initialization.
     pub fn number(&self) -> u64 {
-        self.number.load(Ordering::Relaxed)
+        self.head
+            .read()
+            .as_ref()
+            .map(|head| head.number)
+            .unwrap_or_default()
     }
 
     /// Returns the current block base fee per gas.
     pub fn base_fee_per_gas(&self) -> Option<u64> {
-        *self.base_fee_per_gas.read()
+        self.head
+            .read()
+            .as_ref()
+            .and_then(|head| head.base_fee_per_gas)
+    }
+}
+
+/// State and fee-validation inputs pinned to one block for a transaction batch.
+///
+/// Created lazily by [`MorphTransactionValidator::validate_one_with_state`]. Reusing it
+/// keeps account reads, token reads and the EVM environment on the same block, even if
+/// the canonical head advances. Start with `None` to validate a new batch at the new head.
+pub struct MorphValidationState {
+    head: Arc<MorphValidationHead>,
+    provider: StateProviderBox,
+}
+
+impl std::fmt::Debug for MorphValidationState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MorphValidationState")
+            .field("head", &self.head)
+            .finish_non_exhaustive()
     }
 }
 
@@ -143,16 +179,6 @@ impl<Client, Tx, Evm> MorphTransactionValidator<Client, Tx, Evm> {
     /// Returns the configured client.
     pub const fn client(&self) -> &Client {
         self.inner.client()
-    }
-
-    /// Returns the current block timestamp.
-    fn block_timestamp(&self) -> u64 {
-        self.block_info.timestamp()
-    }
-
-    /// Returns the current block number.
-    fn block_number(&self) -> u64 {
-        self.block_info.number()
     }
 
     /// Returns a reference to the block info tracker.
@@ -217,25 +243,15 @@ where
 
     /// Update the L1 block info for the given header.
     pub fn update_l1_block_info(&self, header: &HeaderTy<Evm::Primitives>) {
-        self.block_info
-            .timestamp
-            .store(header.timestamp(), Ordering::Relaxed);
-        self.block_info
-            .number
-            .store(header.number(), Ordering::Relaxed);
-        *self.block_info.base_fee_per_gas.write() = header.base_fee_per_gas();
-
-        match self.inner.evm_config().evm_env(header) {
-            Ok(evm_env) => *self.block_info.evm_env.write() = evm_env,
+        let evm_env = match self.inner.evm_config().evm_env(header) {
+            Ok(evm_env) => evm_env,
             Err(err) => {
-                tracing::warn!(target: "morph::txpool", %err, "Failed to build EVM env for head block")
+                tracing::warn!(target: "morph::txpool", %err, "Failed to build EVM env for head block");
+                return;
             }
-        }
+        };
 
-        let provider = match self
-            .client()
-            .state_by_block_number_or_tag(header.number().into())
-        {
+        let provider = match self.client().state_by_block_hash(header.hash_slow()) {
             Ok(provider) => provider,
             Err(err) => {
                 tracing::warn!(target: "morph::txpool", %err, "Failed to get state provider for L1 block info update");
@@ -250,7 +266,7 @@ where
 
         match L1BlockInfo::try_fetch(&mut db, hardfork) {
             Ok(l1_block_info) => {
-                *self.block_info.l1_block_info.write() = l1_block_info;
+                self.block_info.update(l1_block_info, header, evm_env);
             }
             Err(err) => {
                 tracing::warn!(target: "morph::txpool", ?err, "Failed to fetch L1 block info");
@@ -275,18 +291,16 @@ where
         self.validate_one_with_state(origin, transaction, &mut None)
     }
 
-    /// Validates a single transaction, reusing an optional state provider.
+    /// Validates a single transaction, reusing a state and head snapshot.
     ///
-    /// When `state` is `None`, a fresh provider is fetched from the database on
-    /// first use and stored back into `state` for reuse by subsequent calls.
-    /// This avoids creating a new [`StateProvider`] for every transaction in a
-    /// batch, which is the main source of txpool validation slowdown as the
-    /// state trie grows.
+    /// When `state` is `None`, validation pins the current complete head and opens its
+    /// provider by block hash. Both are reused for subsequent transactions in the batch.
+    /// Reset `state` to `None` to select a newer head.
     pub fn validate_one_with_state(
         &self,
         origin: TransactionOrigin,
         transaction: Tx,
-        state: &mut Option<Box<dyn reth_storage_api::AccountInfoReader + Send>>,
+        state: &mut Option<MorphValidationState>,
     ) -> TransactionValidationOutcome<Tx> {
         // Reject EIP-4844 blob transactions - not supported on L2
         if transaction.is_eip4844() {
@@ -304,11 +318,25 @@ where
             );
         }
 
+        let head = state
+            .as_ref()
+            .map(|state| state.head.clone())
+            .or_else(|| self.block_info.head.read().clone());
+        let Some(head) = head else {
+            return morph_tx_validation_outcome(
+                transaction,
+                MorphTxError::TokenInfoFetchFailed {
+                    token_id: None,
+                    message: "fee-validation head is not initialized".into(),
+                },
+            );
+        };
+
         // Reject EIP-7702 transactions before Viridian hardfork (PRAGUE)
         if transaction.is_eip7702()
             && !self
                 .chain_spec()
-                .is_viridian_active_at_timestamp(self.block_timestamp())
+                .is_viridian_active_at_timestamp(head.timestamp)
         {
             return TransactionValidationOutcome::Invalid(
                 transaction,
@@ -324,7 +352,7 @@ where
         if is_morph_tx
             && !self
                 .chain_spec()
-                .is_emerald_active_at_timestamp(self.block_timestamp())
+                .is_emerald_active_at_timestamp(head.timestamp)
         {
             return TransactionValidationOutcome::Invalid(
                 transaction,
@@ -378,9 +406,25 @@ where
             }
         }
 
+        if let Err(err) = self.inner.validate_stateless(origin, &transaction) {
+            return TransactionValidationOutcome::Invalid(transaction, err);
+        }
+        if state.is_none() {
+            let provider = match self.client().state_by_block_hash(head.hash) {
+                Ok(provider) => provider,
+                Err(err) => {
+                    return TransactionValidationOutcome::Error(*transaction.hash(), Box::new(err));
+                }
+            };
+            *state = Some(MorphValidationState {
+                head: head.clone(),
+                provider,
+            });
+        }
+        let state = state.as_ref().expect("validation state initialized above");
         let outcome = self
             .inner
-            .validate_one_with_state(origin, transaction, state);
+            .validate_stateful(origin, transaction, &state.provider);
         if outcome.is_invalid() || outcome.is_error() {
             tracing::trace!(target: "morph::txpool", ?outcome, "tx pool validation failed");
             return outcome;
@@ -396,10 +440,8 @@ where
             authorities,
         } = outcome
         {
-            let l1_block_info = *self.block_info.l1_block_info.read();
-            let hardfork = self
-                .chain_spec()
-                .morph_hardfork_at(self.block_number(), self.block_timestamp());
+            let l1_block_info = head.l1_block_info;
+            let hardfork = *head.evm_env.cfg_env.spec();
 
             // Calculate L1 data fee (always calculated for all transactions).
             // Clone consensus tx once — reused for both L1 fee encoding and MorphTx validation.
@@ -418,7 +460,7 @@ where
                     sender,
                     balance,
                     l1_data_fee,
-                    hardfork,
+                    state,
                 ) {
                     return morph_tx_validation_outcome(valid_tx.into_transaction(), err);
                 }
@@ -460,29 +502,16 @@ where
         sender: Address,
         eth_balance: U256,
         l1_data_fee: U256,
-        hardfork: morph_chainspec::hardfork::MorphHardfork,
+        state: &MorphValidationState,
     ) -> Result<crate::MorphTxValidationResult, MorphTxError> {
-        // Get state provider for token info lookup
-        let provider = self
-            .client()
-            .state_by_block_number_or_tag(self.block_number().into())
-            .map_err(|err| MorphTxError::TokenInfoFetchFailed {
-                // The failure is in getting a state provider at all, so no token ID is known.
-                token_id: None,
-                message: err.to_string(),
-            })?;
-
-        let mut db = StateProviderDatabase::new(provider);
-        let evm_env = self.block_info.evm_env.read().clone();
-
-        // Use shared validation logic with unified API (includes ETH balance check)
+        let mut db = StateProviderDatabase::new(&state.provider);
         let input = crate::MorphTxValidationInput {
             consensus_tx,
             sender,
             eth_balance,
             l1_data_fee,
-            hardfork,
-            evm_env: &evm_env,
+            hardfork: *state.head.evm_env.cfg_env.spec(),
+            evm_env: &state.head.evm_env,
         };
 
         let result = crate::validate_morph_tx(&mut db, &input)?;
@@ -723,10 +752,10 @@ mod tests {
     }
 
     /// Maximum gas fee is 2,100,000 wei; value remains denominated in ETH.
-    fn token_fee_transaction(nonce: u64, value: U256) -> crate::MorphPooledTransaction {
+    fn token_fee_transaction(tx_nonce: u64, value: U256) -> crate::MorphPooledTransaction {
         let tx = TxMorph {
             chain_id: 2818,
-            nonce,
+            nonce: tx_nonce,
             gas_limit: 21_000,
             max_fee_per_gas: 100,
             max_priority_fee_per_gas: 10,
@@ -742,6 +771,108 @@ mod tests {
         );
         let len = recovered.encode_2718_len();
         crate::MorphPooledTransaction::new(recovered, len)
+    }
+
+    fn timestamp_sensitive_validator() -> TokenFeeValidator {
+        let validator =
+            token_fee_validator(U256::ZERO, U256::from(10_000_000), 0, Default::default());
+        let client = validator.client();
+        let token = address!("5300000000000000000000000000000000000042");
+        let base = compute_mapping_slot(U256::from(151), &token_id_key(1));
+        client.add_account(
+            L2_TOKEN_REGISTRY_ADDRESS,
+            token_registry_account(1, token, U256::from(7), U256::ZERO)
+                .extend_storage([(storage_key(base + U256::from(1)), U256::ZERO)]),
+        );
+        // Return 10,000,000 only at the old head's timestamp. The token state stays
+        // unchanged so both reads of the cached provider must use the old environment.
+        let old_timestamp = 1_767_765_600u32;
+        let mut code = vec![0x42, 0x63]; // TIMESTAMP PUSH4
+        code.extend_from_slice(&old_timestamp.to_be_bytes());
+        code.extend_from_slice(&[
+            0x14, 0x62, 0x98, 0x96, 0x80, 0x02, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3,
+        ]);
+        client.add_account(
+            token,
+            ExtendedAccount::new(0, U256::ZERO).with_bytecode(code.into()),
+        );
+
+        validator
+    }
+
+    fn replacement_header() -> morph_primitives::MorphHeader {
+        morph_primitives::MorphHeader::from(alloy_consensus::Header {
+            number: 1,
+            timestamp: 1_767_765_601,
+            gas_limit: 30_000_000,
+            base_fee_per_gas: Some(10),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn a_batch_keeps_its_balance_query_environment_across_a_same_height_reorg() {
+        let validator = timestamp_sensitive_validator();
+        let client = validator.client();
+        let tx = token_fee_transaction(0, U256::ZERO);
+        let mut state = None;
+        let first =
+            validator.validate_one_with_state(TransactionOrigin::Local, tx.clone(), &mut state);
+        assert!(
+            matches!(first, TransactionValidationOutcome::Valid { .. }),
+            "{first:?}"
+        );
+
+        let replacement = replacement_header();
+        client.add_block(
+            replacement.hash_slow(),
+            morph_primitives::Block {
+                header: replacement.clone(),
+                body: Default::default(),
+            },
+        );
+        validator.update_l1_block_info(&replacement);
+
+        let in_batch =
+            validator.validate_one_with_state(TransactionOrigin::Local, tx.clone(), &mut state);
+        assert!(
+            matches!(in_batch, TransactionValidationOutcome::Valid { .. }),
+            "a batch cannot mix its old state with the replacement head's environment: {in_batch:?}"
+        );
+        let fresh = validator.validate_one(TransactionOrigin::Local, tx);
+        assert!(
+            matches!(fresh, TransactionValidationOutcome::Invalid(..)),
+            "a new batch must use the replacement head: {fresh:?}"
+        );
+    }
+
+    #[test]
+    fn a_head_published_during_validation_does_not_change_the_balance_query() {
+        let mut validator = timestamp_sensitive_validator();
+        let block_info = validator.block_info().clone();
+        let replacement = replacement_header();
+        let env = MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone())
+            .evm_env(&replacement)
+            .unwrap();
+        // This extension runs after the account read and before Morph fee validation,
+        // forcing the interleaving of a concurrent canonical-head publication.
+        validator
+            .inner
+            .set_additional_stateful_validation(move |_, _, _| {
+                block_info.update(L1BlockInfo::default(), &replacement, env.clone());
+                Ok(())
+            });
+        let tx = token_fee_transaction(0, U256::ZERO);
+        let in_flight = validator.validate_one(TransactionOrigin::Local, tx.clone());
+        assert!(
+            matches!(in_flight, TransactionValidationOutcome::Valid { .. }),
+            "an in-flight validation must retain its original head: {in_flight:?}"
+        );
+        let fresh = validator.validate_one(TransactionOrigin::Local, tx);
+        assert!(
+            matches!(fresh, TransactionValidationOutcome::Invalid(..)),
+            "a fresh validation must see the published head: {fresh:?}"
+        );
     }
 
     #[test]
@@ -943,7 +1074,16 @@ mod tests {
     fn test_morph_l1_block_info_update() {
         let info = MorphL1BlockInfo::new();
         let l1_info = L1BlockInfo::default();
-        info.update(l1_info, 1234, 100, Some(42));
+        let header = morph_primitives::MorphHeader::from(alloy_consensus::Header {
+            timestamp: 1234,
+            number: 100,
+            base_fee_per_gas: Some(42),
+            ..Default::default()
+        });
+        let evm_env = MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone())
+            .evm_env(&header)
+            .unwrap();
+        info.update(l1_info, &header, evm_env);
 
         assert_eq!(info.timestamp(), 1234);
         assert_eq!(info.number(), 100);
@@ -1211,42 +1351,9 @@ mod tests {
 
     #[test]
     fn validate_morph_tx_uses_max_fee_for_token_fee_admission() {
-        let client = new_mock_provider();
+        let validator = token_fee_validator(U256::ZERO, U256::from(300_000), 0, Default::default());
         let signer = address!("0000000000000000000000000000000000000001");
-        let token = address!("5300000000000000000000000000000000000042");
-        let balance_slot = U256::from(7);
-
-        client.add_account(signer, ExtendedAccount::new(0, U256::ZERO));
-        client.add_account(
-            L2_TOKEN_REGISTRY_ADDRESS,
-            token_registry_account(1, token, balance_slot, U256::from(300_000u64)),
-        );
-        client.add_account(
-            token,
-            ExtendedAccount::new(0, U256::ZERO).extend_storage([(
-                storage_key(compute_mapping_slot_for_address(balance_slot, signer)),
-                U256::from(300_000u64),
-            )]),
-        );
-
-        let morph_evm_config = MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone());
-        let eth_validator: EthTransactionValidator<
-            _,
-            crate::MorphPooledTransaction,
-            MorphEvmConfig,
-        > = EthTransactionValidatorBuilder::new(client, morph_evm_config)
-            .no_shanghai()
-            .no_cancun()
-            .disable_balance_check()
-            .build::<crate::MorphPooledTransaction, _>(InMemoryBlobStore::default());
-        let validator = MorphTransactionValidator::new(eth_validator);
-        // Simulate an active chain head with base_fee_per_gas = 10. Execution
-        // would use effective gas price = min(100, 10 + 1) = 11, but txpool
-        // admission follows geth's conservative max_fee_per_gas budget.
-        validator
-            .block_info
-            .update(L1BlockInfo::default(), 0, 0, Some(10));
-
+        // Effective execution price is 11, but admission must reserve the maximum 100.
         let tx = TxMorph {
             chain_id: 2818,
             nonce: 0,
@@ -1269,23 +1376,14 @@ mod tests {
             B256::ZERO,
         ));
         let recovered = Recovered::new_unchecked(envelope, signer);
-        let err = validator
-            .validate_morph_tx_balance(
-                &recovered,
-                signer,
-                U256::ZERO,
-                U256::ZERO,
-                morph_chainspec::hardfork::MorphHardfork::Viridian,
-            )
-            .expect_err("MorphTx should require the max-fee token budget in txpool admission");
-
-        assert!(matches!(
-            err,
-            crate::MorphTxError::InsufficientTokenBalance {
-                required,
-                balance,
-                ..
-            } if required == U256::from(2_100_000u64) && balance == U256::from(300_000u64)
+        let len = recovered.encode_2718_len();
+        let outcome = validator.validate_one(
+            TransactionOrigin::Local,
+            crate::MorphPooledTransaction::new(recovered, len),
+        );
+        assert!(matches!(outcome,
+            TransactionValidationOutcome::Invalid(_, InvalidPoolTransactionError::Overdraft { cost, balance })
+                if cost == U256::from(2_100_000) && balance == U256::from(300_000)
         ));
     }
 }

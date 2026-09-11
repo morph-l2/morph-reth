@@ -39,7 +39,7 @@ mod transaction;
 pub use transaction::MorphPooledTransaction;
 
 mod validator;
-pub use validator::{MorphL1BlockInfo, MorphTransactionValidator};
+pub use validator::{MorphL1BlockInfo, MorphTransactionValidator, MorphValidationState};
 
 mod maintain;
 pub use maintain::maintain_morph_pool;
