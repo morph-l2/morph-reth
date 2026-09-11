@@ -341,7 +341,15 @@ where
             }
             Ok(U256::ZERO)
         }
+        // The token reverted or returned nothing usable. That is a statement about the
+        // token, so it stays a zero balance and the caller rejects the transaction for
+        // insufficient funds.
         Ok(_) => Ok(U256::ZERO),
+        // A failed state read is *not* a statement about the token: report it so the
+        // caller can tell "this account cannot pay" apart from "we could not find out".
+        // Swallowing it here made the `EVMError::Database` arm in
+        // `read_token_balance_with_fallback` unreachable.
+        Err(err @ EVMError::Database(_)) => Err(err),
         Err(_) => Ok(U256::ZERO),
     }
 }
@@ -375,6 +383,121 @@ pub fn encode_balance_of_calldata(account: Address) -> Bytes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use alloy_primitives::{B256, address, bytes};
+    use revm::bytecode::Bytecode;
+    use revm::database::{CacheDB, EmptyDB};
+    use revm::state::AccountInfo;
+
+    /// Returned by [`FeeTokenUnreadable`] so a state read failure is distinguishable.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct ReadFailed;
+
+    impl core::fmt::Display for ReadFailed {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.write_str("state read failed")
+        }
+    }
+
+    impl core::error::Error for ReadFailed {}
+
+    impl revm::database_interface::DBErrorMarker for ReadFailed {}
+
+    /// Fails every storage read of the fee token; everything else reads normally.
+    #[derive(Debug)]
+    struct FeeTokenUnreadable {
+        inner: CacheDB<EmptyDB>,
+        token: Address,
+    }
+
+    impl RevmDatabase for FeeTokenUnreadable {
+        type Error = ReadFailed;
+
+        fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
+            Ok(self.inner.basic(address).unwrap())
+        }
+
+        fn code_by_hash(&mut self, code_hash: B256) -> Result<Bytecode, Self::Error> {
+            Ok(self.inner.code_by_hash(code_hash).unwrap())
+        }
+
+        fn storage(&mut self, address: Address, index: U256) -> Result<U256, Self::Error> {
+            if address == self.token {
+                return Err(ReadFailed);
+            }
+            Ok(self.inner.storage(address, index).unwrap())
+        }
+
+        fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error> {
+            Ok(self.inner.block_hash(number).unwrap())
+        }
+    }
+
+    /// Registry state for a call-mode token (no `balanceSlot`) whose `balanceOf` returns
+    /// storage slot 0, so reading it is a storage read of the token contract.
+    fn call_mode_token_state(token: Address, balance: u64) -> CacheDB<EmptyDB> {
+        let mut db = CacheDB::new(EmptyDB::default());
+        let mut token_id_bytes = [0u8; 32];
+        token_id_bytes[31] = 1;
+        let base = compute_mapping_slot(TOKEN_REGISTRY_SLOT, &token_id_bytes);
+
+        let mut packed = [0u8; 32];
+        packed[30] = 18; // decimals
+        packed[31] = 1; // isActive
+        for (slot, value) in [
+            (base, U256::from_be_bytes(token.into_word().0)),
+            // Zero means "no known balance slot": the EVM `balanceOf` fallback is used.
+            (base + U256::from(1), U256::ZERO),
+            (base + U256::from(2), U256::from_be_bytes(packed)),
+            (base + U256::from(3), U256::from(1)), // scale
+            (
+                compute_mapping_slot(PRICE_RATIO_SLOT, &token_id_bytes),
+                U256::from(1), // priceRatio
+            ),
+        ] {
+            db.insert_account_storage(L2_TOKEN_REGISTRY_ADDRESS, slot, value)
+                .unwrap();
+        }
+
+        // PUSH1 0x00 SLOAD PUSH0 MSTORE PUSH1 0x20 PUSH0 RETURN
+        let code = bytes!("6000545f5260205ff3");
+        db.insert_account_info(
+            token,
+            AccountInfo {
+                code_hash: alloy_primitives::keccak256(code.as_ref()),
+                code: Some(Bytecode::new_raw(code)),
+                ..Default::default()
+            },
+        );
+        db.insert_account_storage(token, U256::ZERO, U256::from(balance))
+            .unwrap();
+        db
+    }
+
+    #[test]
+    fn balance_of_fallback_reports_a_failed_state_read_instead_of_a_zero_balance() {
+        let token = address!("5300000000000000000000000000000000000042");
+        let caller = address!("0000000000000000000000000000000000000001");
+        let hardfork = MorphHardfork::Emerald;
+
+        // Readable state: the fallback reaches the token and reads the balance.
+        let mut readable = call_mode_token_state(token, 10_000_000);
+        let info = TokenFeeInfo::load_for_caller(&mut readable, 1, caller, hardfork)
+            .unwrap()
+            .unwrap();
+        assert_eq!(info.balance, U256::from(10_000_000));
+
+        // Same state, but the token's storage cannot be read. Reporting a zero balance here
+        // would be indistinguishable from an account that genuinely cannot pay.
+        let mut unreadable = FeeTokenUnreadable {
+            inner: call_mode_token_state(token, 10_000_000),
+            token,
+        };
+        assert_eq!(
+            TokenFeeInfo::load_for_caller(&mut unreadable, 1, caller, hardfork).unwrap_err(),
+            ReadFailed
+        );
+    }
 
     #[test]
     fn test_token_fee_info_default() {

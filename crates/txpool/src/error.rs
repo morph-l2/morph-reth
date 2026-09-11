@@ -54,10 +54,13 @@ pub enum MorphTxError {
         value: U256,
     },
 
-    /// Failed to fetch token information from state.
+    /// Failed to read the state needed to evaluate the fee token.
+    ///
+    /// This says nothing about the transaction — the state simply could not be read — so
+    /// callers must not treat it as a permanent rejection.
     TokenInfoFetchFailed {
-        /// The token ID.
-        token_id: u16,
+        /// The token ID, when the failure happened after it was known.
+        token_id: Option<u16>,
         /// Error message.
         message: String,
     },
@@ -105,9 +108,12 @@ impl fmt::Display for MorphTxError {
                     "insufficient ETH balance for transaction value: balance {balance}, value {value}"
                 )
             }
-            Self::TokenInfoFetchFailed { token_id, message } => {
-                write!(f, "failed to fetch token info for ID {token_id}: {message}")
-            }
+            Self::TokenInfoFetchFailed { token_id, message } => match token_id {
+                Some(token_id) => {
+                    write!(f, "failed to fetch token info for ID {token_id}: {message}")
+                }
+                None => write!(f, "failed to read fee token state: {message}"),
+            },
             Self::InvalidFormat { reason } => {
                 write!(f, "invalid MorphTx format: {reason}")
             }
@@ -260,7 +266,7 @@ mod tests {
         assert!(!MorphTxError::InvalidPriceRatio { token_id: 1 }.is_bad_transaction());
         assert!(
             !MorphTxError::TokenInfoFetchFailed {
-                token_id: 1,
+                token_id: Some(1),
                 message: "error".into()
             }
             .is_bad_transaction()
@@ -286,8 +292,12 @@ mod tests {
                 value: U256::from(10u64),
             },
             MorphTxError::TokenInfoFetchFailed {
-                token_id: 5,
+                token_id: Some(5),
                 message: "db error".into(),
+            },
+            MorphTxError::TokenInfoFetchFailed {
+                token_id: None,
+                message: "provider unavailable".into(),
             },
             MorphTxError::InvalidFormat {
                 reason: "bad version".into(),

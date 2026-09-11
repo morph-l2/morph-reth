@@ -383,10 +383,7 @@ where
                     l1_data_fee,
                     hardfork,
                 ) {
-                    return TransactionValidationOutcome::Invalid(
-                        valid_tx.into_transaction(),
-                        err.into(),
-                    );
+                    return morph_tx_validation_outcome(valid_tx.into_transaction(), err);
                 }
             } else {
                 // Regular transaction: validate ETH balance covers cost + L1 fee
@@ -433,7 +430,8 @@ where
             .client()
             .state_by_block_number_or_tag(self.block_number().into())
             .map_err(|err| MorphTxError::TokenInfoFetchFailed {
-                token_id: 0, // token_id not yet extracted
+                // The failure is in getting a state provider at all, so no token ID is known.
+                token_id: None,
                 message: err.to_string(),
             })?;
 
@@ -517,6 +515,24 @@ where
         self.inner.on_new_head_block(new_tip_block);
         self.update_l1_block_info(new_tip_block.header());
     }
+}
+
+/// Maps a [`MorphTxError`] onto the right validation outcome.
+///
+/// [`TransactionValidationOutcome::Invalid`] is a verdict on the transaction: the pool
+/// records it as known-bad and the network layer holds the peer that sent it responsible.
+/// A failed state read is not such a verdict — the transaction may be perfectly valid and
+/// simply could not be checked — so it is reported as
+/// [`TransactionValidationOutcome::Error`], which discards this attempt without blaming
+/// anyone and leaves the sender free to try again.
+fn morph_tx_validation_outcome<Tx: EthPoolTransaction>(
+    transaction: Tx,
+    err: MorphTxError,
+) -> TransactionValidationOutcome<Tx> {
+    if matches!(err, MorphTxError::TokenInfoFetchFailed { .. }) {
+        return TransactionValidationOutcome::Error(*transaction.hash(), Box::new(err));
+    }
+    TransactionValidationOutcome::Invalid(transaction, err.into())
 }
 
 /// Helper function to check if a transaction is an L1 message.
@@ -604,6 +620,55 @@ mod tests {
                 token_balance,
             ),
         ])
+    }
+
+    fn morph_tx_for_outcome_test() -> crate::MorphPooledTransaction {
+        let tx = TxMorph {
+            chain_id: 2818,
+            nonce: 0,
+            gas_limit: 21_000,
+            max_fee_per_gas: 100,
+            max_priority_fee_per_gas: 10,
+            to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
+            fee_token_id: 1,
+            ..Default::default()
+        };
+        let recovered = Recovered::new_unchecked(
+            MorphTxEnvelope::Morph(Signed::new_unhashed(tx, Signature::test_signature())),
+            address!("0000000000000000000000000000000000000001"),
+        );
+        let encoded_len = recovered.encode_2718_len();
+        crate::MorphPooledTransaction::new(recovered, encoded_len)
+    }
+
+    #[test]
+    fn an_unreadable_fee_token_state_is_an_error_not_an_invalid_transaction() {
+        let tx = morph_tx_for_outcome_test();
+        let hash = *tx.hash();
+
+        let outcome = morph_tx_validation_outcome(
+            tx,
+            MorphTxError::TokenInfoFetchFailed {
+                token_id: None,
+                message: "provider unavailable".to_string(),
+            },
+        );
+        assert!(
+            matches!(outcome, TransactionValidationOutcome::Error(reported, _) if reported == hash),
+            "a failed state read must not mark the transaction known-bad: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn a_real_fee_token_failure_is_still_an_invalid_transaction() {
+        let outcome = morph_tx_validation_outcome(
+            morph_tx_for_outcome_test(),
+            MorphTxError::TokenNotActive { token_id: 1 },
+        );
+        assert!(
+            matches!(outcome, TransactionValidationOutcome::Invalid(..)),
+            "{outcome:?}"
+        );
     }
 
     #[test]

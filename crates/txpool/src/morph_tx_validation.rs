@@ -109,7 +109,7 @@ pub fn validate_morph_tx<DB: Database>(
 
     let token_info = TokenFeeInfo::load_for_caller(db, fee_token_id, input.sender, input.hardfork)
         .map_err(|err| MorphTxError::TokenInfoFetchFailed {
-            token_id: fee_token_id,
+            token_id: Some(fee_token_id),
             message: format!("{err:?}"),
         })?
         .ok_or(MorphTxError::TokenNotFound {
