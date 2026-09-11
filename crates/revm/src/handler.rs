@@ -471,6 +471,12 @@ where
         };
 
         if let Err(err) = refund_result {
+            // A contract may reject a refund, but unavailable state is not a verdict
+            // about the contract. Internal calls have already taken the context error,
+            // so it must reach the executor here rather than disappearing at finalization.
+            if matches!(err, EVMError::Database(_)) {
+                return Err(err);
+            }
             tracing::error!(
                 target: "morph::evm",
                 token_id = ?evm.ctx_ref().tx().fee_token_id,
@@ -825,13 +831,15 @@ where
     let mut h = MorphEvmHandler::<DB, I>::new();
     let init_and_floor_gas = InitialAndFloorGas::new(0, 0);
     let mut gas = h.tx_gas(evm, &init_and_floor_gas);
-    // A database failure inside the frame is recorded on the context and surfaces as a halt,
-    // not as an `Err`. Running the frame group directly skips the step that normally converts
-    // it, so an I/O failure would otherwise be indistinguishable from the token reverting.
-    debug_assert!(
-        evm.ctx_ref().error.is_ok(),
-        "context error must be taken before evm_call"
-    );
+    // A database failure inside a frame is recorded on the context and surfaces as a halt,
+    // not as an `Err`; `execution_result` is what normally converts it, and running the
+    // frame group directly skips that step. So the context error is taken here twice.
+    // Before the call, because post-execution still runs after the main frame halts on
+    // such a failure, and the refund path lands here: a nested call must not run in a
+    // context the main frame already poisoned, and the failure it reports must stay the
+    // main frame's. After the call, so a failure inside it is reported as an error rather
+    // than mistaken for the token reverting.
+    take_context_error(evm)?;
     // `execution` owns this checkpoint: it commits once the runtime gas phase is done, or
     // unwinds to it when that phase runs out of gas. The `None` arm is only reachable
     // under EIP-2780 (AMSTERDAM), which Morph never enables, so it is unreachable today;
@@ -841,11 +849,22 @@ where
         Some(res) => Ok(res),
         None => h.runtime_oog_result(evm, &init_and_floor_gas, &mut gas),
     };
+    take_context_error(evm)?;
+    result
+}
+
+/// Moves a database failure recorded on the context into the return path.
+#[inline]
+fn take_context_error<DB, I>(
+    evm: &mut MorphEvm<DB, I>,
+) -> Result<(), EVMError<DB::Error, MorphInvalidTransaction>>
+where
+    DB: alloy_evm::Database,
+{
     revm::context_interface::context::take_error::<
         EVMError<DB::Error, MorphInvalidTransaction>,
         DB::Error,
-    >(&mut evm.ctx_mut().error)?;
-    result
+    >(&mut evm.ctx_mut().error)
 }
 
 /// Query ERC20 `balanceOf(address)` via an internal EVM call.
@@ -949,10 +968,11 @@ where
 
     with_evm_checkpoint(evm, |evm| {
         let calldata = build_transfer_calldata(to, token_amount);
-        let frame_result = evm_call(evm, from, token_address, calldata).map_err(|e| {
-            EVMError::Transaction(MorphInvalidTransaction::TokenTransferFailed {
+        let frame_result = evm_call(evm, from, token_address, calldata).map_err(|e| match e {
+            EVMError::Database(_) => e,
+            _ => EVMError::Transaction(MorphInvalidTransaction::TokenTransferFailed {
                 reason: format!("Error: {e:?}"),
-            })
+            }),
         })?;
 
         if !frame_result.instruction_result().is_ok() {
@@ -1107,6 +1127,231 @@ mod tests {
         Arc,
         atomic::{AtomicBool, Ordering},
     };
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct TokenReadFailure;
+    impl core::fmt::Display for TokenReadFailure {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.write_str("injected refund balance read failure")
+        }
+    }
+    impl core::error::Error for TokenReadFailure {}
+    impl revm::database_interface::DBErrorMarker for TokenReadFailure {}
+
+    #[derive(Debug)]
+    struct UnreadableTokenDb {
+        inner: CacheDB<EmptyDB>,
+        token: Address,
+    }
+    impl revm::Database for UnreadableTokenDb {
+        type Error = TokenReadFailure;
+        fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
+            Ok(revm::Database::basic(&mut self.inner, address).unwrap())
+        }
+        fn code_by_hash(&mut self, hash: B256) -> Result<Bytecode, Self::Error> {
+            Ok(revm::Database::code_by_hash(&mut self.inner, hash).unwrap())
+        }
+        fn storage(&mut self, address: Address, index: U256) -> Result<U256, Self::Error> {
+            if address == self.token {
+                return Err(TokenReadFailure);
+            }
+            Ok(revm::Database::storage(&mut self.inner, address, index).unwrap())
+        }
+        fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error> {
+            Ok(revm::Database::block_hash(&mut self.inner, number).unwrap())
+        }
+    }
+
+    fn finish_transaction_with_refund(
+        code: Bytes,
+    ) -> Result<ExecutionResult<MorphHaltReason>, EVMError<TokenReadFailure, MorphInvalidTransaction>>
+    {
+        let caller = address!("1000000000000000000000000000000000000001");
+        let beneficiary = address!("2000000000000000000000000000000000000002");
+        let token = address!("3000000000000000000000000000000000000003");
+        let target = address!("4000000000000000000000000000000000000004");
+        let mut inner = CacheDB::new(EmptyDB::default());
+        inner.insert_account_info(
+            token,
+            AccountInfo {
+                code_hash: keccak256(code.as_ref()),
+                code: Some(Bytecode::new_raw(code)),
+                ..Default::default()
+            },
+        );
+        let mut evm = MorphEvm::new(
+            MorphContext::new(UnreadableTokenDb { inner, token }, MorphHardfork::Emerald),
+            NoOpInspector,
+        );
+        evm.block.inner.beneficiary = beneficiary;
+        // Produce a real successful main frame. The remainder of this probe enters the
+        // normal reimbursement and result-finalization phases with an unused gas budget.
+        let frame = evm_call(&mut evm, caller, target, Bytes::new()).unwrap();
+        evm.tx = MorphTxEnv {
+            inner: TxEnv {
+                tx_type: MORPH_TX_TYPE_ID,
+                caller,
+                gas_price: 1,
+                gas_limit: 30_000,
+                kind: TxKind::Call(target),
+                ..Default::default()
+            },
+            fee_token_id: Some(1),
+            ..Default::default()
+        };
+        evm.cached_token_fee_info = Some(TokenFeeInfo {
+            token_address: token,
+            is_active: true,
+            price_ratio: U256::from(1),
+            scale: U256::from(1),
+            caller,
+            balance: U256::from(100_000),
+            balance_slot: None,
+            ..Default::default()
+        });
+        let mut handler = MorphEvmHandler::<_, NoOpInspector>::default();
+        handler
+            .reimburse_caller_token_fee(&mut evm, &Gas::new(1_000))
+            .and_then(|_| handler.execution_result(&mut evm, frame, ResultGas::default()))
+    }
+
+    /// A readable token under [`UnreadableTokenDb`], so any failure reported below comes
+    /// from the context, not from a read.
+    fn readable_token_evm() -> MorphEvm<UnreadableTokenDb, NoOpInspector> {
+        let token = address!("3000000000000000000000000000000000000003");
+        let mut inner = CacheDB::new(EmptyDB::default());
+        insert_contract(
+            &mut inner,
+            token,
+            alloy_primitives::bytes!("6000545f5260205ff3"),
+        );
+        inner
+            .insert_account_storage(token, U256::ZERO, U256::from(42))
+            .unwrap();
+        MorphEvm::new(
+            MorphContext::new(
+                UnreadableTokenDb {
+                    inner,
+                    // Nothing reads this address, so every storage read succeeds.
+                    token: address!("9000000000000000000000000000000000000009"),
+                },
+                MorphHardfork::Emerald,
+            ),
+            NoOpInspector,
+        )
+    }
+
+    #[test]
+    fn a_nested_call_does_not_run_in_a_context_the_main_frame_already_poisoned() {
+        let token = address!("3000000000000000000000000000000000000003");
+        let account = address!("1000000000000000000000000000000000000001");
+        let mut evm = readable_token_evm();
+        assert_eq!(
+            evm_call_balance_of(&mut evm, token, account).unwrap(),
+            U256::from(42),
+            "sanity: the token is readable"
+        );
+
+        // The main frame halted on a failed read; post-execution then reaches this call.
+        evm.ctx_mut().error = Err(revm::context_interface::context::ContextError::Db(
+            TokenReadFailure,
+        ));
+        let result = evm_call_balance_of(&mut evm, token, account);
+        assert!(
+            matches!(result, Err(EVMError::Database(TokenReadFailure))),
+            "the main frame's failure must be reported, not overwritten by a nested call: {result:?}"
+        );
+        assert!(
+            evm.ctx_ref().error.is_ok(),
+            "the failure has been moved into the return path"
+        );
+    }
+
+    #[test]
+    fn a_refund_after_a_poisoned_main_frame_reports_the_main_frame_failure() {
+        let caller = address!("1000000000000000000000000000000000000001");
+        let token = address!("3000000000000000000000000000000000000003");
+        let mut evm = readable_token_evm();
+        evm.block.inner.beneficiary = address!("2000000000000000000000000000000000000002");
+        evm.tx = MorphTxEnv {
+            inner: TxEnv {
+                tx_type: MORPH_TX_TYPE_ID,
+                caller,
+                gas_price: 1,
+                gas_limit: 30_000,
+                ..Default::default()
+            },
+            fee_token_id: Some(1),
+            ..Default::default()
+        };
+        evm.cached_token_fee_info = Some(TokenFeeInfo {
+            token_address: token,
+            is_active: true,
+            price_ratio: U256::from(1),
+            scale: U256::from(1),
+            caller,
+            balance: U256::from(100_000),
+            balance_slot: None,
+            ..Default::default()
+        });
+        evm.ctx_mut().error = Err(revm::context_interface::context::ContextError::Db(
+            TokenReadFailure,
+        ));
+
+        let result = MorphEvmHandler::<_, NoOpInspector>::default()
+            .reimburse_caller_token_fee(&mut evm, &Gas::new(1_000));
+        assert!(
+            matches!(result, Err(EVMError::Database(TokenReadFailure))),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn refund_database_failure_aborts_final_execution_result() {
+        let result = finish_transaction_with_refund(alloy_primitives::bytes!("6000545f5260205ff3"));
+        assert!(
+            matches!(result, Err(EVMError::Database(TokenReadFailure))),
+            "refund I/O must abort execution, not finalize success without a refund: {result:?}"
+        );
+    }
+
+    #[test]
+    fn refund_contract_revert_still_allows_transaction_to_finish() {
+        let result = finish_transaction_with_refund(alloy_primitives::bytes!("5f5ffd"));
+        assert!(
+            matches!(result, Ok(ExecutionResult::Success { .. })),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn token_transfer_database_failure_is_not_transaction_invalidity() {
+        let token = address!("3000000000000000000000000000000000000003");
+        let from = address!("1000000000000000000000000000000000000001");
+        let to = address!("2000000000000000000000000000000000000002");
+        let mut inner = CacheDB::new(EmptyDB::default());
+        insert_contract(
+            &mut inner,
+            token,
+            alloy_primitives::bytes!("6000545f5260205ff3"),
+        );
+        let mut evm = MorphEvm::new(
+            MorphContext::new(UnreadableTokenDb { inner, token }, MorphHardfork::Emerald),
+            NoOpInspector,
+        );
+        let result = transfer_erc20_with_evm(
+            &mut evm,
+            from,
+            to,
+            token,
+            U256::from(1),
+            Some(U256::from(10)),
+        );
+        assert!(
+            matches!(result, Err(EVMError::Database(TokenReadFailure))),
+            "{result:?}"
+        );
+    }
 
     fn mutating_return_code(write_value: u8, return_value: u8) -> Bytes {
         Bytes::from(vec![
