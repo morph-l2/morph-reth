@@ -41,8 +41,9 @@ use alloy_consensus::Typed2718;
 use alloy_primitives::{Address, TxHash, U256};
 use futures::{FutureExt, StreamExt};
 use morph_chainspec::hardfork::{MorphHardfork, MorphHardforks};
-use morph_revm::L1BlockInfo;
+use morph_revm::{L1BlockInfo, MorphBlockEnv, MorphEvmEnv};
 use reth_chainspec::ChainSpecProvider;
+use reth_evm::{ConfigureEvm, EvmFactory, EvmFactoryFor};
 use reth_primitives_traits::AlloyBlockHeader;
 use reth_provider::CanonStateSubscriptions;
 use reth_revm::database::StateProviderDatabase;
@@ -144,10 +145,11 @@ const fn is_transient(err: &MorphTxError) -> bool {
 fn collect_removable_transactions<DB: alloy_evm::Database>(
     db: &mut DB,
     l1_block_info: &L1BlockInfo,
-    hardfork: MorphHardfork,
+    evm_env: &MorphEvmEnv,
     block_gas_limit: u64,
     morph_txs: Vec<&MorphPooledTransaction>,
 ) -> Vec<TxHash> {
+    let hardfork = *evm_env.cfg_env.spec();
     // Group by sender and process in nonce order so affordability is validated cumulatively.
     let mut txs_by_sender: HashMap<Address, Vec<&MorphPooledTransaction>> = HashMap::new();
     for tx in morph_txs {
@@ -230,6 +232,7 @@ fn collect_removable_transactions<DB: alloy_evm::Database>(
                 eth_balance: budget.eth_balance,
                 l1_data_fee,
                 hardfork,
+                evm_env,
             };
 
             let validation = match crate::validate_morph_tx(db, &input) {
@@ -306,7 +309,7 @@ fn collect_removable_transactions<DB: alloy_evm::Database>(
 /// - Re-validates MorphTx (0x7F) transactions in the pool
 /// - Removes transactions that no longer have sufficient token balance
 ///
-pub async fn maintain_morph_pool<Pool, Client>(pool: Pool, client: Client)
+pub async fn maintain_morph_pool<Pool, Client, Evm>(pool: Pool, client: Client, evm_config: Evm)
 where
     Pool: TransactionPool<Transaction = MorphPooledTransaction> + Clone,
     Client: ChainSpecProvider<ChainSpec: MorphHardforks>
@@ -314,18 +317,21 @@ where
         + CanonStateSubscriptions
         + Clone
         + 'static,
+    Evm: ConfigureEvm<Primitives = <Client as reth_provider::NodePrimitivesProvider>::Primitives>,
+    EvmFactoryFor<Evm>: EvmFactory<Spec = MorphHardfork, BlockEnv = MorphBlockEnv>,
 {
     let chain_events = client.canonical_state_stream();
 
     tracing::info!(target: "morph::txpool::maintain", "Starting MorphTx maintenance task");
 
-    maintain_morph_pool_with(pool, client, chain_events).await;
+    maintain_morph_pool_with(pool, client, evm_config, chain_events).await;
 }
 
 /// [`maintain_morph_pool`] with an explicit canonical event stream.
-async fn maintain_morph_pool_with<Pool, Client, Events>(
+async fn maintain_morph_pool_with<Pool, Client, Evm, Events>(
     pool: Pool,
     client: Client,
+    evm_config: Evm,
     mut chain_events: Events,
 ) where
     Pool: TransactionPool<Transaction = MorphPooledTransaction> + Clone,
@@ -334,6 +340,8 @@ async fn maintain_morph_pool_with<Pool, Client, Events>(
         + CanonStateSubscriptions
         + Clone
         + 'static,
+    Evm: ConfigureEvm<Primitives = <Client as reth_provider::NodePrimitivesProvider>::Primitives>,
+    EvmFactoryFor<Evm>: EvmFactory<Spec = MorphHardfork, BlockEnv = MorphBlockEnv>,
     Events:
         futures::Stream<Item = reth_provider::CanonStateNotification<Client::Primitives>> + Unpin,
 {
@@ -354,7 +362,6 @@ async fn maintain_morph_pool_with<Pool, Client, Events>(
 
         let new_tip = event.tip();
         let block_number = new_tip.number();
-        let block_timestamp = new_tip.timestamp();
         let block_gas_limit = new_tip.gas_limit();
 
         tracing::trace!(
@@ -363,10 +370,20 @@ async fn maintain_morph_pool_with<Pool, Client, Events>(
             "Processing new block for MorphTx validation"
         );
 
-        // Get the hardfork at this block
-        let hardfork = client
-            .chain_spec()
-            .morph_hardfork_at(block_number, block_timestamp);
+        // Build the environment execution would use for this block, so a call-mode fee
+        // token's `balanceOf` resolves to the balance the execution layer would see.
+        let evm_env = match evm_config.evm_env(new_tip.header()) {
+            Ok(evm_env) => evm_env,
+            Err(err) => {
+                tracing::warn!(
+                    target: "morph::txpool::maintain",
+                    %err,
+                    "Failed to build EVM env for MorphTx revalidation"
+                );
+                continue;
+            }
+        };
+        let hardfork = *evm_env.cfg_env.spec();
 
         // Collect all MorphTx transactions from the pool
         let all_txs = pool.all_transactions();
@@ -419,7 +436,7 @@ async fn maintain_morph_pool_with<Pool, Client, Events>(
         let to_remove = collect_removable_transactions(
             &mut db,
             &l1_block_info,
-            hardfork,
+            &evm_env,
             block_gas_limit,
             morph_txs,
         );
@@ -687,11 +704,19 @@ mod tests {
         MorphPooledTransaction::new(recovered, encoded_len)
     }
 
+    /// The environment the revalidation round is evaluated in.
+    fn test_evm_env() -> MorphEvmEnv {
+        MorphEvmEnv::new(
+            reth_revm::revm::context::CfgEnv::new_with_spec(MorphHardfork::Emerald),
+            MorphBlockEnv::default(),
+        )
+    }
+
     fn removable(db: &mut CacheDB<EmptyDB>, txs: Vec<&MorphPooledTransaction>) -> Vec<TxHash> {
         collect_removable_transactions(
             db,
             &L1BlockInfo::default(),
-            MorphHardfork::Emerald,
+            &test_evm_env(),
             30_000_000,
             txs,
         )
@@ -791,7 +816,7 @@ mod tests {
         let to_remove = collect_removable_transactions(
             &mut db,
             &L1BlockInfo::default(),
-            MorphHardfork::Emerald,
+            &test_evm_env(),
             30_000_000,
             vec![&tx],
         );
@@ -966,6 +991,7 @@ mod tests {
         futures::executor::block_on(maintain_morph_pool_with(
             pool.clone(),
             client,
+            MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone()),
             futures::stream::iter([event]),
         ));
 

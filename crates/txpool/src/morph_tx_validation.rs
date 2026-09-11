@@ -8,7 +8,7 @@ use alloy_evm::Database;
 use alloy_primitives::{Address, U256};
 use morph_chainspec::hardfork::MorphHardfork;
 use morph_primitives::{MorphTxEnvelope, transaction::morph_transaction::MORPH_TX_VERSION_1};
-use morph_revm::TokenFeeInfo;
+use morph_revm::{MorphEvmEnv, TokenFeeInfo};
 
 use crate::MorphTxError;
 
@@ -27,6 +27,11 @@ pub struct MorphTxValidationInput<'a> {
     pub l1_data_fee: U256,
     /// Current hardfork
     pub hardfork: MorphHardfork,
+    /// The environment a call-mode fee token's `balanceOf` is evaluated in.
+    ///
+    /// Must be the environment of the block whose state `db` exposes, so admission and
+    /// maintenance resolve the same balance the execution layer would.
+    pub evm_env: &'a MorphEvmEnv,
 }
 
 /// Result of MorphTx validation.
@@ -107,7 +112,7 @@ pub fn validate_morph_tx<DB: Database>(
         });
     }
 
-    let token_info = TokenFeeInfo::load_for_caller(db, fee_token_id, input.sender, input.hardfork)
+    let token_info = TokenFeeInfo::load_for_caller(db, fee_token_id, input.sender, input.evm_env)
         .map_err(|err| MorphTxError::TokenInfoFetchFailed {
             token_id: Some(fee_token_id),
             message: format!("{err:?}"),
@@ -166,6 +171,14 @@ pub fn validate_morph_tx<DB: Database>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The environment the fee-token balance query is evaluated in.
+    fn test_evm_env(hardfork: MorphHardfork) -> MorphEvmEnv {
+        MorphEvmEnv::new(
+            reth_revm::revm::context::CfgEnv::new_with_spec(hardfork),
+            morph_revm::MorphBlockEnv::default(),
+        )
+    }
     use alloy_consensus::Signed;
     use alloy_primitives::{B256, Signature, TxKind, address};
     use morph_primitives::{TxMorph, transaction::morph_transaction::MORPH_TX_VERSION_1};
@@ -201,6 +214,7 @@ mod tests {
             eth_balance: U256::from(1_000_000_000_000_000_000u128), // 1 ETH
             l1_data_fee: U256::from(100_000),
             hardfork: MorphHardfork::Viridian,
+            evm_env: &test_evm_env(MorphHardfork::Viridian),
         };
 
         assert_eq!(input.sender, sender);
@@ -239,6 +253,7 @@ mod tests {
             eth_balance: U256::from(1_000_000_000_000_000_000u128),
             l1_data_fee: U256::ZERO,
             hardfork: MorphHardfork::Jade,
+            evm_env: &test_evm_env(MorphHardfork::Jade),
         };
         let mut db = EmptyDB::default();
 
@@ -280,6 +295,7 @@ mod tests {
             eth_balance: U256::from(1_000_000_000_000_000_000u128),
             l1_data_fee: U256::ZERO,
             hardfork: MorphHardfork::Viridian,
+            evm_env: &test_evm_env(MorphHardfork::Viridian),
         };
         let mut db = EmptyDB::default();
 
@@ -317,6 +333,7 @@ mod tests {
             eth_balance: U256::from(100u64), // Insufficient ETH
             l1_data_fee: U256::ZERO,
             hardfork: MorphHardfork::Viridian,
+            evm_env: &test_evm_env(MorphHardfork::Viridian),
         };
         let mut db = EmptyDB::default();
 
@@ -358,6 +375,7 @@ mod tests {
             eth_balance: U256::from(10u128.pow(18)), // 1 ETH (sufficient)
             l1_data_fee: U256::from(1000u64),
             hardfork: MorphHardfork::Jade,
+            evm_env: &test_evm_env(MorphHardfork::Jade),
         };
         let mut db = EmptyDB::default();
 
@@ -400,6 +418,7 @@ mod tests {
             eth_balance: U256::from(100u64), // Way too low
             l1_data_fee: U256::from(1000u64),
             hardfork: MorphHardfork::Jade,
+            evm_env: &test_evm_env(MorphHardfork::Jade),
         };
         let mut db = EmptyDB::default();
 
@@ -438,6 +457,7 @@ mod tests {
             eth_balance: U256::from(10u128.pow(18)),
             l1_data_fee: U256::ZERO,
             hardfork: MorphHardfork::Viridian,
+            evm_env: &test_evm_env(MorphHardfork::Viridian),
         };
         let mut db = EmptyDB::default();
 

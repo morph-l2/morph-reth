@@ -12,14 +12,14 @@ use crate::MorphTxError;
 use alloy_consensus::{BlockHeader, Transaction};
 use alloy_eips::{Encodable2718, Typed2718};
 use alloy_primitives::{Address, U256};
-use morph_chainspec::hardfork::MorphHardforks;
+use morph_chainspec::hardfork::{MorphHardfork, MorphHardforks};
 use morph_primitives::MorphTxEnvelope;
-use morph_revm::L1BlockInfo;
+use morph_revm::{L1BlockInfo, MorphBlockEnv, MorphEvmEnv};
 use parking_lot::RwLock;
 use reth_chainspec::ChainSpecProvider;
-use reth_evm::ConfigureEvm;
+use reth_evm::{ConfigureEvm, EvmFactory, EvmFactoryFor};
 use reth_primitives_traits::{
-    Block, BlockTy, GotExpected, SealedBlock, transaction::error::InvalidTransactionError,
+    Block, BlockTy, GotExpected, HeaderTy, SealedBlock, transaction::error::InvalidTransactionError,
 };
 use reth_revm::database::StateProviderDatabase;
 use reth_storage_api::{BlockReaderIdExt, StateProviderFactory};
@@ -54,6 +54,11 @@ pub struct MorphL1BlockInfo {
     timestamp: AtomicU64,
     /// Current block number.
     number: AtomicU64,
+    /// The head block's EVM environment, as `ConfigureEvm` would build it for execution.
+    ///
+    /// A call-mode fee token's `balanceOf` is evaluated in this, so admission resolves the
+    /// same balance the execution layer would rather than one under a default environment.
+    evm_env: RwLock<MorphEvmEnv>,
 }
 
 impl MorphL1BlockInfo {
@@ -176,9 +181,14 @@ fn insufficient_funds_outcome<Tx: PoolTransaction>(
 
 impl<Client, Tx, Evm> MorphTransactionValidator<Client, Tx, Evm>
 where
-    Client: ChainSpecProvider<ChainSpec: MorphHardforks> + StateProviderFactory + BlockReaderIdExt,
+    Client: ChainSpecProvider<ChainSpec: MorphHardforks>
+        + StateProviderFactory
+        + BlockReaderIdExt<Header = HeaderTy<Evm::Primitives>>,
     Tx: EthPoolTransaction<Consensus = MorphTxEnvelope>,
     Evm: ConfigureEvm,
+    // Pins the cached environment to Morph's, so the fee-token balance query runs in
+    // exactly what the execution layer would use.
+    EvmFactoryFor<Evm>: EvmFactory<Spec = MorphHardfork, BlockEnv = MorphBlockEnv>,
 {
     /// Create a new [`MorphTransactionValidator`].
     pub fn new(inner: EthTransactionValidator<Client, Tx, Evm>) -> Self {
@@ -206,10 +216,7 @@ where
     }
 
     /// Update the L1 block info for the given header.
-    pub fn update_l1_block_info<H>(&self, header: &H)
-    where
-        H: BlockHeader,
-    {
+    pub fn update_l1_block_info(&self, header: &HeaderTy<Evm::Primitives>) {
         self.block_info
             .timestamp
             .store(header.timestamp(), Ordering::Relaxed);
@@ -217,6 +224,13 @@ where
             .number
             .store(header.number(), Ordering::Relaxed);
         *self.block_info.base_fee_per_gas.write() = header.base_fee_per_gas();
+
+        match self.inner.evm_config().evm_env(header) {
+            Ok(evm_env) => *self.block_info.evm_env.write() = evm_env,
+            Err(err) => {
+                tracing::warn!(target: "morph::txpool", %err, "Failed to build EVM env for head block")
+            }
+        }
 
         let provider = match self
             .client()
@@ -436,6 +450,7 @@ where
             })?;
 
         let mut db = StateProviderDatabase::new(provider);
+        let evm_env = self.block_info.evm_env.read().clone();
 
         // Use shared validation logic with unified API (includes ETH balance check)
         let input = crate::MorphTxValidationInput {
@@ -444,6 +459,7 @@ where
             eth_balance,
             l1_data_fee,
             hardfork,
+            evm_env: &evm_env,
         };
 
         let result = crate::validate_morph_tx(&mut db, &input)?;
@@ -488,9 +504,14 @@ where
 
 impl<Client, Tx, Evm> TransactionValidator for MorphTransactionValidator<Client, Tx, Evm>
 where
-    Client: ChainSpecProvider<ChainSpec: MorphHardforks> + StateProviderFactory + BlockReaderIdExt,
+    Client: ChainSpecProvider<ChainSpec: MorphHardforks>
+        + StateProviderFactory
+        + BlockReaderIdExt<Header = HeaderTy<Evm::Primitives>>,
     Tx: EthPoolTransaction<Consensus = MorphTxEnvelope>,
     Evm: ConfigureEvm,
+    // Pins the cached environment to Morph's, so the fee-token balance query runs in
+    // exactly what the execution layer would use.
+    EvmFactoryFor<Evm>: EvmFactory<Spec = MorphHardfork, BlockEnv = MorphBlockEnv>,
 {
     type Transaction = Tx;
     type Block = BlockTy<Evm::Primitives>;
