@@ -21,7 +21,10 @@ use crate::{
     error::MorphHaltReason,
     evm::MorphContext,
     l1block::L1BlockInfo,
-    token_fee::{TokenRegistryEntry, compute_mapping_slot_for_address, encode_balance_of_calldata},
+    token_fee::{
+        TokenFeeInfo, TokenRegistryEntry, compute_mapping_slot_for_address,
+        encode_balance_of_calldata, read_balance_from_storage,
+    },
     tx::MorphTxExt,
 };
 
@@ -555,11 +558,7 @@ where
 
         let hardfork = *evm.ctx_ref().cfg().spec();
 
-        let token_fee_info = token_registry_entry.load_for_caller(
-            evm.ctx_mut().journal_mut().db_mut(),
-            caller_addr,
-            hardfork,
-        )?;
+        let token_fee_info = load_token_fee_info(evm, token_registry_entry, caller_addr)?;
 
         let beneficiary = evm.ctx_ref().block().beneficiary();
         let rlp_bytes = evm.ctx_ref().tx().rlp_bytes.clone().unwrap_or_default();
@@ -841,24 +840,70 @@ where
 ///
 /// Uses [`with_evm_snapshot`] to match go-ethereum's StaticCall semantics:
 /// all state changes and `evm.tx` mutations are reverted after the call.
-fn evm_call_balance_of<DB, I>(evm: &mut MorphEvm<DB, I>, token: Address, account: Address) -> U256
+fn evm_call_balance_of<DB, I>(
+    evm: &mut MorphEvm<DB, I>,
+    token: Address,
+    account: Address,
+) -> Result<U256, EVMError<DB::Error, MorphInvalidTransaction>>
 where
     DB: alloy_evm::Database,
 {
     with_evm_snapshot(evm, |evm| {
         let calldata = encode_balance_of_calldata(account);
-        match evm_call(evm, Address::ZERO, token, calldata) {
+        // go-ethereum passes the queried account as the caller
+        // (`sender := vm.AccountRef(userAddress)`, core/token_gas.go:109).
+        match evm_call(evm, account, token, calldata) {
             Ok(ref result) if result.instruction_result().is_ok() => {
                 let output = &result.interpreter_result().output;
-                if output.len() >= 32 {
+                Ok(if output.len() >= 32 {
                     U256::from_be_slice(&output[..32])
                 } else {
                     U256::ZERO
-                }
+                })
             }
-            _ => U256::ZERO,
+            // The token reverted or returned nothing usable: a zero balance, which the
+            // caller turns into the same rejection go-ethereum reaches by erroring out of
+            // `buyAltTokenGas` (core/state_transition.go:314).
+            Ok(_) => Ok(U256::ZERO),
+            // A failed state read is not an answer about the balance, and must never be
+            // turned into one: it would make an I/O failure change the block's outcome.
+            Err(err @ EVMError::Database(_)) => Err(err),
+            Err(_) => Ok(U256::ZERO),
         }
     })
+}
+
+/// Resolves the caller's fee-token balance against the **executing** EVM.
+///
+/// go-ethereum reads it through `st.evm` (`GetAltTokenBalanceHybrid`, core/token_gas.go:43),
+/// so the `balanceOf` call sees the real block context, the real chain config and the user as
+/// `msg.sender`. Building a throwaway EVM here instead would answer under
+/// `BlockEnv::default()` and `CfgEnv::default()` — block 0, timestamp 1, chain id 1, zero
+/// coinbase and base fee — with `SYSTEM_ADDRESS` as the sender and a 30M gas limit in place
+/// of go-ethereum's 200k. For any token whose `balanceOf` reads that context the two clients
+/// would charge different fees for the same transaction.
+fn load_token_fee_info<DB, I>(
+    evm: &mut MorphEvm<DB, I>,
+    entry: TokenRegistryEntry,
+    caller: Address,
+) -> Result<TokenFeeInfo, EVMError<DB::Error, MorphInvalidTransaction>>
+where
+    DB: alloy_evm::Database,
+{
+    let balance = match entry.balance_slot() {
+        // Slot mode is a plain storage read with no environment to get wrong. It goes
+        // through the database rather than the journal deliberately: the journal is empty
+        // at this point in the transaction, and an `sload` here would warm a slot that the
+        // fee deduction below is careful to leave cold.
+        Some(slot) => read_balance_from_storage(
+            evm.ctx_mut().journal_mut().db_mut(),
+            entry.token_address(),
+            caller,
+            slot,
+        )?,
+        None => evm_call_balance_of(evm, entry.token_address(), caller)?,
+    };
+    Ok(entry.into_fee_info(caller, balance))
 }
 
 /// Matches go-ethereum's `transferAltTokenByEVM` validation:
@@ -887,7 +932,7 @@ where
     // This uses with_evm_snapshot internally, so evm.tx is safe.
     let from_balance_before = match from_balance_before {
         Some(b) => b,
-        None => evm_call_balance_of(evm, token_address, from),
+        None => evm_call_balance_of(evm, token_address, from)?,
     };
 
     with_evm_checkpoint(evm, |evm| {
@@ -919,7 +964,7 @@ where
 
         // Verify sender balance changed by the expected amount, matching go-ethereum.
         // evm_call_balance_of uses with_evm_snapshot, so evm.tx is safe here too.
-        let from_balance_after = evm_call_balance_of(evm, token_address, from);
+        let from_balance_after = evm_call_balance_of(evm, token_address, from)?;
 
         // Verify sender balance decreased by exactly the transfer amount.
         // Matches go-ethereum's transferAltTokenByEVM which always checks this,
@@ -1102,6 +1147,77 @@ mod tests {
         fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error> {
             revm::Database::block_hash(&mut self.inner, number)
         }
+    }
+
+    /// `<opcode> PUSH0 MSTORE PUSH1 0x20 PUSH0 RETURN` — a `balanceOf` that reports one piece
+    /// of its environment instead of a balance, so a call made under the wrong environment
+    /// shows up in the value that comes back.
+    fn code_returning(opcode: u8) -> Bytes {
+        Bytes::from(vec![opcode, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3])
+    }
+
+    fn insert_contract(db: &mut CacheDB<EmptyDB>, address: Address, code: Bytes) {
+        db.insert_account_info(
+            address,
+            AccountInfo {
+                code_hash: keccak256(code.as_ref()),
+                code: Some(Bytecode::new_raw(code)),
+                ..Default::default()
+            },
+        );
+    }
+
+    /// Loads token 1's registry entry and resolves `caller`'s balance against `evm`.
+    fn probe_fee_token_balance(db: CacheDB<EmptyDB>, block: BlockEnv, caller: Address) -> U256 {
+        let mut evm = MorphEvm::new(MorphContext::new(db, MorphHardfork::Emerald), NoOpInspector);
+        evm.block = MorphBlockEnv { inner: block };
+
+        let entry = TokenRegistryEntry::load(evm.ctx_mut().journal_mut().db_mut(), 1)
+            .unwrap()
+            .unwrap();
+        load_token_fee_info(&mut evm, entry, caller)
+            .unwrap()
+            .balance
+    }
+
+    #[test]
+    fn fee_token_balance_is_read_under_the_executing_block_environment() {
+        const TIMESTAMP: u64 = 1_767_765_600;
+        let token = address!("5300000000000000000000000000000000000042");
+        let caller = address!("1000000000000000000000000000000000000001");
+
+        let mut db = CacheDB::new(EmptyDB::default());
+        insert_test_fee_token(&mut db, 1, token, true);
+        insert_contract(&mut db, token, code_returning(0x42)); // TIMESTAMP
+
+        let balance = probe_fee_token_balance(
+            db,
+            BlockEnv {
+                timestamp: U256::from(TIMESTAMP),
+                ..Default::default()
+            },
+            caller,
+        );
+
+        // `BlockEnv::default()` reports timestamp 1, which is what a throwaway EVM would
+        // have answered with regardless of the block being executed.
+        assert_eq!(balance, U256::from(TIMESTAMP));
+    }
+
+    #[test]
+    fn fee_token_balance_query_names_the_queried_account_as_the_caller() {
+        let token = address!("5300000000000000000000000000000000000042");
+        let caller = address!("1000000000000000000000000000000000000001");
+
+        let mut db = CacheDB::new(EmptyDB::default());
+        insert_test_fee_token(&mut db, 1, token, true);
+        insert_contract(&mut db, token, code_returning(0x33)); // CALLER
+
+        let balance = probe_fee_token_balance(db, BlockEnv::default(), caller);
+
+        // go-ethereum queries as the account being asked about, not as the zero address and
+        // not as `SYSTEM_ADDRESS`.
+        assert_eq!(balance, U256::from_be_bytes(caller.into_word().0));
     }
 
     fn insert_test_fee_token(
@@ -1432,7 +1548,7 @@ mod tests {
             inner: BlockEnv::default(),
         };
 
-        let balance = evm_call_balance_of(&mut evm, token, account);
+        let balance = evm_call_balance_of(&mut evm, token, account).unwrap();
 
         assert_eq!(balance, U256::from(42));
         let slot_state = evm

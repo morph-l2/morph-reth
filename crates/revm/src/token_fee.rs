@@ -60,6 +60,18 @@ pub(crate) struct TokenRegistryEntry {
 }
 
 impl TokenRegistryEntry {
+    /// The registered ERC20 contract.
+    pub(crate) const fn token_address(&self) -> Address {
+        self.token_address
+    }
+
+    /// The caller's balance storage slot, when the registry declares one.
+    ///
+    /// `None` means call mode: the balance has to be read by calling `balanceOf`.
+    pub(crate) const fn balance_slot(&self) -> Option<U256> {
+        self.balance_slot
+    }
+
     /// Load fee-token metadata without reading a caller's token balance.
     pub(crate) fn load<DB: RevmDatabase>(
         db: &mut DB,
@@ -109,7 +121,7 @@ impl TokenRegistryEntry {
         Ok(self.into_fee_info(caller, balance))
     }
 
-    fn into_fee_info(self, caller: Address, balance: U256) -> TokenFeeInfo {
+    pub(crate) fn into_fee_info(self, caller: Address, balance: U256) -> TokenFeeInfo {
         TokenFeeInfo {
             token_address: self.token_address,
             is_active: self.is_active,
@@ -311,7 +323,7 @@ fn read_token_balance_with_fallback<DB: Database>(
 
 /// Read ERC20 balance directly from storage slot.
 #[inline]
-fn read_balance_from_storage<DB: RevmDatabase>(
+pub(crate) fn read_balance_from_storage<DB: RevmDatabase>(
     db: &mut DB,
     token: Address,
     account: Address,
