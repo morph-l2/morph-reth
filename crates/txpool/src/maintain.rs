@@ -20,8 +20,10 @@
 //! This task runs *alongside* [`reth_transaction_pool::maintain::maintain_transaction_pool`],
 //! and both subscribe to the canonical state stream independently — there is no ordering
 //! guarantee between them. Everything reth's task already understands (ETH balance, nonces,
-//! base fee, mined transactions) stays its responsibility; this task only adds the one
-//! dimension reth cannot see, the sender's **ERC20 token** balance.
+//! base fee, mined transactions) stays its responsibility. This task also checks the
+//! sender's **ERC20 token** balance and the **L1 data fees** missing from reth's cost.
+//! For a sender with MorphTx, an ordinary predecessor that cannot cover L1 fees is
+//! removed so its descendants are parked instead of remaining unchecked in pending.
 //!
 //! Because the ordering is not guaranteed, this task must tolerate seeing a pool snapshot
 //! that still contains transactions the new block already executed. It does so by reading
@@ -137,7 +139,7 @@ const fn is_transient(err: &MorphTxError) -> bool {
     matches!(err, MorphTxError::TokenInfoFetchFailed { .. })
 }
 
-/// Determines which MorphTx transactions are no longer viable at the given state.
+/// Determines which transactions to remove while revalidating senders with MorphTx.
 ///
 /// Returns the hashes to remove from the pool. Only the first offending transaction of a
 /// sender is returned: the pool parks the rest of that sender's transactions on its own when
@@ -189,6 +191,9 @@ fn collect_removable_transactions<DB: alloy_evm::Database>(
             eth_balance: account.balance,
             token_balances: HashMap::new(),
         };
+        // Track reth's cumulative ETH cost separately: it excludes L1 fees. This
+        // distinguishes shortfalls standard maintenance can park from ones it cannot see.
+        let mut pool_eth_cost = U256::ZERO;
         // The nonce the next executable transaction of this sender must carry.
         let mut next_nonce_in_line = account.nonce;
 
@@ -217,21 +222,33 @@ fn collect_removable_transactions<DB: alloy_evm::Database>(
                 break;
             }
             next_nonce_in_line = next_nonce_in_line.saturating_add(1);
+            pool_eth_cost = pool_eth_cost.saturating_add(*tx.cost());
 
             let l1_data_fee = l1_block_info.calculate_tx_l1_cost(tx.encoded_2718(), hardfork);
             if consensus_tx.ty() != morph_primitives::MORPH_TX_TYPE_ID {
-                // Keep ordinary predecessors in the walk. Their ETH spending is still
-                // owed before the later MorphTx can execute. Standard maintenance owns
-                // their removal, so stop here if a predecessor is no longer affordable.
-                if exceeds_block_gas_limit(consensus_tx.gas_limit(), block_gas_limit)
-                    || !consume_eth_budget(
-                        &mut budget,
-                        consensus_tx.value(),
-                        consensus_tx.gas_limit(),
-                        consensus_tx.max_fee_per_gas(),
-                        l1_data_fee,
-                    )
-                {
+                if exceeds_block_gas_limit(consensus_tx.gas_limit(), block_gas_limit) {
+                    break;
+                }
+                if !consume_eth_budget(
+                    &mut budget,
+                    consensus_tx.value(),
+                    consensus_tx.gas_limit(),
+                    consensus_tx.max_fee_per_gas(),
+                    l1_data_fee,
+                ) {
+                    // If reth's cost still fits, only the accumulated L1 fees make
+                    // this predecessor unaffordable. Reth would leave it and its
+                    // descendants pending, so remove it here to park the descendants.
+                    // Otherwise standard maintenance already owns the ETH shortfall.
+                    if pool_eth_cost <= account.balance {
+                        tracing::debug!(
+                            target: "morph::txpool::maintain",
+                            tx_hash = ?tx.hash(),
+                            ?sender,
+                            "Removing ordinary predecessor: insufficient ETH for cumulative L1 fees"
+                        );
+                        to_remove.push(*tx.hash());
+                    }
                     break;
                 }
                 continue;
@@ -333,6 +350,8 @@ fn collect_removable_transactions<DB: alloy_evm::Database>(
 /// - Listens for new canonical blocks
 /// - Re-validates MorphTx (0x7F) transactions in the pool
 /// - Removes transactions that no longer have sufficient token balance
+/// - Removes ordinary predecessors whose L1 fees make the sender's sequence unaffordable,
+///   parking their descendants
 ///
 pub async fn maintain_morph_pool<Pool, Client, Evm>(pool: Pool, client: Client, evm_config: Evm)
 where
@@ -484,7 +503,7 @@ async fn maintain_morph_pool_with<Pool, Client, Evm, Events>(
                 target: "morph::txpool::maintain",
                 count,
                 block_number,
-                "Removed invalid MorphTx transactions"
+                "Removed transactions during MorphTx revalidation"
             );
         }
     }
@@ -1053,6 +1072,132 @@ mod tests {
             pool.get(&token_tx).is_none(),
             "a pending MorphTx following a legacy nonce must still be checked after its token balance becomes zero"
         );
+    }
+
+    #[test]
+    fn ordinary_l1_fee_shortfall_parks_the_morph_successor() {
+        use reth_transaction_pool::TransactionPoolExt;
+
+        // With two ordinary predecessors, the first one's L1 fee leaves too little
+        // even for the second one's gas. The shortfall still belongs to Morph maintenance.
+        for (ordinary_count, l1_fee, eth_balance, token_balance) in [
+            (1, 0u64, 2_100_000u64, 0u64),
+            (1, 1_000_000, 2_100_000, 0),
+            (1, 1_000_000, 2_100_000, 21_000_000),
+            (2, 1_000_000, 4_200_000, 21_000_000),
+        ] {
+            let client = mock_provider(10_000_000, 10 * TX_TOKEN_BUDGET);
+            let validator = crate::MorphTransactionValidator::new(
+                EthTransactionValidatorBuilder::new(
+                    client.clone(),
+                    MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone()),
+                )
+                .disable_balance_check()
+                .with_custom_tx_type(morph_primitives::MORPH_TX_TYPE_ID)
+                .build::<MorphPooledTransaction, _>(InMemoryBlobStore::default()),
+            );
+            let pool = Pool::new(
+                validator,
+                CoinbaseTipOrdering::default(),
+                InMemoryBlobStore::default(),
+                Default::default(),
+            );
+            let ordinary: Vec<_> = (0..ordinary_count)
+                .map(|nonce| {
+                    futures::executor::block_on(pool.add_transaction(
+                        reth_transaction_pool::TransactionOrigin::Local,
+                        legacy_tx(nonce),
+                    ))
+                    .unwrap()
+                    .hash
+                })
+                .collect();
+            let token_tx = futures::executor::block_on(pool.add_transaction(
+                reth_transaction_pool::TransactionOrigin::Local,
+                token_fee_tx(ordinary_count),
+            ))
+            .unwrap()
+            .hash;
+            assert_eq!(pool.all_transactions().pending.len(), ordinary.len() + 1);
+
+            // All were affordable at admission. The new state still covers reth's
+            // ordinary transaction cost, but cannot cover the new L1 fee as well.
+            client.add_account(SIGNER, ExtendedAccount::new(0, U256::from(eth_balance)));
+            set_token_balance(&client, token_balance);
+            client.add_account(
+                morph_revm::L1_GAS_PRICE_ORACLE_ADDRESS,
+                ExtendedAccount::new(0, U256::ZERO).extend_storage([
+                    (storage_key(U256::from(1)), U256::from(1)),
+                    (
+                        storage_key(U256::from(7)),
+                        U256::from(l1_fee) * U256::from(1_000_000_000),
+                    ),
+                ]),
+            );
+            let mut block = head_block();
+            block.header.inner.number = 2;
+            block.header.inner.timestamp += 1;
+            client.add_block(block.header.hash_slow(), block.clone());
+            let event = reth_provider::CanonStateNotification::Commit {
+                new: std::sync::Arc::new(reth_provider::Chain::new(
+                    [reth_primitives_traits::RecoveredBlock::new_unhashed(
+                        block,
+                        Vec::new(),
+                    )],
+                    Default::default(),
+                    Default::default(),
+                )),
+            };
+            // Exercise the same public canonical update used by standard maintenance.
+            pool.on_canonical_state_change(reth_transaction_pool::CanonicalStateUpdate {
+                new_tip: event.tip(),
+                pending_block_base_fee: 10,
+                pending_block_blob_fee: None,
+                changed_accounts: vec![reth_provider::ChangedAccount {
+                    address: SIGNER,
+                    nonce: 0,
+                    balance: U256::from(eth_balance),
+                }],
+                mined_transactions: Vec::new(),
+                update_kind: reth_transaction_pool::PoolUpdateKind::Commit,
+            });
+            assert_eq!(
+                pool.all_transactions().pending.len(),
+                ordinary.len() + 1,
+                "standard maintenance does not see L1 costs"
+            );
+
+            for _ in 0..3 {
+                futures::executor::block_on(maintain_morph_pool_with(
+                    pool.clone(),
+                    client.clone(),
+                    MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone()),
+                    futures::stream::iter([event.clone()]),
+                ));
+            }
+            let all = pool.all_transactions();
+            if l1_fee == 0 {
+                assert!(ordinary.iter().all(|hash| pool.get(hash).is_some()));
+                assert!(
+                    pool.get(&token_tx).is_none(),
+                    "the unfunded MorphTx is removed"
+                );
+                assert!(all.queued.is_empty());
+            } else {
+                let (unaffordable, affordable) = ordinary.split_last().unwrap();
+                assert!(
+                    pool.get(unaffordable).is_none(),
+                    "the first L1-unaffordable predecessor must be removed"
+                );
+                assert!(affordable.iter().all(|hash| pool.get(hash).is_some()));
+                assert_eq!(all.pending.len(), affordable.len());
+                assert_eq!(
+                    all.queued.iter().map(|tx| *tx.hash()).collect::<Vec<_>>(),
+                    [token_tx],
+                    "preserve the successor in queued, including when it still has tokens"
+                );
+            }
+        }
     }
 
     #[test]
