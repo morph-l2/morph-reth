@@ -179,6 +179,8 @@ fn collect_removable_transactions<DB: alloy_evm::Database>(
             eth_balance: account.balance,
             token_balances: HashMap::new(),
         };
+        // The nonce the next executable transaction of this sender must carry.
+        let mut next_nonce_in_line = account.nonce;
 
         for tx in sender_txs {
             // Access the consensus tx by reference (via Deref chain) instead of
@@ -193,6 +195,18 @@ fn collect_removable_transactions<DB: alloy_evm::Database>(
             if consensus_tx.nonce() < account.nonce {
                 continue;
             }
+
+            // Nonce gap: the transactions filling it are not in the pool, so how much of
+            // this sender's balance is still owed by the time this one executes is unknown,
+            // and nothing from here on is executable anyway. Upstream's
+            // `AllTransactions::update` short-circuits the sender on a gap for the same
+            // reason, and go-ethereum only ever applies a per-transaction cost check to its
+            // queue, never a cumulative one. Anything left behind the gap sits in the queued
+            // sub-pool, where reth's own stale eviction reaps it.
+            if consensus_tx.nonce() != next_nonce_in_line {
+                break;
+            }
+            next_nonce_in_line = next_nonce_in_line.saturating_add(1);
 
             if exceeds_block_gas_limit(consensus_tx.gas_limit(), block_gas_limit) {
                 tracing::debug!(
@@ -704,6 +718,32 @@ mod tests {
         let (tx0, tx1) = (token_fee_tx(0), token_fee_tx(1));
 
         assert_eq!(removable(&mut db, vec![&tx0, &tx1]), vec![*tx1.hash()]);
+    }
+
+    #[test]
+    fn a_transaction_behind_a_nonce_gap_is_not_charged_to_the_budget() {
+        // nonce 0 is executable and reserves the sender's whole token balance. nonce 10 sits
+        // behind a gap, so nonces 1..9 — which are not in the pool — decide what is actually
+        // left by the time it executes. Judging it against the residue of nonce 0 alone is
+        // meaningless, and removing it on that basis destroys a transaction that passed
+        // admission on its own.
+        let mut db = test_state(0, 0, TX_TOKEN_BUDGET);
+        let (tx0, gapped) = (token_fee_tx(0), token_fee_tx(10));
+
+        assert!(
+            removable(&mut db, vec![&tx0, &gapped]).is_empty(),
+            "a nonce-gapped transaction has no meaningful cumulative budget"
+        );
+    }
+
+    #[test]
+    fn a_sender_holding_only_future_nonces_is_left_alone() {
+        // Nothing this sender holds is executable at the current state nonce, so there is no
+        // executable front to evaluate — not even for a sender that now holds no tokens.
+        let mut db = test_state(0, 0, 0);
+        let gapped = token_fee_tx(5);
+
+        assert!(removable(&mut db, vec![&gapped]).is_empty());
     }
 
     /// Fails every storage read of the fee token, leaving the rest of the state readable.
