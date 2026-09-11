@@ -825,22 +825,34 @@ where
     let mut h = MorphEvmHandler::<DB, I>::new();
     let init_and_floor_gas = InitialAndFloorGas::new(0, 0);
     let mut gas = h.tx_gas(evm, &init_and_floor_gas);
+    // A database failure inside the frame is recorded on the context and surfaces as a halt,
+    // not as an `Err`. Running the frame group directly skips the step that normally converts
+    // it, so an I/O failure would otherwise be indistinguishable from the token reverting.
+    debug_assert!(
+        evm.ctx_ref().error.is_ok(),
+        "context error must be taken before evm_call"
+    );
     // `execution` owns this checkpoint: it commits once the runtime gas phase is done, or
     // unwinds to it when that phase runs out of gas. The `None` arm is only reachable
     // under EIP-2780 (AMSTERDAM), which Morph never enables, so it is unreachable today;
     // it is kept faithful to upstream so a future hardfork mapping cannot silently skip it.
     let checkpoint = evm.ctx().journal_mut().checkpoint();
-    match h.execution(evm, checkpoint, &mut gas)? {
+    let result = match h.execution(evm, checkpoint, &mut gas)? {
         Some(res) => Ok(res),
         None => h.runtime_oog_result(evm, &init_and_floor_gas, &mut gas),
-    }
+    };
+    revm::context_interface::context::take_error::<
+        EVMError<DB::Error, MorphInvalidTransaction>,
+        DB::Error,
+    >(&mut evm.ctx_mut().error)?;
+    result
 }
 
 /// Query ERC20 `balanceOf(address)` via an internal EVM call.
 ///
 /// Uses [`with_evm_snapshot`] to match go-ethereum's StaticCall semantics:
 /// all state changes and `evm.tx` mutations are reverted after the call.
-fn evm_call_balance_of<DB, I>(
+pub(crate) fn evm_call_balance_of<DB, I>(
     evm: &mut MorphEvm<DB, I>,
     token: Address,
     account: Address,

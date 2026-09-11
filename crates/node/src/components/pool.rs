@@ -41,14 +41,14 @@ where
         // Use in-memory blob store (Morph doesn't support EIP-4844 blobs)
         let blob_store = InMemoryBlobStore::default();
 
-        // Build the Morph-specific EVM config for the validator
+        // Build the Morph-specific EVM config for the validator and the maintenance task
         let morph_evm_config =
             MorphEvmConfig::new(ctx.chain_spec(), morph_evm::MorphEvmFactory::default());
 
         // Build the transaction validator with Morph-specific checks
         let validator = TransactionValidationTaskExecutor::eth_builder(
             ctx.provider().clone(),
-            morph_evm_config,
+            morph_evm_config.clone(),
         )
         .with_max_tx_input_bytes(ctx.config().txpool.max_tx_input_bytes)
         .with_local_transactions_config(pool_config.local_transactions_config.clone())
@@ -88,7 +88,11 @@ where
         // cannot track (reth only tracks ETH balance via SenderInfo)
         ctx.task_executor().spawn_critical_task(
             "txpool maintenance - morph pool",
-            morph_txpool::maintain_morph_pool(pool.clone(), ctx.provider().clone()),
+            morph_txpool::maintain_morph_pool(
+                pool.clone(),
+                ctx.provider().clone(),
+                morph_evm_config,
+            ),
         );
 
         info!(target: "morph::node", "Transaction pool initialized");

@@ -9,11 +9,18 @@ use alloy_evm::Database;
 use alloy_primitives::{Address, Bytes, U256, address, keccak256};
 use morph_chainspec::hardfork::MorphHardfork;
 use revm::Database as RevmDatabase;
-use revm::SystemCallEvm;
 use revm::{context_interface::result::EVMError, inspector::NoOpInspector};
 
 use crate::evm::MorphContext;
 use crate::{MorphEvm, MorphInvalidTransaction};
+
+/// The environment a fee-token `balanceOf` call is evaluated in.
+///
+/// Produced by `ConfigureEvm::evm_env` for the block whose state is being read, so the pool
+/// resolves the same balance the execution layer would. go-ethereum builds the equivalent
+/// `vm.BlockContext` from the header before querying a call-mode token
+/// (`pool.getBalanceFunc`, core/tx_pool.go:330).
+pub type MorphEvmEnv = alloy_evm::EvmEnv<MorphHardfork, crate::MorphBlockEnv>;
 
 /// L2 Token Registry contract address on Morph L2.
 /// Reference: <https://github.com/morph-l2/morph/blob/main/contracts/contracts/l2/system/L2TokenRegistry.sol>
@@ -96,14 +103,14 @@ impl TokenRegistryEntry {
         self,
         db: &mut DB,
         caller: Address,
-        hardfork: MorphHardfork,
+        env: &MorphEvmEnv,
     ) -> Result<TokenFeeInfo, DB::Error> {
         let balance = read_token_balance_with_fallback(
             db,
             self.token_address,
             caller,
             self.balance_slot,
-            hardfork,
+            env,
         )?;
         Ok(self.into_fee_info(caller, balance))
     }
@@ -145,14 +152,14 @@ impl TokenFeeInfo {
         db: &mut DB,
         token_id: u16,
         caller: Address,
-        hardfork: MorphHardfork,
+        env: &MorphEvmEnv,
     ) -> Result<Option<Self>, DB::Error> {
         let entry = match TokenRegistryEntry::load(db, token_id)? {
             Some(e) => e,
             None => return Ok(None),
         };
 
-        entry.load_for_caller(db, caller, hardfork).map(Some)
+        entry.load_for_caller(db, caller, env).map(Some)
     }
 
     /// Storage-only variant of [`Self::load_for_caller`].
@@ -304,20 +311,27 @@ fn read_token_balance_with_fallback<DB: Database>(
     token: Address,
     account: Address,
     balance_slot: Option<U256>,
-    hardfork: MorphHardfork,
+    env: &MorphEvmEnv,
 ) -> Result<U256, DB::Error> {
     if let Some(slot) = balance_slot {
         return read_balance_from_storage(db, token, account, slot);
     }
 
-    // EVM fallback: construct temporary MorphEvm for balanceOf call
+    // Call mode: stand the EVM up in the caller's environment rather than a default one,
+    // and make the same `balanceOf` call the execution layer makes, so both reach the same
+    // answer for a token whose balance depends on block context or `msg.sender`.
     let db: &mut dyn Database<Error = DB::Error> = db;
-    let mut evm = MorphEvm::new(MorphContext::new(db, hardfork), NoOpInspector {});
+    let mut ctx = MorphContext::new(db, *env.cfg_env.spec());
+    ctx.cfg = env.cfg_env.clone();
+    ctx.block = env.block_env.clone();
+    let mut evm = MorphEvm::new(ctx, NoOpInspector {});
 
-    match query_balance_via_system_call(&mut evm, token, account) {
+    match crate::handler::evm_call_balance_of(&mut evm, token, account) {
         Ok(balance) => Ok(balance),
         Err(EVMError::Database(e)) => Err(e),
-        Err(_) => Ok(U256::ZERO), // Non-DB errors → zero (safe fallback)
+        // The token reverted or returned nothing usable: a zero balance, which the caller
+        // turns into the same insufficient-funds rejection the execution layer reaches.
+        Err(_) => Ok(U256::ZERO),
     }
 }
 
@@ -332,52 +346,6 @@ pub(crate) fn read_balance_from_storage<DB: RevmDatabase>(
     let mut key = [0u8; 32];
     key[12..32].copy_from_slice(account.as_slice());
     read_mapping_value(db, token, balance_slot, &key)
-}
-
-/// Execute EVM `balanceOf(address)` call.
-fn query_balance_via_system_call<DB, I>(
-    evm: &mut MorphEvm<DB, I>,
-    token: Address,
-    account: Address,
-) -> Result<U256, EVMError<DB::Error, MorphInvalidTransaction>>
-where
-    DB: Database,
-{
-    let calldata = encode_balance_of_calldata(account);
-    match evm.system_call_one(token, calldata) {
-        Ok(result) if result.is_success() => {
-            if let Some(output) = result.output()
-                && output.len() >= 32
-            {
-                return Ok(U256::from_be_slice(&output[..32]));
-            }
-            Ok(U256::ZERO)
-        }
-        // The token reverted or returned nothing usable. That is a statement about the
-        // token, so it stays a zero balance and the caller rejects the transaction for
-        // insufficient funds.
-        Ok(_) => Ok(U256::ZERO),
-        // A failed state read is *not* a statement about the token: report it so the
-        // caller can tell "this account cannot pay" apart from "we could not find out".
-        // Swallowing it here made the `EVMError::Database` arm in
-        // `read_token_balance_with_fallback` unreachable.
-        Err(err @ EVMError::Database(_)) => Err(err),
-        Err(_) => Ok(U256::ZERO),
-    }
-}
-
-/// Query ERC20 balance via EVM call.
-///
-/// Use this when you have a `MorphEvm` instance and need to call `balanceOf`.
-pub fn query_erc20_balance<DB, I>(
-    evm: &mut MorphEvm<DB, I>,
-    token: Address,
-    account: Address,
-) -> Result<U256, EVMError<DB::Error, MorphInvalidTransaction>>
-where
-    DB: Database,
-{
-    query_balance_via_system_call(evm, token, account)
 }
 
 /// Encode ERC20 `balanceOf(address)` calldata.
@@ -448,6 +416,15 @@ mod tests {
     /// Registry state for a call-mode token (no `balanceSlot`) whose `balanceOf` returns
     /// storage slot 0, so reading it is a storage read of the token contract.
     fn call_mode_token_state(token: Address, balance: u64) -> CacheDB<EmptyDB> {
+        call_mode_token_state_with_code(token, balance, bytes!("6000545f5260205ff3"))
+    }
+
+    /// As [`call_mode_token_state`], with an explicit `balanceOf` implementation.
+    fn call_mode_token_state_with_code(
+        token: Address,
+        balance: u64,
+        code: Bytes,
+    ) -> CacheDB<EmptyDB> {
         let mut db = CacheDB::new(EmptyDB::default());
         let mut token_id_bytes = [0u8; 32];
         token_id_bytes[31] = 1;
@@ -471,8 +448,6 @@ mod tests {
                 .unwrap();
         }
 
-        // PUSH1 0x00 SLOAD PUSH0 MSTORE PUSH1 0x20 PUSH0 RETURN
-        let code = bytes!("6000545f5260205ff3");
         db.insert_account_info(
             token,
             AccountInfo {
@@ -487,14 +462,46 @@ mod tests {
     }
 
     #[test]
+    fn call_mode_balance_is_read_under_the_supplied_block_environment() {
+        const TIMESTAMP: u64 = 1_767_765_600;
+        let token = address!("5300000000000000000000000000000000000042");
+        let caller = address!("0000000000000000000000000000000000000001");
+
+        // TIMESTAMP PUSH0 MSTORE PUSH1 0x20 PUSH0 RETURN — a `balanceOf` that reports the
+        // block time, so an answer produced under the wrong environment is visible.
+        let mut db = call_mode_token_state_with_code(token, 0, bytes!("425f5260205ff3"));
+
+        let env = MorphEvmEnv::new(
+            revm::context::CfgEnv::new_with_spec(MorphHardfork::Emerald),
+            crate::MorphBlockEnv {
+                inner: revm::context::BlockEnv {
+                    timestamp: U256::from(TIMESTAMP),
+                    ..Default::default()
+                },
+            },
+        );
+
+        let info = TokenFeeInfo::load_for_caller(&mut db, 1, caller, &env)
+            .unwrap()
+            .unwrap();
+
+        // `BlockEnv::default()` reports timestamp 1, which is what the pool answered with
+        // regardless of the block it was validating against.
+        assert_eq!(info.balance, U256::from(TIMESTAMP));
+    }
+
+    #[test]
     fn balance_of_fallback_reports_a_failed_state_read_instead_of_a_zero_balance() {
         let token = address!("5300000000000000000000000000000000000042");
         let caller = address!("0000000000000000000000000000000000000001");
-        let hardfork = MorphHardfork::Emerald;
+        let env = MorphEvmEnv::new(
+            revm::context::CfgEnv::new_with_spec(MorphHardfork::Emerald),
+            crate::MorphBlockEnv::default(),
+        );
 
         // Readable state: the fallback reaches the token and reads the balance.
         let mut readable = call_mode_token_state(token, 10_000_000);
-        let info = TokenFeeInfo::load_for_caller(&mut readable, 1, caller, hardfork)
+        let info = TokenFeeInfo::load_for_caller(&mut readable, 1, caller, &env)
             .unwrap()
             .unwrap();
         assert_eq!(info.balance, U256::from(10_000_000));
@@ -506,7 +513,7 @@ mod tests {
             token,
         };
         assert_eq!(
-            TokenFeeInfo::load_for_caller(&mut unreadable, 1, caller, hardfork).unwrap_err(),
+            TokenFeeInfo::load_for_caller(&mut unreadable, 1, caller, &env).unwrap_err(),
             ReadFailed
         );
     }
