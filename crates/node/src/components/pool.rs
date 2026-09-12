@@ -41,14 +41,14 @@ where
         // Use in-memory blob store (Morph doesn't support EIP-4844 blobs)
         let blob_store = InMemoryBlobStore::default();
 
-        // Build the Morph-specific EVM config for the validator
+        // Build the Morph-specific EVM config for the validator and the maintenance task
         let morph_evm_config =
             MorphEvmConfig::new(ctx.chain_spec(), morph_evm::MorphEvmFactory::default());
 
         // Build the transaction validator with Morph-specific checks
         let validator = TransactionValidationTaskExecutor::eth_builder(
             ctx.provider().clone(),
-            morph_evm_config,
+            morph_evm_config.clone(),
         )
         .with_max_tx_input_bytes(ctx.config().txpool.max_tx_input_bytes)
         .with_local_transactions_config(pool_config.local_transactions_config.clone())
@@ -83,12 +83,15 @@ where
         // Spawn standard pool maintenance tasks (from reth)
         spawn_maintenance_tasks(ctx, pool.clone(), &pool_config)?;
 
-        // Spawn Morph-specific maintenance task for MorphTx (0x7F) revalidation
-        // This handles ERC20 token balance changes that reth's standard maintenance
-        // cannot track (reth only tracks ETH balance via SenderInfo)
+        // Revalidate L1 fees for all senders and ERC20 balances for MorphTx (0x7F).
+        // Reth's standard maintenance only tracks ETH costs without L1 data fees.
         ctx.task_executor().spawn_critical_task(
             "txpool maintenance - morph pool",
-            morph_txpool::maintain_morph_pool(pool.clone(), ctx.provider().clone()),
+            morph_txpool::maintain_morph_pool(
+                pool.clone(),
+                ctx.provider().clone(),
+                morph_evm_config,
+            ),
         );
 
         info!(target: "morph::node", "Transaction pool initialized");

@@ -21,7 +21,10 @@ use crate::{
     error::MorphHaltReason,
     evm::MorphContext,
     l1block::L1BlockInfo,
-    token_fee::{TokenRegistryEntry, compute_mapping_slot_for_address, encode_balance_of_calldata},
+    token_fee::{
+        TokenFeeInfo, TokenRegistryEntry, compute_mapping_slot_for_address,
+        encode_balance_of_calldata, read_balance_from_storage,
+    },
     tx::MorphTxExt,
 };
 
@@ -468,6 +471,12 @@ where
         };
 
         if let Err(err) = refund_result {
+            // A contract may reject a refund, but unavailable state is not a verdict
+            // about the contract. Internal calls have already taken the context error,
+            // so it must reach the executor here rather than disappearing at finalization.
+            if matches!(err, EVMError::Database(_)) {
+                return Err(err);
+            }
             tracing::error!(
                 target: "morph::evm",
                 token_id = ?evm.ctx_ref().tx().fee_token_id,
@@ -555,11 +564,7 @@ where
 
         let hardfork = *evm.ctx_ref().cfg().spec();
 
-        let token_fee_info = token_registry_entry.load_for_caller(
-            evm.ctx_mut().journal_mut().db_mut(),
-            caller_addr,
-            hardfork,
-        )?;
+        let token_fee_info = load_token_fee_info(evm, token_registry_entry, caller_addr)?;
 
         let beneficiary = evm.ctx_ref().block().beneficiary();
         let rlp_bytes = evm.ctx_ref().tx().rlp_bytes.clone().unwrap_or_default();
@@ -826,39 +831,110 @@ where
     let mut h = MorphEvmHandler::<DB, I>::new();
     let init_and_floor_gas = InitialAndFloorGas::new(0, 0);
     let mut gas = h.tx_gas(evm, &init_and_floor_gas);
+    // A database failure inside a frame is recorded on the context and surfaces as a halt,
+    // not as an `Err`; `execution_result` is what normally converts it, and running the
+    // frame group directly skips that step. So the context error is taken here twice.
+    // Before the call, because post-execution still runs after the main frame halts on
+    // such a failure, and the refund path lands here: a nested call must not run in a
+    // context the main frame already poisoned, and the failure it reports must stay the
+    // main frame's. After the call, so a failure inside it is reported as an error rather
+    // than mistaken for the token reverting.
+    take_context_error(evm)?;
     // `execution` owns this checkpoint: it commits once the runtime gas phase is done, or
     // unwinds to it when that phase runs out of gas. The `None` arm is only reachable
     // under EIP-2780 (AMSTERDAM), which Morph never enables, so it is unreachable today;
     // it is kept faithful to upstream so a future hardfork mapping cannot silently skip it.
     let checkpoint = evm.ctx().journal_mut().checkpoint();
-    match h.execution(evm, checkpoint, &mut gas)? {
+    let result = match h.execution(evm, checkpoint, &mut gas)? {
         Some(res) => Ok(res),
         None => h.runtime_oog_result(evm, &init_and_floor_gas, &mut gas),
-    }
+    };
+    take_context_error(evm)?;
+    result
+}
+
+/// Moves a database failure recorded on the context into the return path.
+#[inline]
+fn take_context_error<DB, I>(
+    evm: &mut MorphEvm<DB, I>,
+) -> Result<(), EVMError<DB::Error, MorphInvalidTransaction>>
+where
+    DB: alloy_evm::Database,
+{
+    revm::context_interface::context::take_error::<
+        EVMError<DB::Error, MorphInvalidTransaction>,
+        DB::Error,
+    >(&mut evm.ctx_mut().error)
 }
 
 /// Query ERC20 `balanceOf(address)` via an internal EVM call.
 ///
 /// Uses [`with_evm_snapshot`] to match go-ethereum's StaticCall semantics:
 /// all state changes and `evm.tx` mutations are reverted after the call.
-fn evm_call_balance_of<DB, I>(evm: &mut MorphEvm<DB, I>, token: Address, account: Address) -> U256
+pub(crate) fn evm_call_balance_of<DB, I>(
+    evm: &mut MorphEvm<DB, I>,
+    token: Address,
+    account: Address,
+) -> Result<U256, EVMError<DB::Error, MorphInvalidTransaction>>
 where
     DB: alloy_evm::Database,
 {
     with_evm_snapshot(evm, |evm| {
         let calldata = encode_balance_of_calldata(account);
-        match evm_call(evm, Address::ZERO, token, calldata) {
+        // go-ethereum passes the queried account as the caller
+        // (`sender := vm.AccountRef(userAddress)`, core/token_gas.go:109).
+        match evm_call(evm, account, token, calldata) {
             Ok(ref result) if result.instruction_result().is_ok() => {
                 let output = &result.interpreter_result().output;
-                if output.len() >= 32 {
+                Ok(if output.len() >= 32 {
                     U256::from_be_slice(&output[..32])
                 } else {
                     U256::ZERO
-                }
+                })
             }
-            _ => U256::ZERO,
+            // The token reverted or returned nothing usable: a zero balance, which the
+            // caller turns into the same rejection go-ethereum reaches by erroring out of
+            // `buyAltTokenGas` (core/state_transition.go:314).
+            Ok(_) => Ok(U256::ZERO),
+            // A failed state read is not an answer about the balance, and must never be
+            // turned into one: it would make an I/O failure change the block's outcome.
+            Err(err @ EVMError::Database(_)) => Err(err),
+            Err(_) => Ok(U256::ZERO),
         }
     })
+}
+
+/// Resolves the caller's fee-token balance against the **executing** EVM.
+///
+/// go-ethereum reads it through `st.evm` (`GetAltTokenBalanceHybrid`, core/token_gas.go:43),
+/// so the `balanceOf` call sees the real block context, the real chain config and the user as
+/// `msg.sender`. Building a throwaway EVM here instead would answer under
+/// `BlockEnv::default()` and `CfgEnv::default()` — block 0, timestamp 1, chain id 1, zero
+/// coinbase and base fee — with `SYSTEM_ADDRESS` as the sender and a 30M gas limit in place
+/// of go-ethereum's 200k. For any token whose `balanceOf` reads that context the two clients
+/// would charge different fees for the same transaction.
+fn load_token_fee_info<DB, I>(
+    evm: &mut MorphEvm<DB, I>,
+    entry: TokenRegistryEntry,
+    caller: Address,
+) -> Result<TokenFeeInfo, EVMError<DB::Error, MorphInvalidTransaction>>
+where
+    DB: alloy_evm::Database,
+{
+    let balance = match entry.balance_slot() {
+        // Slot mode is a plain storage read with no environment to get wrong. It goes
+        // through the database rather than the journal deliberately: the journal is empty
+        // at this point in the transaction, and an `sload` here would warm a slot that the
+        // fee deduction below is careful to leave cold.
+        Some(slot) => read_balance_from_storage(
+            evm.ctx_mut().journal_mut().db_mut(),
+            entry.token_address(),
+            caller,
+            slot,
+        )?,
+        None => evm_call_balance_of(evm, entry.token_address(), caller)?,
+    };
+    Ok(entry.into_fee_info(caller, balance))
 }
 
 /// Matches go-ethereum's `transferAltTokenByEVM` validation:
@@ -887,15 +963,16 @@ where
     // This uses with_evm_snapshot internally, so evm.tx is safe.
     let from_balance_before = match from_balance_before {
         Some(b) => b,
-        None => evm_call_balance_of(evm, token_address, from),
+        None => evm_call_balance_of(evm, token_address, from)?,
     };
 
     with_evm_checkpoint(evm, |evm| {
         let calldata = build_transfer_calldata(to, token_amount);
-        let frame_result = evm_call(evm, from, token_address, calldata).map_err(|e| {
-            EVMError::Transaction(MorphInvalidTransaction::TokenTransferFailed {
+        let frame_result = evm_call(evm, from, token_address, calldata).map_err(|e| match e {
+            EVMError::Database(_) => e,
+            _ => EVMError::Transaction(MorphInvalidTransaction::TokenTransferFailed {
                 reason: format!("Error: {e:?}"),
-            })
+            }),
         })?;
 
         if !frame_result.instruction_result().is_ok() {
@@ -919,7 +996,7 @@ where
 
         // Verify sender balance changed by the expected amount, matching go-ethereum.
         // evm_call_balance_of uses with_evm_snapshot, so evm.tx is safe here too.
-        let from_balance_after = evm_call_balance_of(evm, token_address, from);
+        let from_balance_after = evm_call_balance_of(evm, token_address, from)?;
 
         // Verify sender balance decreased by exactly the transfer amount.
         // Matches go-ethereum's transferAltTokenByEVM which always checks this,
@@ -1051,6 +1128,231 @@ mod tests {
         atomic::{AtomicBool, Ordering},
     };
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct TokenReadFailure;
+    impl core::fmt::Display for TokenReadFailure {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.write_str("injected refund balance read failure")
+        }
+    }
+    impl core::error::Error for TokenReadFailure {}
+    impl revm::database_interface::DBErrorMarker for TokenReadFailure {}
+
+    #[derive(Debug)]
+    struct UnreadableTokenDb {
+        inner: CacheDB<EmptyDB>,
+        token: Address,
+    }
+    impl revm::Database for UnreadableTokenDb {
+        type Error = TokenReadFailure;
+        fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
+            Ok(revm::Database::basic(&mut self.inner, address).unwrap())
+        }
+        fn code_by_hash(&mut self, hash: B256) -> Result<Bytecode, Self::Error> {
+            Ok(revm::Database::code_by_hash(&mut self.inner, hash).unwrap())
+        }
+        fn storage(&mut self, address: Address, index: U256) -> Result<U256, Self::Error> {
+            if address == self.token {
+                return Err(TokenReadFailure);
+            }
+            Ok(revm::Database::storage(&mut self.inner, address, index).unwrap())
+        }
+        fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error> {
+            Ok(revm::Database::block_hash(&mut self.inner, number).unwrap())
+        }
+    }
+
+    fn finish_transaction_with_refund(
+        code: Bytes,
+    ) -> Result<ExecutionResult<MorphHaltReason>, EVMError<TokenReadFailure, MorphInvalidTransaction>>
+    {
+        let caller = address!("1000000000000000000000000000000000000001");
+        let beneficiary = address!("2000000000000000000000000000000000000002");
+        let token = address!("3000000000000000000000000000000000000003");
+        let target = address!("4000000000000000000000000000000000000004");
+        let mut inner = CacheDB::new(EmptyDB::default());
+        inner.insert_account_info(
+            token,
+            AccountInfo {
+                code_hash: keccak256(code.as_ref()),
+                code: Some(Bytecode::new_raw(code)),
+                ..Default::default()
+            },
+        );
+        let mut evm = MorphEvm::new(
+            MorphContext::new(UnreadableTokenDb { inner, token }, MorphHardfork::Emerald),
+            NoOpInspector,
+        );
+        evm.block.inner.beneficiary = beneficiary;
+        // Produce a real successful main frame. The remainder of this probe enters the
+        // normal reimbursement and result-finalization phases with an unused gas budget.
+        let frame = evm_call(&mut evm, caller, target, Bytes::new()).unwrap();
+        evm.tx = MorphTxEnv {
+            inner: TxEnv {
+                tx_type: MORPH_TX_TYPE_ID,
+                caller,
+                gas_price: 1,
+                gas_limit: 30_000,
+                kind: TxKind::Call(target),
+                ..Default::default()
+            },
+            fee_token_id: Some(1),
+            ..Default::default()
+        };
+        evm.cached_token_fee_info = Some(TokenFeeInfo {
+            token_address: token,
+            is_active: true,
+            price_ratio: U256::from(1),
+            scale: U256::from(1),
+            caller,
+            balance: U256::from(100_000),
+            balance_slot: None,
+            ..Default::default()
+        });
+        let mut handler = MorphEvmHandler::<_, NoOpInspector>::default();
+        handler
+            .reimburse_caller_token_fee(&mut evm, &Gas::new(1_000))
+            .and_then(|_| handler.execution_result(&mut evm, frame, ResultGas::default()))
+    }
+
+    /// A readable token under [`UnreadableTokenDb`], so any failure reported below comes
+    /// from the context, not from a read.
+    fn readable_token_evm() -> MorphEvm<UnreadableTokenDb, NoOpInspector> {
+        let token = address!("3000000000000000000000000000000000000003");
+        let mut inner = CacheDB::new(EmptyDB::default());
+        insert_contract(
+            &mut inner,
+            token,
+            alloy_primitives::bytes!("6000545f5260205ff3"),
+        );
+        inner
+            .insert_account_storage(token, U256::ZERO, U256::from(42))
+            .unwrap();
+        MorphEvm::new(
+            MorphContext::new(
+                UnreadableTokenDb {
+                    inner,
+                    // Nothing reads this address, so every storage read succeeds.
+                    token: address!("9000000000000000000000000000000000000009"),
+                },
+                MorphHardfork::Emerald,
+            ),
+            NoOpInspector,
+        )
+    }
+
+    #[test]
+    fn a_nested_call_does_not_run_in_a_context_the_main_frame_already_poisoned() {
+        let token = address!("3000000000000000000000000000000000000003");
+        let account = address!("1000000000000000000000000000000000000001");
+        let mut evm = readable_token_evm();
+        assert_eq!(
+            evm_call_balance_of(&mut evm, token, account).unwrap(),
+            U256::from(42),
+            "sanity: the token is readable"
+        );
+
+        // The main frame halted on a failed read; post-execution then reaches this call.
+        evm.ctx_mut().error = Err(revm::context_interface::context::ContextError::Db(
+            TokenReadFailure,
+        ));
+        let result = evm_call_balance_of(&mut evm, token, account);
+        assert!(
+            matches!(result, Err(EVMError::Database(TokenReadFailure))),
+            "the main frame's failure must be reported, not overwritten by a nested call: {result:?}"
+        );
+        assert!(
+            evm.ctx_ref().error.is_ok(),
+            "the failure has been moved into the return path"
+        );
+    }
+
+    #[test]
+    fn a_refund_after_a_poisoned_main_frame_reports_the_main_frame_failure() {
+        let caller = address!("1000000000000000000000000000000000000001");
+        let token = address!("3000000000000000000000000000000000000003");
+        let mut evm = readable_token_evm();
+        evm.block.inner.beneficiary = address!("2000000000000000000000000000000000000002");
+        evm.tx = MorphTxEnv {
+            inner: TxEnv {
+                tx_type: MORPH_TX_TYPE_ID,
+                caller,
+                gas_price: 1,
+                gas_limit: 30_000,
+                ..Default::default()
+            },
+            fee_token_id: Some(1),
+            ..Default::default()
+        };
+        evm.cached_token_fee_info = Some(TokenFeeInfo {
+            token_address: token,
+            is_active: true,
+            price_ratio: U256::from(1),
+            scale: U256::from(1),
+            caller,
+            balance: U256::from(100_000),
+            balance_slot: None,
+            ..Default::default()
+        });
+        evm.ctx_mut().error = Err(revm::context_interface::context::ContextError::Db(
+            TokenReadFailure,
+        ));
+
+        let result = MorphEvmHandler::<_, NoOpInspector>::default()
+            .reimburse_caller_token_fee(&mut evm, &Gas::new(1_000));
+        assert!(
+            matches!(result, Err(EVMError::Database(TokenReadFailure))),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn refund_database_failure_aborts_final_execution_result() {
+        let result = finish_transaction_with_refund(alloy_primitives::bytes!("6000545f5260205ff3"));
+        assert!(
+            matches!(result, Err(EVMError::Database(TokenReadFailure))),
+            "refund I/O must abort execution, not finalize success without a refund: {result:?}"
+        );
+    }
+
+    #[test]
+    fn refund_contract_revert_still_allows_transaction_to_finish() {
+        let result = finish_transaction_with_refund(alloy_primitives::bytes!("5f5ffd"));
+        assert!(
+            matches!(result, Ok(ExecutionResult::Success { .. })),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn token_transfer_database_failure_is_not_transaction_invalidity() {
+        let token = address!("3000000000000000000000000000000000000003");
+        let from = address!("1000000000000000000000000000000000000001");
+        let to = address!("2000000000000000000000000000000000000002");
+        let mut inner = CacheDB::new(EmptyDB::default());
+        insert_contract(
+            &mut inner,
+            token,
+            alloy_primitives::bytes!("6000545f5260205ff3"),
+        );
+        let mut evm = MorphEvm::new(
+            MorphContext::new(UnreadableTokenDb { inner, token }, MorphHardfork::Emerald),
+            NoOpInspector,
+        );
+        let result = transfer_erc20_with_evm(
+            &mut evm,
+            from,
+            to,
+            token,
+            U256::from(1),
+            Some(U256::from(10)),
+        );
+        assert!(
+            matches!(result, Err(EVMError::Database(TokenReadFailure))),
+            "{result:?}"
+        );
+    }
+
     fn mutating_return_code(write_value: u8, return_value: u8) -> Bytes {
         Bytes::from(vec![
             0x60,
@@ -1102,6 +1404,77 @@ mod tests {
         fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error> {
             revm::Database::block_hash(&mut self.inner, number)
         }
+    }
+
+    /// `<opcode> PUSH0 MSTORE PUSH1 0x20 PUSH0 RETURN` — a `balanceOf` that reports one piece
+    /// of its environment instead of a balance, so a call made under the wrong environment
+    /// shows up in the value that comes back.
+    fn code_returning(opcode: u8) -> Bytes {
+        Bytes::from(vec![opcode, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3])
+    }
+
+    fn insert_contract(db: &mut CacheDB<EmptyDB>, address: Address, code: Bytes) {
+        db.insert_account_info(
+            address,
+            AccountInfo {
+                code_hash: keccak256(code.as_ref()),
+                code: Some(Bytecode::new_raw(code)),
+                ..Default::default()
+            },
+        );
+    }
+
+    /// Loads token 1's registry entry and resolves `caller`'s balance against `evm`.
+    fn probe_fee_token_balance(db: CacheDB<EmptyDB>, block: BlockEnv, caller: Address) -> U256 {
+        let mut evm = MorphEvm::new(MorphContext::new(db, MorphHardfork::Emerald), NoOpInspector);
+        evm.block = MorphBlockEnv { inner: block };
+
+        let entry = TokenRegistryEntry::load(evm.ctx_mut().journal_mut().db_mut(), 1)
+            .unwrap()
+            .unwrap();
+        load_token_fee_info(&mut evm, entry, caller)
+            .unwrap()
+            .balance
+    }
+
+    #[test]
+    fn fee_token_balance_is_read_under_the_executing_block_environment() {
+        const TIMESTAMP: u64 = 1_767_765_600;
+        let token = address!("5300000000000000000000000000000000000042");
+        let caller = address!("1000000000000000000000000000000000000001");
+
+        let mut db = CacheDB::new(EmptyDB::default());
+        insert_test_fee_token(&mut db, 1, token, true);
+        insert_contract(&mut db, token, code_returning(0x42)); // TIMESTAMP
+
+        let balance = probe_fee_token_balance(
+            db,
+            BlockEnv {
+                timestamp: U256::from(TIMESTAMP),
+                ..Default::default()
+            },
+            caller,
+        );
+
+        // `BlockEnv::default()` reports timestamp 1, which is what a throwaway EVM would
+        // have answered with regardless of the block being executed.
+        assert_eq!(balance, U256::from(TIMESTAMP));
+    }
+
+    #[test]
+    fn fee_token_balance_query_names_the_queried_account_as_the_caller() {
+        let token = address!("5300000000000000000000000000000000000042");
+        let caller = address!("1000000000000000000000000000000000000001");
+
+        let mut db = CacheDB::new(EmptyDB::default());
+        insert_test_fee_token(&mut db, 1, token, true);
+        insert_contract(&mut db, token, code_returning(0x33)); // CALLER
+
+        let balance = probe_fee_token_balance(db, BlockEnv::default(), caller);
+
+        // go-ethereum queries as the account being asked about, not as the zero address and
+        // not as `SYSTEM_ADDRESS`.
+        assert_eq!(balance, U256::from_be_bytes(caller.into_word().0));
     }
 
     fn insert_test_fee_token(
@@ -1432,7 +1805,7 @@ mod tests {
             inner: BlockEnv::default(),
         };
 
-        let balance = evm_call_balance_of(&mut evm, token, account);
+        let balance = evm_call_balance_of(&mut evm, token, account).unwrap();
 
         assert_eq!(balance, U256::from(42));
         let slot_state = evm
