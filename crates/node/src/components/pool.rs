@@ -83,9 +83,8 @@ where
         // Spawn standard pool maintenance tasks (from reth)
         spawn_maintenance_tasks(ctx, pool.clone(), &pool_config)?;
 
-        // Spawn Morph-specific maintenance task for MorphTx (0x7F) revalidation
-        // This handles ERC20 token balance changes that reth's standard maintenance
-        // cannot track (reth only tracks ETH balance via SenderInfo)
+        // Revalidate L1 fees for all senders and ERC20 balances for MorphTx (0x7F).
+        // Reth's standard maintenance only tracks ETH costs without L1 data fees.
         ctx.task_executor().spawn_critical_task(
             "txpool maintenance - morph pool",
             morph_txpool::maintain_morph_pool(
