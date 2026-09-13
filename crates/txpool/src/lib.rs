@@ -33,7 +33,7 @@
 #![cfg_attr(docsrs, feature(doc_cfg), allow(unexpected_cfgs))]
 
 mod error;
-pub use error::MorphTxError;
+pub use error::{MorphTxError, MorphTxValidationError};
 
 mod transaction;
 pub use transaction::MorphPooledTransaction;

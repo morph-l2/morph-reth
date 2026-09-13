@@ -11,7 +11,6 @@ use morph_chainspec::hardfork::MorphHardfork;
 use revm::Database as RevmDatabase;
 use revm::{context_interface::result::EVMError, inspector::NoOpInspector};
 
-use crate::evm::MorphContext;
 use crate::{MorphEvm, MorphInvalidTransaction};
 
 /// The environment a fee-token `balanceOf` call is evaluated in.
@@ -57,7 +56,7 @@ pub struct TokenFeeInfo {
 
 /// Fee-token registry metadata without any caller-specific balance state.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct TokenRegistryEntry {
+pub struct TokenRegistryEntry {
     token_address: Address,
     is_active: bool,
     decimals: u8,
@@ -80,10 +79,7 @@ impl TokenRegistryEntry {
     }
 
     /// Load fee-token metadata without reading a caller's token balance.
-    pub(crate) fn load<DB: RevmDatabase>(
-        db: &mut DB,
-        token_id: u16,
-    ) -> Result<Option<Self>, DB::Error> {
+    pub fn load<DB: RevmDatabase>(db: &mut DB, token_id: u16) -> Result<Option<Self>, DB::Error> {
         read_registry_entry(db, token_id)
     }
 
@@ -99,12 +95,12 @@ impl TokenRegistryEntry {
     }
 
     /// Resolve the caller's balance to produce complete fee information.
-    pub(crate) fn load_for_caller<DB: Database>(
+    pub fn load_for_caller<DB: Database>(
         self,
         db: &mut DB,
         caller: Address,
         env: &MorphEvmEnv,
-    ) -> Result<TokenFeeInfo, DB::Error> {
+    ) -> Result<TokenFeeInfo, EVMError<DB::Error, MorphInvalidTransaction>> {
         let balance = read_token_balance_with_fallback(
             db,
             self.token_address,
@@ -143,6 +139,16 @@ impl TokenRegistryEntry {
 }
 
 impl TokenFeeInfo {
+    /// Maximum permitted token debit, bounded by the available balance.
+    /// A zero fee limit means that the whole balance is available.
+    pub fn effective_fee_limit(&self, fee_limit: U256) -> U256 {
+        if fee_limit.is_zero() {
+            self.balance
+        } else {
+            self.balance.min(fee_limit)
+        }
+    }
+
     /// Load token fee information with EVM call fallback.
     ///
     /// Reads token parameters from L2 Token Registry storage. If the token's
@@ -153,7 +159,7 @@ impl TokenFeeInfo {
         token_id: u16,
         caller: Address,
         env: &MorphEvmEnv,
-    ) -> Result<Option<Self>, DB::Error> {
+    ) -> Result<Option<Self>, EVMError<DB::Error, MorphInvalidTransaction>> {
         let entry = match TokenRegistryEntry::load(db, token_id)? {
             Some(e) => e,
             None => return Ok(None),
@@ -312,27 +318,19 @@ fn read_token_balance_with_fallback<DB: Database>(
     account: Address,
     balance_slot: Option<U256>,
     env: &MorphEvmEnv,
-) -> Result<U256, DB::Error> {
+) -> Result<U256, EVMError<DB::Error, MorphInvalidTransaction>> {
     if let Some(slot) = balance_slot {
-        return read_balance_from_storage(db, token, account, slot);
+        return Ok(read_balance_from_storage(db, token, account, slot)?);
     }
 
     // Call mode: stand the EVM up in the caller's environment rather than a default one,
     // and make the same `balanceOf` call the execution layer makes, so both reach the same
     // answer for a token whose balance depends on block context or `msg.sender`.
     let db: &mut dyn Database<Error = DB::Error> = db;
-    let mut ctx = MorphContext::new(db, *env.cfg_env.spec());
-    ctx.cfg = env.cfg_env.clone();
-    ctx.block = env.block_env.clone();
-    let mut evm = MorphEvm::new(ctx, NoOpInspector {});
-
-    match crate::handler::evm_call_balance_of(&mut evm, token, account) {
-        Ok(balance) => Ok(balance),
-        Err(EVMError::Database(e)) => Err(e),
-        // The token reverted or returned nothing usable: a zero balance, which the caller
-        // turns into the same insufficient-funds rejection the execution layer reaches.
-        Err(_) => Ok(U256::ZERO),
-    }
+    let mut evm = MorphEvm::from_env(db, env.clone(), NoOpInspector {});
+    // Geth's pool query has Origin=sender and GasPrice=0, unlike an executing transaction.
+    evm.tx.inner.caller = account;
+    crate::handler::evm_call_balance_of(&mut evm, token, account)
 }
 
 /// Read ERC20 balance directly from storage slot.
@@ -514,7 +512,7 @@ mod tests {
         };
         assert_eq!(
             TokenFeeInfo::load_for_caller(&mut unreadable, 1, caller, &env).unwrap_err(),
-            ReadFailed
+            EVMError::Database(ReadFailed)
         );
     }
 

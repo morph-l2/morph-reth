@@ -27,6 +27,11 @@ pub enum MorphInvalidTransaction {
     #[error("Token with ID {0} has invalid fee configuration")]
     InvalidTokenConfig(u16),
 
+    /// The token balance call reverted, violated static execution, or returned malformed data.
+    #[error("Token balance query failed")]
+    TokenBalanceQueryFailed,
+
+    /// The transfer failed or its return value/balance delta was invalid.
     #[error("Token transfer failed: {reason}")]
     TokenTransferFailed {
         /// Token transfer failure reason.

@@ -8,7 +8,7 @@
 //! - L1 data fee validation
 //! - MorphTx (0x7F) ERC20 token balance validation
 
-use crate::MorphTxError;
+use crate::MorphTxValidationError;
 use alloy_consensus::{BlockHeader, Sealable, Transaction};
 use alloy_eips::{Encodable2718, Typed2718};
 use alloy_primitives::{Address, B256, U256};
@@ -40,13 +40,13 @@ const MAX_INITCODE_SIZE: usize = reth_revm::revm::primitives::eip3860::MAX_INITC
 
 /// A complete set of fee-validation inputs for one block.
 #[derive(Debug)]
-struct MorphValidationHead {
+pub(crate) struct MorphValidationHead {
     hash: B256,
     number: u64,
     timestamp: u64,
     base_fee_per_gas: Option<u64>,
-    l1_block_info: L1BlockInfo,
-    evm_env: MorphEvmEnv,
+    pub(crate) l1_block_info: L1BlockInfo,
+    pub(crate) evm_env: MorphEvmEnv,
 }
 
 /// Tracks L1 fee parameters and the matching block environment.
@@ -59,7 +59,7 @@ pub struct MorphL1BlockInfo {
 }
 
 impl MorphL1BlockInfo {
-    /// Creates an uninitialized tracker. Validation returns an error until a head is published.
+    /// Creates an uninitialized tracker; admission can populate it from the provider head.
     pub fn new() -> Self {
         Self::default()
     }
@@ -126,8 +126,40 @@ impl MorphL1BlockInfo {
 /// keeps account reads, token reads and the EVM environment on the same block, even if
 /// the canonical head advances. Start with `None` to validate a new batch at the new head.
 pub struct MorphValidationState {
-    head: Arc<MorphValidationHead>,
-    provider: StateProviderBox,
+    pub(crate) head: Arc<MorphValidationHead>,
+    pub(crate) provider: StateProviderBox,
+}
+
+/// Opens state, EVM environment and L1 parameters for exactly one header.
+pub(crate) fn validation_state_for_header<Client, Evm>(
+    client: &Client,
+    evm_config: &Evm,
+    header: &HeaderTy<Evm::Primitives>,
+) -> Result<MorphValidationState, Box<dyn std::error::Error + Send + Sync>>
+where
+    Client: StateProviderFactory,
+    Evm: ConfigureEvm,
+    EvmFactoryFor<Evm>: EvmFactory<Spec = MorphHardfork, BlockEnv = MorphBlockEnv>,
+{
+    let evm_env = evm_config
+        .evm_env(header)
+        .map_err(|err| std::io::Error::other(err.to_string()))?;
+    let provider = client.state_by_block_hash(header.hash_slow())?;
+    let l1_block_info = L1BlockInfo::try_fetch(
+        &mut StateProviderDatabase::new(&provider),
+        *evm_env.cfg_env.spec(),
+    )?;
+    Ok(MorphValidationState {
+        head: Arc::new(MorphValidationHead {
+            hash: header.hash_slow(),
+            number: header.number(),
+            timestamp: header.timestamp(),
+            base_fee_per_gas: header.base_fee_per_gas(),
+            l1_block_info,
+            evm_env,
+        }),
+        provider,
+    })
 }
 
 impl std::fmt::Debug for MorphValidationState {
@@ -243,35 +275,68 @@ where
 
     /// Update the L1 block info for the given header.
     pub fn update_l1_block_info(&self, header: &HeaderTy<Evm::Primitives>) {
-        let evm_env = match self.inner.evm_config().evm_env(header) {
-            Ok(evm_env) => evm_env,
-            Err(err) => {
-                tracing::warn!(target: "morph::txpool", %err, "Failed to build EVM env for head block");
-                return;
-            }
-        };
-
-        let provider = match self.client().state_by_block_hash(header.hash_slow()) {
-            Ok(provider) => provider,
-            Err(err) => {
-                tracing::warn!(target: "morph::txpool", %err, "Failed to get state provider for L1 block info update");
-                return;
-            }
-        };
-
-        let mut db = StateProviderDatabase::new(provider);
-        let hardfork = self
-            .chain_spec()
-            .morph_hardfork_at(header.number(), header.timestamp());
-
-        match L1BlockInfo::try_fetch(&mut db, hardfork) {
-            Ok(l1_block_info) => {
-                self.block_info.update(l1_block_info, header, evm_env);
+        match validation_state_for_header(self.client(), self.inner.evm_config(), header) {
+            Ok(state) => {
+                self.inner
+                    .on_new_head_block(&SealedBlock::from_parts_unchecked(
+                        header.clone(),
+                        Default::default(),
+                        header.hash_slow(),
+                    ));
+                *self.block_info.head.write() = Some(state.head);
             }
             Err(err) => {
-                tracing::warn!(target: "morph::txpool", ?err, "Failed to fetch L1 block info");
+                tracing::warn!(target: "morph::txpool", %err, "Failed to refresh fee-validation head")
             }
         }
+    }
+
+    /// Consults the provider for every new batch, independently of maintenance callbacks.
+    /// Deep commits can bypass `on_new_head_block`; a reorg can replace a head at the
+    /// same height. Retry the entire snapshot once if its state disappears while opening.
+    fn latest_validation_state(
+        &self,
+    ) -> Result<MorphValidationState, Box<dyn std::error::Error + Send + Sync>> {
+        let mut last_error = None;
+        for _ in 0..2 {
+            let header = self
+                .client()
+                .latest_header()?
+                .ok_or_else(|| std::io::Error::other("latest validation header is unavailable"))?;
+            let cached = self
+                .block_info
+                .head
+                .read()
+                .clone()
+                .filter(|head| head.hash == header.hash());
+            let refresh_inner = cached.is_none();
+            let result = if let Some(head) = cached {
+                self.client()
+                    .state_by_block_hash(head.hash)
+                    .map(|provider| MorphValidationState { head, provider })
+                    .map_err(|err| Box::new(err) as Box<dyn std::error::Error + Send + Sync>)
+            } else {
+                validation_state_for_header(self.client(), self.inner.evm_config(), header.header())
+            };
+            match result {
+                Ok(state) => {
+                    // The inner validator also caches fork and gas-limit settings.
+                    // Its callback reads only the header; no block-body fetch is needed.
+                    if refresh_inner {
+                        self.inner
+                            .on_new_head_block(&SealedBlock::from_parts_unchecked(
+                                header.header().clone(),
+                                Default::default(),
+                                header.hash(),
+                            ));
+                    }
+                    *self.block_info.head.write() = Some(state.head.clone());
+                    return Ok(state);
+                }
+                Err(err) => last_error = Some(err),
+            }
+        }
+        Err(last_error.expect("both snapshot attempts failed"))
     }
 
     /// Validates a single transaction.
@@ -293,7 +358,7 @@ where
 
     /// Validates a single transaction, reusing a state and head snapshot.
     ///
-    /// When `state` is `None`, validation pins the current complete head and opens its
+    /// When `state` is `None`, validation reads the latest provider header and opens its
     /// provider by block hash. Both are reused for subsequent transactions in the batch.
     /// Reset `state` to `None` to select a newer head.
     pub fn validate_one_with_state(
@@ -318,19 +383,14 @@ where
             );
         }
 
-        let head = state
-            .as_ref()
-            .map(|state| state.head.clone())
-            .or_else(|| self.block_info.head.read().clone());
-        let Some(head) = head else {
-            return morph_tx_validation_outcome(
-                transaction,
-                MorphTxError::TokenInfoFetchFailed {
-                    token_id: None,
-                    message: "fee-validation head is not initialized".into(),
-                },
-            );
-        };
+        if state.is_none() {
+            match self.latest_validation_state() {
+                Ok(snapshot) => *state = Some(snapshot),
+                Err(err) => return TransactionValidationOutcome::Error(*transaction.hash(), err),
+            }
+        }
+        let state = state.as_ref().expect("validation state initialized above");
+        let head = &state.head;
 
         // Reject EIP-7702 transactions before Viridian hardfork (PRAGUE)
         if transaction.is_eip7702()
@@ -409,19 +469,6 @@ where
         if let Err(err) = self.inner.validate_stateless(origin, &transaction) {
             return TransactionValidationOutcome::Invalid(transaction, err);
         }
-        if state.is_none() {
-            let provider = match self.client().state_by_block_hash(head.hash) {
-                Ok(provider) => provider,
-                Err(err) => {
-                    return TransactionValidationOutcome::Error(*transaction.hash(), Box::new(err));
-                }
-            };
-            *state = Some(MorphValidationState {
-                head: head.clone(),
-                provider,
-            });
-        }
-        let state = state.as_ref().expect("validation state initialized above");
         let outcome = self
             .inner
             .validate_stateful(origin, transaction, &state.provider);
@@ -503,7 +550,8 @@ where
         eth_balance: U256,
         l1_data_fee: U256,
         state: &MorphValidationState,
-    ) -> Result<crate::MorphTxValidationResult, MorphTxError> {
+    ) -> Result<crate::MorphTxValidationResult, MorphTxValidationError<reth_provider::ProviderError>>
+    {
         let mut db = StateProviderDatabase::new(&state.provider);
         let input = crate::MorphTxValidationInput {
             consensus_tx,
@@ -585,27 +633,33 @@ where
     }
 
     fn on_new_head_block(&self, new_tip_block: &SealedBlock<Self::Block>) {
-        self.inner.on_new_head_block(new_tip_block);
         self.update_l1_block_info(new_tip_block.header());
     }
 }
 
-/// Maps a [`MorphTxError`] onto the right validation outcome.
+/// Maps a [`MorphTxValidationError`] onto the right validation outcome.
 ///
 /// [`TransactionValidationOutcome::Invalid`] is a verdict on the transaction: the pool
-/// records it as known-bad and the network layer holds the peer that sent it responsible.
+/// can record it as known-bad. Peer penalties are decided separately by the error type.
 /// A failed state read is not such a verdict — the transaction may be perfectly valid and
 /// simply could not be checked — so it is reported as
 /// [`TransactionValidationOutcome::Error`], which discards this attempt without blaming
 /// anyone and leaves the sender free to try again.
-fn morph_tx_validation_outcome<Tx: EthPoolTransaction>(
+fn morph_tx_validation_outcome<
+    Tx: EthPoolTransaction,
+    E: std::error::Error + Send + Sync + 'static,
+>(
     transaction: Tx,
-    err: MorphTxError,
+    err: MorphTxValidationError<E>,
 ) -> TransactionValidationOutcome<Tx> {
-    if matches!(err, MorphTxError::TokenInfoFetchFailed { .. }) {
-        return TransactionValidationOutcome::Error(*transaction.hash(), Box::new(err));
+    match err {
+        MorphTxValidationError::State(err) => {
+            TransactionValidationOutcome::Error(*transaction.hash(), Box::new(err))
+        }
+        MorphTxValidationError::Invalid(err) => {
+            TransactionValidationOutcome::Invalid(transaction, err.into())
+        }
     }
-    TransactionValidationOutcome::Invalid(transaction, err.into())
 }
 
 /// Helper function to check if a transaction is an L1 message.
@@ -621,6 +675,7 @@ fn is_morph_tx(tx: &impl Typed2718) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::MorphTxError;
     use alloy_consensus::{Sealable, Signed, TxEip1559, TxLegacy};
     use alloy_eips::eip2718::Encodable2718;
     use alloy_primitives::{B256, Signature, TxKind, address};
@@ -824,14 +879,22 @@ mod tests {
         );
 
         let replacement = replacement_header();
+        client
+            .blocks
+            .lock()
+            .retain(|_, block| block.header.number() != replacement.number());
+        client
+            .headers
+            .lock()
+            .retain(|_, header| header.number() != replacement.number());
         client.add_block(
             replacement.hash_slow(),
             morph_primitives::Block {
-                header: replacement.clone(),
+                header: replacement,
                 body: Default::default(),
             },
         );
-        validator.update_l1_block_info(&replacement);
+        // A deep commit updates the provider without notifying the validator.
 
         let in_batch =
             validator.validate_one_with_state(TransactionOrigin::Local, tx.clone(), &mut state);
@@ -847,9 +910,45 @@ mod tests {
     }
 
     #[test]
+    fn admission_recovers_without_a_maintenance_head_callback() {
+        for reset_cache in [false, true] {
+            let validator =
+                token_fee_validator(U256::ZERO, U256::from(10_000_000), 0, Default::default());
+            if reset_cache {
+                *validator.block_info.head.write() = None;
+            }
+            // Simulate a >64-block backfill/deep commit: only the provider advances.
+            let mut header = replacement_header();
+            header.inner.number = 100;
+            validator.client().add_block(
+                header.hash_slow(),
+                morph_primitives::Block {
+                    header: header.clone(),
+                    body: Default::default(),
+                },
+            );
+            let mut state = None;
+            let outcome = validator.validate_one_with_state(
+                TransactionOrigin::Local,
+                token_fee_transaction(0, U256::ZERO),
+                &mut state,
+            );
+            assert!(
+                matches!(outcome, TransactionValidationOutcome::Valid { .. }),
+                "{outcome:?}"
+            );
+            let state = state.unwrap();
+            assert_eq!(state.head.hash, header.hash_slow());
+            assert_eq!(state.head.number, 100);
+            assert_eq!(validator.inner.block_gas_limit(), header.gas_limit());
+        }
+    }
+
+    #[test]
     fn a_head_published_during_validation_does_not_change_the_balance_query() {
         let mut validator = timestamp_sensitive_validator();
         let block_info = validator.block_info().clone();
+        let client = validator.client().clone();
         let replacement = replacement_header();
         let env = MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone())
             .evm_env(&replacement)
@@ -859,6 +958,21 @@ mod tests {
         validator
             .inner
             .set_additional_stateful_validation(move |_, _, _| {
+                client
+                    .blocks
+                    .lock()
+                    .retain(|_, block| block.header.number() != replacement.number());
+                client
+                    .headers
+                    .lock()
+                    .retain(|_, header| header.number() != replacement.number());
+                client.add_block(
+                    replacement.hash_slow(),
+                    morph_primitives::Block {
+                        header: replacement.clone(),
+                        body: Default::default(),
+                    },
+                );
                 block_info.update(L1BlockInfo::default(), &replacement, env.clone());
                 Ok(())
             });
@@ -1040,10 +1154,7 @@ mod tests {
 
         let outcome = morph_tx_validation_outcome(
             tx,
-            MorphTxError::TokenInfoFetchFailed {
-                token_id: None,
-                message: "provider unavailable".to_string(),
-            },
+            MorphTxValidationError::State(std::io::Error::other("provider unavailable")),
         );
         assert!(
             matches!(outcome, TransactionValidationOutcome::Error(reported, _) if reported == hash),
@@ -1055,7 +1166,9 @@ mod tests {
     fn a_real_fee_token_failure_is_still_an_invalid_transaction() {
         let outcome = morph_tx_validation_outcome(
             token_fee_transaction(0, U256::ZERO),
-            MorphTxError::TokenNotActive { token_id: 1 },
+            MorphTxValidationError::<std::io::Error>::Invalid(MorphTxError::TokenNotActive {
+                token_id: 1,
+            }),
         );
         assert!(
             matches!(outcome, TransactionValidationOutcome::Invalid(..)),
