@@ -104,6 +104,7 @@ where
         evm.cached_token_fee_info = None;
         evm.pre_fee_logs.clear();
         evm.post_fee_logs.clear();
+        evm.pre_fee_gas_refund = 0;
 
         let (_, tx, _, journal, _, _) = evm.ctx().all_mut();
 
@@ -177,6 +178,14 @@ where
             // For L1 messages we must zero it out, otherwise gas_used is undercounted.
             exec_result.gas_mut().set_refund(0);
             return Ok(());
+        }
+        // go-ethereum settles the user's refund from `StateDB.GetRefund()`, which
+        // still holds whatever the token fee `transfer()` call recorded in
+        // `buyAltTokenGas()` (see `MorphEvm::pre_fee_gas_refund`). Fold that net
+        // amount in before the EIP-3529 cap so the two clients agree on gas used.
+        let pre_fee_refund = evm.pre_fee_gas_refund;
+        if pre_fee_refund != 0 {
+            exec_result.gas_mut().record_refund(pre_fee_refund);
         }
         post_execution::refund(
             evm.ctx().cfg().gas_params(),
@@ -456,7 +465,8 @@ where
                 token_fee_info.token_address,
                 token_amount_required,
                 None,
-            );
+            )
+            .map(|_| ());
             let refund_logs: Vec<_> = evm
                 .ctx_mut()
                 .journal_mut()
@@ -627,7 +637,9 @@ where
             }
         } else {
             // Transfer with evm call (from=caller, balance known from token registry).
-            transfer_erc20_with_evm(
+            // Keep the call's net SSTORE refund: go-ethereum credits it to the
+            // user's refund counter at settlement (`refundGas`).
+            evm.pre_fee_gas_refund = transfer_erc20_with_evm(
                 evm,
                 caller_addr,
                 beneficiary,
@@ -872,6 +884,9 @@ where
 ///
 /// `from_balance_before` is the sender's balance before the transfer. If `None`,
 /// the balance is queried via EVM call (matching go-eth's nil `userBalanceBefore`).
+///
+/// Returns the net gas refund recorded by the `transfer()` call so the caller can
+/// carry it into the transaction's refund counter where go-ethereum would.
 fn transfer_erc20_with_evm<DB, I>(
     evm: &mut MorphEvm<DB, I>,
     from: Address,
@@ -879,7 +894,7 @@ fn transfer_erc20_with_evm<DB, I>(
     token_address: Address,
     token_amount: U256,
     from_balance_before: Option<U256>,
-) -> Result<(), EVMError<DB::Error, MorphInvalidTransaction>>
+) -> Result<i64, EVMError<DB::Error, MorphInvalidTransaction>>
 where
     DB: alloy_evm::Database,
 {
@@ -941,7 +956,7 @@ where
             .into());
         }
 
-        Ok(())
+        Ok(frame_result.gas().refunded())
     })
 }
 
@@ -1033,15 +1048,19 @@ fn calculate_caller_fee_with_l1_cost(
 mod tests {
     use super::*;
     use crate::{
-        MorphBlockEnv,
+        MorphBlockEnv, MorphHaltReason,
         token_fee::{L2_TOKEN_REGISTRY_ADDRESS, compute_mapping_slot},
     };
     use alloy_primitives::{B256, Bytes, TxKind, address, keccak256};
     use morph_chainspec::hardfork::MorphHardfork;
     use morph_primitives::MORPH_TX_TYPE_ID;
     use revm::{
+        ExecuteEvm,
         context::{BlockEnv, TxEnv},
-        context_interface::{cfg::gas_params::GasId, result::InvalidTransaction},
+        context_interface::{
+            cfg::gas_params::GasId,
+            result::{ExecutionResult, InvalidTransaction},
+        },
         database::{CacheDB, EmptyDB},
         inspector::NoOpInspector,
         state::{AccountInfo, Bytecode},
@@ -1587,5 +1606,146 @@ mod tests {
             !token_accessed.load(Ordering::Relaxed),
             "simulation must not query the fee-token contract or its balance storage"
         );
+    }
+
+    /// Hand-assembled ERC20 whose balance of `A` lives in storage slot `uint256(A)`.
+    /// Implements `balanceOf(address)` and `transfer(address,uint256)` (returns true).
+    fn slotless_erc20_code() -> Bytes {
+        let mut code: Vec<u8> = vec![
+            0x60, 0x00, 0x35, 0x60, 0xe0, 0x1c, // selector
+            // DUP1 PUSH4 balanceOf EQ PUSH1 <dest, patched> JUMPI
+            0x80, 0x63, 0x70, 0xa0, 0x82, 0x31, 0x14, 0x60, 0x00, 0x57,
+            // DUP1 PUSH4 transfer EQ PUSH1 <dest, patched> JUMPI
+            0x80, 0x63, 0xa9, 0x05, 0x9c, 0xbb, 0x14, 0x60, 0x00, 0x57,
+            // PUSH1 0 DUP1 REVERT
+            0x60, 0x00, 0x80, 0xfd,
+        ];
+        let balance_of = code.len() as u8;
+        // JUMPDEST; return sload(calldataload(4))
+        code.extend_from_slice(&[
+            0x5b, 0x60, 0x04, 0x35, 0x54, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3,
+        ]);
+        let transfer = code.len() as u8;
+        // JUMPDEST; sstore(caller, sload(caller) - amt); sstore(to, sload(to) + amt); return true
+        code.extend_from_slice(&[
+            0x5b, 0x60, 0x24, 0x35, 0x80, 0x33, 0x54, 0x03, 0x33, 0x55, 0x60, 0x04, 0x35, 0x80,
+            0x54, 0x82, 0x01, 0x90, 0x55, 0x50, 0x60, 0x01, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60,
+            0x00, 0xf3,
+        ]);
+        code[14] = balance_of;
+        code[24] = transfer;
+        Bytes::from(code)
+    }
+
+    /// Contract that calls `token.transfer(msg.sender, 1)`.
+    fn send_one_back_code(token: Address) -> Bytes {
+        let mut code: Vec<u8> = vec![
+            0x63, 0xa9, 0x05, 0x9c, 0xbb, 0x60, 0xe0, 0x1b, 0x60, 0x00, 0x52, // selector
+            0x33, 0x60, 0x04, 0x52, // to = caller
+            0x60, 0x01, 0x60, 0x24, 0x52, // amount = 1
+            0x60, 0x20, 0x60, 0x00, 0x60, 0x44, 0x60, 0x00, 0x60, 0x00, 0x73,
+        ];
+        code.extend_from_slice(token.as_slice());
+        code.extend_from_slice(&[0x5a, 0xf1, 0x50, 0x00]); // GAS CALL POP STOP
+        Bytes::from(code)
+    }
+
+    fn flat_balance_slot(account: Address) -> U256 {
+        U256::from_be_bytes(account.into_word().0)
+    }
+
+    fn insert_code(db: &mut CacheDB<EmptyDB>, address: Address, code: Bytes) {
+        db.insert_account_info(
+            address,
+            AccountInfo {
+                code_hash: keccak256(&code),
+                code: Some(Bytecode::new_raw(code)),
+                ..Default::default()
+            },
+        );
+    }
+
+    /// Runs one token-fee MorphTx paid with a slotless (EVM-call path) token whose
+    /// balance is exactly the fee, so the fee `transfer()` clears the payer's
+    /// balance slot and earns an SSTORE clearing refund inside the protocol call.
+    fn run_slot_clearing_fee_tx(
+        gas_limit: u64,
+        target: impl FnOnce(&mut CacheDB<EmptyDB>, Address) -> Address,
+    ) -> ExecutionResult<MorphHaltReason> {
+        let token_id = 1u16;
+        let token = address!("1000000000000000000000000000000000000001");
+        let caller = address!("2000000000000000000000000000000000000002");
+        let vault = address!("4800000000000000000000000000000000000048");
+        let basefee = 1_000_000u64;
+
+        let mut db = CacheDB::new(EmptyDB::default());
+        insert_code(&mut db, token, slotless_erc20_code());
+        // price_ratio = scale = 1 -> 1 wei == 1 token unit; no balance slot configured.
+        insert_test_fee_token(&mut db, token_id, token, true);
+        let fee = U256::from(gas_limit) * U256::from(basefee);
+        db.insert_account_storage(token, flat_balance_slot(caller), fee)
+            .unwrap();
+        db.insert_account_storage(token, flat_balance_slot(vault), U256::from(1))
+            .unwrap();
+        db.insert_account_info(caller, AccountInfo::default());
+        let to = target(&mut db, token);
+
+        let mut evm = MorphEvm::new(MorphContext::new(db, MorphHardfork::Emerald), NoOpInspector);
+        // Morph never enables the EIP-7623 calldata floor (see `morph-evm` config).
+        evm.cfg.disable_eip7623 = true;
+        evm.block = MorphBlockEnv {
+            inner: BlockEnv {
+                basefee,
+                beneficiary: vault,
+                ..Default::default()
+            },
+        };
+        let result = evm
+            .transact_one(MorphTxEnv {
+                inner: TxEnv {
+                    tx_type: MORPH_TX_TYPE_ID,
+                    caller,
+                    gas_limit,
+                    gas_price: basefee as u128,
+                    gas_priority_fee: Some(0),
+                    kind: TxKind::Call(to),
+                    ..Default::default()
+                },
+                fee_token_id: Some(token_id),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(result.is_success(), "{result:?}");
+        result
+    }
+
+    /// go-ethereum executes the fee `transfer()` via `evm.Call` before
+    /// `StateDB.Prepare`, which leaves the call's SSTORE refund on the counter
+    /// that `refundGas()` later settles against. A 21000-gas value transfer whose
+    /// fee clears the payer's balance slot therefore settles at
+    /// `21000 - min(4800, 21000 / 5) = 16800` on morph-geth.
+    #[test]
+    fn token_fee_transfer_sstore_refund_is_credited_to_the_user_like_geth() {
+        let result = run_slot_clearing_fee_tx(21_000, |_, _| {
+            address!("3000000000000000000000000000000000000003")
+        });
+        assert_eq!(result.tx_gas_used(), 16_800);
+    }
+
+    /// The main call hands one token back to the payer, re-setting the slot the
+    /// fee transfer cleared. go-ethereum nets the fee call's `+4800` against the
+    /// main call's `-4800` on one counter and refunds nothing. Without carrying
+    /// the fee refund over, the main frame alone would end at `-4800`, which
+    /// revm's final-refund cast turns into the maximum `gas_used / 5` refund.
+    #[test]
+    fn token_fee_transfer_refund_nets_against_main_call_like_geth() {
+        let result = run_slot_clearing_fee_tx(100_000, |db, token| {
+            let helper = address!("3000000000000000000000000000000000000003");
+            insert_code(db, helper, send_one_back_code(token));
+            db.insert_account_storage(token, flat_balance_slot(helper), U256::from(1000))
+                .unwrap();
+            helper
+        });
+        assert_eq!(result.tx_gas_used(), 30_974);
     }
 }

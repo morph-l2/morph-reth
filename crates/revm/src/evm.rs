@@ -110,6 +110,15 @@ pub struct MorphEvm<DB: Database, I> {
     pub(crate) pre_fee_logs: Vec<alloy_primitives::Log>,
     /// Transfer event logs from token fee reimbursement (post-execution phase).
     pub(crate) post_fee_logs: Vec<alloy_primitives::Log>,
+    /// Net SSTORE gas refund accumulated by the token fee deduction call.
+    ///
+    /// go-ethereum runs the fee `transfer()` through `evm.Call` inside
+    /// `buyAltTokenGas()` before `StateDB.Prepare`, and `Prepare` does not reset
+    /// the refund counter, so any refund the token contract earns there (for
+    /// example clearing the payer's balance slot) is credited to the user's own
+    /// refund in `refundGas()`. revm keeps refunds on the frame's `Gas`, so the
+    /// handler carries this value into the transaction refund explicitly.
+    pub(crate) pre_fee_gas_refund: i64,
 }
 
 impl<DB: Database, I> MorphEvm<DB, I> {
@@ -175,6 +184,7 @@ impl<DB: Database, I> MorphEvm<DB, I> {
             cached_l1_data_fee: U256::ZERO,
             pre_fee_logs: Vec::new(),
             post_fee_logs: Vec::new(),
+            pre_fee_gas_refund: 0,
         }
     }
 }
