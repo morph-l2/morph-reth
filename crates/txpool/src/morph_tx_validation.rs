@@ -8,9 +8,10 @@ use alloy_evm::Database;
 use alloy_primitives::{Address, U256};
 use morph_chainspec::hardfork::MorphHardfork;
 use morph_primitives::{MorphTxEnvelope, transaction::morph_transaction::MORPH_TX_VERSION_1};
-use morph_revm::TokenFeeInfo;
+use morph_revm::{MorphEvmEnv, MorphInvalidTransaction, TokenFeeInfo};
+use reth_revm::revm::context::result::EVMError;
 
-use crate::MorphTxError;
+use crate::{MorphTxError, MorphTxValidationError};
 
 /// High-level input for MorphTx validation.
 ///
@@ -27,6 +28,11 @@ pub struct MorphTxValidationInput<'a> {
     pub l1_data_fee: U256,
     /// Current hardfork
     pub hardfork: MorphHardfork,
+    /// The environment a call-mode fee token's `balanceOf` is evaluated in.
+    ///
+    /// Must be the environment of the block whose state `db` exposes, so admission and
+    /// maintenance resolve the same balance the execution layer would.
+    pub evm_env: &'a MorphEvmEnv,
 }
 
 /// Result of MorphTx validation.
@@ -38,8 +44,6 @@ pub struct MorphTxValidationResult {
     pub token_info: Option<TokenFeeInfo>,
     /// The required token amount
     pub required_token_amount: U256,
-    /// The amount that will be paid (min of fee_limit and required)
-    pub amount_to_pay: U256,
 }
 
 /// Validates a MorphTx transaction's token-related fields.
@@ -53,24 +57,37 @@ pub struct MorphTxValidationResult {
 pub fn validate_morph_tx<DB: Database>(
     db: &mut DB,
     input: &MorphTxValidationInput<'_>,
-) -> Result<MorphTxValidationResult, MorphTxError> {
+) -> Result<MorphTxValidationResult, MorphTxValidationError<DB::Error>> {
+    validate_morph_tx_with_token_info(input, |token_id| {
+        TokenFeeInfo::load_for_caller(db, token_id, input.sender, input.evm_env)
+    })
+}
+
+/// Shared checks with a caller-provided, fixed-state token lookup.
+/// Maintenance supplies a per-round cache; admission performs a fresh lookup.
+pub(crate) fn validate_morph_tx_with_token_info<E>(
+    input: &MorphTxValidationInput<'_>,
+    load_token: impl FnOnce(u16) -> Result<Option<TokenFeeInfo>, EVMError<E, MorphInvalidTransaction>>,
+) -> Result<MorphTxValidationResult, MorphTxValidationError<E>> {
     // Keep MorphTx structural validation in the shared path so both initial
     // admission and background revalidation enforce the same invariants.
     let morph_tx = match input.consensus_tx {
         MorphTxEnvelope::Morph(signed) => signed.tx(),
-        _ => return Err(MorphTxError::InvalidTokenId),
+        _ => return Err(MorphTxError::InvalidTokenId.into()),
     };
 
     if !input.hardfork.is_jade() && morph_tx.version == MORPH_TX_VERSION_1 {
         return Err(MorphTxError::InvalidFormat {
             reason: "MorphTx version 1 is not yet active (jade fork not reached)".to_string(),
-        });
+        }
+        .into());
     }
 
     if let Err(reason) = morph_tx.validate() {
         return Err(MorphTxError::InvalidFormat {
             reason: reason.to_string(),
-        });
+        }
+        .into());
     }
 
     let tx_value = morph_tx.value;
@@ -78,7 +95,8 @@ pub fn validate_morph_tx<DB: Database>(
         return Err(MorphTxError::InsufficientEthForValue {
             balance: input.eth_balance,
             value: tx_value,
-        });
+        }
+        .into());
     }
 
     let fee_token_id = morph_tx.fee_token_id;
@@ -97,20 +115,22 @@ pub fn validate_morph_tx<DB: Database>(
             return Err(MorphTxError::InsufficientEthForValue {
                 balance: input.eth_balance,
                 value: total_eth_cost,
-            });
+            }
+            .into());
         }
         return Ok(MorphTxValidationResult {
             uses_token_fee: false,
             token_info: None,
             required_token_amount: U256::ZERO,
-            amount_to_pay: U256::ZERO,
         });
     }
 
-    let token_info = TokenFeeInfo::load_for_caller(db, fee_token_id, input.sender, input.hardfork)
-        .map_err(|err| MorphTxError::TokenInfoFetchFailed {
-            token_id: fee_token_id,
-            message: format!("{err:?}"),
+    let token_info = load_token(fee_token_id)
+        .map_err(|err| match err {
+            EVMError::Database(err) => MorphTxValidationError::State(err),
+            _ => MorphTxValidationError::Invalid(MorphTxError::TokenBalanceQueryFailed {
+                token_id: fee_token_id,
+            }),
         })?
         .ok_or(MorphTxError::TokenNotFound {
             token_id: fee_token_id,
@@ -120,14 +140,16 @@ pub fn validate_morph_tx<DB: Database>(
     if !token_info.is_active {
         return Err(MorphTxError::TokenNotActive {
             token_id: fee_token_id,
-        });
+        }
+        .into());
     }
 
     // Check price ratio is valid
     if token_info.price_ratio.is_zero() {
         return Err(MorphTxError::InvalidPriceRatio {
             token_id: fee_token_id,
-        });
+        }
+        .into());
     }
 
     // Txpool admission follows geth's conservative budget check and requires
@@ -136,14 +158,7 @@ pub fn validate_morph_tx<DB: Database>(
     let total_token_fee = token_gas_fee.saturating_add(input.l1_data_fee);
     let required_token_amount = token_info.eth_to_token_amount(total_token_fee);
 
-    // Match REVM semantics:
-    // - fee_limit == 0 => use token balance as effective limit
-    // - fee_limit > balance => cap by token balance
-    let effective_limit = if fee_limit.is_zero() || fee_limit > token_info.balance {
-        token_info.balance
-    } else {
-        fee_limit
-    };
+    let effective_limit = token_info.effective_fee_limit(fee_limit);
 
     // Check token balance against effective limit.
     if effective_limit < required_token_amount {
@@ -152,20 +167,28 @@ pub fn validate_morph_tx<DB: Database>(
             token_address: token_info.token_address,
             balance: effective_limit,
             required: required_token_amount,
-        });
+        }
+        .into());
     }
 
     Ok(MorphTxValidationResult {
         uses_token_fee: true,
         token_info: Some(token_info),
         required_token_amount,
-        amount_to_pay: required_token_amount,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The environment the fee-token balance query is evaluated in.
+    fn test_evm_env(hardfork: MorphHardfork) -> MorphEvmEnv {
+        MorphEvmEnv::new(
+            reth_revm::revm::context::CfgEnv::new_with_spec(hardfork),
+            morph_revm::MorphBlockEnv::default(),
+        )
+    }
     use alloy_consensus::Signed;
     use alloy_primitives::{B256, Signature, TxKind, address};
     use morph_primitives::{TxMorph, transaction::morph_transaction::MORPH_TX_VERSION_1};
@@ -201,6 +224,7 @@ mod tests {
             eth_balance: U256::from(1_000_000_000_000_000_000u128), // 1 ETH
             l1_data_fee: U256::from(100_000),
             hardfork: MorphHardfork::Viridian,
+            evm_env: &test_evm_env(MorphHardfork::Viridian),
         };
 
         assert_eq!(input.sender, sender);
@@ -239,6 +263,7 @@ mod tests {
             eth_balance: U256::from(1_000_000_000_000_000_000u128),
             l1_data_fee: U256::ZERO,
             hardfork: MorphHardfork::Jade,
+            evm_env: &test_evm_env(MorphHardfork::Jade),
         };
         let mut db = EmptyDB::default();
 
@@ -246,9 +271,9 @@ mod tests {
 
         assert_eq!(
             err,
-            MorphTxError::InvalidFormat {
+            MorphTxValidationError::Invalid(MorphTxError::InvalidFormat {
                 reason: "version 1 MorphTx cannot have FeeLimit when FeeTokenID is 0".to_string(),
-            }
+            })
         );
     }
 
@@ -280,11 +305,15 @@ mod tests {
             eth_balance: U256::from(1_000_000_000_000_000_000u128),
             l1_data_fee: U256::ZERO,
             hardfork: MorphHardfork::Viridian,
+            evm_env: &test_evm_env(MorphHardfork::Viridian),
         };
         let mut db = EmptyDB::default();
 
         let err = validate_morph_tx(&mut db, &input).unwrap_err();
-        assert_eq!(err, MorphTxError::InvalidTokenId);
+        assert_eq!(
+            err,
+            MorphTxValidationError::Invalid(MorphTxError::InvalidTokenId)
+        );
     }
 
     #[test]
@@ -317,11 +346,15 @@ mod tests {
             eth_balance: U256::from(100u64), // Insufficient ETH
             l1_data_fee: U256::ZERO,
             hardfork: MorphHardfork::Viridian,
+            evm_env: &test_evm_env(MorphHardfork::Viridian),
         };
         let mut db = EmptyDB::default();
 
         let err = validate_morph_tx(&mut db, &input).unwrap_err();
-        assert!(matches!(err, MorphTxError::InsufficientEthForValue { .. }));
+        assert!(matches!(
+            err,
+            MorphTxValidationError::Invalid(MorphTxError::InsufficientEthForValue { .. })
+        ));
     }
 
     #[test]
@@ -358,6 +391,7 @@ mod tests {
             eth_balance: U256::from(10u128.pow(18)), // 1 ETH (sufficient)
             l1_data_fee: U256::from(1000u64),
             hardfork: MorphHardfork::Jade,
+            evm_env: &test_evm_env(MorphHardfork::Jade),
         };
         let mut db = EmptyDB::default();
 
@@ -400,11 +434,15 @@ mod tests {
             eth_balance: U256::from(100u64), // Way too low
             l1_data_fee: U256::from(1000u64),
             hardfork: MorphHardfork::Jade,
+            evm_env: &test_evm_env(MorphHardfork::Jade),
         };
         let mut db = EmptyDB::default();
 
         let err = validate_morph_tx(&mut db, &input).unwrap_err();
-        assert!(matches!(err, MorphTxError::InsufficientEthForValue { .. }));
+        assert!(matches!(
+            err,
+            MorphTxValidationError::Invalid(MorphTxError::InsufficientEthForValue { .. })
+        ));
     }
 
     #[test]
@@ -438,13 +476,17 @@ mod tests {
             eth_balance: U256::from(10u128.pow(18)),
             l1_data_fee: U256::ZERO,
             hardfork: MorphHardfork::Viridian,
+            evm_env: &test_evm_env(MorphHardfork::Viridian),
         };
         let mut db = EmptyDB::default();
 
         // EmptyDB has no token registry state, so token lookup will fail
         let err = validate_morph_tx(&mut db, &input).unwrap_err();
         assert!(
-            matches!(err, MorphTxError::TokenNotFound { token_id: 42 }),
+            matches!(
+                err,
+                MorphTxValidationError::Invalid(MorphTxError::TokenNotFound { token_id: 42 })
+            ),
             "expected TokenNotFound {{ token_id: 42 }}, got {err:?}"
         );
     }
