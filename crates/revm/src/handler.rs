@@ -655,7 +655,35 @@ where
             evm.pre_fee_logs = std::mem::take(&mut evm.ctx_mut().journal_mut().logs);
 
             // State changes should be marked cold to avoid warm access in the main tx execution.
-            // finalize() clears journal state (including logs, which we already took above).
+            // Fee deduction ran a real EVM frame, so its state writes must survive while the
+            // frame's metadata must not: go-ethereum's `StateDB.Prepare` rebuilds the access
+            // list and resets transient storage before the main transaction
+            // (core/state/statedb.go:1066). `finalize()` is the nearest revm equivalent — it
+            // commits the deduction's state and drops the journal, undo history, logs and
+            // transient storage — and re-marking every account and slot cold reproduces the
+            // warmth `Prepare` would have left behind.
+            //
+            // The `transaction_id` handling inside `finalize()` is load-bearing, not incidental.
+            // Warming a slot goes through `EvmStorageSlot::mark_warm_with_transaction_id`, which
+            // re-baselines the EIP-2200 `original_value` to the present value whenever the slot's
+            // transaction id differs from the journal's (revm-state/src/lib.rs). That must not
+            // happen to the slot the deduction just cleared: re-baselining it to zero would make
+            // the main frame's SSTORE a *create* (SSTORE_SET, 20000) rather than a *recreate*
+            // (100), and would drop the `SubRefund` that cancels the deduction frame's `+4800`.
+            // Measured on `main_restores_cleared_slot`: 23_291 gas becomes 38_391 (+19_900
+            // -4_800), and the state root moves with the fee it implies.
+            //
+            // It does not happen because ids stay equal throughout execution. revm advances the
+            // id only when a transaction finishes — `commit_tx()` from `execution_result`, or
+            // `discard_tx()` on the error path — both after the main frame is done;
+            // `ExecuteEvm::finalize` then resets it to ZERO before the next transaction. So
+            // across this deduction and the main frame the journal's id is 0 — and this
+            // `finalize()` keeps it at 0 rather than advancing it. Swapping in `commit_tx()` here
+            // would leave the deduction-warmed slots holding 0 while the journal held 1, and the
+            // main frame's first touch of them would re-baseline `original_value`; the call-path
+            // fixtures under `bin/morph-statetest` catch exactly that. An explicit `mark_cold`
+            // carries no such risk: it drives only the warm/cold gas decision, never the
+            // re-baseline.
             let mut state = evm.finalize();
             state.iter_mut().for_each(|(_, acc)| {
                 acc.mark_cold();
