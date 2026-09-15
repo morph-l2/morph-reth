@@ -8,7 +8,7 @@ use alloy_evm::Database;
 use alloy_primitives::{Address, U256};
 use morph_chainspec::hardfork::MorphHardfork;
 use morph_primitives::{MorphTxEnvelope, transaction::morph_transaction::MORPH_TX_VERSION_1};
-use morph_revm::TokenFeeInfo;
+use morph_revm::{MorphEvmEnv, TokenFeeInfo};
 
 use crate::MorphTxError;
 
@@ -107,7 +107,15 @@ pub fn validate_morph_tx<DB: Database>(
         });
     }
 
-    let token_info = TokenFeeInfo::load_for_caller(db, fee_token_id, input.sender, input.hardfork)
+    // Pool admission has no block environment, so a call-mode token's `balanceOf`
+    // is evaluated under the hardfork's defaults. That matches the pool's previous
+    // behaviour; threading the real head environment through admission is txpool
+    // work and does not belong in this change.
+    let env = MorphEvmEnv::new(
+        reth_revm::revm::context::CfgEnv::new_with_spec(input.hardfork),
+        morph_revm::MorphBlockEnv::default(),
+    );
+    let token_info = TokenFeeInfo::load_for_caller(db, fee_token_id, input.sender, &env)
         .map_err(|err| MorphTxError::TokenInfoFetchFailed {
             token_id: fee_token_id,
             message: format!("{err:?}"),

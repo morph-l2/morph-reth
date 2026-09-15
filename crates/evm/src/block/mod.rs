@@ -138,7 +138,6 @@ where
         &mut self,
         tx: &MorphTxEnvelope,
         sender: Address,
-        hardfork: MorphHardfork,
     ) -> Result<Option<MorphReceiptTxFields>, BlockExecutionError> {
         if !tx.is_morph_tx() {
             return Ok(None);
@@ -169,12 +168,13 @@ where
 
         let token_info = match self.evm.cached_token_fee_info() {
             Some(info) => Some(info),
-            None => {
-                TokenFeeInfo::load_for_caller(self.evm.db_mut(), fee_token_id, sender, hardfork)
-                    .map_err(|e| {
-                        BlockExecutionError::msg(format!("Failed to fetch token fee info: {e:?}"))
-                    })?
-            }
+            // Only `price_ratio` and `scale` are read below, and both come straight from
+            // registry storage. `load_storage_only` reads exactly that and never builds a
+            // temporary EVM to resolve a balance this receipt has no use for.
+            None => TokenFeeInfo::load_storage_only(self.evm.db_mut(), fee_token_id, sender)
+                .map_err(|e| {
+                    BlockExecutionError::msg(format!("Failed to fetch token fee info: {e:?}"))
+                })?,
         };
 
         Ok(token_info.map(|info| MorphReceiptTxFields {
@@ -300,7 +300,7 @@ where
         // are tracing-only — the trait API no longer permits us to surface errors
         // from `commit_transaction`.
         let (tx, signer) = recovered.into_parts();
-        let morph_tx_fields = match self.get_morph_tx_fields(&tx, signer, self.hardfork) {
+        let morph_tx_fields = match self.get_morph_tx_fields(&tx, signer) {
             Ok(fields) => fields,
             Err(err) => {
                 tracing::error!(
