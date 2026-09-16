@@ -45,3 +45,32 @@ fn fee_token_calls_match_geth() {
         assert_eq!(outcome.gas_used, gas, "{} / {}", outcome.test, outcome.fork);
     }
 }
+
+/// Replays mainnet transaction `0x9ebfdac9040d7c2a8739ffdaae8baf5e7aa22fdb48585f80592de4b4cf39ed44`
+/// (block 26836567, Jade): a MorphTx V0 that pays its fee in token 1, which the registry still
+/// resolves through the direct-slot path, and whose call transfers that same token. The fixtures
+/// above are synthetic; this is slot mode as mainnet actually ran it, which every node must keep
+/// replaying identically after the registry moves off slot mode.
+///
+/// go-ethereum's state-test runner signs with `secretKey` and fixes the chain id to 1, so the
+/// sender is the harness account `0xa94f…6ebf0b`, carrying the real sender's nonce, EIP-7702
+/// delegation code and token balance under its own balance slot, and the fee vault's balance sits
+/// under the harness vault. The prestate tracer does not see the slots the fee logic reads straight
+/// from state, so the token balances, the registry entry and the L1 gas price oracle come from the
+/// parent block, which is exact here because the transaction is alone in its block. Roots are from
+/// morph-geth 4012f174b. The logs root equals the on-chain receipt's logs with the sender topic
+/// substituted, and the gas matches the on-chain receipt: the substitution changes the L1 data fee,
+/// and with it the token amount charged, but not the gas burned.
+#[test]
+fn mainnet_slot_mode_fee_token_transfer_matches_geth() {
+    let outcomes =
+        run_suite_str(include_str!("fixtures/mainnet_slot_mode_fee_token.json")).unwrap();
+    assert_eq!(outcomes.len(), 1);
+    let outcome = &outcomes[0];
+    assert!(
+        outcome.pass,
+        "{} / {}: {}",
+        outcome.test, outcome.fork, outcome.error_msg
+    );
+    assert_eq!(outcome.gas_used, 51_257);
+}
