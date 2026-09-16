@@ -576,13 +576,7 @@ impl TxMorph {
     ///
     /// V0 format: ChainID, Nonce, GasTipCap, GasFeeCap, Gas, To, Value, Data, AccessList, FeeTokenID, FeeLimit
     fn decode_fields_v0(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
-        // Need to decode RLP header first
-        let header = Header::decode(buf)?;
-        if !header.list {
-            return Err(alloy_rlp::Error::UnexpectedString);
-        }
-
-        Self::decode_fields_v0_inner(buf)
+        Self::decode_exact_list(buf, Self::decode_fields_v0_inner)
     }
 
     /// Decodes V1 format fields (for decode_fields, includes RLP header handling).
@@ -604,13 +598,36 @@ impl TxMorph {
 
     /// Decodes V1/V2 format fields, including the RLP list header.
     fn decode_fields_versioned(buf: &mut &[u8], version: u8) -> alloy_rlp::Result<Self> {
-        // Need to decode RLP header first
+        Self::decode_exact_list(buf, |buf| Self::decode_fields_versioned_inner(buf, version))
+    }
+
+    /// Decodes an RLP list header followed by `decode_inner`, requiring the list
+    /// to be consumed exactly: surplus elements are rejected with
+    /// [`alloy_rlp::Error::ListLengthMismatch`], as in [`Decodable::decode`].
+    fn decode_exact_list(
+        buf: &mut &[u8],
+        decode_inner: impl FnOnce(&mut &[u8]) -> alloy_rlp::Result<Self>,
+    ) -> alloy_rlp::Result<Self> {
         let header = Header::decode(buf)?;
         if !header.list {
             return Err(alloy_rlp::Error::UnexpectedString);
         }
 
-        Self::decode_fields_versioned_inner(buf, version)
+        let remaining = buf.len();
+        if header.payload_length > remaining {
+            return Err(alloy_rlp::Error::InputTooShort);
+        }
+
+        let tx = decode_inner(buf)?;
+
+        if buf.len() + header.payload_length != remaining {
+            return Err(alloy_rlp::Error::ListLengthMismatch {
+                expected: header.payload_length,
+                got: remaining - buf.len(),
+            });
+        }
+
+        Ok(tx)
     }
 
     /// Decodes V1 format fields (inner, assumes RLP header already consumed).
@@ -2880,6 +2897,11 @@ mod tests {
             matches!(err, alloy_rlp::Error::ListLengthMismatch { .. }),
             "unsigned V1 decode must reject trailing elements, got {err:?}"
         );
+        let err = TxMorph::decode_fields(&mut unsigned.as_slice()).unwrap_err();
+        assert!(
+            matches!(err, alloy_rlp::Error::ListLengthMismatch { .. }),
+            "V1 decode_fields must reject trailing elements, got {err:?}"
+        );
 
         // Signed path: the V1 decoder reads the list header where yParity should be.
         let signature = Signature::new(U256::from(1u64), U256::from(2u64), false);
@@ -2891,6 +2913,55 @@ mod tests {
             !err.to_string().contains("unsupported"),
             "expected an RLP-level error, got {err}"
         );
+    }
+
+    /// `decode_fields` (behind `rlp_decode_fields`) consumes the list exactly
+    /// for every version, like `Decodable::decode`: a surplus element is
+    /// rejected rather than left unread.
+    #[test]
+    fn test_decode_fields_rejects_surplus_list_elements() {
+        fn with_extra_element(mut list: &[u8]) -> Vec<u8> {
+            let header = Header::decode(&mut list).unwrap();
+            assert!(header.list);
+            let mut payload = list[..header.payload_length].to_vec();
+            payload.push(alloy_rlp::EMPTY_STRING_CODE);
+            let mut out = Vec::new();
+            Header {
+                list: true,
+                payload_length: payload.len(),
+            }
+            .encode(&mut out);
+            out.extend_from_slice(&payload);
+            out
+        }
+
+        let v2 = sample_v2_tx(1);
+        let v0 = TxMorph {
+            version: MORPH_TX_VERSION_0,
+            reference: None,
+            memo: None,
+            authorization_list: Vec::new(),
+            ..v2.clone()
+        };
+        for tx in [v0, v2] {
+            let mut encoded = Vec::new();
+            tx.encode(&mut encoded);
+            // V1+ carries the version byte in front of the list.
+            let prefix_len = usize::from(!tx.is_v0());
+            let mut surplus = encoded[..prefix_len].to_vec();
+            surplus.extend(with_extra_element(&encoded[prefix_len..]));
+
+            for result in [
+                TxMorph::decode_fields(&mut surplus.as_slice()),
+                TxMorph::decode(&mut surplus.as_slice()),
+            ] {
+                assert!(
+                    matches!(result, Err(alloy_rlp::Error::ListLengthMismatch { .. })),
+                    "version {}: surplus element must be rejected, got {result:?}",
+                    tx.version
+                );
+            }
+        }
     }
 
     /// A V2 with an empty list is valid and encodes as the V1 field list plus

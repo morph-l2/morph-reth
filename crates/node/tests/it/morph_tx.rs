@@ -1273,10 +1273,14 @@ async fn morph_tx_v2_rejected_before_onyx() -> eyre::Result<()> {
         .with_authorization_list(vec![authorization])
         .build_signed()?;
 
-    let result = node.rpc.inject_tx(raw_tx).await;
+    let err = node
+        .rpc
+        .inject_tx(raw_tx)
+        .await
+        .expect_err("MorphTx v2 should be rejected by pool before Onyx");
     assert!(
-        result.is_err(),
-        "MorphTx v2 should be rejected by pool before Onyx"
+        err.to_string().contains("not yet active"),
+        "unexpected error: {err}"
     );
 
     Ok(())

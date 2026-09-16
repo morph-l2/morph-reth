@@ -284,9 +284,10 @@ impl MorphTransactionParts {
         if let Some(version) = self.version {
             tx = tx.with_version(version);
         } else if tx.is_morph_tx() && self.authorization_list.is_some() {
-            // A MorphTx carrying an authorization list can only be V2; model it
-            // as such instead of leaving the version unset (which the handler
-            // treats as V0 and rejects).
+            // Only V2 may carry an `authorizationList` field, so its presence
+            // (even `[]`) selects V2 instead of leaving the version unset, which
+            // the handler would treat as V0. Presence rather than length is the
+            // same convention `tx_type` uses to select 0x04.
             tx = tx.with_version(MORPH_TX_VERSION_2);
         }
         if let Some(fee_token_id) = self.fee_token_id {
