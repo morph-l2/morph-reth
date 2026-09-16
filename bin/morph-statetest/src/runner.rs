@@ -246,6 +246,15 @@ fn validation_error<E>(
 where
     E: std::fmt::Display,
 {
+    // `expectException` is checked for presence, deliberately not for its text.
+    // go-ethereum's own statetest harness does the same -- `tests/state_test.go`
+    // returns early on `len(ExpectException) > 0` under a standing
+    // "TODO check error string" -- so matching on the text here would make this
+    // runner stricter than the client the fixtures are generated from, and a
+    // fixture imported from go-ethereum could fail on wording alone. The string
+    // stays in the JSON as documentation of which failure the case is meant to
+    // provoke; the assertion is that the transaction is *rejected*, which is what
+    // both clients agree on.
     match (&test.expect_exception, exec_result) {
         (Some(_), Err(_)) => return None,
         (Some(expected), Ok(_)) => {

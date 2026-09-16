@@ -631,10 +631,21 @@ const RUNTIME_REVERT_INIT: &[u8] = &[
 ///   1. Block 1: Deploy a contract whose runtime always reverts (EIP-1559 tx)
 ///   2. Block 2: Call that contract with MorphTx v0 (ERC20 fee)
 ///   3. Verify: receipt.status = false, but token balance decreased
+///   4. Verify: the receipt still carries both fee `Transfer` events
 ///
 /// This exercises the handler's `validate_and_deduct_token_fee` (charges fee
 /// upfront) and `reimburse_caller_token_fee` (partial refund for unused gas)
 /// paths when the main transaction execution reverts.
+///
+/// The log assertion is the point of running the fee path on a *reverting* main
+/// frame. go-ethereum keeps `StateDB.logs` outside the state snapshot/revert
+/// mechanism, so the deduction's `Transfer` survives a main-frame revert; that
+/// is the entire reason morph-reth caches fee logs in `pre_fee_logs` /
+/// `post_fee_logs` instead of leaving them in the journal (`crates/evm/src/block/receipt.rs`).
+/// A regression there -- the fee logs dropped, or restored into the reverted
+/// frame -- changes the receipt's logs and therefore the block's receipts root,
+/// and no state assertion in this test would notice. This is the only test that
+/// runs the production receipt builder against a reverting main frame.
 #[tokio::test(flavor = "multi_thread")]
 async fn morph_tx_v0_token_fee_still_charged_on_revert() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -709,6 +720,40 @@ async fn morph_tx_v0_token_fee_still_charged_on_revert() -> eyre::Result<()> {
         "token balance must decrease even when main tx reverts \
          (fee deducted upfront, partial refund for unused gas). \
          before={bal_before}, after={bal_after}"
+    );
+
+    // Both fee transfers must survive the main frame's revert: go-ethereum keeps
+    // `StateDB.logs` outside the state snapshot/revert mechanism, so the deduction's
+    // `Transfer` is still in the receipt while the reverted main frame contributes
+    // none. Order is go-ethereum's: deduction, (empty) main frame, reimbursement.
+    let fee_vault = morph_node::test_utils::TEST_FEE_VAULT_ADDRESS;
+    let transfer_topic = erc20_transfer_topic();
+    let transfer_logs: Vec<_> = receipt
+        .logs()
+        .iter()
+        .filter(|log| log.address == token_addr && log.topics().first() == Some(&transfer_topic))
+        .collect();
+    assert_eq!(
+        transfer_logs.len(),
+        2,
+        "receipt must carry the fee deduction and the fee reimbursement even though \
+         the main frame reverted; dropping the deduction's log changes the receipts root. \
+         got {transfer_logs:?}"
+    );
+    assert_eq!(
+        (transfer_logs[0].topics()[1], transfer_logs[0].topics()[2]),
+        (address_topic(sender), address_topic(fee_vault)),
+        "first log must be the fee deduction (sender -> fee vault)"
+    );
+    assert_ne!(
+        transfer_logs[0].data.data.as_ref(),
+        [0u8; 32],
+        "the deduction must move a non-zero fee"
+    );
+    assert_eq!(
+        (transfer_logs[1].topics()[1], transfer_logs[1].topics()[2]),
+        (address_topic(fee_vault), address_topic(sender)),
+        "second log must be the fee reimbursement (fee vault -> sender)"
     );
 
     // The receipt should carry MorphTx-specific fee fields

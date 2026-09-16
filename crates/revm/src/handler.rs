@@ -670,8 +670,17 @@ where
             // list and resets transient storage before the main transaction
             // (core/state/statedb.go:1066). `finalize()` is the nearest revm equivalent — it
             // commits the deduction's state and drops the journal, undo history, logs and
-            // transient storage — and re-marking every account and slot cold reproduces the
-            // warmth `Prepare` would have left behind.
+            // transient storage.
+            //
+            // `mark_cold` below only has to *drop* the warmth this frame's own CALL created; it
+            // does not restore what `Prepare` would have left warm, and must not try to. That
+            // warmth arrives later from upstream, which is why the two cannot be swapped:
+            // `run_without_catch_error` runs this deduction inside `validate()`, then
+            // `pre_execution()` → `pre_execution::load_accounts` re-warms the coinbase
+            // (EIP-3651) and the transaction's access list, and the nonce bump just below
+            // re-loads the caller. If a future change reorders those phases, a main frame that
+            // reads `COINBASE` would be charged 2600 instead of go-ethereum's 100; nothing here
+            // would catch it, because no fixture's main frame touches the coinbase.
             //
             // The `transaction_id` handling inside `finalize()` is load-bearing, not incidental.
             // Warming a slot goes through `EvmStorageSlot::mark_warm_with_transaction_id`, which
@@ -941,9 +950,11 @@ where
 /// `system_call_one` — answers under `BlockEnv::default()` and `CfgEnv::default()`: block 0,
 /// timestamp 1, chain id 1, zero coinbase and base fee, with `SYSTEM_ADDRESS` as the sender.
 /// For any token whose `balanceOf` reads that context the two clients would charge different
-/// fees for the same transaction. The gas budget was never the problem: `system_call_one`
-/// capped at `SYSTEM_CALL_GAS_LIMIT`, which is go-ethereum's 200k, and so does
-/// [`EVM_CALL_GAS_LIMIT`].
+/// fees for the same transaction. The gas budget was never the problem: this crate's
+/// `system_call_one` set the limit to its own `SYSTEM_CALL_GAS_LIMIT` — `exec.rs`, 200_000,
+/// which deliberately shadows revm's `SYSTEM_CALL_GAS_LIMIT` of 30_000_000 at the
+/// `SystemCallEvm` impl — and that 200k is go-ethereum's `maxGas`. [`EVM_CALL_GAS_LIMIT`]
+/// carries the same number forward.
 fn load_token_fee_info<DB, I>(
     evm: &mut MorphEvm<DB, I>,
     entry: TokenRegistryEntry,
