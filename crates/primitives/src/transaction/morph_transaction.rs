@@ -5,6 +5,12 @@
 //! - ERC20 tokens for gas payment instead of native ETH
 //! - Transaction reference for indexing/lookup
 //! - Memo field for arbitrary data
+//! - EIP-7702 authorization list (version 2, Onyx onwards)
+//!
+//! Wire formats (after the `0x7F` type byte):
+//! - V0: `RLP([chainId, nonce, gasTipCap, gasFeeCap, gas, to, value, data, accessList, feeTokenID, feeLimit, V, R, S])`
+//! - V1: `0x01 || RLP([..., feeTokenID, feeLimit, reference, memo, V, R, S])`
+//! - V2: `0x02 || RLP([..., feeTokenID, feeLimit, reference, memo, authorizationList, V, R, S])`
 //!
 //! Reference: <https://github.com/morph-l2/go-ethereum/pull/282>
 
@@ -27,6 +33,16 @@ pub const MORPH_TX_VERSION_0: u8 = 0;
 
 /// MorphTx version 1: includes Version, Reference, Memo fields.
 pub const MORPH_TX_VERSION_1: u8 = 1;
+
+/// MorphTx version 2: V1 fields plus an EIP-7702 authorization list.
+///
+/// The list may be empty, in which case the transaction behaves exactly like a
+/// V1 transaction (only the wire version byte and the empty list field differ).
+/// The authorization tuples use the standard EIP-7702 structure, encoding and
+/// signing domain (`keccak256(0x05 || rlp([chainId, address, nonce]))`), so
+/// authority recovery, intrinsic gas and delegation semantics are identical to
+/// the `0x04` SetCode transaction.
+pub const MORPH_TX_VERSION_2: u8 = 2;
 
 /// Maximum length of the memo field in bytes.
 pub const MAX_MEMO_LENGTH: usize = 64;
@@ -75,8 +91,11 @@ pub struct MorphTxFields {
 /// - Memo field for arbitrary data
 ///
 /// Reference: <https://github.com/morph-l2/go-ethereum/pull/282>
+///
+/// JSON serialization is implemented by hand (see the `Serialize` impl below)
+/// because whether `authorizationList` is emitted depends on the version.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 pub struct TxMorph {
     /// EIP-155: Simple replay attack protection.
@@ -129,14 +148,7 @@ pub struct TxMorph {
 
     /// Version of the Morph transaction format.
     /// Used for future extensibility.
-    #[cfg_attr(
-        feature = "serde",
-        serde(
-            default,
-            with = "alloy_serde::quantity",
-            skip_serializing_if = "is_morph_tx_version_0"
-        )
-    )]
+    #[cfg_attr(feature = "serde", serde(default, with = "alloy_serde::quantity"))]
     pub version: u8,
 
     /// Token ID for alternative fee payment.
@@ -160,20 +172,30 @@ pub struct TxMorph {
     /// Reference key for the transaction (optional, v1 only).
     /// Used for indexing and looking up transactions by external systems.
     /// This is a 32-byte value that can be used to group related transactions.
-    #[cfg_attr(
-        feature = "serde",
-        serde(default, skip_serializing_if = "Option::is_none")
-    )]
+    #[cfg_attr(feature = "serde", serde(default))]
     pub reference: Option<B256>,
 
-    /// Memo field for arbitrary data (optional, v1 only).
+    /// Memo field for arbitrary data (optional, v1+).
     /// Can be used to attach additional information to the transaction.
     /// Maximum length is 64 bytes.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub memo: Option<Bytes>,
+
+    /// EIP-7702 authorization list (v2 only).
+    ///
+    /// Always empty for V0 and V1. A V2 transaction may carry an empty list, in
+    /// which case it behaves exactly like V1; the tuples are standard
+    /// [`SignedAuthorization`]s and are applied exactly like an EIP-7702
+    /// (`0x04`) transaction's list.
+    ///
+    /// JSON: every V2 transaction emits the key (an empty list as `[]`) and V0
+    /// and V1 never do, matching go-ethereum's `MarshalJSON`. An absent key,
+    /// `[]` and `null` all decode to an empty list.
     #[cfg_attr(
         feature = "serde",
-        serde(default, skip_serializing_if = "Option::is_none")
+        serde(default, deserialize_with = "alloy_serde::null_as_default")
     )]
-    pub memo: Option<Bytes>,
+    pub authorization_list: Vec<SignedAuthorization>,
 
     /// Input has two uses depending if transaction is Create or Call (if `to`
     /// field is None or Some).
@@ -183,6 +205,67 @@ pub struct TxMorph {
     ///   message call.
     #[cfg_attr(feature = "serde", serde(default, alias = "data"))]
     pub input: Bytes,
+}
+
+/// Same field layout as the derived `Deserialize`, except that
+/// `authorizationList` follows the version instead of the list length: a V2
+/// transaction always emits it, so an empty list serializes as `[]` like
+/// go-ethereum does, while V0 and V1 never emit it.
+#[cfg(feature = "serde")]
+impl serde::Serialize for TxMorph {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(serde::Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Repr<'a> {
+            #[serde(with = "alloy_serde::quantity")]
+            chain_id: ChainId,
+            #[serde(with = "alloy_serde::quantity")]
+            nonce: u64,
+            #[serde(with = "alloy_serde::quantity", rename = "gas")]
+            gas_limit: u64,
+            #[serde(with = "alloy_serde::quantity")]
+            max_fee_per_gas: u128,
+            #[serde(with = "alloy_serde::quantity")]
+            max_priority_fee_per_gas: u128,
+            to: &'a TxKind,
+            value: &'a U256,
+            access_list: &'a AccessList,
+            #[serde(
+                with = "alloy_serde::quantity",
+                skip_serializing_if = "is_morph_tx_version_0"
+            )]
+            version: u8,
+            #[serde(with = "alloy_serde::quantity", rename = "feeTokenID")]
+            fee_token_id: u16,
+            fee_limit: &'a U256,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            reference: Option<&'a B256>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            memo: Option<&'a Bytes>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            authorization_list: Option<&'a Vec<SignedAuthorization>>,
+            input: &'a Bytes,
+        }
+
+        Repr {
+            chain_id: self.chain_id,
+            nonce: self.nonce,
+            gas_limit: self.gas_limit,
+            max_fee_per_gas: self.max_fee_per_gas,
+            max_priority_fee_per_gas: self.max_priority_fee_per_gas,
+            to: &self.to,
+            value: &self.value,
+            access_list: &self.access_list,
+            version: self.version,
+            fee_token_id: self.fee_token_id,
+            fee_limit: &self.fee_limit,
+            reference: self.reference.as_ref(),
+            memo: self.memo.as_ref(),
+            authorization_list: self.is_v2().then_some(&self.authorization_list),
+            input: &self.input,
+        }
+        .serialize(serializer)
+    }
 }
 
 impl TxMorph {
@@ -231,6 +314,11 @@ impl TxMorph {
     /// - Version 0 (legacy format): FeeTokenID must be > 0, Reference and Memo must not be set
     /// - Version 1 (with Reference/Memo): FeeTokenID, Reference, Memo are all optional;
     ///   if FeeTokenID is 0, FeeLimit must not be set
+    /// - Version 2 (with authorization list): all V1 rules. The authorization
+    ///   list may be empty (the transaction then behaves like V1); a non-empty
+    ///   list requires `to` to be a call (no CREATE), matching the EIP-7702
+    ///   `0x04` static rule
+    /// - Versions 0 and 1 must not carry an authorization list
     /// - Other versions: not supported
     pub fn validate_version(&self) -> Result<(), &'static str> {
         match self.version {
@@ -251,12 +339,31 @@ impl TxMorph {
                 if self.memo.as_ref().is_some_and(|m| !m.is_empty()) {
                     return Err("version 0 MorphTx does not support Memo field");
                 }
+                if self.has_authorizations() {
+                    return Err("version 0 MorphTx does not support authorization list");
+                }
             }
             MORPH_TX_VERSION_1 => {
                 // Version 1: FeeTokenID, Reference, Memo are all optional
                 // If FeeTokenID is 0, FeeLimit must not be set
                 if self.fee_token_id == 0 && self.fee_limit > U256::ZERO {
                     return Err("version 1 MorphTx cannot have FeeLimit when FeeTokenID is 0");
+                }
+                if self.has_authorizations() {
+                    return Err("version 1 MorphTx does not support authorization list");
+                }
+            }
+            MORPH_TX_VERSION_2 => {
+                if self.fee_token_id == 0 && self.fee_limit > U256::ZERO {
+                    return Err("version 2 MorphTx cannot have FeeLimit when FeeTokenID is 0");
+                }
+                // An empty list is allowed (V2 then behaves like V1). With
+                // authorizations the transaction cannot be a CREATE, the same
+                // static rule as EIP-7702 SetCode transactions.
+                if self.has_authorizations() && self.to.is_create() {
+                    return Err(
+                        "version 2 MorphTx with an authorization list cannot create a contract",
+                    );
                 }
             }
             _ => {
@@ -276,6 +383,42 @@ impl TxMorph {
         self.version == MORPH_TX_VERSION_1
     }
 
+    /// Returns true if this is a version 2 MorphTx (with EIP-7702 authorization list).
+    pub const fn is_v2(&self) -> bool {
+        self.version == MORPH_TX_VERSION_2
+    }
+
+    /// Returns true if the authorization list is non-empty.
+    ///
+    /// This looks at the raw field regardless of `version`; use
+    /// [`Transaction::authorization_list`] for the version-gated view.
+    pub fn has_authorizations(&self) -> bool {
+        !self.authorization_list.is_empty()
+    }
+
+    /// Authorization tuples that are part of the V2 wire and signing encodings.
+    ///
+    /// Only V2 encodes the list (an empty V2 list encodes as the empty RLP list
+    /// `0xc0`); V0/V1 must never carry one (see [`Self::validate_version`]).
+    /// The debug assertion catches callers that encode such an inconsistent
+    /// transaction instead of silently dropping the list from the wire bytes.
+    ///
+    /// Returns a `Vec` reference because alloy-rlp implements `Encodable` for
+    /// `Vec<T>` but not for `[T]`.
+    fn encoded_authorization_list(&self) -> &Vec<SignedAuthorization> {
+        static EMPTY: Vec<SignedAuthorization> = Vec::new();
+        if self.is_v2() {
+            &self.authorization_list
+        } else {
+            debug_assert!(
+                !self.has_authorizations(),
+                "MorphTx version {} must not carry an authorization list",
+                self.version
+            );
+            &EMPTY
+        }
+    }
+
     /// Calculate the in-memory size of this transaction.
     pub fn size(&self) -> usize {
         mem::size_of::<ChainId>() + // chain_id
@@ -291,16 +434,19 @@ impl TxMorph {
         mem::size_of::<U256>() + // fee_limit
         mem::size_of::<Option<B256>>() + // reference
         self.memo.as_ref().map_or(0, |m| m.len()) + // memo
+        mem::size_of::<Vec<SignedAuthorization>>() + // authorization_list
+        self.authorization_list.len() * mem::size_of::<SignedAuthorization>() +
         self.input.len() // input
     }
 
     /// Outputs the length of the transaction's RLP fields, without a RLP header.
     ///
-    /// Note: For V1, the version byte is NOT included here - it's encoded as a prefix byte
+    /// Note: For V1+, the version byte is NOT included here - it's encoded as a prefix byte
     /// before the RLP data, similar to txType.
     ///
     /// V0 format: ChainID, Nonce, GasTipCap, GasFeeCap, Gas, To, Value, Data, AccessList, FeeTokenID, FeeLimit
     /// V1 format: ChainID, Nonce, GasTipCap, GasFeeCap, Gas, To, Value, Data, AccessList, FeeTokenID, FeeLimit, Reference, Memo
+    /// V2 format: V1 fields, AuthorizationList
     #[doc(hidden)]
     pub fn fields_len(&self) -> usize {
         let mut len = 0;
@@ -329,16 +475,21 @@ impl TxMorph {
             // Memo is Option<Bytes> - encoded as RLP bytes or empty
             len += self.memo.as_ref().map_or(0usize.length(), |m| m.0.length());
         }
+        if self.is_v2() {
+            // V2 format: adds the EIP-7702 authorization list after Memo
+            len += self.encoded_authorization_list().length();
+        }
         len
     }
 
     /// Encodes only the transaction's RLP fields into the desired buffer, without a RLP header.
     ///
-    /// Note: For V1, the version byte is NOT included here - it's encoded as a prefix byte
+    /// Note: For V1+, the version byte is NOT included here - it's encoded as a prefix byte
     /// before the RLP data by the caller (encode_2718).
     ///
     /// V0 format: ChainID, Nonce, GasTipCap, GasFeeCap, Gas, To, Value, Data, AccessList, FeeTokenID, FeeLimit
     /// V1 format: ChainID, Nonce, GasTipCap, GasFeeCap, Gas, To, Value, Data, AccessList, FeeTokenID, FeeLimit, Reference, Memo
+    /// V2 format: V1 fields, AuthorizationList
     pub fn encode_fields(&self, out: &mut dyn BufMut) {
         // Common fields
         self.chain_id.encode(out);
@@ -370,36 +521,54 @@ impl TxMorph {
                 Bytes::new().encode(out); // Encode empty bytes for None
             }
         }
+        if self.is_v2() {
+            // V2 format: EIP-7702 authorization list, encoded exactly like TxEip7702
+            self.encoded_authorization_list().encode(out);
+        }
+    }
+
+    /// Determines the wire-format version from the first byte after the txType byte.
+    ///
+    /// - `0x00` or an RLP list prefix (`>= 0xC0`): V0 (no version byte; matches
+    ///   go-ethereum's `decode()` which routes `firstByte == 0` to V0)
+    /// - `0x01`: V1
+    /// - `0x02`: V2
+    /// - anything else: unsupported
+    ///
+    /// Returns the version and whether a version byte must be skipped.
+    fn wire_version(first_byte: u8) -> alloy_rlp::Result<(u8, bool)> {
+        if first_byte == MORPH_TX_VERSION_0 || first_byte >= 0xC0 {
+            Ok((MORPH_TX_VERSION_0, false))
+        } else if first_byte == MORPH_TX_VERSION_1 || first_byte == MORPH_TX_VERSION_2 {
+            Ok((first_byte, true))
+        } else {
+            Err(alloy_rlp::Error::Custom("unsupported morph tx version"))
+        }
     }
 
     /// Decodes the inner fields from RLP bytes (after txType byte is consumed).
     ///
     /// Version detection based on first byte:
     /// - V0 format: first byte is 0 or RLP list prefix (>= 0xC0) → direct RLP decode
-    /// - V1+ format: first byte is version (0x01, 0x02, ...) → skip version byte, then RLP decode
+    /// - V1/V2 format: first byte is version (0x01 / 0x02) → skip version byte, then RLP decode
     ///
     /// V0 RLP: ChainID, Nonce, GasTipCap, GasFeeCap, Gas, To, Value, Data, AccessList, FeeTokenID, FeeLimit
     /// V1 RLP: ChainID, Nonce, GasTipCap, GasFeeCap, Gas, To, Value, Data, AccessList, FeeTokenID, FeeLimit, Reference, Memo
+    /// V2 RLP: V1 fields, AuthorizationList
     pub fn decode_fields(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
         if buf.is_empty() {
             return Err(alloy_rlp::Error::InputTooShort);
         }
 
-        let first_byte = buf[0];
-
-        // Check first byte to determine version:
-        // - V0 format (legacy AltFeeTx): first byte is 0 or RLP list prefix (0xC0-0xFF), no version prefix
-        // - V1+ format: first byte is version (0x01, 0x02, ...) followed by RLP
-        if first_byte == 0 || first_byte >= 0xC0 {
-            // V0 format: direct RLP decode (legacy compatible)
-            Self::decode_fields_v0(buf)
-        } else if first_byte == MORPH_TX_VERSION_1 {
-            // V1 format: first byte is version, rest is RLP
-            // Skip the version byte
+        let (version, has_version_byte) = Self::wire_version(buf[0])?;
+        if has_version_byte {
             *buf = &buf[1..];
-            Self::decode_fields_v1(buf)
-        } else {
-            Err(alloy_rlp::Error::Custom("unsupported morph tx version"))
+        }
+
+        match version {
+            MORPH_TX_VERSION_0 => Self::decode_fields_v0(buf),
+            MORPH_TX_VERSION_1 => Self::decode_fields_v1(buf),
+            _ => Self::decode_fields_v2(buf),
         }
     }
 
@@ -423,17 +592,46 @@ impl TxMorph {
     ///
     /// Note: Version is NOT in the RLP - it was already consumed as a prefix byte.
     fn decode_fields_v1(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
+        Self::decode_fields_versioned(buf, MORPH_TX_VERSION_1)
+    }
+
+    /// Decodes V2 format fields (for decode_fields, includes RLP header handling).
+    ///
+    /// V2 format (after version byte is consumed): V1 fields, AuthorizationList
+    fn decode_fields_v2(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
+        Self::decode_fields_versioned(buf, MORPH_TX_VERSION_2)
+    }
+
+    /// Decodes V1/V2 format fields, including the RLP list header.
+    fn decode_fields_versioned(buf: &mut &[u8], version: u8) -> alloy_rlp::Result<Self> {
         // Need to decode RLP header first
         let header = Header::decode(buf)?;
         if !header.list {
             return Err(alloy_rlp::Error::UnexpectedString);
         }
 
-        Self::decode_fields_v1_inner(buf)
+        Self::decode_fields_versioned_inner(buf, version)
     }
 
     /// Decodes V1 format fields (inner, assumes RLP header already consumed).
     fn decode_fields_v1_inner(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
+        Self::decode_fields_versioned_inner(buf, MORPH_TX_VERSION_1)
+    }
+
+    /// Decodes V2 format fields (inner, assumes RLP header already consumed).
+    fn decode_fields_v2_inner(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
+        Self::decode_fields_versioned_inner(buf, MORPH_TX_VERSION_2)
+    }
+
+    /// Decodes V1/V2 format fields (inner, assumes RLP header already consumed).
+    ///
+    /// V2 reads one extra field, the EIP-7702 authorization list, after Memo.
+    /// An empty V2 list is valid and decodes as an empty list (behaving like V1).
+    fn decode_fields_versioned_inner(buf: &mut &[u8], version: u8) -> alloy_rlp::Result<Self> {
+        debug_assert!(
+            version == MORPH_TX_VERSION_1 || version == MORPH_TX_VERSION_2,
+            "versioned decoder only handles V1 and V2"
+        );
         let chain_id = Decodable::decode(buf)?;
         let nonce = Decodable::decode(buf)?;
         let max_priority_fee_per_gas = Decodable::decode(buf)?;
@@ -466,6 +664,13 @@ impl TxMorph {
             Some(memo_bytes)
         };
 
+        // V2 only: authorization list, same RLP shape as TxEip7702 (may be empty).
+        let authorization_list = if version == MORPH_TX_VERSION_2 {
+            Vec::<SignedAuthorization>::decode(buf)?
+        } else {
+            Vec::new()
+        };
+
         Ok(Self {
             chain_id,
             nonce,
@@ -476,11 +681,12 @@ impl TxMorph {
             value,
             input,
             access_list,
-            version: MORPH_TX_VERSION_1,
+            version,
             fee_token_id,
             fee_limit,
             reference,
             memo,
+            authorization_list,
         })
     }
 
@@ -520,16 +726,18 @@ impl TxMorph {
             fee_limit,
             reference: None,
             memo: None,
+            authorization_list: Vec::new(),
         })
     }
 
     /// Computes the hash used for signing the transaction.
     ///
-    /// Note: The sigHash encoding differs from transaction encoding for V1:
-    /// - Transaction encoding: `[version byte] + RLP([..., FeeTokenID, FeeLimit, Reference, Memo])`
-    /// - SigHash encoding: `TxType + RLP([..., FeeTokenID, FeeLimit, Version, Reference, Memo])`
+    /// Note: The sigHash encoding differs from transaction encoding for V1+:
+    /// - Transaction encoding: `[version byte] + RLP([..., FeeTokenID, FeeLimit, Reference, Memo, (AuthorizationList)])`
+    /// - SigHash encoding: `TxType + RLP([..., FeeTokenID, FeeLimit, Version, Reference, Memo, (AuthorizationList)])`
     ///
-    /// For V1, Version is included IN the RLP for signing, not as a prefix.
+    /// For V1+, Version is included IN the RLP for signing, not as a prefix.
+    /// V2 appends the authorization list after Memo in both encodings.
     pub fn signature_hash(&self) -> B256 {
         let mut buf = Vec::new();
         self.encode_for_sig_hash(&mut buf);
@@ -540,8 +748,9 @@ impl TxMorph {
     ///
     /// V0 format: TxType + RLP([..., FeeTokenID, FeeLimit])
     /// V1 format: TxType + RLP([..., FeeTokenID, FeeLimit, Version, Reference, Memo])
+    /// V2 format: TxType + RLP([..., FeeTokenID, FeeLimit, Version, Reference, Memo, AuthorizationList])
     ///
-    /// Note: For V1, Version is included in the RLP (after FeeLimit), not as a prefix byte.
+    /// Note: For V1+, Version is included in the RLP (after FeeLimit), not as a prefix byte.
     fn encode_for_sig_hash(&self, out: &mut dyn BufMut) {
         // Write txType
         out.put_u8(MORPH_TX_TYPE_ID);
@@ -573,13 +782,17 @@ impl TxMorph {
         len += self.fee_limit.length();
 
         if !self.is_v0() {
-            // V1 sigHash: includes Version, Reference, Memo IN the RLP
+            // V1+ sigHash: includes Version, Reference, Memo IN the RLP
             len += self.version.length();
             len += self
                 .reference
                 .as_ref()
                 .map_or(0usize.length(), |r| r.0.length());
             len += self.memo.as_ref().map_or(0usize.length(), |m| m.0.length());
+        }
+        if self.is_v2() {
+            // V2 sigHash: authorization list is covered by the signature
+            len += self.encoded_authorization_list().length();
         }
         len
     }
@@ -588,6 +801,7 @@ impl TxMorph {
     ///
     /// V0 format: ChainID, Nonce, GasTipCap, GasFeeCap, Gas, To, Value, Data, AccessList, FeeTokenID, FeeLimit
     /// V1 format: ChainID, Nonce, GasTipCap, GasFeeCap, Gas, To, Value, Data, AccessList, FeeTokenID, FeeLimit, Version, Reference, Memo
+    /// V2 format: V1 fields, AuthorizationList
     fn encode_sig_hash_fields(&self, out: &mut dyn BufMut) {
         self.chain_id.encode(out);
         self.nonce.encode(out);
@@ -602,7 +816,7 @@ impl TxMorph {
         self.fee_limit.encode(out);
 
         if !self.is_v0() {
-            // V1 sigHash: includes Version, Reference, Memo IN the RLP
+            // V1+ sigHash: includes Version, Reference, Memo IN the RLP
             self.version.encode(out);
             if let Some(ref r) = self.reference {
                 r.0.encode(out);
@@ -614,6 +828,10 @@ impl TxMorph {
             } else {
                 Bytes::new().encode(out);
             }
+        }
+        if self.is_v2() {
+            // V2 sigHash: authorization list is covered by the signature
+            self.encoded_authorization_list().encode(out);
         }
     }
 }
@@ -689,8 +907,18 @@ impl Transaction for TxMorph {
         None
     }
 
+    /// Returns the EIP-7702 authorization list of a V2 transaction, if any.
+    ///
+    /// `None` for V0/V1 (even if the raw field is populated on an invalid
+    /// in-memory value) and for a V2 transaction with an empty list, so the
+    /// txpool authority tracking and the EVM authorization application only
+    /// ever see lists that will actually be applied.
     fn authorization_list(&self) -> Option<&[SignedAuthorization]> {
-        None
+        if self.is_v2() && !self.authorization_list.is_empty() {
+            Some(&self.authorization_list)
+        } else {
+            None
+        }
     }
 }
 
@@ -703,11 +931,12 @@ impl RlpEcdsaEncodableTx for TxMorph {
         self.encode_fields(out);
     }
 
-    /// Override: For V1, include the version byte prefix before the RLP list.
+    /// Override: For V1+, include the version byte prefix before the RLP list.
     ///
     /// Wire format:
     /// - V0: `RLP([fields..., V, R, S])`
     /// - V1: `version_byte(0x01) + RLP([fields..., V, R, S])`
+    /// - V2: `version_byte(0x02) + RLP([fields..., authorizationList, V, R, S])`
     fn rlp_encode_signed(&self, signature: &Signature, out: &mut dyn BufMut) {
         if !self.is_v0() {
             out.put_u8(self.version);
@@ -739,32 +968,29 @@ impl RlpEcdsaDecodableTx for TxMorph {
         Self::decode_fields(buf)
     }
 
-    /// Override: Handle the V1 version byte before the RLP list.
+    /// Override: Handle the V1/V2 version byte before the RLP list.
     ///
     /// Wire format (after txType byte is consumed):
     /// - V0: `RLP([fields_v0..., V, R, S])`
     /// - V1: `version_byte(0x01) + RLP([fields_v1..., V, R, S])`
+    /// - V2: `version_byte(0x02) + RLP([fields_v2..., V, R, S])`
     ///
     /// The default implementation assumes the buffer starts with an RLP list header,
-    /// which fails for V1 because the first byte is the version byte (0x01).
+    /// which fails for V1+ because the first byte is the version byte.
+    ///
+    /// Each version has a fixed number of list elements; a payload with extra
+    /// elements (e.g. a V1 prefix followed by V2 fields) fails the trailing
+    /// [`alloy_rlp::Error::ListLengthMismatch`] check, matching go-ethereum's
+    /// `rlp: input list has too many elements`.
     fn rlp_decode_with_signature(buf: &mut &[u8]) -> alloy_rlp::Result<(Self, Signature)> {
         if buf.is_empty() {
             return Err(alloy_rlp::Error::InputTooShort);
         }
 
-        let first_byte = buf[0];
-
-        // Detect version:
-        // - V1: first byte is version byte (0x01), skip it
-        // - V0: first byte is 0 or RLP list prefix (>= 0xC0), no version prefix
-        let version = if first_byte == MORPH_TX_VERSION_1 {
-            *buf = &buf[1..]; // skip version byte
-            MORPH_TX_VERSION_1
-        } else if first_byte == MORPH_TX_VERSION_0 || first_byte >= 0xC0 {
-            MORPH_TX_VERSION_0
-        } else {
-            return Err(alloy_rlp::Error::Custom("unsupported morph tx version"));
-        };
+        let (version, has_version_byte) = Self::wire_version(buf[0])?;
+        if has_version_byte {
+            *buf = &buf[1..];
+        }
 
         // Now decode: RLP([fields..., V, R, S])
         let header = Header::decode(buf)?;
@@ -775,10 +1001,10 @@ impl RlpEcdsaDecodableTx for TxMorph {
         let remaining = buf.len();
 
         // Decode fields based on version
-        let tx = if version == MORPH_TX_VERSION_1 {
-            Self::decode_fields_v1_inner(buf)?
-        } else {
-            Self::decode_fields_v0_inner(buf)?
+        let tx = match version {
+            MORPH_TX_VERSION_0 => Self::decode_fields_v0_inner(buf)?,
+            MORPH_TX_VERSION_1 => Self::decode_fields_v1_inner(buf)?,
+            _ => Self::decode_fields_v2_inner(buf)?,
         };
 
         let signature = Signature::decode_rlp_vrs(buf, bool::decode)?;
@@ -820,7 +1046,7 @@ impl Encodable for TxMorph {
     /// Encodes TxMorph to RLP.
     ///
     /// For V0: RLP([fields...])
-    /// For V1: [version byte] + RLP([fields...])
+    /// For V1+: [version byte] + RLP([fields...])
     fn encode(&self, out: &mut dyn BufMut) {
         if !self.is_v0() {
             // V1+: write version byte before RLP
@@ -840,27 +1066,24 @@ impl Encodable for TxMorph {
 }
 
 impl Decodable for TxMorph {
-    /// Decodes TxMorph from RLP bytes (after txType byte is consumed).
+    /// Decodes an unsigned TxMorph from RLP bytes (after txType byte is consumed).
     ///
-    /// This handles both V0 and V1 formats:
+    /// This handles all formats:
     /// - V0: RLP list directly
-    /// - V1: version byte + RLP list
+    /// - V1/V2: version byte + RLP list
+    ///
+    /// Like the signed path, the list must be consumed exactly: extra trailing
+    /// elements (e.g. an authorization list on a V1 prefix) are rejected with
+    /// [`alloy_rlp::Error::ListLengthMismatch`].
     fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
         if buf.is_empty() {
             return Err(alloy_rlp::Error::InputTooShort);
         }
 
-        let first_byte = buf[0];
-
-        // Check if this is a version prefix (V1+) or RLP list header (V0)
-        if first_byte == MORPH_TX_VERSION_1 {
-            // V1: skip version byte, then decode RLP
+        let (version, has_version_byte) = Self::wire_version(buf[0])?;
+        if has_version_byte {
             *buf = &buf[1..];
-        } else if first_byte != MORPH_TX_VERSION_0 && first_byte < 0xC0 {
-            // Invalid: not a version we support and not an RLP list
-            return Err(alloy_rlp::Error::Custom("unsupported morph tx version"));
         }
-        // V0: first_byte is 0 or RLP list prefix (>= 0xC0)
 
         let header = Header::decode(buf)?;
         if !header.list {
@@ -872,12 +1095,20 @@ impl Decodable for TxMorph {
             return Err(alloy_rlp::Error::InputTooShort);
         }
 
-        // Determine version based on what we saw
-        if first_byte == MORPH_TX_VERSION_1 {
-            Self::decode_fields_v1_inner(buf)
-        } else {
-            Self::decode_fields_v0_inner(buf)
+        let tx = match version {
+            MORPH_TX_VERSION_0 => Self::decode_fields_v0_inner(buf)?,
+            MORPH_TX_VERSION_1 => Self::decode_fields_v1_inner(buf)?,
+            _ => Self::decode_fields_v2_inner(buf)?,
+        };
+
+        if buf.len() + header.payload_length != remaining {
+            return Err(alloy_rlp::Error::ListLengthMismatch {
+                expected: header.payload_length,
+                got: remaining - buf.len(),
+            });
         }
+
+        Ok(tx)
     }
 }
 
@@ -922,6 +1153,10 @@ mod compact_txmorph {
     /// - `memo` and `input` are packed into a single `Bytes` field (`data`) because
     ///   the derive macro only allows one `Bytes` field and it must be last.
     ///   Format: `[memo_len: u8][memo_bytes][input_bytes]`.
+    /// - `authorization_list` (V2) was appended after `reference`. It only adds a
+    ///   single presence bit to the struct flags (44 → 45 bits, still 6 flag
+    ///   bytes), so rows written before V2 decode unchanged (empty list). The
+    ///   layout is locked by `test_compact_decodes_pre_v2_bytes`; do not reorder.
     #[derive(Debug, Clone, PartialEq, Eq, Hash, Compact)]
     #[reth_codecs(crate = "reth_codecs")]
     struct TxMorphCompact {
@@ -939,6 +1174,9 @@ mod compact_txmorph {
         fee_token_id: u64,
         fee_limit: U256,
         reference: Option<B256>,
+        /// V2 EIP-7702 authorization list; `None` for V0/V1 rows and for V2
+        /// rows whose list is empty.
+        authorization_list: Option<Vec<SignedAuthorization>>,
         /// Packed: `[memo_len: u8][memo_bytes][input_bytes]` (must be last)
         data: Bytes,
     }
@@ -968,6 +1206,8 @@ mod compact_txmorph {
                 fee_token_id: u64::from(self.fee_token_id),
                 fee_limit: self.fee_limit,
                 reference: self.reference,
+                authorization_list: (!self.authorization_list.is_empty())
+                    .then(|| self.authorization_list.clone()),
                 data: data.into(),
             };
             helper.to_compact(buf)
@@ -999,6 +1239,7 @@ mod compact_txmorph {
                 fee_limit: helper.fee_limit,
                 reference: helper.reference,
                 memo,
+                authorization_list: helper.authorization_list.unwrap_or_default(),
                 input,
             };
             (tx, remaining)
@@ -1253,6 +1494,7 @@ mod tests {
             fee_limit: U256::from(1000u64),
             reference: Some(reference),
             memo: Some(memo.clone()),
+            authorization_list: Vec::new(),
         };
 
         // Test Transaction trait methods
@@ -1323,6 +1565,7 @@ mod tests {
             fee_limit: U256::from(1000u64),
             reference: Some(reference),
             memo: Some(memo),
+            authorization_list: Vec::new(),
         };
 
         // Encode
@@ -1368,6 +1611,7 @@ mod tests {
             fee_limit: U256::from(1000u64),
             reference: None, // V0 has no reference
             memo: None,      // V0 has no memo
+            authorization_list: Vec::new(),
         };
 
         // Encode
@@ -1413,6 +1657,7 @@ mod tests {
             fee_limit: U256::from(1000u64),
             reference: None,
             memo: None,
+            authorization_list: Vec::new(),
         };
 
         // Encode
@@ -1442,6 +1687,7 @@ mod tests {
             fee_limit: U256::from(1000u64),
             reference: None,
             memo: None,
+            authorization_list: Vec::new(),
         };
 
         let mut buf = Vec::new();
@@ -1474,6 +1720,7 @@ mod tests {
             fee_limit: U256::from(1000u64),
             reference: None,
             memo: None,
+            authorization_list: Vec::new(),
         };
 
         // Encode the transaction
@@ -1552,6 +1799,7 @@ mod tests {
             fee_limit: U256::ZERO,
             reference: None,
             memo: None,
+            authorization_list: Vec::new(),
         };
 
         let size = tx.size();
@@ -1575,6 +1823,7 @@ mod tests {
             fee_limit: U256::from(1000u64),
             reference: None,
             memo: None,
+            authorization_list: Vec::new(),
         };
 
         let fields_len = tx.fields_len();
@@ -1602,6 +1851,7 @@ mod tests {
             fee_limit: U256::from(1000u64),
             reference: None,
             memo: None,
+            authorization_list: Vec::new(),
         };
 
         let mut buf = Vec::new();
@@ -1644,6 +1894,7 @@ mod tests {
             fee_limit: U256::from(1000u64),
             reference: None,
             memo: None,
+            authorization_list: Vec::new(),
         };
 
         let hash = tx.signature_hash();
@@ -1670,6 +1921,7 @@ mod tests {
             fee_limit: U256::ZERO,
             reference: Some(reference),
             memo: Some(memo.clone()),
+            authorization_list: Vec::new(),
         };
 
         // Test trait methods
@@ -1791,6 +2043,7 @@ mod tests {
             fee_limit: U256::ZERO,
             reference: Some(B256::from([0xab; 32])),
             memo: Some(Bytes::from(vec![0xca, 0xfe])),
+            authorization_list: Vec::new(),
         };
 
         let mut buf = Vec::new();
@@ -1831,6 +2084,7 @@ mod tests {
             fee_limit: U256::from(1000u64),
             reference: None,
             memo: None,
+            authorization_list: Vec::new(),
         };
 
         let mut buf = Vec::new();
@@ -1901,13 +2155,23 @@ mod tests {
         assert!(!v1_tx.is_v0());
         assert!(v1_tx.is_v1());
 
-        // Unsupported version (e.g., 2) - neither is_v0 nor is_v1
+        // V2 transaction - neither is_v0 nor is_v1
         let v2_tx = TxMorph {
-            version: 2,
+            version: MORPH_TX_VERSION_2,
             ..Default::default()
         };
         assert!(!v2_tx.is_v0());
         assert!(!v2_tx.is_v1()); // is_v1 uses == not >=, so version 2 is not v1
+        assert!(v2_tx.is_v2());
+
+        // Unsupported version (e.g., 3) - none of the helpers match
+        let v3_tx = TxMorph {
+            version: 3,
+            ..Default::default()
+        };
+        assert!(!v3_tx.is_v0());
+        assert!(!v3_tx.is_v1());
+        assert!(!v3_tx.is_v2());
     }
 
     #[test]
@@ -2051,6 +2315,7 @@ mod tests {
             fee_limit: U256::ZERO,
             reference: Some(reference),
             memo: Some(memo.clone()),
+            authorization_list: Vec::new(),
         };
 
         // Create a dummy signature for testing
@@ -2153,6 +2418,7 @@ mod tests {
             fee_limit: U256::from(1000u64),
             reference: None,
             memo: None,
+            authorization_list: Vec::new(),
         };
 
         let signature = Signature::new(U256::from(1u64), U256::from(2u64), false);
@@ -2267,6 +2533,7 @@ mod tests {
             fee_limit: U256::from(999u64),
             reference: Some(B256::from([0xab; 32])),
             memo: Some(Bytes::from(vec![0xca, 0xfe, 0xba, 0xbe])),
+            authorization_list: Vec::new(),
             input: Bytes::from(vec![0x12, 0x34, 0x56]),
         };
 
@@ -2297,6 +2564,7 @@ mod tests {
             fee_limit: U256::from(500u64),
             reference: None,
             memo: None,
+            authorization_list: Vec::new(),
             input: Bytes::from(vec![0x60, 0x80, 0x60, 0x40]),
         };
 
@@ -2306,5 +2574,548 @@ mod tests {
 
         assert!(remaining.is_empty());
         assert_eq!(tx, decoded);
+    }
+
+    // =========================================================================
+    // V2 (EIP-7702 authorization list) tests
+    // =========================================================================
+
+    use alloy_eips::eip7702::Authorization;
+
+    /// A syntactically valid authorization tuple (the signature is not
+    /// recoverable; recovery only matters at execution time).
+    fn sample_authorization(nonce: u64) -> SignedAuthorization {
+        Authorization {
+            chain_id: U256::from(2818),
+            address: address!("2222222222222222222222222222222222222222"),
+            nonce,
+        }
+        .into_signed(Signature::new(
+            U256::from(0x1111u64),
+            U256::from(0x2222u64),
+            true,
+        ))
+    }
+
+    fn sample_v2_tx(fee_token_id: u16) -> TxMorph {
+        TxMorph {
+            chain_id: 2818,
+            nonce: 26,
+            gas_limit: 3_000_000,
+            max_fee_per_gas: 1_000_000_000,
+            max_priority_fee_per_gas: 0,
+            to: TxKind::Call(address!("1111111111111111111111111111111111111111")),
+            value: U256::ZERO,
+            access_list: AccessList::default(),
+            input: Bytes::new(),
+            version: MORPH_TX_VERSION_2,
+            fee_token_id,
+            fee_limit: if fee_token_id > 0 {
+                U256::from(1_000_000_000_000_000_000u128)
+            } else {
+                U256::ZERO
+            },
+            reference: Some(B256::from([0x01; 32])),
+            memo: Some(Bytes::from_static(b"invoice-1")),
+            authorization_list: vec![sample_authorization(27), sample_authorization(28)],
+        }
+    }
+
+    #[test]
+    fn test_morph_transaction_v2_validate_rules() {
+        // Valid V2 with token fee and with ETH fee.
+        assert!(sample_v2_tx(1).validate().is_ok());
+        assert!(sample_v2_tx(0).validate().is_ok());
+
+        // V2 may carry an empty list (it then behaves like V1).
+        let empty = TxMorph {
+            authorization_list: Vec::new(),
+            ..sample_v2_tx(0)
+        };
+        assert!(empty.validate().is_ok());
+        assert!(!empty.has_authorizations());
+
+        // With authorizations V2 cannot create a contract (same rule as EIP-7702
+        // SetCode); without them CREATE is allowed exactly like V1.
+        let create = TxMorph {
+            to: TxKind::Create,
+            input: Bytes::from_static(&[0x60, 0x80]),
+            ..sample_v2_tx(0)
+        };
+        assert_eq!(
+            create.validate().unwrap_err(),
+            "version 2 MorphTx with an authorization list cannot create a contract"
+        );
+        let create_without_authorizations = TxMorph {
+            authorization_list: Vec::new(),
+            ..create
+        };
+        assert!(create_without_authorizations.validate().is_ok());
+
+        // V1 fee rule still applies to V2.
+        let fee_limit_without_token = TxMorph {
+            fee_token_id: 0,
+            fee_limit: U256::from(1u64),
+            ..sample_v2_tx(0)
+        };
+        assert_eq!(
+            fee_limit_without_token.validate().unwrap_err(),
+            "version 2 MorphTx cannot have FeeLimit when FeeTokenID is 0"
+        );
+
+        // V0 / V1 must not carry a list.
+        let v1_with_list = TxMorph {
+            version: MORPH_TX_VERSION_1,
+            ..sample_v2_tx(0)
+        };
+        assert_eq!(
+            v1_with_list.validate().unwrap_err(),
+            "version 1 MorphTx does not support authorization list"
+        );
+        let v0_with_list = TxMorph {
+            version: MORPH_TX_VERSION_0,
+            fee_token_id: 1,
+            reference: None,
+            memo: None,
+            ..sample_v2_tx(1)
+        };
+        assert_eq!(
+            v0_with_list.validate().unwrap_err(),
+            "version 0 MorphTx does not support authorization list"
+        );
+
+        // An empty list on V1 is the normal state.
+        let v1_empty_list = TxMorph {
+            version: MORPH_TX_VERSION_1,
+            authorization_list: Vec::new(),
+            ..sample_v2_tx(0)
+        };
+        assert!(v1_empty_list.validate().is_ok());
+    }
+
+    #[test]
+    fn test_morph_transaction_authorization_list_accessor_is_version_gated() {
+        let v2 = sample_v2_tx(0);
+        assert_eq!(
+            Transaction::authorization_list(&v2).map(<[SignedAuthorization]>::len),
+            Some(2)
+        );
+
+        // Even if an (invalid) V1 value carries the raw field, the trait view is None,
+        // so pool authority tracking and the EVM never see it.
+        let v1 = TxMorph {
+            version: MORPH_TX_VERSION_1,
+            ..sample_v2_tx(0)
+        };
+        assert!(Transaction::authorization_list(&v1).is_none());
+        assert!(v1.has_authorizations());
+
+        // A V2 with an empty list has nothing to apply: the trait view is None
+        // (like a plain V1), so nothing downstream treats it as a 7702 carrier.
+        let v2_empty = TxMorph {
+            authorization_list: Vec::new(),
+            ..sample_v2_tx(0)
+        };
+        assert!(Transaction::authorization_list(&v2_empty).is_none());
+        assert!(!v2_empty.has_authorizations());
+    }
+
+    #[test]
+    fn test_morph_transaction_rlp_roundtrip_v2() {
+        let tx = sample_v2_tx(1);
+
+        let mut buf = Vec::new();
+        tx.encode(&mut buf);
+        assert_eq!(buf[0], MORPH_TX_VERSION_2, "V2 wire prefix byte");
+        assert!(buf[1] >= 0xC0, "RLP list header follows the version byte");
+        assert_eq!(buf.len(), tx.length());
+
+        let decoded = TxMorph::decode(&mut buf.as_slice()).expect("Should decode V2");
+        assert_eq!(decoded, tx);
+        assert!(decoded.is_v2());
+
+        // decode_fields (the RlpEcdsaDecodableTx fallback) takes the same route.
+        let via_fields = TxMorph::decode_fields(&mut buf.as_slice()).expect("decode_fields V2");
+        assert_eq!(via_fields, tx);
+    }
+
+    #[test]
+    fn test_morph_signed_v2_decode_2718_roundtrip() {
+        use alloy_consensus::Signed;
+        use alloy_consensus::transaction::{RlpEcdsaDecodableTx, RlpEcdsaEncodableTx};
+        use alloy_eips::eip2718::Decodable2718;
+
+        let tx = sample_v2_tx(1);
+        let signature = Signature::new(U256::from(1u64), U256::from(2u64), false);
+
+        let mut signed_buf = Vec::new();
+        tx.rlp_encode_signed(&signature, &mut signed_buf);
+        assert_eq!(signed_buf[0], MORPH_TX_VERSION_2);
+        assert_eq!(
+            signed_buf.len(),
+            tx.rlp_encoded_length_with_signature(&signature)
+        );
+
+        let (decoded_tx, decoded_sig) =
+            TxMorph::rlp_decode_with_signature(&mut signed_buf.as_slice())
+                .expect("Should decode V2 signed tx");
+        assert_eq!(decoded_tx, tx);
+        assert_eq!(decoded_sig, signature);
+
+        // Full EIP-2718 roundtrip: 0x7f || 0x02 || rlp([...])
+        let signed_tx = Signed::new_unhashed(tx.clone(), signature);
+        let mut eip2718_buf = Vec::new();
+        signed_tx.encode_2718(&mut eip2718_buf);
+        assert_eq!(eip2718_buf[0], MORPH_TX_TYPE_ID);
+        assert_eq!(eip2718_buf[1], MORPH_TX_VERSION_2);
+        assert_eq!(eip2718_buf.len(), signed_tx.encode_2718_len());
+
+        let decoded_signed = Signed::<TxMorph>::decode_2718(&mut eip2718_buf.as_slice())
+            .expect("Should decode V2 signed tx via decode_2718");
+        assert_eq!(decoded_signed.tx(), &tx);
+        assert_eq!(decoded_signed.hash(), signed_tx.hash());
+    }
+
+    /// Locks the V2 wire layout: the authorization list sits between `memo`
+    /// and the transaction signature, and the signing payload carries the
+    /// version inside the RLP list (no `0x02` prefix) followed by the list.
+    #[test]
+    fn test_morph_transaction_v2_wire_and_sig_hash_layout() {
+        use alloy_consensus::transaction::RlpEcdsaEncodableTx;
+
+        let tx = sample_v2_tx(1);
+        let signature = Signature::new(U256::from(1u64), U256::from(2u64), false);
+        let auth_list = tx.authorization_list.clone();
+
+        // Common prefix shared by the wire and signing encodings.
+        let mut common = Vec::new();
+        tx.chain_id.encode(&mut common);
+        tx.nonce.encode(&mut common);
+        tx.max_priority_fee_per_gas.encode(&mut common);
+        tx.max_fee_per_gas.encode(&mut common);
+        tx.gas_limit.encode(&mut common);
+        tx.to.encode(&mut common);
+        tx.value.encode(&mut common);
+        tx.input.encode(&mut common);
+        tx.access_list.encode(&mut common);
+        tx.fee_token_id.encode(&mut common);
+        tx.fee_limit.encode(&mut common);
+
+        let mut tail = Vec::new();
+        tx.reference.unwrap().0.encode(&mut tail);
+        tx.memo.clone().unwrap().encode(&mut tail);
+        auth_list.encode(&mut tail);
+
+        // Wire: 0x02 || rlp([common..., reference, memo, authorizationList, yParity, r, s])
+        let mut wire_payload = common.clone();
+        wire_payload.extend_from_slice(&tail);
+        signature.write_rlp_vrs(&mut wire_payload, signature.v());
+        let mut expected_wire = vec![MORPH_TX_VERSION_2];
+        Header {
+            list: true,
+            payload_length: wire_payload.len(),
+        }
+        .encode(&mut expected_wire);
+        expected_wire.extend_from_slice(&wire_payload);
+
+        let mut actual_wire = Vec::new();
+        tx.rlp_encode_signed(&signature, &mut actual_wire);
+        assert_eq!(actual_wire, expected_wire, "V2 wire layout");
+
+        // Signing: 0x7f || rlp([common..., version, reference, memo, authorizationList])
+        let mut sig_payload = common;
+        tx.version.encode(&mut sig_payload);
+        sig_payload.extend_from_slice(&tail);
+        let mut expected_sig_preimage = vec![MORPH_TX_TYPE_ID];
+        Header {
+            list: true,
+            payload_length: sig_payload.len(),
+        }
+        .encode(&mut expected_sig_preimage);
+        expected_sig_preimage.extend_from_slice(&sig_payload);
+
+        let mut actual_sig_preimage = Vec::new();
+        tx.encode_for_signing(&mut actual_sig_preimage);
+        assert_eq!(
+            actual_sig_preimage, expected_sig_preimage,
+            "V2 sigHash layout"
+        );
+        assert_eq!(tx.signature_hash(), keccak256(&expected_sig_preimage));
+        assert_eq!(tx.payload_len_for_signature(), expected_sig_preimage.len());
+    }
+
+    #[test]
+    fn test_morph_transaction_v2_signature_hash_covers_authorization_list() {
+        let tx = sample_v2_tx(0);
+        let other_list = TxMorph {
+            authorization_list: vec![sample_authorization(99)],
+            ..tx.clone()
+        };
+        assert_ne!(tx.signature_hash(), other_list.signature_hash());
+
+        // Same base fields as V1: the version and the list both move the hash.
+        let v1 = TxMorph {
+            version: MORPH_TX_VERSION_1,
+            authorization_list: Vec::new(),
+            ..tx.clone()
+        };
+        assert_ne!(tx.signature_hash(), v1.signature_hash());
+    }
+
+    /// V1 payloads have a fixed element count: an appended authorization list
+    /// (i.e. V2 fields behind a V1 prefix) must be rejected, not silently
+    /// ignored, on both the signed and the unsigned decode paths.
+    #[test]
+    fn test_v1_wire_with_trailing_authorization_list_rejected() {
+        use alloy_consensus::transaction::{RlpEcdsaDecodableTx, RlpEcdsaEncodableTx};
+
+        let tx = sample_v2_tx(0);
+
+        // Unsigned path: rewrite the version byte so a V1 decoder sees 14 fields.
+        let mut unsigned = Vec::new();
+        tx.encode(&mut unsigned);
+        unsigned[0] = MORPH_TX_VERSION_1;
+        let err = TxMorph::decode(&mut unsigned.as_slice()).unwrap_err();
+        assert!(
+            matches!(err, alloy_rlp::Error::ListLengthMismatch { .. }),
+            "unsigned V1 decode must reject trailing elements, got {err:?}"
+        );
+
+        // Signed path: the V1 decoder reads the list header where yParity should be.
+        let signature = Signature::new(U256::from(1u64), U256::from(2u64), false);
+        let mut signed = Vec::new();
+        tx.rlp_encode_signed(&signature, &mut signed);
+        signed[0] = MORPH_TX_VERSION_1;
+        let err = TxMorph::rlp_decode_with_signature(&mut signed.as_slice()).unwrap_err();
+        assert!(
+            !err.to_string().contains("unsupported"),
+            "expected an RLP-level error, got {err}"
+        );
+    }
+
+    /// A V2 with an empty list is valid and encodes as the V1 field list plus
+    /// one empty RLP list (`0xc0`): same payload as V1, version byte `0x02`.
+    #[test]
+    fn test_v2_wire_with_empty_authorization_list_is_v1_layout_plus_empty_list() {
+        let v2 = TxMorph {
+            authorization_list: Vec::new(),
+            ..sample_v2_tx(0)
+        };
+        let v1 = TxMorph {
+            version: MORPH_TX_VERSION_1,
+            ..v2.clone()
+        };
+        assert!(v2.validate().is_ok());
+
+        let mut v2_buf = Vec::new();
+        v2.encode(&mut v2_buf);
+        let mut v1_buf = Vec::new();
+        v1.encode(&mut v1_buf);
+        assert_eq!(v2_buf[0], MORPH_TX_VERSION_2);
+        assert_eq!(v1_buf[0], MORPH_TX_VERSION_1);
+
+        // Strip the version byte and the list header from both encodings.
+        let mut v2_payload = &v2_buf[1..];
+        let v2_header = Header::decode(&mut v2_payload).unwrap();
+        let mut v1_payload = &v1_buf[1..];
+        let v1_header = Header::decode(&mut v1_payload).unwrap();
+        assert!(v2_header.list && v1_header.list);
+        assert_eq!(v2_header.payload_length, v1_header.payload_length + 1);
+        assert_eq!(
+            v2_payload,
+            [v1_payload, &[alloy_rlp::EMPTY_LIST_CODE][..]].concat(),
+            "V2 with an empty list = V1 fields + 0xc0"
+        );
+
+        // Round trip: the empty list decodes as empty and the value is unchanged.
+        let decoded = TxMorph::decode(&mut v2_buf.as_slice()).expect("V2 with empty list decodes");
+        assert_eq!(decoded, v2);
+        assert!(decoded.authorization_list.is_empty());
+        assert!(decoded.validate().is_ok());
+
+        // The version still moves the signature hash even though the list is empty.
+        assert_ne!(v2.signature_hash(), v1.signature_hash());
+    }
+
+    #[test]
+    fn test_morph_transaction_rejects_unknown_version_byte() {
+        let mut buf: &[u8] = &[0x03, 0xc0];
+        let err = TxMorph::decode(&mut buf).unwrap_err();
+        assert!(err.to_string().contains("unsupported morph tx version"));
+    }
+
+    #[test]
+    fn test_morph_transaction_size_counts_authorizations() {
+        let v2 = sample_v2_tx(0);
+        let v1 = TxMorph {
+            version: MORPH_TX_VERSION_1,
+            authorization_list: Vec::new(),
+            ..v2.clone()
+        };
+        assert!(v2.size() > v1.size());
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_tx_morph_serde_v2_outputs_authorization_list() {
+        let v2 = sample_v2_tx(1);
+        let json = serde_json::to_value(&v2).unwrap();
+        assert_eq!(json["version"], serde_json::json!("0x2"));
+        let list = json["authorizationList"]
+            .as_array()
+            .expect("V2 JSON carries authorizationList");
+        assert_eq!(list.len(), 2);
+        for key in ["chainId", "address", "nonce", "yParity", "r", "s"] {
+            assert!(
+                list[0].get(key).is_some(),
+                "authorization tuple must have `{key}` (same shape as 0x04)"
+            );
+        }
+
+        let roundtrip: TxMorph = serde_json::from_value(json).unwrap();
+        assert_eq!(roundtrip, v2);
+
+        // V0 / V1 never emit the key, and the hand-written serializer stays in
+        // step with the derived deserializer for every version.
+        for version in [MORPH_TX_VERSION_0, MORPH_TX_VERSION_1] {
+            let tx = TxMorph {
+                version,
+                authorization_list: Vec::new(),
+                ..sample_v2_tx(1)
+            };
+            let json = serde_json::to_value(&tx).unwrap();
+            assert!(json.get("authorizationList").is_none());
+            assert_eq!(serde_json::from_value::<TxMorph>(json).unwrap(), tx);
+        }
+
+        // A V2 with an empty list still emits the key, as `[]` (go-ethereum
+        // does the same), and `[]`, an absent key and `null` all decode back
+        // to the same (empty) value.
+        let v2_empty = TxMorph {
+            authorization_list: Vec::new(),
+            ..sample_v2_tx(1)
+        };
+        let mut json = serde_json::to_value(&v2_empty).unwrap();
+        assert_eq!(json["version"], serde_json::json!("0x2"));
+        assert_eq!(json["authorizationList"], serde_json::json!([]));
+        let empty: TxMorph = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(empty, v2_empty);
+        json.as_object_mut().unwrap().remove("authorizationList");
+        let absent: TxMorph = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(absent, v2_empty);
+        json["authorizationList"] = serde_json::Value::Null;
+        let null: TxMorph = serde_json::from_value(json).unwrap();
+        assert_eq!(null, v2_empty);
+    }
+
+    #[cfg(feature = "reth-codec")]
+    #[test]
+    fn test_compact_roundtrip_v2_with_authorization_list() {
+        use reth_codecs::Compact;
+
+        let tx = sample_v2_tx(1);
+        let mut buf = Vec::new();
+        tx.to_compact(&mut buf);
+        let (decoded, remaining) = TxMorph::from_compact(&buf, buf.len());
+
+        assert!(remaining.is_empty());
+        assert_eq!(tx, decoded);
+    }
+
+    /// A V2 with an empty list stores the list as absent (same bytes as a V1
+    /// row apart from the version) and decodes back to an empty list.
+    #[cfg(feature = "reth-codec")]
+    #[test]
+    fn test_compact_roundtrip_v2_with_empty_authorization_list() {
+        use reth_codecs::Compact;
+
+        let v2_empty = TxMorph {
+            authorization_list: Vec::new(),
+            ..sample_v2_tx(1)
+        };
+        let mut buf = Vec::new();
+        v2_empty.to_compact(&mut buf);
+        let (decoded, remaining) = TxMorph::from_compact(&buf, buf.len());
+        assert!(remaining.is_empty());
+        assert_eq!(decoded, v2_empty);
+        assert!(decoded.authorization_list.is_empty());
+
+        let v1 = TxMorph {
+            version: MORPH_TX_VERSION_1,
+            ..v2_empty
+        };
+        let mut v1_buf = Vec::new();
+        v1.to_compact(&mut v1_buf);
+        assert_eq!(
+            buf.len(),
+            v1_buf.len(),
+            "an empty list adds no storage bytes"
+        );
+    }
+
+    /// Storage layout lock: rows written before the V2 field existed must keep
+    /// decoding byte-for-byte, and pre-V2 transactions must still encode to the
+    /// exact same bytes (the new presence bit only occupies previously unused
+    /// flag padding). Vectors were produced by the pre-V2 `Compact` impl.
+    #[cfg(feature = "reth-codec")]
+    #[test]
+    fn test_compact_decodes_pre_v2_bytes() {
+        use alloy_primitives::hex;
+        use reth_codecs::Compact;
+
+        let v1 = TxMorph {
+            chain_id: 2818,
+            nonce: 42,
+            gas_limit: 21_000,
+            max_fee_per_gas: 100_000_000_000,
+            max_priority_fee_per_gas: 2_000_000_000,
+            to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
+            value: U256::from(1_000_000_000_000_000_000u128),
+            access_list: AccessList::default(),
+            version: 1,
+            fee_token_id: 7,
+            fee_limit: U256::from(999u64),
+            reference: Some(B256::from([0xab; 32])),
+            memo: Some(Bytes::from(vec![0xca, 0xfe, 0xba, 0xbe])),
+            authorization_list: Vec::new(),
+            input: Bytes::from(vec![0x12, 0x34, 0x56]),
+        };
+        let v1_bytes = hex::decode(
+            "1252482442080b022a5208174876e8007735940000000000000000000000000000000000000000020de0b6b3a764000000010703e7abababababababababababababababababababababababababababababababab04cafebabe123456",
+        )
+        .unwrap();
+
+        let v0 = TxMorph {
+            chain_id: 2818,
+            nonce: 0,
+            gas_limit: 100_000,
+            max_fee_per_gas: 50_000_000_000,
+            max_priority_fee_per_gas: 1_000_000_000,
+            to: TxKind::Create,
+            value: U256::ZERO,
+            access_list: AccessList::default(),
+            version: 0,
+            fee_token_id: 1,
+            fee_limit: U256::from(500u64),
+            reference: None,
+            memo: None,
+            authorization_list: Vec::new(),
+            input: Bytes::from(vec![0x60, 0x80, 0x60, 0x40]),
+        };
+        let v0_bytes =
+            hex::decode("0253080042000b020186a00ba43b74003b9aca00000101f40060806040").unwrap();
+
+        for (name, tx, bytes) in [("v1", v1, v1_bytes), ("v0", v0, v0_bytes)] {
+            let (decoded, remaining) = TxMorph::from_compact(&bytes, bytes.len());
+            assert!(remaining.is_empty(), "{name}: pre-V2 bytes fully consumed");
+            assert_eq!(decoded, tx, "{name}: pre-V2 bytes decode unchanged");
+
+            let mut reencoded = Vec::new();
+            tx.to_compact(&mut reencoded);
+            assert_eq!(
+                reencoded, bytes,
+                "{name}: pre-V2 rows re-encode identically"
+            );
+        }
     }
 }

@@ -5501,6 +5501,7 @@ dependencies = [
  "eyre",
  "morph-chainspec",
  "morph-evm",
+ "morph-primitives",
  "morph-revm",
  "revm",
  "revm-statetest-types",

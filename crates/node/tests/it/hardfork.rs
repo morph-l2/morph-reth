@@ -63,6 +63,31 @@ async fn pre_jade_chain_advances() -> eyre::Result<()> {
     Ok(())
 }
 
+/// With Onyx disabled (pre-Onyx schedule), blocks are still built correctly.
+///
+/// Only MorphTx v2 is gated on Onyx; everything else behaves as under Jade.
+#[tokio::test(flavor = "multi_thread")]
+async fn pre_onyx_chain_advances() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, wallet) = TestNodeBuilder::new()
+        .with_schedule(HardforkSchedule::PreOnyx)
+        .build()
+        .await?;
+    let mut node = nodes.pop().unwrap();
+    let wallet = wallet_to_arc(wallet);
+
+    let payloads = advance_chain(3, &mut node, wallet).await?;
+    assert_eq!(payloads.len(), 3);
+
+    for (i, payload) in payloads.iter().enumerate() {
+        let block = payload.block();
+        assert_eq!(block.header().inner.number, (i + 1) as u64);
+    }
+
+    Ok(())
+}
+
 /// Verify that an empty block can be produced under pre-Jade schedule.
 #[tokio::test(flavor = "multi_thread")]
 async fn pre_jade_empty_block() -> eyre::Result<()> {

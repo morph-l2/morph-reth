@@ -1,4 +1,5 @@
 use morph_chainspec::hardfork::MorphHardfork;
+use morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_2;
 use morph_revm::{MorphTxEnv, MorphTxExt};
 use revm::{
     context::{BlockEnv, CfgEnv, TransactionType, TxEnv},
@@ -282,6 +283,11 @@ impl MorphTransactionParts {
         let mut tx = MorphTxEnv::new(inner);
         if let Some(version) = self.version {
             tx = tx.with_version(version);
+        } else if tx.is_morph_tx() && self.authorization_list.is_some() {
+            // A MorphTx carrying an authorization list can only be V2; model it
+            // as such instead of leaving the version unset (which the handler
+            // treats as V0 and rejects).
+            tx = tx.with_version(MORPH_TX_VERSION_2);
         }
         if let Some(fee_token_id) = self.fee_token_id {
             tx = tx.with_fee_token_id(fee_token_id);
@@ -358,7 +364,10 @@ pub fn parse_fork(name: &str) -> Result<MorphHardfork, SchemaError> {
         "morph203" | "morph-203" => Ok(MorphHardfork::Morph203),
         "viridian" | "prague" => Ok(MorphHardfork::Viridian),
         "emerald" => Ok(MorphHardfork::Emerald),
-        "jade" | "osaka" => Ok(MorphHardfork::Jade),
+        "jade" => Ok(MorphHardfork::Jade),
+        // OSAKA is the spec level of the latest Morph fork, so the generic
+        // Ethereum name maps to it (matches `MorphHardfork::from(SpecId::OSAKA)`).
+        "onyx" | "osaka" => Ok(MorphHardfork::Onyx),
         "cancun" => Ok(MorphHardfork::Morph203),
         _ => Err(SchemaError::UnknownFork(name.to_string())),
     }
@@ -485,6 +494,86 @@ mod tests {
             Some(&0x02),
             "when currentBaseFee is present, fallback L1 fee encoding must match go-ethereum's dynamic-fee envelope"
         );
+    }
+
+    #[test]
+    fn morph_tx_with_authorization_list_is_modelled_as_v2() {
+        let suite: MorphTestSuite = serde_json::from_str(
+            r#"{
+              "case": {
+                "env": {
+                  "currentChainID": "0x1",
+                  "currentCoinbase": "0x0000000000000000000000000000000000000000",
+                  "currentDifficulty": "0x0",
+                  "currentGasLimit": "0x989680",
+                  "currentNumber": "0x1",
+                  "currentTimestamp": "0x1",
+                  "currentBaseFee": "0x1"
+                },
+                "pre": {},
+                "transaction": {
+                  "type": "0x7f",
+                  "nonce": "0x0",
+                  "gasLimit": ["0x186a0"],
+                  "to": "0x00000000000000000000000000000000000000f1",
+                  "value": ["0x0"],
+                  "data": ["0x"],
+                  "accessLists": [null],
+                  "maxFeePerGas": "0x10",
+                  "maxPriorityFeePerGas": "0x1",
+                  "feeTokenID": "0x1",
+                  "feeLimit": "0x3e8",
+                  "authorizationList": [{
+                    "chainId": "0x1",
+                    "address": "0x4242424242424242424242424242424242424242",
+                    "nonce": "0x0",
+                    "yParity": "0x0",
+                    "r": "0x1",
+                    "s": "0x2"
+                  }],
+                  "secretKey": "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8"
+                },
+                "post": {
+                  "Onyx": [{
+                    "indexes": { "data": 0, "gas": 0, "value": 0 },
+                    "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                    "logs": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                    "expectException": null
+                  }]
+                }
+              }
+            }"#,
+        )
+        .expect("suite should parse");
+
+        let unit = suite.0.values().next().unwrap();
+        let post = &unit.post["Onyx"][0];
+        let tx = unit
+            .morph_tx_env(post, MorphHardfork::Onyx)
+            .expect("tx env should build");
+
+        assert!(tx.is_morph_tx());
+        assert_eq!(tx.version, Some(MORPH_TX_VERSION_2));
+        assert_eq!(tx.fee_token_id, Some(1));
+        assert_eq!(tx.authorization_list.len(), 1);
+
+        // The fallback L1 fee bytes must be the V2 envelope (0x7f || 0x02 || rlp)
+        // and carry the authorization list: the delegate address appears verbatim.
+        let encoded = tx.rlp_bytes.expect("fallback L1 fee bytes");
+        assert_eq!(encoded[0], 0x7f);
+        assert_eq!(encoded[1], MORPH_TX_VERSION_2);
+        let delegate = [0x42u8; 20];
+        assert!(
+            encoded.windows(20).any(|window| window == delegate),
+            "L1 fee sizing bytes must include the authorization list"
+        );
+    }
+
+    #[test]
+    fn parse_fork_maps_onyx_and_osaka() {
+        assert_eq!(parse_fork("Onyx").unwrap(), MorphHardfork::Onyx);
+        assert_eq!(parse_fork("osaka").unwrap(), MorphHardfork::Onyx);
+        assert_eq!(parse_fork("jade").unwrap(), MorphHardfork::Jade);
     }
 
     #[test]

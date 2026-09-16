@@ -40,7 +40,7 @@ impl TryFrom<&OtherFields> for MorphGenesisInfo {
 /// the Morph hardforks were activated.
 ///
 /// Note: Bernoulli and Curie use block-based activation, while Morph203, Viridian,
-/// Emerald, and Jade use timestamp-based activation (matching go-ethereum behavior).
+/// Emerald, Jade, and Onyx use timestamp-based activation (matching go-ethereum behavior).
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MorphHardforkInfo {
@@ -62,6 +62,9 @@ pub struct MorphHardforkInfo {
     /// Jade hardfork timestamp.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub jade_fork_time: Option<u64>,
+    /// Onyx hardfork timestamp.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub onyx_time: Option<u64>,
 }
 
 impl MorphHardforkInfo {
@@ -136,7 +139,8 @@ mod tests {
           "morph203Time": 3000,
           "viridianTime": 4000,
           "emeraldTime": 5000,
-          "jadeForkTime": 6000
+          "jadeForkTime": 6000,
+          "onyxTime": 7000
         }
         "#;
 
@@ -152,8 +156,30 @@ mod tests {
                 viridian_time: Some(4000),
                 emerald_time: Some(5000),
                 jade_fork_time: Some(6000),
+                onyx_time: Some(7000),
             }
         );
+    }
+
+    #[test]
+    fn test_extract_morph_hardfork_info_without_onyx() {
+        // Genesis files scheduled through Jade (current mainnet/hoodi) must keep parsing.
+        let genesis_info = r#"
+        {
+          "bernoulliBlock": 0,
+          "curieBlock": 100,
+          "morph203Time": 3000,
+          "viridianTime": 4000,
+          "emeraldTime": 5000,
+          "jadeForkTime": 6000
+        }
+        "#;
+
+        let others: OtherFields = serde_json::from_str(genesis_info).unwrap();
+        let hardfork_info = MorphHardforkInfo::extract_from(&others).unwrap();
+
+        assert_eq!(hardfork_info.jade_fork_time, Some(6000));
+        assert_eq!(hardfork_info.onyx_time, None);
     }
 
     #[test]

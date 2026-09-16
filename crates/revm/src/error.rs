@@ -43,6 +43,23 @@ pub enum MorphInvalidTransaction {
         /// Available token balance.
         available: U256,
     },
+
+    /// A MorphTx below version 2 carries an EIP-7702 authorization list.
+    ///
+    /// Only MorphTx V2 (Onyx onwards) may carry authorizations; the RLP decoders
+    /// never produce this shape, so it only surfaces for malformed simulation
+    /// requests.
+    #[error("MorphTx version {version} does not support an authorization list")]
+    AuthorizationListNotSupported {
+        /// The transaction's MorphTx version.
+        version: u8,
+    },
+
+    /// A MorphTx carrying an EIP-7702 authorization list is a contract creation.
+    ///
+    /// Same rule as `ErrSetCodeTxCreate` for `0x04` transactions.
+    #[error("MorphTx with an authorization list cannot create a contract")]
+    AuthorizationListCreate,
 }
 
 impl InvalidTxError for MorphInvalidTransaction {
