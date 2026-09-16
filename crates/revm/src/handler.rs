@@ -833,8 +833,20 @@ where
     if let Some(delegate) = known_bytecode.1.eip7702_address() {
         known_bytecode = internal_call_code(evm.ctx_mut().journal_mut(), delegate)?;
     }
-    let mut memory =
+    // Fee frames are top-level frames that run in the middle of a transaction, so
+    // neither of revm's truncation points covers them: `free_child_context` only
+    // releases a *child* frame's region, and `LocalContext::clear` only runs once the
+    // whole transaction is done. Carve this frame's memory out above whatever the
+    // shared buffer already holds and release it on the way out, so the main
+    // transaction frame still starts on zeroed memory the way go-ethereum's
+    // per-run `NewMemory()` guarantees. The frame keeps using the context's buffer
+    // rather than one of its own because a nested call hands its callee a
+    // `CallInput::SharedBuffer` range, and a precompile callee resolves that range
+    // against the context's buffer (`CallInput::as_bytes`) rather than against the
+    // calling frame's memory.
+    let mut fee_frame_memory =
         SharedMemory::new_with_buffer(evm.ctx_ref().local().shared_memory_buffer().clone());
+    let mut memory = fee_frame_memory.new_child_context();
     memory.set_memory_limit(evm.ctx_ref().cfg().memory_limit());
     let frame = FrameInit {
         depth: 0,
@@ -859,7 +871,9 @@ where
             charged_new_account_state_gas: false,
         })),
     };
-    let result = MorphEvmHandler::<DB, I>::new().run_exec_loop(evm, frame)?;
+    let result = MorphEvmHandler::<DB, I>::new().run_exec_loop(evm, frame);
+    fee_frame_memory.free_child_context();
+    let result = result?;
     take_context_error(evm)?;
     Ok(result)
 }
@@ -2196,5 +2210,188 @@ mod tests {
         )
         .unwrap();
         assert!(evm.ctx_ref().journal().state.is_empty());
+    }
+
+    /// Runs one transaction against `code` deployed at [`FEE_REFUND_TARGET`] and
+    /// returns what the main frame returned. `fee_token_id` selects the call-mode
+    /// token-fee path or the ordinary ETH-fee path.
+    fn fee_refund_run_probe(code: Bytes, fee_token_id: Option<u16>) -> Bytes {
+        let mut evm = fee_refund_evm(U256::from(FEE_REFUND_TOKEN_FEE));
+        let db = evm.ctx_mut().journal_mut().db_mut();
+        insert_contract(db, FEE_REFUND_TARGET, code);
+        db.insert_account_info(
+            FEE_REFUND_CALLER,
+            AccountInfo {
+                balance: U256::from(FEE_REFUND_GAS_LIMIT as u128 * FEE_REFUND_GAS_PRICE),
+                ..Default::default()
+            },
+        );
+        let tx = MorphTxEnv {
+            inner: TxEnv {
+                tx_type: if fee_token_id.is_some() {
+                    MORPH_TX_TYPE_ID
+                } else {
+                    0
+                },
+                caller: FEE_REFUND_CALLER,
+                gas_limit: FEE_REFUND_GAS_LIMIT,
+                gas_price: FEE_REFUND_GAS_PRICE,
+                kind: TxKind::Call(FEE_REFUND_TARGET),
+                ..Default::default()
+            },
+            fee_token_id,
+            ..Default::default()
+        };
+        let result = evm.transact_one(tx).expect("probe must execute");
+        assert!(result.is_success(), "expected success, got {result:?}");
+        result.output().cloned().unwrap_or_default()
+    }
+
+    /// Minimal proxy: copies its calldata into memory and `DELEGATECALL`s
+    /// `implementation`, the way mainnet's call-mode fee tokens reach theirs.
+    fn delegating_proxy_code(implementation: Address) -> Bytes {
+        let mut code = vec![
+            0x36, // CALLDATASIZE      (size)
+            0x5f, // PUSH0             (offset)
+            0x5f, // PUSH0             (destOffset)
+            0x37, // CALLDATACOPY
+            0x5f, // PUSH0             (retSize)
+            0x5f, // PUSH0             (retOffset)
+            0x36, // CALLDATASIZE      (argsSize)
+            0x5f, // PUSH0             (argsOffset)
+            0x73, // PUSH20 implementation
+        ];
+        code.extend_from_slice(implementation.as_slice());
+        code.extend_from_slice(&[
+            0x5a, // GAS
+            0xf4, // DELEGATECALL
+            0x3d, // RETURNDATASIZE    (size)
+            0x5f, // PUSH0             (offset)
+            0x5f, // PUSH0             (destOffset)
+            0x3e, // RETURNDATACOPY
+            0x50, // POP               (DELEGATECALL success flag)
+            0x3d, // RETURNDATASIZE    (size)
+            0x5f, // PUSH0             (offset)
+            0xf3, // RETURN
+        ]);
+        Bytes::from(code)
+    }
+
+    /// Same ERC20, except `balanceOf` returns its result through the identity
+    /// precompile, reading the precompile's arguments out of memory.
+    fn fee_refund_precompile_erc20_code() -> Bytes {
+        let mut code = vec![
+            0x36, // CALLDATASIZE
+            0x60, 0x44, // PUSH1 68
+            0x14, // EQ
+            0x60, 0x1e, // PUSH1 30 (transfer JUMPDEST)
+            0x57, // JUMPI
+            // balanceOf(address), answered by identity(mem[0..32])
+            0x60, 0x04, // PUSH1 4
+            0x35, // CALLDATALOAD
+            0x54, // SLOAD
+            0x5f, // PUSH0
+            0x52, // MSTORE
+            0x60, 0x20, // PUSH1 32   (retSize)
+            0x60, 0x20, // PUSH1 32   (retOffset)
+            0x60, 0x20, // PUSH1 32   (argsSize)
+            0x5f, // PUSH0            (argsOffset)
+            0x60, 0x04, // PUSH1 4    (identity precompile)
+            0x5a, // GAS
+            0xfa, // STATICCALL
+            0x50, // POP
+            0x60, 0x20, // PUSH1 32   (size)
+            0x60, 0x20, // PUSH1 32   (offset)
+            0xf3, // RETURN
+        ];
+        assert_eq!(code.len(), 30, "the transfer JUMPDEST moved");
+        code.extend_from_slice(&fee_refund_slotless_erc20_code()[19..]);
+        Bytes::from(code)
+    }
+
+    /// A precompile called from inside a fee frame resolves its arguments against
+    /// the context's shared buffer, so the fee frames have to keep writing into that
+    /// buffer rather than into one of their own.
+    #[test]
+    fn fee_token_frames_reach_a_precompile_through_memory() {
+        let fee = U256::from(FEE_REFUND_TOKEN_FEE);
+        let mut evm = fee_refund_evm(fee);
+        let db = evm.ctx_mut().journal_mut().db_mut();
+        insert_contract(db, FEE_REFUND_TOKEN, fee_refund_precompile_erc20_code());
+        assert_eq!(
+            fee_refund_run_fee_tx(&mut evm),
+            fee_refund_run_token_fee_tx(fee)
+        );
+    }
+
+    /// Mainnet's call-mode fee tokens are proxies, so a fee frame's nested
+    /// `DELEGATECALL` reads its calldata back out of the frame's memory.
+    #[test]
+    fn fee_token_frames_reach_a_delegating_proxy_implementation() {
+        const IMPLEMENTATION: Address = address!("3000000000000000000000000000000000000004");
+        let fee = U256::from(FEE_REFUND_TOKEN_FEE);
+        let mut evm = fee_refund_evm(fee);
+        let db = evm.ctx_mut().journal_mut().db_mut();
+        insert_contract(db, IMPLEMENTATION, fee_refund_slotless_erc20_code());
+        insert_contract(db, FEE_REFUND_TOKEN, delegating_proxy_code(IMPLEMENTATION));
+
+        // Indistinguishable from the same transaction against an unproxied token:
+        // the implementation saw exactly the calldata the fee frame wrote.
+        assert_eq!(
+            fee_refund_run_fee_tx(&mut evm),
+            fee_refund_run_token_fee_tx(fee)
+        );
+    }
+
+    /// Runs the standard call-mode token-fee MorphTx on an already-built `evm` and
+    /// reports it the way [`fee_refund_run_token_fee_tx`] does.
+    fn fee_refund_run_fee_tx(
+        evm: &mut MorphEvm<CacheDB<EmptyDB>, NoOpInspector>,
+    ) -> (u64, u64, U256) {
+        let result = evm
+            .transact_one(MorphTxEnv {
+                inner: TxEnv {
+                    tx_type: MORPH_TX_TYPE_ID,
+                    caller: FEE_REFUND_CALLER,
+                    gas_limit: FEE_REFUND_GAS_LIMIT,
+                    gas_price: FEE_REFUND_GAS_PRICE,
+                    kind: TxKind::Call(FEE_REFUND_TARGET),
+                    ..Default::default()
+                },
+                fee_token_id: Some(FEE_REFUND_TOKEN_ID),
+                ..Default::default()
+            })
+            .expect("token-fee MorphTx must execute");
+        assert!(result.is_success(), "expected success, got {result:?}");
+        (
+            result.tx_gas_used(),
+            result.gas().final_refunded(),
+            fee_refund_present_value(evm, FEE_REFUND_CALLER),
+        )
+    }
+
+    /// go-ethereum allocates a fresh `Memory` for every interpreter run
+    /// (`core/vm/interpreter.go`), so a transaction's frame always starts on zeroed
+    /// memory. The fee-token frames run on the transaction's shared memory buffer,
+    /// so they have to hand it back the length they found it at.
+    #[test]
+    fn fee_token_frames_do_not_leak_memory_into_the_main_frame() {
+        // `MSIZE` and `MLOAD(0)`, each returned as the frame's 32-byte output.
+        for probe in [
+            vec![0x59, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3],
+            vec![0x5f, 0x51, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3],
+        ] {
+            let code = Bytes::from(probe);
+            assert_eq!(
+                U256::from_be_slice(&fee_refund_run_probe(code.clone(), None)),
+                U256::ZERO,
+                "ETH-fee control"
+            );
+            assert_eq!(
+                U256::from_be_slice(&fee_refund_run_probe(code, Some(FEE_REFUND_TOKEN_ID))),
+                U256::ZERO,
+                "a token-fee main frame must start on zeroed memory too"
+            );
+        }
     }
 }
