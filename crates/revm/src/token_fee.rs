@@ -328,7 +328,15 @@ fn read_token_balance_with_fallback<DB: Database>(
     // answer for a token whose balance depends on block context or `msg.sender`.
     let db: &mut dyn Database<Error = DB::Error> = db;
     let mut evm = MorphEvm::from_env(db, env.clone(), NoOpInspector {});
-    // Geth's pool query has Origin=sender and GasPrice=0, unlike an executing transaction.
+    // ORIGIN follows this client's own execution layer, which resolves the same
+    // `balanceOf` against the transaction's `caller`. go-ethereum's pool instead builds
+    // its query on an empty `vm.TxContext{}` (core/tx_pool.go:341), leaving ORIGIN at the
+    // zero address and disagreeing with go-ethereum's own execution layer. Admission
+    // exists to predict what the builder will be able to include, so it follows execution
+    // rather than the other client's pool. GASPRICE is the one input this query still
+    // cannot match: it stays at the `TxEnv` default of zero because the effective price
+    // depends on the next block's base fee, which admission does not know. go-ethereum's
+    // pool has the same gap.
     evm.tx.inner.caller = account;
     crate::handler::evm_call_balance_of(&mut evm, token, account)
 }
