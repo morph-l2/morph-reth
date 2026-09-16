@@ -427,11 +427,11 @@ where
         // This ensures the same price_ratio/scale is used for both deduction and reimbursement.
         // The cache is kept populated (not taken) so the block executor's receipt builder
         // can also read it without re-querying the DB.
-        let token_fee_info =
-            evm.cached_token_fee_info
-                .ok_or(MorphInvalidTransaction::TokenTransferFailed {
-                    reason: "cached_token_fee_info not set by validate_and_deduct_token_fee".into(),
-                })?;
+        let token_fee_info = evm.cached_token_fee_info.ok_or_else(|| {
+            MorphInvalidTransaction::TokenTransferFailed {
+                reason: "cached_token_fee_info not set by validate_and_deduct_token_fee".into(),
+            }
+        })?;
 
         // Calculate token amount required for total fee
         let token_amount_required = token_fee_info.eth_to_token_amount(reimburse_eth);
@@ -441,14 +441,6 @@ where
         // should not cause transaction to fail" (state_transition.go:698).
         let refund_result = if let Some(balance_slot) = token_fee_info.balance_slot {
             let journal = evm.ctx().journal_mut();
-            // `transfer_erc20_with_slot` reaches the journal's `sload`/`sstore` directly,
-            // which panic rather than error when the account is absent from `journal.state`.
-            // The deduction loads it — but it skips both transfer modes for a zero fee, so
-            // this must not rely on that having happened. Today the two cannot disagree
-            // (`eth_to_token_amount` rounds up, so a zero token fee means a zero ETH fee,
-            // which returns above), which makes this load a no-op that keeps the invariant
-            // local to the code that needs it.
-            let _ = journal.load_account_mut(token_fee_info.token_address)?;
             transfer_erc20_with_slot(
                 journal,
                 beneficiary,
@@ -615,11 +607,7 @@ where
             // still need their normal per-transaction updates.
         } else if let Some(balance_slot) = token_fee_info.balance_slot {
             // Transfer with token slot.
-            // Ensure token account is loaded into the journal state, because `sload`/`sstore`
-            // assume the account is present.
             let journal = evm.ctx_mut().journal_mut();
-            let _ = journal.load_account_mut(token_fee_info.token_address)?;
-            journal.touch(token_fee_info.token_address);
             let (from_storage_slot, to_storage_slot) = transfer_erc20_with_slot(
                 journal,
                 caller_addr,
@@ -756,6 +744,11 @@ where
 
 /// Performs an ERC20 balance transfer by directly `sload`/`sstore`-ing the token contract storage
 /// using the known `balance` mapping base slot, returning the computed storage slots for `from`/`to`.
+///
+/// The token account is loaded and touched here, ahead of the checkpoint, rather than by the
+/// callers. The journal's `sload`/`sstore` panic instead of erroring when the account is absent
+/// from `journal.state`, and touching keeps the token among the transaction's state changes even
+/// for a self-transfer that writes no slot, as go-ethereum's `SetState` still marks it dirty.
 #[inline]
 fn transfer_erc20_with_slot<DB>(
     journal: &mut revm::Journal<DB>,
@@ -768,6 +761,8 @@ fn transfer_erc20_with_slot<DB>(
 where
     DB: alloy_evm::Database,
 {
+    let _ = journal.load_account_mut(token)?;
+    journal.touch(token);
     with_journal_checkpoint(journal, |journal| {
         // Sub amount (checked: reject if insufficient, matching go-ethereum's
         // changeAltTokenBalanceByState which returns an error on underflow)
@@ -1156,6 +1151,7 @@ fn calculate_caller_fee_with_l1_cost(
 mod tests {
     use super::*;
     use crate::MorphTxEnv;
+    use crate::token_fee::tests::{TokenReadFailure, UnreadableTokenDb};
     use crate::{
         MorphBlockEnv,
         token_fee::{L2_TOKEN_REGISTRY_ADDRESS, compute_mapping_slot},
@@ -1174,40 +1170,6 @@ mod tests {
         Arc,
         atomic::{AtomicBool, Ordering},
     };
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    struct TokenReadFailure;
-    impl core::fmt::Display for TokenReadFailure {
-        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-            f.write_str("injected refund balance read failure")
-        }
-    }
-    impl core::error::Error for TokenReadFailure {}
-    impl revm::database_interface::DBErrorMarker for TokenReadFailure {}
-
-    #[derive(Debug)]
-    struct UnreadableTokenDb {
-        inner: CacheDB<EmptyDB>,
-        token: Address,
-    }
-    impl revm::Database for UnreadableTokenDb {
-        type Error = TokenReadFailure;
-        fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
-            Ok(revm::Database::basic(&mut self.inner, address).unwrap())
-        }
-        fn code_by_hash(&mut self, hash: B256) -> Result<Bytecode, Self::Error> {
-            Ok(revm::Database::code_by_hash(&mut self.inner, hash).unwrap())
-        }
-        fn storage(&mut self, address: Address, index: U256) -> Result<U256, Self::Error> {
-            if address == self.token {
-                return Err(TokenReadFailure);
-            }
-            Ok(revm::Database::storage(&mut self.inner, address, index).unwrap())
-        }
-        fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error> {
-            Ok(revm::Database::block_hash(&mut self.inner, number).unwrap())
-        }
-    }
 
     fn finish_transaction_with_refund(
         code: Bytes,
@@ -1799,10 +1761,8 @@ mod tests {
             inner: BlockEnv::default(),
         };
 
+        // Nothing loads the token first: the helper has to put it in `journal.state` itself.
         let journal = evm.ctx_mut().journal_mut();
-        let _ = journal.load_account_mut(token).unwrap();
-        journal.touch(token);
-
         let err = transfer_erc20_with_slot(journal, from, to, token, U256::from(1), balance_slot)
             .unwrap_err();
 

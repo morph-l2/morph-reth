@@ -56,7 +56,7 @@ pub struct TokenFeeInfo {
 
 /// Fee-token registry metadata without any caller-specific balance state.
 #[derive(Clone, Copy, Debug)]
-pub struct TokenRegistryEntry {
+pub(crate) struct TokenRegistryEntry {
     token_address: Address,
     is_active: bool,
     decimals: u8,
@@ -79,7 +79,10 @@ impl TokenRegistryEntry {
     }
 
     /// Load fee-token metadata without reading a caller's token balance.
-    pub fn load<DB: RevmDatabase>(db: &mut DB, token_id: u16) -> Result<Option<Self>, DB::Error> {
+    pub(crate) fn load<DB: RevmDatabase>(
+        db: &mut DB,
+        token_id: u16,
+    ) -> Result<Option<Self>, DB::Error> {
         read_registry_entry(db, token_id)
     }
 
@@ -95,7 +98,7 @@ impl TokenRegistryEntry {
     }
 
     /// Resolve the caller's balance to produce complete fee information.
-    pub fn load_for_caller<DB: Database>(
+    pub(crate) fn load_for_caller<DB: Database>(
         self,
         db: &mut DB,
         caller: Address,
@@ -367,7 +370,7 @@ pub fn encode_balance_of_calldata(account: Address) -> Bytes {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     use alloy_primitives::{B256, address, bytes};
@@ -375,29 +378,32 @@ mod tests {
     use revm::database::{CacheDB, EmptyDB};
     use revm::state::AccountInfo;
 
-    /// Returned by [`FeeTokenUnreadable`] so a state read failure is distinguishable.
+    /// The storage read failure injected by [`UnreadableTokenDb`], distinguishable from any
+    /// error a real database would report. Shared with the handler tests.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    struct ReadFailed;
+    pub(crate) struct TokenReadFailure;
 
-    impl core::fmt::Display for ReadFailed {
+    impl core::fmt::Display for TokenReadFailure {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-            f.write_str("state read failed")
+            f.write_str("injected token storage read failure")
         }
     }
 
-    impl core::error::Error for ReadFailed {}
+    impl core::error::Error for TokenReadFailure {}
 
-    impl revm::database_interface::DBErrorMarker for ReadFailed {}
+    impl revm::database_interface::DBErrorMarker for TokenReadFailure {}
 
-    /// Fails every storage read of the fee token; everything else reads normally.
+    /// Fails every storage read of `token` with [`TokenReadFailure`]; everything else reads
+    /// normally, so a failure a test observes comes from that token's storage. Shared with the
+    /// handler tests.
     #[derive(Debug)]
-    struct FeeTokenUnreadable {
-        inner: CacheDB<EmptyDB>,
-        token: Address,
+    pub(crate) struct UnreadableTokenDb {
+        pub(crate) inner: CacheDB<EmptyDB>,
+        pub(crate) token: Address,
     }
 
-    impl RevmDatabase for FeeTokenUnreadable {
-        type Error = ReadFailed;
+    impl RevmDatabase for UnreadableTokenDb {
+        type Error = TokenReadFailure;
 
         fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
             Ok(self.inner.basic(address).unwrap())
@@ -409,7 +415,7 @@ mod tests {
 
         fn storage(&mut self, address: Address, index: U256) -> Result<U256, Self::Error> {
             if address == self.token {
-                return Err(ReadFailed);
+                return Err(TokenReadFailure);
             }
             Ok(self.inner.storage(address, index).unwrap())
         }
@@ -514,13 +520,13 @@ mod tests {
 
         // Same state, but the token's storage cannot be read. Reporting a zero balance here
         // would be indistinguishable from an account that genuinely cannot pay.
-        let mut unreadable = FeeTokenUnreadable {
+        let mut unreadable = UnreadableTokenDb {
             inner: call_mode_token_state(token, 10_000_000),
             token,
         };
         assert_eq!(
             TokenFeeInfo::load_for_caller(&mut unreadable, 1, caller, &env).unwrap_err(),
-            EVMError::Database(ReadFailed)
+            EVMError::Database(TokenReadFailure)
         );
     }
 
