@@ -441,6 +441,14 @@ where
         // should not cause transaction to fail" (state_transition.go:698).
         let refund_result = if let Some(balance_slot) = token_fee_info.balance_slot {
             let journal = evm.ctx().journal_mut();
+            // `transfer_erc20_with_slot` reaches the journal's `sload`/`sstore` directly,
+            // which panic rather than error when the account is absent from `journal.state`.
+            // The deduction loads it — but it skips both transfer modes for a zero fee, so
+            // this must not rely on that having happened. Today the two cannot disagree
+            // (`eth_to_token_amount` rounds up, so a zero token fee means a zero ETH fee,
+            // which returns above), which makes this load a no-op that keeps the invariant
+            // local to the code that needs it.
+            let _ = journal.load_account_mut(token_fee_info.token_address)?;
             transfer_erc20_with_slot(
                 journal,
                 beneficiary,
@@ -649,9 +657,11 @@ where
             // Cache fee Transfer logs separately from the journal.
             //
             // go-ethereum's StateDB.logs is independent of the state snapshot/revert
-            // mechanism — fee logs survive regardless of main tx result. revm's
-            // ExecutionResult::Revert has no logs field, so we keep fee logs out of
-            // the handler pipeline entirely and merge them in the receipt builder.
+            // mechanism — fee logs survive regardless of main tx result. In revm they
+            // would not: the `finalize()` below clears the journal's logs, and whatever
+            // survived would still be dropped when `execution_result` commits the
+            // transaction. So the fee logs are kept out of the handler pipeline entirely
+            // and merged back in the receipt builder.
             evm.pre_fee_logs = std::mem::take(&mut evm.ctx_mut().journal_mut().logs);
 
             // State changes should be marked cold to avoid warm access in the main tx execution.
@@ -787,6 +797,13 @@ const EVM_CALL_GAS_LIMIT: u64 = 200_000;
 
 /// Loads internal-call code without changing the account's access-list temperature.
 /// Geth's direct Call/StaticCall resolve code without executing a CALL opcode.
+///
+/// This is also what puts `address` into `journal.state`, which [`evm_call`] depends on:
+/// a `CallValue::Transfer` frame runs `Journal::transfer_loaded`, and its zero-value path
+/// is `self.state.get_mut(&to).unwrap()` — a panic, not an error. In an ordinary CALL the
+/// account is there because the opcode's `load_acc_and_calc_gas` put it there; an internal
+/// call has no opcode, so this is the only load. Resolving the bytecode some other way
+/// (caching it, hoisting it, short-circuiting on a known code hash) must keep the load.
 fn internal_call_code<DB: alloy_evm::Database>(
     journal: &mut revm::Journal<DB>,
     address: Address,
@@ -920,11 +937,13 @@ where
 ///
 /// go-ethereum reads it through `st.evm` (`GetAltTokenBalanceHybrid`, core/token_gas.go:43),
 /// so the `balanceOf` call sees the real block context, the real chain config and the user as
-/// `msg.sender`. Building a throwaway EVM here instead would answer under
-/// `BlockEnv::default()` and `CfgEnv::default()` — block 0, timestamp 1, chain id 1, zero
-/// coinbase and base fee — with `SYSTEM_ADDRESS` as the sender and a 30M gas limit in place
-/// of go-ethereum's 200k. For any token whose `balanceOf` reads that context the two clients
-/// would charge different fees for the same transaction.
+/// `msg.sender`. Building a throwaway EVM here instead — as this path used to, through
+/// `system_call_one` — answers under `BlockEnv::default()` and `CfgEnv::default()`: block 0,
+/// timestamp 1, chain id 1, zero coinbase and base fee, with `SYSTEM_ADDRESS` as the sender.
+/// For any token whose `balanceOf` reads that context the two clients would charge different
+/// fees for the same transaction. The gas budget was never the problem: `system_call_one`
+/// capped at `SYSTEM_CALL_GAS_LIMIT`, which is go-ethereum's 200k, and so does
+/// [`EVM_CALL_GAS_LIMIT`].
 fn load_token_fee_info<DB, I>(
     evm: &mut MorphEvm<DB, I>,
     entry: TokenRegistryEntry,
@@ -983,13 +1002,13 @@ where
     };
 
     // Geth checks affordability before executing the token contract.
-    let expected_balance = from_balance_before.checked_sub(token_amount).ok_or(
-        MorphInvalidTransaction::TokenTransferFailed {
+    let expected_balance = from_balance_before
+        .checked_sub(token_amount)
+        .ok_or_else(|| MorphInvalidTransaction::TokenTransferFailed {
             reason: format!(
                 "sender balance {from_balance_before} less than token amount {token_amount}"
             ),
-        },
-    )?;
+        })?;
 
     let calldata = build_transfer_calldata(to, token_amount);
     let frame_result =

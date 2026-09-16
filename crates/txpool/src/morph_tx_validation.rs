@@ -144,14 +144,9 @@ pub fn validate_morph_tx<DB: Database>(
     let total_token_fee = token_gas_fee.saturating_add(input.l1_data_fee);
     let required_token_amount = token_info.eth_to_token_amount(total_token_fee);
 
-    // Match REVM semantics:
-    // - fee_limit == 0 => use token balance as effective limit
-    // - fee_limit > balance => cap by token balance
-    let effective_limit = if fee_limit.is_zero() || fee_limit > token_info.balance {
-        token_info.balance
-    } else {
-        fee_limit
-    };
+    // Share the execution layer's clamp rather than restating it: a zero `fee_limit`
+    // means the whole token balance, and a larger one is capped by it.
+    let effective_limit = token_info.effective_fee_limit(fee_limit);
 
     // Check token balance against effective limit.
     if effective_limit < required_token_amount {
