@@ -525,3 +525,24 @@ pub(crate) async fn expect_payload_build_failure(
         }
     }
 }
+
+/// Init code that deploys `runtime` as-is (CODECOPY + RETURN; runtime must be < 256 bytes).
+pub(crate) fn init_code_for(runtime: &[u8]) -> Vec<u8> {
+    assert!(runtime.len() < 256, "runtime must fit a PUSH1 length");
+    let len = runtime.len() as u8;
+    // PUSH1 len PUSH1 12 PUSH1 0 CODECOPY PUSH1 len PUSH1 0 RETURN — 12 bytes, runtime at offset 12.
+    let mut code = vec![
+        0x60, len, 0x60, 0x0c, 0x60, 0x00, 0x39, 0x60, len, 0x60, 0x00, 0xf3,
+    ];
+    code.extend_from_slice(runtime);
+    code
+}
+
+/// Runtime that returns the 32-byte word `0x42`.
+pub(crate) const RETURN_WORD_42_RUNTIME: &[u8] =
+    &[0x60, 0x42, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3];
+
+/// Runtime that emits `LOG0` with the 32-byte word `0x42` as data, then stops.
+pub(crate) const LOG_WORD_42_RUNTIME: &[u8] = &[
+    0x60, 0x42, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xa0, 0x00,
+];

@@ -95,11 +95,21 @@ pub struct MorphEvm<DB: Database, I> {
     /// Ensures consistent price_ratio/scale between deduct and reimburse,
     /// matching go-ethereum's `st.feeRate`/`st.tokenScale` caching pattern.
     pub(crate) cached_token_fee_info: Option<TokenFeeInfo>,
+    /// Token-unit numerator the fee deduction overcharged by rounding up.
+    ///
+    /// From Celadon on, the unused-gas refund adds this back before rounding
+    /// down, so the caller pays `ceil` of the net fee instead of
+    /// `ceil(prepaid) - ceil(refund)`, which under-collects. Mirrors
+    /// go-ethereum's `st.altFeeRoundingCredit`.
+    pub(crate) cached_alt_fee_rounding_credit: U256,
     /// Cached L1 data fee calculated during handler validation.
     /// Avoids re-encoding the full transaction RLP in the block executor's
     /// receipt-building path (the handler already has the encoded bytes via
     /// `MorphTxEnv.rlp_bytes`).
     pub(crate) cached_l1_data_fee: U256,
+    /// Signed refund counter from a successful fee deduction call.
+    /// Applied before the final refund cap; refund-transfer refunds are excluded.
+    pub(crate) pre_fee_refund: i64,
     /// Transfer event logs from token fee deduction (pre-execution phase).
     ///
     /// In go-ethereum, `buyAltTokenGas()` emits Transfer events into `StateDB.logs`
@@ -113,6 +123,14 @@ pub struct MorphEvm<DB: Database, I> {
 }
 
 impl<DB: Database, I> MorphEvm<DB, I> {
+    /// Constructs an EVM from the full environment used by both execution and pool queries.
+    pub fn from_env(db: DB, env: crate::MorphEvmEnv, inspector: I) -> Self {
+        let ctx = MorphContext::new(db, *env.cfg_env.spec())
+            .with_cfg(env.cfg_env)
+            .with_block(env.block_env);
+        Self::new(ctx, inspector)
+    }
+
     /// Create a new Morph EVM.
     ///
     /// The precompiles are automatically selected based on the hardfork spec
@@ -172,7 +190,9 @@ impl<DB: Database, I> MorphEvm<DB, I> {
         Self {
             inner,
             cached_token_fee_info: None,
+            cached_alt_fee_rounding_credit: U256::ZERO,
             cached_l1_data_fee: U256::ZERO,
+            pre_fee_refund: 0,
             pre_fee_logs: Vec::new(),
             post_fee_logs: Vec::new(),
         }
