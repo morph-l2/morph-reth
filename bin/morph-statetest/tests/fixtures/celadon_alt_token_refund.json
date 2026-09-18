@@ -1,0 +1,157 @@
+{
+  "celadon_alt_token_refund_rounding": {
+    "env": {
+      "currentCoinbase": "0x530000000000000000000000000000000000000a",
+      "currentDifficulty": "0x0",
+      "currentGasLimit": "0x1c9c380",
+      "currentNumber": "0x1",
+      "currentTimestamp": "0x1",
+      "currentBaseFee": "0x1",
+      "currentChainID": "0x1"
+    },
+    "pre": {
+      "0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {}
+      },
+      "0x3000000000000000000000000000000000000003": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x366044146013576004355460005260206000f35b60243580335403335560043580548201905550600160005260206000f3",
+        "storage": {
+          "0x9734b052146069605dcf2a05300c1dd5cd5852a2844e5491b2eb25d6daa909bc": "0x00000000000000000000000000000000000000000000000000000000000f4240"
+        }
+      },
+      "0x4200000000000000000000000000000000000042": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {}
+      },
+      "0x5300000000000000000000000000000000000021": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706d": "0x0000000000000000000000003000000000000000000000000000000000000003",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706e": "0x0000000000000000000000000000000000000000000000000000000000000002",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706f": "0x0000000000000000000000000000000000000000000000000000000000001201",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e6377070": "0x0000000000000000000000000000000000000000000000000000000000000001",
+          "0xbb86fbc034f4e382929974bcd8419ed626b0ea647f962d89ba2fb6bd28785ab9": "0x0000000000000000000000000000000000000000000000000000000000000003"
+        }
+      }
+    },
+    "transaction": {
+      "type": "0x7f",
+      "version": "0x0",
+      "feeTokenID": "0x1",
+      "feeLimit": "0x0",
+      "nonce": "0x0",
+      "gasPrice": "0x1",
+      "gasLimit": [
+        "0x186a1",
+        "0x186a2",
+        "0x186a3"
+      ],
+      "to": "0x4200000000000000000000000000000000000042",
+      "value": [
+        "0x0"
+      ],
+      "data": [
+        "0x01"
+      ],
+      "secretKey": "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8"
+    },
+    "post": {
+      "Emerald": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0xdfaedbf51f7737495c2597c811b6127d75727bc8e359c7b6261dd5ff6519a14d",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"
+        },
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 1,
+            "value": 0
+          },
+          "hash": "0xdfaedbf51f7737495c2597c811b6127d75727bc8e359c7b6261dd5ff6519a14d",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"
+        },
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 2,
+            "value": 0
+          },
+          "hash": "0x29e5e2daaf49bd925026bc3834581a8062ef52ba8faf28bae579ca9b0bc5b43f",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"
+        }
+      ],
+      "Jade": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0xdfaedbf51f7737495c2597c811b6127d75727bc8e359c7b6261dd5ff6519a14d",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"
+        },
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 1,
+            "value": 0
+          },
+          "hash": "0xdfaedbf51f7737495c2597c811b6127d75727bc8e359c7b6261dd5ff6519a14d",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"
+        },
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 2,
+            "value": 0
+          },
+          "hash": "0x29e5e2daaf49bd925026bc3834581a8062ef52ba8faf28bae579ca9b0bc5b43f",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"
+        }
+      ],
+      "Celadon": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x29e5e2daaf49bd925026bc3834581a8062ef52ba8faf28bae579ca9b0bc5b43f",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"
+        },
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 1,
+            "value": 0
+          },
+          "hash": "0x29e5e2daaf49bd925026bc3834581a8062ef52ba8faf28bae579ca9b0bc5b43f",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"
+        },
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 2,
+            "value": 0
+          },
+          "hash": "0x29e5e2daaf49bd925026bc3834581a8062ef52ba8faf28bae579ca9b0bc5b43f",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"
+        }
+      ]
+    }
+  }
+}
