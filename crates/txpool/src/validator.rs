@@ -935,6 +935,7 @@ mod tests {
             fee_limit: U256::from(300_000u64),
             reference: None,
             memo: None,
+            authorization_list: Vec::new(),
             input: Default::default(),
         };
         let envelope = MorphTxEnvelope::Morph(Signed::new_unchecked(

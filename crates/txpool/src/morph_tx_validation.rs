@@ -7,7 +7,10 @@
 use alloy_evm::Database;
 use alloy_primitives::{Address, U256};
 use morph_chainspec::hardfork::MorphHardfork;
-use morph_primitives::{MorphTxEnvelope, transaction::morph_transaction::MORPH_TX_VERSION_1};
+use morph_primitives::{
+    MorphTxEnvelope,
+    transaction::morph_transaction::{MORPH_TX_VERSION_1, MORPH_TX_VERSION_2},
+};
 use morph_revm::{MorphEvmEnv, TokenFeeInfo};
 
 use crate::MorphTxError;
@@ -64,6 +67,17 @@ pub fn validate_morph_tx<DB: Database>(
     if !input.hardfork.is_jade() && morph_tx.version == MORPH_TX_VERSION_1 {
         return Err(MorphTxError::InvalidFormat {
             reason: "MorphTx version 1 is not yet active (jade fork not reached)".to_string(),
+        });
+    }
+
+    // V2 (EIP-7702 authorization list) is gated on Celadon. The list itself is
+    // validated by `TxMorph::validate` below (V0/V1 must not carry one, a
+    // non-empty V2 list forbids CREATE; an empty V2 list is allowed); authority
+    // tracking and delegated-sender limits come from the upstream validator,
+    // which reads the list through `Transaction::authorization_list`.
+    if !input.hardfork.is_celadon() && morph_tx.version == MORPH_TX_VERSION_2 {
+        return Err(MorphTxError::InvalidFormat {
+            reason: "MorphTx version 2 is not yet active (celadon fork not reached)".to_string(),
         });
     }
 
@@ -229,6 +243,7 @@ mod tests {
             fee_limit: U256::from(1u64),
             reference: Some(B256::ZERO),
             memo: None,
+            authorization_list: Vec::new(),
             input: Default::default(),
         };
         let envelope = MorphTxEnvelope::Morph(Signed::new_unchecked(
@@ -307,6 +322,7 @@ mod tests {
             fee_limit: U256::from(1000u64),
             reference: None,
             memo: None,
+            authorization_list: Vec::new(),
             input: Default::default(),
         };
         let envelope = MorphTxEnvelope::Morph(Signed::new_unchecked(
@@ -345,6 +361,7 @@ mod tests {
             fee_limit: U256::ZERO,
             reference: None,
             memo: None,
+            authorization_list: Vec::new(),
             input: Default::default(),
         };
         let envelope = MorphTxEnvelope::Morph(Signed::new_unchecked(
@@ -389,6 +406,7 @@ mod tests {
             fee_limit: U256::ZERO,
             reference: None,
             memo: None,
+            authorization_list: Vec::new(),
             input: Default::default(),
         };
         let envelope = MorphTxEnvelope::Morph(Signed::new_unchecked(
@@ -427,6 +445,7 @@ mod tests {
             fee_limit: U256::from(1000u64),
             reference: None,
             memo: None,
+            authorization_list: Vec::new(),
             input: Default::default(),
         };
         let envelope = MorphTxEnvelope::Morph(Signed::new_unchecked(
@@ -449,6 +468,107 @@ mod tests {
         assert!(
             matches!(err, MorphTxError::TokenNotFound { token_id: 42 }),
             "expected TokenNotFound {{ token_id: 42 }}, got {err:?}"
+        );
+    }
+
+    fn v2_eth_fee_envelope(
+        authorization_list: Vec<alloy_eips::eip7702::SignedAuthorization>,
+    ) -> MorphTxEnvelope {
+        let tx = TxMorph {
+            chain_id: 2818,
+            nonce: 0,
+            gas_limit: 100_000,
+            max_fee_per_gas: 1_000_000_000,
+            max_priority_fee_per_gas: 500_000_000,
+            to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
+            value: U256::ZERO,
+            access_list: Default::default(),
+            version: MORPH_TX_VERSION_2,
+            fee_token_id: 0,
+            fee_limit: U256::ZERO,
+            reference: None,
+            memo: None,
+            authorization_list,
+            input: Default::default(),
+        };
+        MorphTxEnvelope::Morph(Signed::new_unchecked(
+            tx,
+            Signature::test_signature(),
+            B256::ZERO,
+        ))
+    }
+
+    fn sample_authorization() -> alloy_eips::eip7702::SignedAuthorization {
+        alloy_eips::eip7702::Authorization {
+            chain_id: U256::from(2818),
+            address: address!("0000000000000000000000000000000000000042"),
+            nonce: 0,
+        }
+        .into_signed(Signature::test_signature())
+    }
+
+    #[test]
+    fn test_validate_morph_tx_v2_rejected_before_celadon() {
+        let envelope = v2_eth_fee_envelope(vec![sample_authorization()]);
+        let input = MorphTxValidationInput {
+            consensus_tx: &envelope,
+            sender: address!("1000000000000000000000000000000000000001"),
+            eth_balance: U256::from(10u128.pow(18)),
+            l1_data_fee: U256::from(1000u64),
+            hardfork: MorphHardfork::Jade,
+        };
+        let mut db = EmptyDB::default();
+
+        let err = validate_morph_tx(&mut db, &input).unwrap_err();
+        assert_eq!(
+            err,
+            MorphTxError::InvalidFormat {
+                reason: "MorphTx version 2 is not yet active (celadon fork not reached)"
+                    .to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_validate_morph_tx_v2_eth_fee_path_accepted_after_celadon() {
+        let envelope = v2_eth_fee_envelope(vec![sample_authorization()]);
+        let input = MorphTxValidationInput {
+            consensus_tx: &envelope,
+            sender: address!("1000000000000000000000000000000000000001"),
+            eth_balance: U256::from(10u128.pow(18)),
+            l1_data_fee: U256::from(1000u64),
+            hardfork: MorphHardfork::Celadon,
+        };
+        let mut db = EmptyDB::default();
+
+        let result = validate_morph_tx(&mut db, &input).unwrap();
+        assert!(!result.uses_token_fee);
+    }
+
+    /// A V2 without authorizations is admitted like a V1 (still Celadon-gated).
+    #[test]
+    fn test_validate_morph_tx_v2_empty_authorization_list_accepted() {
+        let envelope = v2_eth_fee_envelope(vec![]);
+        let mut input = MorphTxValidationInput {
+            consensus_tx: &envelope,
+            sender: address!("1000000000000000000000000000000000000001"),
+            eth_balance: U256::from(10u128.pow(18)),
+            l1_data_fee: U256::ZERO,
+            hardfork: MorphHardfork::Celadon,
+        };
+        let mut db = EmptyDB::default();
+
+        let result = validate_morph_tx(&mut db, &input).unwrap();
+        assert!(!result.uses_token_fee);
+
+        input.hardfork = MorphHardfork::Jade;
+        let err = validate_morph_tx(&mut db, &input).unwrap_err();
+        assert_eq!(
+            err,
+            MorphTxError::InvalidFormat {
+                reason: "MorphTx version 2 is not yet active (celadon fork not reached)"
+                    .to_string(),
+            }
         );
     }
 }

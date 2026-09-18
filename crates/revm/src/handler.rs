@@ -1,6 +1,7 @@
 //! Morph EVM Handler implementation.
 
 use alloy_primitives::{Address, Bytes, U256};
+use morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_2;
 use revm::{
     ExecuteEvm,
     context::{
@@ -14,6 +15,7 @@ use revm::{
     handler::{EvmTr, FrameTr, Handler, MainnetHandler, post_execution, pre_execution, validation},
     inspector::{Inspector, InspectorHandler},
     interpreter::{Gas, GasTracker, InitialAndFloorGas, interpreter::EthInterpreter},
+    primitives::hardfork::SpecId,
 };
 
 use crate::{
@@ -87,13 +89,50 @@ where
             .map(|result| result.map_haltreason(Into::into))
     }
 
+    /// Applies the EIP-7702 authorization list.
+    ///
+    /// revm's default implementation only applies the list when
+    /// `tx_type == 0x04`; MorphTx (`0x7F`) maps to `TransactionType::Custom`
+    /// and would be skipped silently, charging the sender for authorizations
+    /// that never take effect. MorphTx V2 lists are applied here with the same
+    /// `pre_execution::apply_auth_list` routine and refund accounting as `0x04`.
+    ///
+    /// The EIP-2780 (Amsterdam) runtime-charge variant is not handled for
+    /// MorphTx: no Morph hardfork enables it (see
+    /// `test_morph_hardforks_do_not_enable_amsterdam_state_gas`).
     #[inline]
     fn apply_eip7702_auth_list(
         &self,
         evm: &mut Self::Evm,
         init_and_floor_gas: &mut GasTracker,
     ) -> Result<Option<u64>, Self::Error> {
-        pre_execution::apply_eip7702_auth_list(evm.ctx(), init_and_floor_gas)
+        if !evm.ctx_ref().tx().is_morph_tx() {
+            return pre_execution::apply_eip7702_auth_list(evm.ctx(), init_and_floor_gas);
+        }
+
+        // `validate_env` already enforced that only V2 carries a list, so V0/V1
+        // (and a V2 with an empty list, which behaves like V1) fall through here
+        // with nothing to apply.
+        if evm.ctx_ref().tx().authorization_list_len() == 0 {
+            return Ok(Some(0));
+        }
+
+        let chain_id = evm.ctx_ref().cfg().chain_id();
+        let (tx, journal) = evm.ctx().tx_journal_mut();
+        let refunded_accounts = pre_execution::apply_auth_list::<_, Self::Error>(
+            chain_id,
+            tx.authorization_list(),
+            journal,
+        )?;
+
+        let regular_gas_refund = evm
+            .ctx_ref()
+            .cfg()
+            .gas_params()
+            .tx_eip7702_auth_refund_regular()
+            .saturating_mul(refunded_accounts);
+
+        Ok(Some(regular_gas_refund))
     }
 
     #[inline]
@@ -256,6 +295,14 @@ where
             )?;
         }
 
+        // The `Custom` branch also skips the EIP-7702 static rules (Prague gate,
+        // no CREATE) that revm applies to `0x04`. A MorphTx V2 carrying
+        // authorizations must obey the same rules; an empty V2 list is allowed
+        // and needs no extra checks.
+        if evm.ctx_ref().tx().is_morph_tx() {
+            self.validate_morph_tx_authorization_list(evm)?;
+        }
+
         Ok(())
     }
 
@@ -349,6 +396,49 @@ impl<DB, I> MorphEvmHandler<DB, I>
 where
     DB: alloy_evm::Database,
 {
+    /// Static EIP-7702 rules for MorphTx, mirroring the `Eip7702` branch of
+    /// revm's `validate_env` that `TransactionType::Custom` skips:
+    ///
+    /// - V0/V1 must not carry an authorization list
+    /// - V2 with an empty list needs no extra checks (it behaves like V1)
+    /// - V2 with authorizations requires Prague (always true past Viridian,
+    ///   asserted anyway) and a call target (no CREATE)
+    #[inline]
+    fn validate_morph_tx_authorization_list(
+        &self,
+        evm: &mut MorphEvm<DB, I>,
+    ) -> Result<(), EVMError<DB::Error, MorphInvalidTransaction>> {
+        let tx = evm.ctx_ref().tx();
+        let version = tx.version.unwrap_or_default();
+        let auth_list_len = tx.authorization_list_len();
+
+        if version < MORPH_TX_VERSION_2 {
+            if auth_list_len != 0 {
+                return Err(
+                    MorphInvalidTransaction::AuthorizationListNotSupported { version }.into(),
+                );
+            }
+            return Ok(());
+        }
+
+        if auth_list_len == 0 {
+            return Ok(());
+        }
+
+        let spec: SpecId = (*evm.ctx_ref().cfg().spec()).into();
+        if !spec.is_enabled_in(SpecId::PRAGUE) {
+            return Err(MorphInvalidTransaction::EthInvalidTransaction(
+                InvalidTransaction::Eip7702NotSupported,
+            )
+            .into());
+        }
+        if tx.kind().is_create() {
+            return Err(MorphInvalidTransaction::AuthorizationListCreate.into());
+        }
+
+        Ok(())
+    }
+
     /// Validate and deduct ETH-based gas fees.
     #[inline]
     fn validate_and_deduct_eth_fee(
@@ -1595,6 +1685,565 @@ mod tests {
                 InvalidTransaction::GasPriceLessThanBasefee
             ))
         ));
+    }
+
+    // =========================================================================
+    // MorphTx V2 (EIP-7702 authorization list) handler rules
+    // =========================================================================
+
+    use alloy_consensus::transaction::Either;
+    use alloy_eips::eip7702::{Authorization, RecoveredAuthority};
+    use morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_1;
+    use revm::context_interface::transaction::{RecoveredAuthorization, SignedAuthorization};
+
+    fn sample_signed_authorization() -> SignedAuthorization {
+        Authorization {
+            chain_id: U256::from(1),
+            address: Address::with_last_byte(0x42),
+            nonce: 0,
+        }
+        .into_signed(alloy_primitives::Signature::new(
+            U256::from(1),
+            U256::from(2),
+            true,
+        ))
+    }
+
+    fn recovered_authorization(
+        authority: Address,
+        delegate: Address,
+        chain_id: u64,
+        nonce: u64,
+    ) -> Either<SignedAuthorization, RecoveredAuthorization> {
+        Either::Right(RecoveredAuthorization::new_unchecked(
+            Authorization {
+                chain_id: U256::from(chain_id),
+                address: delegate,
+                nonce,
+            },
+            RecoveredAuthority::Valid(authority),
+        ))
+    }
+
+    fn morph_tx_env_with_authorizations(
+        version: Option<u8>,
+        kind: TxKind,
+        authorization_list: Vec<Either<SignedAuthorization, RecoveredAuthorization>>,
+    ) -> MorphTxEnv {
+        MorphTxEnv {
+            inner: TxEnv {
+                tx_type: MORPH_TX_TYPE_ID,
+                gas_limit: 100_000,
+                kind,
+                authorization_list,
+                ..Default::default()
+            },
+            version,
+            fee_token_id: Some(0),
+            ..Default::default()
+        }
+    }
+
+    fn evm_with_spec(spec: MorphHardfork) -> MorphEvm<CacheDB<EmptyDB>, NoOpInspector> {
+        MorphEvm::new(
+            MorphContext::new(CacheDB::new(EmptyDB::default()), spec),
+            NoOpInspector,
+        )
+    }
+
+    fn validate_env_of(
+        evm: &mut MorphEvm<CacheDB<EmptyDB>, NoOpInspector>,
+    ) -> Result<(), EVMError<std::convert::Infallible, MorphInvalidTransaction>> {
+        <MorphEvmHandler<_, _> as Handler>::validate_env(&MorphEvmHandler::default(), evm)
+    }
+
+    #[test]
+    fn validate_env_accepts_v2_morph_tx_with_authorization_list() {
+        let mut evm = evm_with_spec(MorphHardfork::Celadon);
+        evm.tx = morph_tx_env_with_authorizations(
+            Some(MORPH_TX_VERSION_2),
+            TxKind::Call(Address::ZERO),
+            vec![Either::Left(sample_signed_authorization())],
+        );
+
+        assert!(validate_env_of(&mut evm).is_ok());
+    }
+
+    #[test]
+    fn validate_env_rejects_v1_morph_tx_with_authorization_list() {
+        let mut evm = evm_with_spec(MorphHardfork::Celadon);
+        evm.tx = morph_tx_env_with_authorizations(
+            Some(MORPH_TX_VERSION_1),
+            TxKind::Call(Address::ZERO),
+            vec![Either::Left(sample_signed_authorization())],
+        );
+
+        let err = validate_env_of(&mut evm).unwrap_err();
+        assert!(matches!(
+            err,
+            EVMError::Transaction(MorphInvalidTransaction::AuthorizationListNotSupported {
+                version: MORPH_TX_VERSION_1
+            })
+        ));
+    }
+
+    /// A V2 with an empty list is a V1 in all but the version byte: no 7702
+    /// static rule applies (revm's `EmptyAuthorizationList` is `0x04`-only).
+    #[test]
+    fn validate_env_accepts_v2_morph_tx_with_empty_authorization_list() {
+        let mut evm = evm_with_spec(MorphHardfork::Celadon);
+        evm.tx = morph_tx_env_with_authorizations(
+            Some(MORPH_TX_VERSION_2),
+            TxKind::Call(Address::ZERO),
+            vec![],
+        );
+
+        assert!(validate_env_of(&mut evm).is_ok());
+    }
+
+    /// Without authorizations a V2 may create a contract, exactly like V1.
+    #[test]
+    fn validate_env_accepts_v2_morph_tx_create_without_authorizations() {
+        let mut evm = evm_with_spec(MorphHardfork::Celadon);
+        evm.tx = morph_tx_env_with_authorizations(Some(MORPH_TX_VERSION_2), TxKind::Create, vec![]);
+
+        assert!(validate_env_of(&mut evm).is_ok());
+    }
+
+    #[test]
+    fn validate_env_rejects_v2_morph_tx_create() {
+        let mut evm = evm_with_spec(MorphHardfork::Celadon);
+        evm.tx = morph_tx_env_with_authorizations(
+            Some(MORPH_TX_VERSION_2),
+            TxKind::Create,
+            vec![Either::Left(sample_signed_authorization())],
+        );
+
+        let err = validate_env_of(&mut evm).unwrap_err();
+        assert!(matches!(
+            err,
+            EVMError::Transaction(MorphInvalidTransaction::AuthorizationListCreate)
+        ));
+    }
+
+    #[test]
+    fn validate_env_rejects_v2_morph_tx_before_prague() {
+        // Structurally unreachable on Morph (Celadon > Viridian = Prague), but the
+        // guard mirrors revm's `Eip7702NotSupported` for `0x04`.
+        let mut evm = evm_with_spec(MorphHardfork::Morph203);
+        evm.tx = morph_tx_env_with_authorizations(
+            Some(MORPH_TX_VERSION_2),
+            TxKind::Call(Address::ZERO),
+            vec![Either::Left(sample_signed_authorization())],
+        );
+
+        let err = validate_env_of(&mut evm).unwrap_err();
+        assert!(matches!(
+            err,
+            EVMError::Transaction(MorphInvalidTransaction::EthInvalidTransaction(
+                InvalidTransaction::Eip7702NotSupported
+            ))
+        ));
+    }
+
+    #[test]
+    fn validate_env_keeps_accepting_v1_morph_tx_without_authorizations() {
+        let mut evm = evm_with_spec(MorphHardfork::Celadon);
+        evm.tx = morph_tx_env_with_authorizations(
+            Some(MORPH_TX_VERSION_1),
+            TxKind::Call(Address::ZERO),
+            vec![],
+        );
+
+        assert!(validate_env_of(&mut evm).is_ok());
+    }
+
+    fn apply_auth_list_of(evm: &mut MorphEvm<CacheDB<EmptyDB>, NoOpInspector>) -> Option<u64> {
+        let mut gas = GasTracker::new(100_000, 100_000, 0);
+        <MorphEvmHandler<_, _> as Handler>::apply_eip7702_auth_list(
+            &MorphEvmHandler::default(),
+            evm,
+            &mut gas,
+        )
+        .expect("authorization application must not fail")
+    }
+
+    fn account_nonce_and_code(
+        evm: &mut MorphEvm<CacheDB<EmptyDB>, NoOpInspector>,
+        address: Address,
+    ) -> (u64, Option<Bytecode>) {
+        let account = evm
+            .ctx()
+            .journal_mut()
+            .load_account_with_code_mut(address)
+            .unwrap()
+            .data;
+        let info = &account.account().info;
+        (info.nonce, info.code.clone())
+    }
+
+    /// revm's default hook is a no-op for `TransactionType::Custom`; the Morph
+    /// override must apply a V2 list exactly like a `0x04` transaction, and
+    /// report the EIP-7702 refund for authorities that already exist.
+    #[test]
+    fn apply_eip7702_auth_list_delegates_v2_morph_tx_authorities() {
+        let authority = Address::with_last_byte(0xaa);
+        let delegate = Address::with_last_byte(0x42);
+
+        let mut db = CacheDB::new(EmptyDB::default());
+        db.insert_account_info(
+            authority,
+            AccountInfo {
+                balance: U256::from(1),
+                nonce: 0,
+                ..Default::default()
+            },
+        );
+        let mut evm = MorphEvm::new(MorphContext::new(db, MorphHardfork::Celadon), NoOpInspector);
+        evm.cfg.chain_id = 1;
+        evm.tx = morph_tx_env_with_authorizations(
+            Some(MORPH_TX_VERSION_2),
+            TxKind::Call(Address::ZERO),
+            vec![recovered_authorization(authority, delegate, 1, 0)],
+        );
+
+        let refund = apply_auth_list_of(&mut evm);
+        assert_eq!(
+            refund,
+            Some(
+                evm.ctx_ref()
+                    .cfg()
+                    .gas_params()
+                    .tx_eip7702_auth_refund_regular()
+            ),
+            "an existing authority earns the regular EIP-7702 refund"
+        );
+        assert_eq!(refund, Some(12_500));
+
+        let (nonce, code) = account_nonce_and_code(&mut evm, authority);
+        assert_eq!(nonce, 1, "authority nonce is consumed by the delegation");
+        let code = code.expect("delegation designator written");
+        assert!(code.is_eip7702());
+        assert_eq!(code, Bytecode::new_eip7702(delegate));
+    }
+
+    #[test]
+    fn apply_eip7702_auth_list_skips_invalid_v2_tuples() {
+        let authority = Address::with_last_byte(0xaa);
+        let delegate = Address::with_last_byte(0x42);
+
+        let mut evm = evm_with_spec(MorphHardfork::Celadon);
+        evm.cfg.chain_id = 1;
+        evm.tx = morph_tx_env_with_authorizations(
+            Some(MORPH_TX_VERSION_2),
+            TxKind::Call(Address::ZERO),
+            vec![
+                // wrong chain id
+                recovered_authorization(authority, delegate, 999, 0),
+                // wrong nonce (authority is at 0)
+                recovered_authorization(authority, delegate, 1, 5),
+            ],
+        );
+
+        assert_eq!(apply_auth_list_of(&mut evm), Some(0));
+
+        let (nonce, code) = account_nonce_and_code(&mut evm, authority);
+        assert_eq!(nonce, 0);
+        assert!(code.is_none_or(|code| code.is_empty()));
+    }
+
+    #[test]
+    fn apply_eip7702_auth_list_is_noop_for_morph_tx_without_authorizations() {
+        let mut evm = evm_with_spec(MorphHardfork::Celadon);
+        evm.tx = morph_tx_env_with_authorizations(
+            Some(MORPH_TX_VERSION_1),
+            TxKind::Call(Address::ZERO),
+            vec![],
+        );
+
+        assert_eq!(apply_auth_list_of(&mut evm), Some(0));
+    }
+
+    fn evm_with_authority(
+        authority: Address,
+        info: AccountInfo,
+    ) -> MorphEvm<CacheDB<EmptyDB>, NoOpInspector> {
+        let mut db = CacheDB::new(EmptyDB::default());
+        db.insert_account_info(authority, info);
+        let mut evm = MorphEvm::new(MorphContext::new(db, MorphHardfork::Celadon), NoOpInspector);
+        evm.cfg.chain_id = 1;
+        evm
+    }
+
+    fn v2_env_with(
+        authorization_list: Vec<Either<SignedAuthorization, RecoveredAuthorization>>,
+    ) -> MorphTxEnv {
+        morph_tx_env_with_authorizations(
+            Some(MORPH_TX_VERSION_2),
+            TxKind::Call(Address::ZERO),
+            authorization_list,
+        )
+    }
+
+    /// A never-seen authority is created by the delegation and earns no refund
+    /// (the 25 000 intrinsic gas pays for the new account).
+    #[test]
+    fn apply_eip7702_auth_list_creates_fresh_authority_without_refund() {
+        let authority = Address::with_last_byte(0xaa);
+        let delegate = Address::with_last_byte(0x42);
+
+        let mut evm = evm_with_spec(MorphHardfork::Celadon);
+        evm.cfg.chain_id = 1;
+        evm.tx = v2_env_with(vec![recovered_authorization(authority, delegate, 1, 0)]);
+
+        assert_eq!(apply_auth_list_of(&mut evm), Some(0));
+
+        let (nonce, code) = account_nonce_and_code(&mut evm, authority);
+        assert_eq!(nonce, 1);
+        assert_eq!(code, Some(Bytecode::new_eip7702(delegate)));
+    }
+
+    /// An authority that is a real contract can never be delegated (EIP-7702 rule 5).
+    #[test]
+    fn apply_eip7702_auth_list_skips_authority_with_contract_code() {
+        let authority = Address::with_last_byte(0xaa);
+        let delegate = Address::with_last_byte(0x42);
+        // PUSH1 0 PUSH1 0 REVERT
+        let contract_code = Bytecode::new_raw(Bytes::from_static(&[0x60, 0x00, 0x60, 0x00, 0xfd]));
+
+        let mut evm = evm_with_authority(
+            authority,
+            AccountInfo {
+                balance: U256::from(1),
+                nonce: 3,
+                code_hash: contract_code.hash_slow(),
+                code: Some(contract_code.clone()),
+                ..Default::default()
+            },
+        );
+        evm.tx = v2_env_with(vec![recovered_authorization(authority, delegate, 1, 3)]);
+
+        assert_eq!(apply_auth_list_of(&mut evm), Some(0));
+
+        let (nonce, code) = account_nonce_and_code(&mut evm, authority);
+        assert_eq!(nonce, 3, "contract authority is left untouched");
+        assert_eq!(code, Some(contract_code));
+    }
+
+    /// An already-delegated authority can be re-pointed at a new delegate.
+    #[test]
+    fn apply_eip7702_auth_list_redelegates_already_delegated_authority() {
+        let authority = Address::with_last_byte(0xaa);
+        let first = Address::with_last_byte(0x41);
+        let second = Address::with_last_byte(0x42);
+        let existing = Bytecode::new_eip7702(first);
+
+        let mut evm = evm_with_authority(
+            authority,
+            AccountInfo {
+                balance: U256::from(1),
+                nonce: 5,
+                code_hash: existing.hash_slow(),
+                code: Some(existing),
+                ..Default::default()
+            },
+        );
+        evm.tx = v2_env_with(vec![recovered_authorization(authority, second, 1, 5)]);
+
+        assert_eq!(apply_auth_list_of(&mut evm), Some(12_500));
+
+        let (nonce, code) = account_nonce_and_code(&mut evm, authority);
+        assert_eq!(nonce, 6);
+        assert_eq!(code, Some(Bytecode::new_eip7702(second)));
+    }
+
+    /// Delegating to the zero address clears the designator (EIP-7702 rule 8).
+    #[test]
+    fn apply_eip7702_auth_list_zero_address_clears_delegation() {
+        let authority = Address::with_last_byte(0xaa);
+        let existing = Bytecode::new_eip7702(Address::with_last_byte(0x41));
+
+        let mut evm = evm_with_authority(
+            authority,
+            AccountInfo {
+                balance: U256::from(1),
+                nonce: 5,
+                code_hash: existing.hash_slow(),
+                code: Some(existing),
+                ..Default::default()
+            },
+        );
+        evm.tx = v2_env_with(vec![recovered_authorization(
+            authority,
+            Address::ZERO,
+            1,
+            5,
+        )]);
+
+        assert_eq!(apply_auth_list_of(&mut evm), Some(12_500));
+
+        let (nonce, code) = account_nonce_and_code(&mut evm, authority);
+        assert_eq!(nonce, 6);
+        assert!(
+            code.is_none_or(|code| code.is_empty()),
+            "zero-address delegation must clear the code"
+        );
+    }
+
+    /// A tuple whose authority could not be recovered (the shape
+    /// `MorphTxEnv::from_recovered_tx` produces for a bad signature) is
+    /// skipped, not fatal.
+    #[test]
+    fn apply_eip7702_auth_list_skips_tuple_with_invalid_authority() {
+        let delegate = Address::with_last_byte(0x42);
+        let mut evm = evm_with_spec(MorphHardfork::Celadon);
+        evm.cfg.chain_id = 1;
+        evm.tx = v2_env_with(vec![Either::Right(RecoveredAuthorization::new_unchecked(
+            Authorization {
+                chain_id: U256::from(1),
+                address: delegate,
+                nonce: 0,
+            },
+            RecoveredAuthority::Invalid,
+        ))]);
+
+        assert_eq!(apply_auth_list_of(&mut evm), Some(0));
+        assert!(
+            evm.ctx()
+                .journal_mut()
+                .inner
+                .state
+                .values()
+                .all(|account| account
+                    .info
+                    .code
+                    .as_ref()
+                    .is_none_or(|code| code.is_empty())),
+            "no account may have been delegated"
+        );
+    }
+
+    /// `chainId = 0` tuples are valid on every chain (EIP-7702 rule 1).
+    #[test]
+    fn apply_eip7702_auth_list_accepts_chain_id_zero_tuple() {
+        let authority = Address::with_last_byte(0xaa);
+        let delegate = Address::with_last_byte(0x42);
+
+        let mut evm = evm_with_spec(MorphHardfork::Celadon);
+        evm.cfg.chain_id = 1;
+        evm.tx = v2_env_with(vec![recovered_authorization(authority, delegate, 0, 0)]);
+
+        assert_eq!(apply_auth_list_of(&mut evm), Some(0));
+
+        let (nonce, code) = account_nonce_and_code(&mut evm, authority);
+        assert_eq!(nonce, 1);
+        assert_eq!(code, Some(Bytecode::new_eip7702(delegate)));
+    }
+
+    /// `nonce = 2^64 - 1` tuples are skipped (EIP-7702 rule 2).
+    #[test]
+    fn apply_eip7702_auth_list_skips_nonce_max_tuple() {
+        let authority = Address::with_last_byte(0xaa);
+        let delegate = Address::with_last_byte(0x42);
+
+        let mut evm = evm_with_spec(MorphHardfork::Celadon);
+        evm.cfg.chain_id = 1;
+        evm.tx = v2_env_with(vec![recovered_authorization(
+            authority,
+            delegate,
+            1,
+            u64::MAX,
+        )]);
+
+        assert_eq!(apply_auth_list_of(&mut evm), Some(0));
+
+        let (nonce, code) = account_nonce_and_code(&mut evm, authority);
+        assert_eq!(nonce, 0);
+        assert!(code.is_none_or(|code| code.is_empty()));
+    }
+
+    /// Two tuples for the same authority apply in order: the second one sees the
+    /// nonce bumped by the first, and both earn the refund.
+    #[test]
+    fn apply_eip7702_auth_list_applies_consecutive_tuples_for_same_authority() {
+        let authority = Address::with_last_byte(0xaa);
+        let first = Address::with_last_byte(0x41);
+        let second = Address::with_last_byte(0x42);
+
+        let mut evm = evm_with_authority(
+            authority,
+            AccountInfo {
+                balance: U256::from(1),
+                nonce: 0,
+                ..Default::default()
+            },
+        );
+        evm.tx = v2_env_with(vec![
+            recovered_authorization(authority, first, 1, 0),
+            recovered_authorization(authority, second, 1, 1),
+        ]);
+
+        assert_eq!(apply_auth_list_of(&mut evm), Some(25_000));
+
+        let (nonce, code) = account_nonce_and_code(&mut evm, authority);
+        assert_eq!(nonce, 2);
+        assert_eq!(code, Some(Bytecode::new_eip7702(second)));
+    }
+
+    /// Simulation (`eth_call`, fee charge disabled) still enforces the static
+    /// V2 rules; only the fee-cap check is fee-dependent.
+    #[test]
+    fn validate_env_enforces_v2_rules_when_fee_charge_is_disabled() {
+        let mut evm = evm_with_spec(MorphHardfork::Celadon);
+        evm.cfg.disable_fee_charge = true;
+        evm.tx = morph_tx_env_with_authorizations(
+            Some(MORPH_TX_VERSION_2),
+            TxKind::Create,
+            vec![Either::Left(sample_signed_authorization())],
+        );
+
+        let err = validate_env_of(&mut evm).unwrap_err();
+        assert!(matches!(
+            err,
+            EVMError::Transaction(MorphInvalidTransaction::AuthorizationListCreate)
+        ));
+    }
+
+    /// revm's intrinsic gas charges 25 000 per authorization from
+    /// `authorization_list_len()` regardless of the transaction type, so a
+    /// MorphTx V2 needs no Morph-specific handling here (design doc 5.6).
+    #[test]
+    fn validate_initial_tx_gas_charges_per_authorization_for_morph_tx_v2() {
+        let mut evm = evm_with_spec(MorphHardfork::Celadon);
+        evm.tx = v2_env_with(vec![
+            Either::Left(sample_signed_authorization()),
+            Either::Left(sample_signed_authorization()),
+        ]);
+
+        // 21_000 base + 2 × 25_000 per authorization.
+        evm.tx.inner.gas_limit = 70_999;
+        let err = <MorphEvmHandler<_, _> as Handler>::validate_initial_tx_gas(
+            &MorphEvmHandler::default(),
+            &mut evm,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            EVMError::Transaction(MorphInvalidTransaction::EthInvalidTransaction(
+                InvalidTransaction::CallGasCostMoreThanGasLimit {
+                    initial_gas: 71_000,
+                    gas_limit: 70_999,
+                }
+            ))
+        ));
+
+        evm.tx.inner.gas_limit = 71_000;
+        let initial = <MorphEvmHandler<_, _> as Handler>::validate_initial_tx_gas(
+            &MorphEvmHandler::default(),
+            &mut evm,
+        )
+        .expect("exact intrinsic gas is accepted");
+        assert_eq!(initial.initial_regular_gas, 71_000);
     }
 
     #[test]
