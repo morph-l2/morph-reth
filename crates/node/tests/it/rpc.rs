@@ -670,15 +670,15 @@ async fn estimate_gas_for_morph_tx_v2_includes_authorization_gas() -> eyre::Resu
 }
 
 /// Simulation is not fork-gated, exactly like V1 (geth only gates
-/// `setDefaults`, i.e. the send paths): before Onyx `eth_estimateGas` and
+/// `setDefaults`, i.e. the send paths): before Celadon `eth_estimateGas` and
 /// `eth_call` still simulate a V2 request, while sending the same transaction
 /// is rejected by the pool.
 #[tokio::test(flavor = "multi_thread")]
-async fn simulation_of_morph_tx_v2_is_not_fork_gated_before_onyx() -> eyre::Result<()> {
+async fn simulation_of_morph_tx_v2_is_not_fork_gated_before_celadon() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let (mut nodes, wallet) = TestNodeBuilder::new()
-        .with_schedule(HardforkSchedule::PreOnyx)
+        .with_schedule(HardforkSchedule::PreCeladon)
         .build()
         .await?;
     let node = nodes.pop().unwrap();
@@ -710,7 +710,7 @@ async fn simulation_of_morph_tx_v2_is_not_fork_gated_before_onyx() -> eyre::Resu
         .await?;
     assert!(
         estimate.to::<u64>() >= 21_000 + 25_000,
-        "pre-Onyx estimate must still price the authorization: {estimate}"
+        "pre-Celadon estimate must still price the authorization: {estimate}"
     );
     let call_result: Value = client.request("eth_call", (request, "latest")).await?;
     assert_eq!(call_result.as_str(), Some("0x"));
@@ -725,7 +725,7 @@ async fn simulation_of_morph_tx_v2_is_not_fork_gated_before_onyx() -> eyre::Resu
         .rpc
         .inject_tx(raw_tx)
         .await
-        .expect_err("MorphTx v2 must be rejected by the pool before Onyx");
+        .expect_err("MorphTx v2 must be rejected by the pool before Celadon");
     assert!(
         err.to_string().contains("not yet active"),
         "unexpected error: {err}"

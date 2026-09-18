@@ -46,7 +46,7 @@ pub enum MorphInvalidTransaction {
 
     /// A MorphTx below version 2 carries an EIP-7702 authorization list.
     ///
-    /// Only MorphTx V2 (Onyx onwards) may carry authorizations; the RLP decoders
+    /// Only MorphTx V2 (Celadon onwards) may carry authorizations; the RLP decoders
     /// never produce this shape, so it only surfaces for malformed simulation
     /// requests.
     #[error("MorphTx version {version} does not support an authorization list")]

@@ -1377,7 +1377,7 @@ mod tests {
 
     #[test]
     fn validate_env_accepts_v2_morph_tx_with_authorization_list() {
-        let mut evm = evm_with_spec(MorphHardfork::Onyx);
+        let mut evm = evm_with_spec(MorphHardfork::Celadon);
         evm.tx = morph_tx_env_with_authorizations(
             Some(MORPH_TX_VERSION_2),
             TxKind::Call(Address::ZERO),
@@ -1389,7 +1389,7 @@ mod tests {
 
     #[test]
     fn validate_env_rejects_v1_morph_tx_with_authorization_list() {
-        let mut evm = evm_with_spec(MorphHardfork::Onyx);
+        let mut evm = evm_with_spec(MorphHardfork::Celadon);
         evm.tx = morph_tx_env_with_authorizations(
             Some(MORPH_TX_VERSION_1),
             TxKind::Call(Address::ZERO),
@@ -1409,7 +1409,7 @@ mod tests {
     /// static rule applies (revm's `EmptyAuthorizationList` is `0x04`-only).
     #[test]
     fn validate_env_accepts_v2_morph_tx_with_empty_authorization_list() {
-        let mut evm = evm_with_spec(MorphHardfork::Onyx);
+        let mut evm = evm_with_spec(MorphHardfork::Celadon);
         evm.tx = morph_tx_env_with_authorizations(
             Some(MORPH_TX_VERSION_2),
             TxKind::Call(Address::ZERO),
@@ -1422,7 +1422,7 @@ mod tests {
     /// Without authorizations a V2 may create a contract, exactly like V1.
     #[test]
     fn validate_env_accepts_v2_morph_tx_create_without_authorizations() {
-        let mut evm = evm_with_spec(MorphHardfork::Onyx);
+        let mut evm = evm_with_spec(MorphHardfork::Celadon);
         evm.tx = morph_tx_env_with_authorizations(Some(MORPH_TX_VERSION_2), TxKind::Create, vec![]);
 
         assert!(validate_env_of(&mut evm).is_ok());
@@ -1430,7 +1430,7 @@ mod tests {
 
     #[test]
     fn validate_env_rejects_v2_morph_tx_create() {
-        let mut evm = evm_with_spec(MorphHardfork::Onyx);
+        let mut evm = evm_with_spec(MorphHardfork::Celadon);
         evm.tx = morph_tx_env_with_authorizations(
             Some(MORPH_TX_VERSION_2),
             TxKind::Create,
@@ -1446,7 +1446,7 @@ mod tests {
 
     #[test]
     fn validate_env_rejects_v2_morph_tx_before_prague() {
-        // Structurally unreachable on Morph (Onyx > Viridian = Prague), but the
+        // Structurally unreachable on Morph (Celadon > Viridian = Prague), but the
         // guard mirrors revm's `Eip7702NotSupported` for `0x04`.
         let mut evm = evm_with_spec(MorphHardfork::Morph203);
         evm.tx = morph_tx_env_with_authorizations(
@@ -1466,7 +1466,7 @@ mod tests {
 
     #[test]
     fn validate_env_keeps_accepting_v1_morph_tx_without_authorizations() {
-        let mut evm = evm_with_spec(MorphHardfork::Onyx);
+        let mut evm = evm_with_spec(MorphHardfork::Celadon);
         evm.tx = morph_tx_env_with_authorizations(
             Some(MORPH_TX_VERSION_1),
             TxKind::Call(Address::ZERO),
@@ -1517,7 +1517,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let mut evm = MorphEvm::new(MorphContext::new(db, MorphHardfork::Onyx), NoOpInspector);
+        let mut evm = MorphEvm::new(MorphContext::new(db, MorphHardfork::Celadon), NoOpInspector);
         evm.cfg.chain_id = 1;
         evm.tx = morph_tx_env_with_authorizations(
             Some(MORPH_TX_VERSION_2),
@@ -1550,7 +1550,7 @@ mod tests {
         let authority = Address::with_last_byte(0xaa);
         let delegate = Address::with_last_byte(0x42);
 
-        let mut evm = evm_with_spec(MorphHardfork::Onyx);
+        let mut evm = evm_with_spec(MorphHardfork::Celadon);
         evm.cfg.chain_id = 1;
         evm.tx = morph_tx_env_with_authorizations(
             Some(MORPH_TX_VERSION_2),
@@ -1572,7 +1572,7 @@ mod tests {
 
     #[test]
     fn apply_eip7702_auth_list_is_noop_for_morph_tx_without_authorizations() {
-        let mut evm = evm_with_spec(MorphHardfork::Onyx);
+        let mut evm = evm_with_spec(MorphHardfork::Celadon);
         evm.tx = morph_tx_env_with_authorizations(
             Some(MORPH_TX_VERSION_1),
             TxKind::Call(Address::ZERO),
@@ -1588,7 +1588,7 @@ mod tests {
     ) -> MorphEvm<CacheDB<EmptyDB>, NoOpInspector> {
         let mut db = CacheDB::new(EmptyDB::default());
         db.insert_account_info(authority, info);
-        let mut evm = MorphEvm::new(MorphContext::new(db, MorphHardfork::Onyx), NoOpInspector);
+        let mut evm = MorphEvm::new(MorphContext::new(db, MorphHardfork::Celadon), NoOpInspector);
         evm.cfg.chain_id = 1;
         evm
     }
@@ -1610,7 +1610,7 @@ mod tests {
         let authority = Address::with_last_byte(0xaa);
         let delegate = Address::with_last_byte(0x42);
 
-        let mut evm = evm_with_spec(MorphHardfork::Onyx);
+        let mut evm = evm_with_spec(MorphHardfork::Celadon);
         evm.cfg.chain_id = 1;
         evm.tx = v2_env_with(vec![recovered_authorization(authority, delegate, 1, 0)]);
 
@@ -1714,7 +1714,7 @@ mod tests {
     #[test]
     fn apply_eip7702_auth_list_skips_tuple_with_invalid_authority() {
         let delegate = Address::with_last_byte(0x42);
-        let mut evm = evm_with_spec(MorphHardfork::Onyx);
+        let mut evm = evm_with_spec(MorphHardfork::Celadon);
         evm.cfg.chain_id = 1;
         evm.tx = v2_env_with(vec![Either::Right(RecoveredAuthorization::new_unchecked(
             Authorization {
@@ -1747,7 +1747,7 @@ mod tests {
         let authority = Address::with_last_byte(0xaa);
         let delegate = Address::with_last_byte(0x42);
 
-        let mut evm = evm_with_spec(MorphHardfork::Onyx);
+        let mut evm = evm_with_spec(MorphHardfork::Celadon);
         evm.cfg.chain_id = 1;
         evm.tx = v2_env_with(vec![recovered_authorization(authority, delegate, 0, 0)]);
 
@@ -1764,7 +1764,7 @@ mod tests {
         let authority = Address::with_last_byte(0xaa);
         let delegate = Address::with_last_byte(0x42);
 
-        let mut evm = evm_with_spec(MorphHardfork::Onyx);
+        let mut evm = evm_with_spec(MorphHardfork::Celadon);
         evm.cfg.chain_id = 1;
         evm.tx = v2_env_with(vec![recovered_authorization(
             authority,
@@ -1812,7 +1812,7 @@ mod tests {
     /// V2 rules; only the fee-cap check is fee-dependent.
     #[test]
     fn validate_env_enforces_v2_rules_when_fee_charge_is_disabled() {
-        let mut evm = evm_with_spec(MorphHardfork::Onyx);
+        let mut evm = evm_with_spec(MorphHardfork::Celadon);
         evm.cfg.disable_fee_charge = true;
         evm.tx = morph_tx_env_with_authorizations(
             Some(MORPH_TX_VERSION_2),
@@ -1832,7 +1832,7 @@ mod tests {
     /// MorphTx V2 needs no Morph-specific handling here (design doc 5.6).
     #[test]
     fn validate_initial_tx_gas_charges_per_authorization_for_morph_tx_v2() {
-        let mut evm = evm_with_spec(MorphHardfork::Onyx);
+        let mut evm = evm_with_spec(MorphHardfork::Celadon);
         evm.tx = v2_env_with(vec![
             Either::Left(sample_signed_authorization()),
             Either::Left(sample_signed_authorization()),

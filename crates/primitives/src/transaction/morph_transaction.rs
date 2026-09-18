@@ -5,7 +5,7 @@
 //! - ERC20 tokens for gas payment instead of native ETH
 //! - Transaction reference for indexing/lookup
 //! - Memo field for arbitrary data
-//! - EIP-7702 authorization list (version 2, Onyx onwards)
+//! - EIP-7702 authorization list (version 2, Celadon onwards)
 //!
 //! Wire formats (after the `0x7F` type byte):
 //! - V0: `RLP([chainId, nonce, gasTipCap, gasFeeCap, gas, to, value, data, accessList, feeTokenID, feeLimit, V, R, S])`

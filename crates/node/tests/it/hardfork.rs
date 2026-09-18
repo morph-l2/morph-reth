@@ -63,15 +63,15 @@ async fn pre_jade_chain_advances() -> eyre::Result<()> {
     Ok(())
 }
 
-/// With Onyx disabled (pre-Onyx schedule), blocks are still built correctly.
+/// With Celadon disabled (pre-Celadon schedule), blocks are still built correctly.
 ///
-/// Only MorphTx v2 is gated on Onyx; everything else behaves as under Jade.
+/// Only MorphTx v2 is gated on Celadon; everything else behaves as under Jade.
 #[tokio::test(flavor = "multi_thread")]
-async fn pre_onyx_chain_advances() -> eyre::Result<()> {
+async fn pre_celadon_chain_advances() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let (mut nodes, wallet) = TestNodeBuilder::new()
-        .with_schedule(HardforkSchedule::PreOnyx)
+        .with_schedule(HardforkSchedule::PreCeladon)
         .build()
         .await?;
     let mut node = nodes.pop().unwrap();

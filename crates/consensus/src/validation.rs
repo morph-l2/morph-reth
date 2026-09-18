@@ -320,10 +320,10 @@ impl Consensus<Block> for MorphConsensus {
         let is_jade = self
             .chain_spec
             .is_jade_active_at_timestamp(block.header().timestamp());
-        let is_onyx = self
+        let is_celadon = self
             .chain_spec
-            .is_onyx_active_at_timestamp(block.header().timestamp());
-        validate_morph_txs(&block.body().transactions, is_emerald, is_jade, is_onyx)?;
+            .is_celadon_active_at_timestamp(block.header().timestamp());
+        validate_morph_txs(&block.body().transactions, is_emerald, is_jade, is_celadon)?;
 
         // Validate L1 messages ordering and internal consistency with header.
         // This is the body-level half of L1 validation; it verifies that the L1
@@ -647,7 +647,7 @@ fn validate_l1_messages_in_block(
 /// Performs three checks per MorphTx:
 /// 1. **Type hardfork gate**: rejects MorphTx before the Emerald fork is active
 /// 2. **Version hardfork gate**: rejects V1 transactions before the Jade fork is
-///    active and V2 transactions before the Onyx fork is active
+///    active and V2 transactions before the Celadon fork is active
 /// 3. **Field validation**: delegates to [`TxMorph::validate()`] for version-specific
 ///    field constraints (including the V2 authorization-list rules), memo length,
 ///    and gas price ordering
@@ -657,7 +657,7 @@ fn validate_morph_txs(
     txs: &[MorphTxEnvelope],
     is_emerald: bool,
     is_jade: bool,
-    is_onyx: bool,
+    is_celadon: bool,
 ) -> Result<(), ConsensusError> {
     for tx in txs {
         let morph_tx = match tx {
@@ -679,10 +679,10 @@ fn validate_morph_txs(
             )));
         }
 
-        // Reject MorphTx V2 (EIP-7702 authorization list) before Onyx fork.
-        if !is_onyx && morph_tx.version == MORPH_TX_VERSION_2 {
+        // Reject MorphTx V2 (EIP-7702 authorization list) before Celadon fork.
+        if !is_celadon && morph_tx.version == MORPH_TX_VERSION_2 {
             return Err(ConsensusError::other(MorphConsensusError::InvalidBody(
-                "MorphTx version 2 is not yet active (onyx fork not reached)".into(),
+                "MorphTx version 2 is not yet active (celadon fork not reached)".into(),
             )));
         }
 
@@ -1939,24 +1939,24 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_morph_tx_v2_before_onyx_rejected() {
+    fn test_validate_morph_tx_v2_before_celadon_rejected() {
         let txs = [create_morph_tx_v2()];
         let result = validate_morph_txs(&txs, true, true, false);
         assert!(
             result
                 .unwrap_err()
                 .to_string()
-                .contains("onyx fork not reached")
+                .contains("celadon fork not reached")
         );
     }
 
     #[test]
-    fn test_validate_morph_tx_v2_after_onyx_valid() {
+    fn test_validate_morph_tx_v2_after_celadon_valid() {
         let txs = [create_morph_tx_v2()];
         assert!(validate_morph_txs(&txs, true, true, true).is_ok());
     }
 
-    /// A V2 with an empty list is valid after Onyx (and still Onyx-gated).
+    /// A V2 with an empty list is valid after Celadon (and still Celadon-gated).
     #[test]
     fn test_validate_morph_tx_v2_empty_authorization_list_accepted() {
         let txs = [create_morph_tx_v2_with(
@@ -1969,7 +1969,7 @@ mod tests {
             validate_morph_txs(&txs, true, true, false)
                 .unwrap_err()
                 .to_string()
-                .contains("onyx fork not reached")
+                .contains("celadon fork not reached")
         );
     }
 
@@ -2017,7 +2017,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_block_pre_execution_rejects_v2_without_onyx() {
+    fn test_validate_block_pre_execution_rejects_v2_without_celadon() {
         // `create_test_chainspec` schedules forks through Jade only.
         let consensus = MorphConsensus::new(create_test_chainspec());
         let block = create_sealed_block(0, vec![create_morph_tx_v2()]);
@@ -2027,13 +2027,13 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            err.contains("onyx fork not reached"),
+            err.contains("celadon fork not reached"),
             "unexpected error: {err}"
         );
     }
 
     #[test]
-    fn test_validate_block_pre_execution_uses_chainspec_onyx_activation() {
+    fn test_validate_block_pre_execution_uses_chainspec_celadon_activation() {
         let genesis_json = serde_json::json!({
             "config": {
                 "chainId": 1337,
@@ -2053,7 +2053,7 @@ mod tests {
                 "viridianTime": 0,
                 "emeraldTime": 0,
                 "jadeForkTime": 0,
-                "onyxTime": 1000,
+                "celadonTime": 1000,
                 "morph": {}
             },
             "alloc": {}
@@ -2067,7 +2067,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            err.contains("onyx fork not reached"),
+            err.contains("celadon fork not reached"),
             "unexpected error: {err}"
         );
 

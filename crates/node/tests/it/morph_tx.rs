@@ -750,7 +750,7 @@ async fn morph_tx_v0_token_fee_still_charged_on_revert() -> eyre::Result<()> {
 }
 
 // =============================================================================
-// MorphTx v2 (EIP-7702 authorization list) — Onyx gating and delegation
+// MorphTx v2 (EIP-7702 authorization list) — Celadon gating and delegation
 // =============================================================================
 
 /// Asserts that `authority` is delegated to `delegate` (`0xef0100 || delegate`)
@@ -1249,13 +1249,13 @@ async fn morph_tx_v2_pending_authorization_limits_authority_inflight_txs() -> ey
     Ok(())
 }
 
-/// MorphTx v2 is rejected by the pool while Onyx is not active.
+/// MorphTx v2 is rejected by the pool while Celadon is not active.
 #[tokio::test(flavor = "multi_thread")]
-async fn morph_tx_v2_rejected_before_onyx() -> eyre::Result<()> {
+async fn morph_tx_v2_rejected_before_celadon() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let (mut nodes, wallet) = TestNodeBuilder::new()
-        .with_schedule(HardforkSchedule::PreOnyx)
+        .with_schedule(HardforkSchedule::PreCeladon)
         .build()
         .await?;
     let node = nodes.pop().unwrap();
@@ -1277,7 +1277,7 @@ async fn morph_tx_v2_rejected_before_onyx() -> eyre::Result<()> {
         .rpc
         .inject_tx(raw_tx)
         .await
-        .expect_err("MorphTx v2 should be rejected by pool before Onyx");
+        .expect_err("MorphTx v2 should be rejected by pool before Celadon");
     assert!(
         err.to_string().contains("not yet active"),
         "unexpected error: {err}"
@@ -1286,9 +1286,9 @@ async fn morph_tx_v2_rejected_before_onyx() -> eyre::Result<()> {
     Ok(())
 }
 
-/// MorphTx v1 keeps working after Onyx (only v2 is new).
+/// MorphTx v1 keeps working after Celadon (only v2 is new).
 #[tokio::test(flavor = "multi_thread")]
-async fn morph_tx_v1_still_accepted_after_onyx() -> eyre::Result<()> {
+async fn morph_tx_v1_still_accepted_after_celadon() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;

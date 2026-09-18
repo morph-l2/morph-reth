@@ -70,14 +70,14 @@ pub fn validate_morph_tx<DB: Database>(
         });
     }
 
-    // V2 (EIP-7702 authorization list) is gated on Onyx. The list itself is
+    // V2 (EIP-7702 authorization list) is gated on Celadon. The list itself is
     // validated by `TxMorph::validate` below (V0/V1 must not carry one, a
     // non-empty V2 list forbids CREATE; an empty V2 list is allowed); authority
     // tracking and delegated-sender limits come from the upstream validator,
     // which reads the list through `Transaction::authorization_list`.
-    if !input.hardfork.is_onyx() && morph_tx.version == MORPH_TX_VERSION_2 {
+    if !input.hardfork.is_celadon() && morph_tx.version == MORPH_TX_VERSION_2 {
         return Err(MorphTxError::InvalidFormat {
-            reason: "MorphTx version 2 is not yet active (onyx fork not reached)".to_string(),
+            reason: "MorphTx version 2 is not yet active (celadon fork not reached)".to_string(),
         });
     }
 
@@ -505,7 +505,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_morph_tx_v2_rejected_before_onyx() {
+    fn test_validate_morph_tx_v2_rejected_before_celadon() {
         let envelope = v2_eth_fee_envelope(vec![sample_authorization()]);
         let input = MorphTxValidationInput {
             consensus_tx: &envelope,
@@ -520,20 +520,21 @@ mod tests {
         assert_eq!(
             err,
             MorphTxError::InvalidFormat {
-                reason: "MorphTx version 2 is not yet active (onyx fork not reached)".to_string(),
+                reason: "MorphTx version 2 is not yet active (celadon fork not reached)"
+                    .to_string(),
             }
         );
     }
 
     #[test]
-    fn test_validate_morph_tx_v2_eth_fee_path_accepted_after_onyx() {
+    fn test_validate_morph_tx_v2_eth_fee_path_accepted_after_celadon() {
         let envelope = v2_eth_fee_envelope(vec![sample_authorization()]);
         let input = MorphTxValidationInput {
             consensus_tx: &envelope,
             sender: address!("1000000000000000000000000000000000000001"),
             eth_balance: U256::from(10u128.pow(18)),
             l1_data_fee: U256::from(1000u64),
-            hardfork: MorphHardfork::Onyx,
+            hardfork: MorphHardfork::Celadon,
         };
         let mut db = EmptyDB::default();
 
@@ -541,7 +542,7 @@ mod tests {
         assert!(!result.uses_token_fee);
     }
 
-    /// A V2 without authorizations is admitted like a V1 (still Onyx-gated).
+    /// A V2 without authorizations is admitted like a V1 (still Celadon-gated).
     #[test]
     fn test_validate_morph_tx_v2_empty_authorization_list_accepted() {
         let envelope = v2_eth_fee_envelope(vec![]);
@@ -550,7 +551,7 @@ mod tests {
             sender: address!("1000000000000000000000000000000000000001"),
             eth_balance: U256::from(10u128.pow(18)),
             l1_data_fee: U256::ZERO,
-            hardfork: MorphHardfork::Onyx,
+            hardfork: MorphHardfork::Celadon,
         };
         let mut db = EmptyDB::default();
 
@@ -562,7 +563,8 @@ mod tests {
         assert_eq!(
             err,
             MorphTxError::InvalidFormat {
-                reason: "MorphTx version 2 is not yet active (onyx fork not reached)".to_string(),
+                reason: "MorphTx version 2 is not yet active (celadon fork not reached)"
+                    .to_string(),
             }
         );
     }

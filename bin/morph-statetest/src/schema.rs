@@ -368,7 +368,7 @@ pub fn parse_fork(name: &str) -> Result<MorphHardfork, SchemaError> {
         "jade" => Ok(MorphHardfork::Jade),
         // OSAKA is the spec level of the latest Morph fork, so the generic
         // Ethereum name maps to it (matches `MorphHardfork::from(SpecId::OSAKA)`).
-        "onyx" | "osaka" => Ok(MorphHardfork::Onyx),
+        "celadon" | "osaka" => Ok(MorphHardfork::Celadon),
         "cancun" => Ok(MorphHardfork::Morph203),
         _ => Err(SchemaError::UnknownFork(name.to_string())),
     }
@@ -535,7 +535,7 @@ mod tests {
                   "secretKey": "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8"
                 },
                 "post": {
-                  "Onyx": [{
+                  "Celadon": [{
                     "indexes": { "data": 0, "gas": 0, "value": 0 },
                     "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
                     "logs": "0x0000000000000000000000000000000000000000000000000000000000000000",
@@ -548,9 +548,9 @@ mod tests {
         .expect("suite should parse");
 
         let unit = suite.0.values().next().unwrap();
-        let post = &unit.post["Onyx"][0];
+        let post = &unit.post["Celadon"][0];
         let tx = unit
-            .morph_tx_env(post, MorphHardfork::Onyx)
+            .morph_tx_env(post, MorphHardfork::Celadon)
             .expect("tx env should build");
 
         assert!(tx.is_morph_tx());
@@ -571,9 +571,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_fork_maps_onyx_and_osaka() {
-        assert_eq!(parse_fork("Onyx").unwrap(), MorphHardfork::Onyx);
-        assert_eq!(parse_fork("osaka").unwrap(), MorphHardfork::Onyx);
+    fn parse_fork_maps_celadon_and_osaka() {
+        assert_eq!(parse_fork("Celadon").unwrap(), MorphHardfork::Celadon);
+        assert_eq!(parse_fork("osaka").unwrap(), MorphHardfork::Celadon);
         assert_eq!(parse_fork("jade").unwrap(), MorphHardfork::Jade);
     }
 

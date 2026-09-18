@@ -76,18 +76,18 @@ pub enum HardforkSchedule {
     #[default]
     AllActive,
 
-    /// Onyx is NOT active; all other forks are active at t=0.
+    /// Celadon is NOT active; all other forks are active at t=0.
     ///
-    /// Use this to test pre-Onyx behavior: MorphTx v2 (authorization list) rejected.
-    PreOnyx,
+    /// Use this to test pre-Celadon behavior: MorphTx v2 (authorization list) rejected.
+    PreCeladon,
 
-    /// Jade and Onyx are NOT active; all other forks are active at t=0.
+    /// Jade and Celadon are NOT active; all other forks are active at t=0.
     ///
     /// Use this to test pre-Jade behavior: state root validation skipped,
     /// MorphTx v1 rejected, etc.
     PreJade,
 
-    /// Viridian, Emerald, Jade, and Onyx are NOT active; all earlier forks are at t=0.
+    /// Viridian, Emerald, Jade, and Celadon are NOT active; all earlier forks are at t=0.
     ///
     /// Use this to test pre-Viridian behavior: EIP-7702 rejected, etc.
     PreViridian,
@@ -112,7 +112,7 @@ impl HardforkSchedule {
     /// used to determine which forks are currently active on those networks.
     fn reference_genesis_json(&self) -> Option<&'static str> {
         match self {
-            Self::AllActive | Self::PreOnyx | Self::PreJade | Self::PreViridian => None,
+            Self::AllActive | Self::PreCeladon | Self::PreJade | Self::PreViridian => None,
             Self::Hoodi => Some(include_str!("../../chainspec/res/genesis/hoodi.json")),
             Self::Mainnet => Some(include_str!("../../chainspec/res/genesis/mainnet.json")),
         }
@@ -121,8 +121,8 @@ impl HardforkSchedule {
     /// Apply this schedule's fork timestamps to a mutable genesis JSON value.
     ///
     /// - `AllActive`: no changes (test genesis already has all forks at 0)
-    /// - `PreOnyx`: set `onyxTime` to `u64::MAX`
-    /// - `PreJade`: set `jadeForkTime` and `onyxTime` to `u64::MAX`
+    /// - `PreCeladon`: set `celadonTime` to `u64::MAX`
+    /// - `PreJade`: set `jadeForkTime` and `celadonTime` to `u64::MAX`
     /// - `Hoodi`/`Mainnet`: compare each `*Time` key against the reference network;
     ///   forks active now → 0, forks not yet active → `u64::MAX`.
     ///   Block-based forks (`*Block`) are always kept at 0.
@@ -131,23 +131,23 @@ impl HardforkSchedule {
             Self::AllActive => {
                 // nothing to do — test genesis has all forks at 0
             }
-            Self::PreOnyx => {
-                // Disable only Onyx; all other forks remain at 0.
+            Self::PreCeladon => {
+                // Disable only Celadon; all other forks remain at 0.
                 let config = genesis["config"].as_object_mut().expect("genesis.config");
-                config.insert("onyxTime".to_string(), serde_json::json!(u64::MAX));
+                config.insert("celadonTime".to_string(), serde_json::json!(u64::MAX));
             }
             Self::PreJade => {
                 // Disable Jade and everything after it; all earlier forks remain at 0.
                 let config = genesis["config"].as_object_mut().expect("genesis.config");
                 config.insert("jadeForkTime".to_string(), serde_json::json!(u64::MAX));
-                config.insert("onyxTime".to_string(), serde_json::json!(u64::MAX));
+                config.insert("celadonTime".to_string(), serde_json::json!(u64::MAX));
             }
             Self::PreViridian => {
                 let config = genesis["config"].as_object_mut().expect("genesis.config");
                 config.insert("viridianTime".to_string(), serde_json::json!(u64::MAX));
                 config.insert("emeraldTime".to_string(), serde_json::json!(u64::MAX));
                 config.insert("jadeForkTime".to_string(), serde_json::json!(u64::MAX));
-                config.insert("onyxTime".to_string(), serde_json::json!(u64::MAX));
+                config.insert("celadonTime".to_string(), serde_json::json!(u64::MAX));
             }
             Self::Hoodi | Self::Mainnet => {
                 let reference_json = self.reference_genesis_json().unwrap();
