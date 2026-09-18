@@ -503,6 +503,7 @@ where
         let beneficiary = evm.ctx_ref().block().beneficiary();
         let basefee = evm.ctx.block().basefee() as u128;
         let effective_gas_price = evm.ctx.tx().effective_gas_price(basefee);
+        let hardfork = *evm.ctx_ref().cfg().spec();
 
         let refunded = gas.refunded().max(0) as u64;
         let reimburse_eth = U256::from(
@@ -523,8 +524,25 @@ where
             }
         })?;
 
-        // Calculate token amount required for total fee
-        let token_amount_required = token_fee_info.eth_to_token_amount(reimburse_eth);
+        // From Celadon on, add back the numerator the deduction's rounding-up
+        // overcharged and round down, so the caller ends up paying `ceil` of the
+        // net fee. Before Celadon both halves round up independently, which
+        // under-collects; that is mainnet's history and must stay bit-identical.
+        // Matches go-ethereum's `refundGas` gate on `IsCeladon`.
+        let token_amount_required = if hardfork.is_celadon() {
+            token_fee_info
+                .eth_to_token_amount_floor(reimburse_eth, evm.cached_alt_fee_rounding_credit)
+        } else {
+            token_fee_info.eth_to_token_amount(reimburse_eth)
+        };
+
+        // Rounding down can land on zero, which the ceiling never did for a
+        // non-zero `reimburse_eth`. go-ethereum's `TransferAltTokenHybrid`
+        // returns early on a zero amount: no `Transfer(.., 0)` log on the
+        // call path, and no slot writes on the direct-slot path.
+        if token_amount_required.is_zero() {
+            return Ok(());
+        }
 
         // Attempt token refund. Matches go-ethereum's refundGas() which silently logs
         // and continues on failure: "Continue execution even if refund fails - refund
@@ -678,8 +696,11 @@ where
         // Total fee in ETH
         let total_eth_fee = l2_gas_fee.saturating_add(l1_data_fee);
 
-        // Calculate token amount required for total fee
-        let token_amount_required = token_fee_info.eth_to_token_amount(total_eth_fee);
+        // Calculate token amount required for total fee. The credit is the part of
+        // one token unit the rounding-up overcharged; from Celadon on the refund
+        // hands it back (see `reimburse_caller_token_fee`).
+        let (token_amount_required, alt_fee_rounding_credit) =
+            token_fee_info.eth_to_token_amount_with_credit(total_eth_fee);
 
         let fee_limit = token_fee_info.effective_fee_limit(fee_limit_from_tx);
 
@@ -804,6 +825,7 @@ where
         // Cache token fee info for the reimburse phase, ensuring consistent
         // price_ratio/scale between deduction and reimbursement.
         evm.cached_token_fee_info = Some(token_fee_info);
+        evm.cached_alt_fee_rounding_credit = alt_fee_rounding_credit;
         evm.cached_l1_data_fee = l1_data_fee;
 
         Ok(())
@@ -3032,5 +3054,357 @@ mod tests {
                 "a token-fee main frame must start on zeroed memory too"
             );
         }
+    }
+}
+
+/// Alt-token refund rounding, gated on Celadon.
+///
+/// Uses the registry's direct-slot path so the arithmetic is the only variable;
+/// the call path routes the same `token_amount_required` through an ERC20
+/// `transfer`, which [`tests`] already covers.
+#[cfg(test)]
+mod refund_rounding_tests {
+    use super::*;
+    use crate::{L2_TOKEN_REGISTRY_ADDRESS, MorphTxEnv, TokenFeeInfo, compute_mapping_slot};
+    use alloy_primitives::{Address, TxKind, U256, address};
+    use morph_chainspec::hardfork::MorphHardfork;
+    use morph_primitives::MORPH_TX_TYPE_ID;
+    use revm::{
+        context::TxEnv,
+        database::{CacheDB, EmptyDB},
+        inspector::NoOpInspector,
+        state::AccountInfo,
+    };
+
+    const CALLER: Address = address!("1000000000000000000000000000000000000001");
+    const BENEFICIARY: Address = address!("2000000000000000000000000000000000000002");
+    const TOKEN: Address = address!("3000000000000000000000000000000000000003");
+    const BALANCE_SLOT: U256 = U256::from_limbs([7, 0, 0, 0]);
+    /// A `price_ratio` of 3 against a `scale` of 1 makes two of every three wei
+    /// an inexact conversion, which is what the two roundings disagree about.
+    const PRICE_RATIO: u64 = 3;
+    const FEE_TOKEN_ID: u16 = 1;
+    const VAULT_BALANCE: u64 = 1_000_000;
+    const STARTING_BALANCE: u64 = 1_000_000;
+
+    fn slot_of(account: Address) -> U256 {
+        compute_mapping_slot_for_address(BALANCE_SLOT, account)
+    }
+
+    fn token_balance(
+        evm: &mut MorphEvm<CacheDB<EmptyDB>, NoOpInspector>,
+        account: Address,
+    ) -> U256 {
+        let journal = evm.ctx.journal_mut();
+        journal.load_account_mut(TOKEN).expect("load token");
+        *journal.sload(TOKEN, slot_of(account)).expect("sload")
+    }
+
+    fn ceil_to_token(eth_amount: u64) -> U256 {
+        TokenFeeInfo {
+            price_ratio: U256::from(PRICE_RATIO),
+            scale: U256::from(1u64),
+            ..Default::default()
+        }
+        .eth_to_token_amount(U256::from(eth_amount))
+    }
+
+    // -------------------------------------------------------------------------
+    // Whole-transaction coverage: deduction, call, refund
+    // -------------------------------------------------------------------------
+
+    /// Registers the fee token in the L2TokenRegistry on the direct-slot path.
+    ///
+    /// `balanceSlot` is stored one-based, so zero there means "call mode".
+    fn register_slot_mode_token(db: &mut CacheDB<EmptyDB>) {
+        let mut token_id_bytes = [0u8; 32];
+        token_id_bytes[30..32].copy_from_slice(&FEE_TOKEN_ID.to_be_bytes());
+        let base = compute_mapping_slot(U256::from(151), &token_id_bytes);
+
+        let mut put = |slot: U256, value: U256| {
+            db.insert_account_storage(L2_TOKEN_REGISTRY_ADDRESS, slot, value)
+                .unwrap();
+        };
+        put(base, U256::from_be_bytes(TOKEN.into_word().0));
+        put(base + U256::from(1), BALANCE_SLOT + U256::from(1));
+        let mut status = [0u8; 32];
+        status[30] = 18; // decimals
+        status[31] = 1; // isActive
+        put(base + U256::from(2), U256::from_be_bytes(status));
+        put(base + U256::from(3), U256::from(1u64)); // scale
+        put(
+            compute_mapping_slot(U256::from(153), &token_id_bytes),
+            U256::from(PRICE_RATIO),
+        );
+    }
+
+    /// A funded caller with the fee token registered on the direct-slot path.
+    fn slot_mode_evm(spec: MorphHardfork) -> MorphEvm<CacheDB<EmptyDB>, NoOpInspector> {
+        let mut db = CacheDB::new(EmptyDB::default());
+        db.insert_account_info(TOKEN, AccountInfo::default());
+        db.insert_account_info(CALLER, AccountInfo::default());
+        register_slot_mode_token(&mut db);
+        db.insert_account_storage(TOKEN, slot_of(CALLER), U256::from(STARTING_BALANCE))
+            .unwrap();
+        db.insert_account_storage(TOKEN, slot_of(BENEFICIARY), U256::ZERO)
+            .unwrap();
+
+        let mut evm = MorphEvm::new(MorphContext::new(db, spec), NoOpInspector);
+        evm.block.inner.beneficiary = BENEFICIARY;
+        evm.block.inner.basefee = 0;
+        evm.block.inner.gas_limit = 30_000_000;
+        evm
+    }
+
+    /// `calldata_len` bytes of non-zero calldata shift the transaction's gas
+    /// cost, which is what moves `gas_used` through its remainders modulo
+    /// `PRICE_RATIO`.
+    fn fee_tx(gas_limit: u64, calldata_len: usize) -> MorphTxEnv {
+        MorphTxEnv {
+            inner: TxEnv {
+                tx_type: MORPH_TX_TYPE_ID,
+                caller: CALLER,
+                kind: TxKind::Call(Address::repeat_byte(0x0e)),
+                gas_limit,
+                gas_price: 1,
+                data: alloy_primitives::Bytes::from(vec![0x01; calldata_len]),
+                ..Default::default()
+            },
+            fee_token_id: Some(FEE_TOKEN_ID),
+            ..Default::default()
+        }
+    }
+
+    /// Runs a whole token-fee transaction and reports
+    /// `(net token spend, gas used)`.
+    fn net_token_spend(spec: MorphHardfork, gas_limit: u64, calldata_len: usize) -> (U256, u64) {
+        let mut evm = slot_mode_evm(spec);
+        let result = evm
+            .transact_one(fee_tx(gas_limit, calldata_len))
+            .expect("token-fee MorphTx must execute");
+        assert!(result.is_success(), "expected success, got {result:?}");
+        let gas_used = result.tx_gas_used();
+
+        (
+            U256::from(STARTING_BALANCE) - token_balance(&mut evm, CALLER),
+            gas_used,
+        )
+    }
+
+    /// The deduction must hand the refund the numerator its rounding-up
+    /// overcharged.
+    ///
+    /// Asserted directly, because whether the credit changes the refunded amount
+    /// depends on how prepaid and remaining gas land modulo `PRICE_RATIO` — an
+    /// end-to-end assertion alone passes with the credit stuck at zero.
+    #[test]
+    fn deduction_records_the_rounding_credit_for_the_refund() {
+        for (gas_limit, want_credit) in [(99_999u64, 0u64), (100_000, 2), (100_001, 1)] {
+            let mut evm = slot_mode_evm(MorphHardfork::Celadon);
+            evm.tx = fee_tx(gas_limit, 0);
+            MorphEvmHandler::default()
+                .validate_against_state_and_deduct_caller(
+                    &mut evm,
+                    &mut InitialAndFloorGas::default(),
+                )
+                .expect("deduction must succeed");
+
+            // The prepaid fee is `gas_limit` at price 1, so the credit is what
+            // rounding `gas_limit / PRICE_RATIO` up left unused.
+            assert_eq!(
+                evm.cached_alt_fee_rounding_credit,
+                U256::from(want_credit),
+                "gas_limit {gas_limit}"
+            );
+        }
+    }
+
+    /// From Celadon on, deduction and refund together charge exactly
+    /// `ceil(net ETH fee)` in token units, whatever the prepaid amount rounded to.
+    ///
+    /// The sweep covers every remainder `gas_used` and the prepaid amount can
+    /// have modulo `PRICE_RATIO`; the credit only changes the refund for some of
+    /// those combinations, and the final assertion holds the sweep to covering
+    /// them.
+    #[test]
+    fn celadon_charges_the_ceiling_of_the_net_fee_end_to_end() {
+        let mut seen_remainders = [false; PRICE_RATIO as usize];
+        for calldata_len in 0..PRICE_RATIO as usize {
+            for gas_limit in 100_000u64..100_000 + PRICE_RATIO {
+                let (spent, gas_used) =
+                    net_token_spend(MorphHardfork::Celadon, gas_limit, calldata_len);
+                assert_eq!(
+                    spent,
+                    ceil_to_token(gas_used),
+                    "gas_limit {gas_limit}, calldata_len {calldata_len}, gas_used {gas_used}"
+                );
+                seen_remainders[(gas_used % PRICE_RATIO) as usize] = true;
+            }
+        }
+        assert!(
+            seen_remainders.iter().all(|seen| *seen),
+            "the sweep must cover every gas_used remainder modulo {PRICE_RATIO}, \
+             otherwise it misses the cases where the credit changes the refund"
+        );
+    }
+
+    /// The pre-Celadon rule under-collects, so the fork gate is load-bearing.
+    ///
+    /// Rounding both halves up independently cancels out whenever the prepaid
+    /// amount and the refund leave the same remainder, so the shortfall shows on
+    /// only some transactions: the assertion is that at least one swept
+    /// transaction is short, and that none over-collects.
+    #[test]
+    fn pre_celadon_under_collects_end_to_end() {
+        let mut short = 0;
+        for calldata_len in 0..PRICE_RATIO as usize {
+            for gas_limit in 100_000u64..100_000 + PRICE_RATIO {
+                let (spent, gas_used) =
+                    net_token_spend(MorphHardfork::Jade, gas_limit, calldata_len);
+                let ceiling = ceil_to_token(gas_used);
+                assert!(
+                    spent <= ceiling,
+                    "pre-Celadon must never collect more than the ceiling of the net fee, \
+                     gas_limit {gas_limit}, calldata_len {calldata_len}: spent {spent} > {ceiling}"
+                );
+                if spent < ceiling {
+                    short += 1;
+                }
+            }
+        }
+        assert!(
+            short > 0,
+            "pre-Celadon must under-collect on at least one swept transaction, \
+             otherwise this test cannot tell the two rules apart"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // The refund step in isolation
+    // -------------------------------------------------------------------------
+
+    /// An EVM parked right before `reimburse_caller_token_fee`, holding the state
+    /// the deduction phase would have left behind: the fee already in the vault,
+    /// and `rounding_credit` recorded from the deduction's rounding-up.
+    fn evm_after_deduction(
+        spec: MorphHardfork,
+        rounding_credit: U256,
+    ) -> MorphEvm<CacheDB<EmptyDB>, NoOpInspector> {
+        let mut db = CacheDB::new(EmptyDB::default());
+        db.insert_account_info(TOKEN, AccountInfo::default());
+        db.insert_account_storage(TOKEN, slot_of(BENEFICIARY), U256::from(VAULT_BALANCE))
+            .unwrap();
+        db.insert_account_storage(TOKEN, slot_of(CALLER), U256::ZERO)
+            .unwrap();
+
+        let mut evm = MorphEvm::new(MorphContext::new(db, spec), NoOpInspector);
+        evm.block.inner.beneficiary = BENEFICIARY;
+        evm.block.inner.basefee = 0;
+        evm.tx = MorphTxEnv {
+            inner: TxEnv {
+                tx_type: MORPH_TX_TYPE_ID,
+                caller: CALLER,
+                kind: TxKind::Call(Address::ZERO),
+                gas_limit: 100_000,
+                // With a zero basefee the effective gas price is 1, so the ETH to
+                // refund equals the gas left and the arithmetic reads directly.
+                gas_price: 1,
+                ..Default::default()
+            },
+            fee_token_id: Some(FEE_TOKEN_ID),
+            ..Default::default()
+        };
+        evm.cached_token_fee_info = Some(TokenFeeInfo {
+            token_address: TOKEN,
+            is_active: true,
+            price_ratio: U256::from(PRICE_RATIO),
+            scale: U256::from(1u64),
+            caller: CALLER,
+            balance: U256::ZERO,
+            balance_slot: Some(BALANCE_SLOT),
+            ..Default::default()
+        });
+        evm.cached_alt_fee_rounding_credit = rounding_credit;
+        evm
+    }
+
+    /// Refunds `gas_left` worth of gas and reports what reached the caller.
+    fn refund_with(spec: MorphHardfork, gas_left: u64, rounding_credit: U256) -> U256 {
+        let mut evm = evm_after_deduction(spec, rounding_credit);
+        MorphEvmHandler::default()
+            .reimburse_caller_token_fee(&mut evm, &Gas::new(gas_left))
+            .expect("refund must not fail");
+        token_balance(&mut evm, CALLER)
+    }
+
+    /// Before Celadon both halves of the fee round up independently. That
+    /// under-collects, but it is mainnet's history and must not move.
+    #[test]
+    fn pre_celadon_refund_rounds_up() {
+        // ceil(4 / 3) = 2, whatever credit the deduction recorded.
+        assert_eq!(
+            refund_with(MorphHardfork::Jade, 4, U256::ZERO),
+            U256::from(2u64)
+        );
+        assert_eq!(
+            refund_with(MorphHardfork::Jade, 4, U256::from(2u64)),
+            U256::from(2u64)
+        );
+    }
+
+    /// From Celadon on the refund adds the prepaid rounding credit and rounds
+    /// down.
+    #[test]
+    fn celadon_refund_rounds_down_with_the_credit() {
+        // floor((4 + 0) / 3) = 1 — a whole token unit less than the old rule.
+        assert_eq!(
+            refund_with(MorphHardfork::Celadon, 4, U256::ZERO),
+            U256::from(1u64)
+        );
+        // floor((4 + 2) / 3) = 2: the credit can bring the refund back up.
+        assert_eq!(
+            refund_with(MorphHardfork::Celadon, 4, U256::from(2u64)),
+            U256::from(2u64)
+        );
+    }
+
+    /// Flooring can reach zero, where the ceiling always refunded at least one
+    /// unit. A zero refund must move no tokens and write no slots, matching
+    /// go-ethereum's `TransferAltTokenHybrid` early return.
+    #[test]
+    fn celadon_zero_refund_touches_nothing() {
+        // floor(2 / 3) = 0 while ceil(2 / 3) = 1.
+        assert_eq!(
+            refund_with(MorphHardfork::Celadon, 2, U256::ZERO),
+            U256::ZERO
+        );
+        assert_eq!(
+            refund_with(MorphHardfork::Jade, 2, U256::ZERO),
+            U256::from(1u64)
+        );
+
+        let mut evm = evm_after_deduction(MorphHardfork::Celadon, U256::ZERO);
+        MorphEvmHandler::default()
+            .reimburse_caller_token_fee(&mut evm, &Gas::new(2))
+            .unwrap();
+        assert!(
+            evm.post_fee_logs.is_empty(),
+            "a zero refund must emit no Transfer log"
+        );
+        // Asserted before any read of our own: `token_balance` would itself pull
+        // the account and slot into the journal.
+        assert!(
+            evm.ctx
+                .journal_mut()
+                .state
+                .get(&TOKEN)
+                .is_none_or(|token| token.storage.is_empty()),
+            "a zero refund must not load or write the token's balance slots"
+        );
+        assert_eq!(
+            token_balance(&mut evm, BENEFICIARY),
+            U256::from(VAULT_BALANCE),
+            "a zero refund must leave the vault balance alone"
+        );
     }
 }
