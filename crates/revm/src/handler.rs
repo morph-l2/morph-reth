@@ -145,6 +145,7 @@ where
         evm.cached_l1_data_fee = U256::ZERO;
         evm.pre_fee_refund = 0;
         evm.cached_token_fee_info = None;
+        evm.cached_alt_fee_rounding_credit = U256::ZERO;
         evm.pre_fee_logs.clear();
         evm.post_fee_logs.clear();
 
@@ -3226,6 +3227,41 @@ mod refund_rounding_tests {
     /// have modulo `PRICE_RATIO`; the credit only changes the refund for some of
     /// those combinations, and the final assertion holds the sweep to covering
     /// them.
+    /// The credit belongs to one transaction. It is only read next to
+    /// `cached_token_fee_info`, which the same deduction writes, so a stale value
+    /// cannot reach a refund today. Clearing it with the other per-transaction
+    /// caches keeps that true without depending on where the reads happen.
+    #[test]
+    fn the_rounding_credit_does_not_outlive_its_transaction() {
+        let handler = MorphEvmHandler::default();
+        let mut evm = slot_mode_evm(MorphHardfork::Celadon);
+
+        evm.tx = fee_tx(100_000, 0);
+        handler
+            .validate_against_state_and_deduct_caller(&mut evm, &mut InitialAndFloorGas::default())
+            .expect("deduction must succeed");
+        assert_eq!(evm.cached_alt_fee_rounding_credit, U256::from(2u64));
+
+        // The next transaction on the same EVM pays no token fee. An L1 message is
+        // the shortest such path: it clears the caches and returns.
+        evm.tx = MorphTxEnv {
+            inner: TxEnv {
+                tx_type: morph_primitives::L1_TX_TYPE_ID,
+                caller: CALLER,
+                kind: TxKind::Call(Address::repeat_byte(0x0e)),
+                gas_limit: 100_000,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        handler
+            .validate_against_state_and_deduct_caller(&mut evm, &mut InitialAndFloorGas::default())
+            .expect("an L1 message needs no fee");
+
+        assert!(evm.cached_token_fee_info.is_none());
+        assert_eq!(evm.cached_alt_fee_rounding_credit, U256::ZERO);
+    }
+
     #[test]
     fn celadon_charges_the_ceiling_of_the_net_fee_end_to_end() {
         let mut seen_remainders = [false; PRICE_RATIO as usize];
