@@ -3,22 +3,20 @@
 use crate::MorphTransactionRequest;
 use alloy_consensus::{EthereumTxEnvelope, SignableTransaction, TxEip4844};
 use alloy_network::TxSigner;
-use alloy_primitives::{B256, Bytes, Signature, TxKind, U64, U256};
+use alloy_primitives::{B256, Signature, TxKind, U64, U256};
 use alloy_rpc_types_eth::AccessList;
 use reth_rpc_convert::{SignTxRequestError, SignableTxRequest, TryIntoSimTx, TryIntoTxEnv};
 use reth_rpc_eth_types::EthApiError;
 
-use morph_primitives::{
-    MorphTxEnvelope, TxMorph,
-    transaction::morph_transaction::{MORPH_TX_VERSION_0, MORPH_TX_VERSION_1, MORPH_TX_VERSION_2},
-};
+use morph_primitives::{MorphTxEnvelope, TxMorph};
 use morph_revm::{MorphBlockEnv, MorphTxEnv};
 use reth_evm::EvmEnv;
 
 /// Converts a [`MorphTransactionRequest`] into a simulated transaction envelope.
 ///
 /// Handles both standard Ethereum transactions and Morph-specific fee token transactions.
-/// MorphTx version is selected from the Morph-specific fields.
+/// The MorphTx version is derived from the content, see
+/// [`try_build_morph_tx_from_request`].
 impl TryIntoSimTx<MorphTxEnvelope> for MorphTransactionRequest {
     fn try_into_sim_tx(self) -> Result<MorphTxEnvelope, alloy_consensus::error::ValueError<Self>> {
         // Try to build a MorphTx; returns None if this should be a standard Ethereum tx
@@ -26,7 +24,6 @@ impl TryIntoSimTx<MorphTxEnvelope> for MorphTransactionRequest {
             &self.inner,
             self.fee_token_id.unwrap_or_default(),
             self.fee_limit.unwrap_or_default(),
-            self.version,
             self.reference,
             self.memo.clone(),
         );
@@ -44,7 +41,6 @@ impl TryIntoSimTx<MorphTxEnvelope> for MorphTransactionRequest {
                         inner,
                         fee_token_id: self.fee_token_id,
                         fee_limit: self.fee_limit,
-                        version: self.version,
                         reference: self.reference,
                         memo: self.memo.clone(),
                     })
@@ -60,7 +56,8 @@ impl TryIntoSimTx<MorphTxEnvelope> for MorphTransactionRequest {
 /// Builds and signs a transaction from an RPC request.
 ///
 /// Supports both standard Ethereum transactions and Morph fee token transactions.
-/// MorphTx version is selected from the Morph-specific fields.
+/// The MorphTx version is derived from the content, see
+/// [`try_build_morph_tx_from_request`].
 impl SignableTxRequest<MorphTxEnvelope> for MorphTransactionRequest {
     async fn try_build_and_sign(
         self,
@@ -71,7 +68,6 @@ impl SignableTxRequest<MorphTxEnvelope> for MorphTransactionRequest {
             &self.inner,
             self.fee_token_id.unwrap_or_default(),
             self.fee_limit.unwrap_or_default(),
-            self.version,
             self.reference,
             self.memo,
         );
@@ -101,7 +97,8 @@ impl SignableTxRequest<MorphTxEnvelope> for MorphTransactionRequest {
 /// Converts a transaction request into a transaction environment for EVM execution.
 ///
 /// Also encodes the transaction for L1 fee calculation.
-/// MorphTx version is selected from the Morph-specific fields.
+/// The MorphTx version is derived from the content, see
+/// [`try_build_morph_tx_from_request`].
 impl<Spec> TryIntoTxEnv<MorphTxEnv, Spec, MorphBlockEnv> for MorphTransactionRequest {
     type Err = EthApiError;
 
@@ -111,8 +108,6 @@ impl<Spec> TryIntoTxEnv<MorphTxEnv, Spec, MorphBlockEnv> for MorphTransactionReq
     ) -> Result<MorphTxEnv, Self::Err> {
         let fee_token_id = self.fee_token_id;
         let fee_limit = self.fee_limit;
-        let explicit_version = explicit_morph_tx_version(self.version)
-            .map_err(|err| EthApiError::InvalidParams(err.to_string()))?;
         let reference = normalize_reference(self.reference);
         let memo = self.memo;
         let mut inner = self.inner;
@@ -132,8 +127,7 @@ impl<Spec> TryIntoTxEnv<MorphTxEnv, Spec, MorphBlockEnv> for MorphTransactionReq
         // see `try_build_morph_tx_from_request`. Honouring it here would make
         // `eth_call` / `eth_estimateGas` silently price a token-fee request as an
         // ETH transaction.
-        let is_morph_tx = explicit_version.is_some()
-            || fee_token_id.is_some_and(|id| id.to::<u64>() > 0)
+        let is_morph_tx = fee_token_id.is_some_and(|id| id.to::<u64>() > 0)
             || is_nonzero_reference(reference.as_ref())
             || memo.as_ref().is_some_and(|m| !m.is_empty());
 
@@ -150,7 +144,7 @@ impl<Spec> TryIntoTxEnv<MorphTxEnv, Spec, MorphBlockEnv> for MorphTransactionReq
             };
             tx_env.fee_limit = fee_limit;
             tx_env.reference = reference;
-            tx_env.memo = memo.clone();
+            tx_env.memo = memo;
             tx_env.inner.tx_type = morph_primitives::MORPH_TX_TYPE_ID;
             // geth's `ToMessage` maps legacy `gasPrice` to both EIP-1559 caps.
             // Preserve that shape so fallback MorphTx encoding produces the
@@ -158,29 +152,15 @@ impl<Spec> TryIntoTxEnv<MorphTxEnv, Spec, MorphBlockEnv> for MorphTransactionReq
             if let Some(gas_price) = legacy_gas_price {
                 tx_env.inner.gas_priority_fee = Some(gas_price);
             }
-            let version = morph_tx_version(
-                explicit_version,
-                reference.as_ref(),
-                memo.as_ref(),
-                has_authorizations,
-            );
-            // Same static rules as `TxMorph::validate`, surfaced as parameter
-            // errors so simulations fail with a clear message rather than an
-            // EVM-level rejection. A V2 without authorizations needs none of
-            // them (it behaves like V1).
-            if version < MORPH_TX_VERSION_2 && has_authorizations {
-                return Err(EthApiError::InvalidParams(format!(
-                    "MorphTx version {version} does not support an authorization list"
-                )));
-            }
-            if version == MORPH_TX_VERSION_2 && has_authorizations && tx_env.inner.kind.is_create()
-            {
+            // Same static rule as `TxMorph::validate`, surfaced as a parameter
+            // error so simulations fail with a clear message rather than an
+            // EVM-level rejection.
+            if has_authorizations && tx_env.inner.kind.is_create() {
                 return Err(EthApiError::InvalidParams(
-                    "MorphTx version 2 with an authorization list cannot create a contract"
-                        .to_string(),
+                    "MorphTx with an authorization list cannot create a contract".to_string(),
                 ));
             }
-            tx_env.version = Some(version);
+            tx_env.version = Some(TxMorph::inferred_version(has_authorizations));
         }
 
         // Required by `MorphEthApi::caller_gas_allowance` (eth/call.rs) to
@@ -212,24 +192,22 @@ fn morph_envelope_from_ethereum(
 /// `Ok(None)` if this should be a standard Ethereum transaction,
 /// or `Err(...)` if there's a validation error.
 ///
-/// A MorphTx is constructed when any of these conditions are met:
-/// - `version` is present
+/// A MorphTx is constructed when any of these Morph fields is set:
 /// - `feeTokenID > 0` (ERC20 gas payment)
-/// - `reference` is present
-/// - `memo` is present and non-empty
+/// - a non-zero `reference`
+/// - a non-empty `memo`
 ///
-/// An `authorizationList` on its own does not select a MorphTx: without any
-/// Morph field the request stays a standard EIP-7702 (`0x04`) transaction.
-/// Together with a Morph field (or an explicit `version: 2`) it selects
-/// MorphTx V2. An explicit `version: 2` without a list builds a V2 with an
-/// empty list (V1 semantics); an explicit `version: 0/1` with a list is
-/// rejected by [`TxMorph::validate`].
+/// The version is not part of the request; it is derived from the content
+/// ([`TxMorph::inferred_version`]): V1 is the baseline and a non-empty
+/// `authorizationList` selects V2. An absent, `null` or empty list are the
+/// same thing, and a legacy `version` key is ignored. A list on its own does
+/// not select a MorphTx: without any Morph field the request stays a standard
+/// EIP-7702 (`0x04`) transaction.
 fn try_build_morph_tx_from_request(
     req: &alloy_rpc_types_eth::TransactionRequest,
     fee_token_id: U64,
     fee_limit: U256,
-    version: Option<U64>,
-    reference: Option<alloy_primitives::B256>,
+    reference: Option<B256>,
     memo: Option<alloy_primitives::Bytes>,
 ) -> Result<Option<TxMorph>, &'static str> {
     let reference = normalize_reference(reference);
@@ -238,28 +216,18 @@ fn try_build_morph_tx_from_request(
     }
 
     let fee_token_id_u16 = u16::try_from(fee_token_id.to::<u64>()).map_err(|_| "invalid token")?;
-    let explicit_version = explicit_morph_tx_version(version)?;
 
     // Check if this should be a MorphTx
-    let has_explicit_version = explicit_version.is_some();
     let has_fee_token = fee_token_id_u16 > 0;
     let has_reference = is_nonzero_reference(reference.as_ref());
     let has_memo = memo.as_ref().is_some_and(|m| !m.is_empty());
-    // An empty list does not select V2 on its own (like an empty memo does not
-    // select V1); the list is kept as-is so `validate` rejects V0/V1 carriers.
-    let authorization_list = req.authorization_list.clone().unwrap_or_default();
-
-    if !has_explicit_version && !has_fee_token && !has_reference && !has_memo {
+    if !has_fee_token && !has_reference && !has_memo {
         // No Morph-specific fields → standard Ethereum tx
         return Ok(None);
     }
 
-    let version = morph_tx_version(
-        explicit_version,
-        reference.as_ref(),
-        memo.as_ref(),
-        !authorization_list.is_empty(),
-    );
+    let authorization_list = req.authorization_list.clone().unwrap_or_default();
+    let version = TxMorph::inferred_version(!authorization_list.is_empty());
 
     // Now build the MorphTx
     let chain_id = req
@@ -307,43 +275,6 @@ fn try_build_morph_tx_from_request(
     Ok(Some(morph_tx))
 }
 
-fn explicit_morph_tx_version(version: Option<U64>) -> Result<Option<u8>, &'static str> {
-    let Some(version) = version else {
-        return Ok(None);
-    };
-
-    match u8::try_from(version.to::<u64>()) {
-        Ok(version @ (MORPH_TX_VERSION_0 | MORPH_TX_VERSION_1 | MORPH_TX_VERSION_2)) => {
-            Ok(Some(version))
-        }
-        _ => Err("unsupported MorphTx version"),
-    }
-}
-
-/// Infers the MorphTx version for a request without an explicit `version`.
-///
-/// - an authorization list selects V2
-/// - a reference or memo selects V1
-/// - otherwise V0 (token-fee only)
-fn morph_tx_version(
-    explicit_version: Option<u8>,
-    reference: Option<&B256>,
-    memo: Option<&Bytes>,
-    has_authorizations: bool,
-) -> u8 {
-    if let Some(version) = explicit_version {
-        return version;
-    }
-
-    if has_authorizations {
-        MORPH_TX_VERSION_2
-    } else if is_nonzero_reference(reference) || memo.is_some_and(|m| !m.is_empty()) {
-        MORPH_TX_VERSION_1
-    } else {
-        MORPH_TX_VERSION_0
-    }
-}
-
 fn is_nonzero_reference(reference: Option<&B256>) -> bool {
     reference.is_some_and(|reference| *reference != B256::ZERO)
 }
@@ -360,6 +291,9 @@ mod tests {
     use alloy_primitives::{Address, B256, Bytes, address};
     use alloy_rpc_types_eth::{TransactionInfo, TransactionInput, TransactionRequest};
     use morph_chainspec::MorphHardfork;
+    use morph_primitives::transaction::morph_transaction::{
+        MORPH_TX_VERSION_1, MORPH_TX_VERSION_2,
+    };
     use reth_rpc_convert::FromConsensusTx;
     use revm::context::{BlockEnv, CfgEnv};
 
@@ -421,7 +355,6 @@ mod tests {
             inner: create_basic_transaction_request(),
             fee_token_id: None,
             fee_limit: None,
-            version: None,
             reference: None,
             memo: None,
         };
@@ -453,7 +386,6 @@ mod tests {
             inner: create_basic_transaction_request(),
             fee_token_id: None,
             fee_limit: None,
-            version: None,
             reference: None,
             memo: None,
         };
@@ -486,7 +418,6 @@ mod tests {
             inner: create_basic_transaction_request(),
             fee_token_id: None,
             fee_limit: None,
-            version: None,
             reference: None,
             memo: None,
         };
@@ -522,7 +453,6 @@ mod tests {
             inner: create_morph_transaction_request(),
             fee_token_id: Some(U64::from(1)), // Triggers MorphTx (use U64, not U256)
             fee_limit: Some(U256::from(1000000)),
-            version: None,
             reference: Some(reference),
             memo: Some(memo.clone()),
         };
@@ -574,13 +504,14 @@ mod tests {
         );
     }
 
+    /// Token fee alone is a MorphTx and, like everything without an
+    /// authorization list, gets the V1 baseline (V0 is never produced).
     #[test]
-    fn test_fee_token_only_tx_env_uses_morph_tx_version_0() {
+    fn test_fee_token_only_tx_env_uses_morph_tx_version_1() {
         let request = MorphTransactionRequest {
             inner: create_morph_transaction_request(),
             fee_token_id: Some(U64::from(1)),
             fee_limit: Some(U256::from(1000000)),
-            version: None,
             reference: None,
             memo: None,
         };
@@ -590,38 +521,11 @@ mod tests {
             .try_into_tx_env(&evm_env)
             .expect("conversion should succeed");
 
-        assert_eq!(
-            tx_env.version,
-            Some(morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_0)
-        );
+        assert_eq!(tx_env.version, Some(MORPH_TX_VERSION_1));
     }
 
-    #[test]
-    fn test_explicit_version_tx_env_triggers_morph_tx() {
-        let request = MorphTransactionRequest {
-            inner: create_morph_transaction_request(),
-            fee_token_id: None,
-            fee_limit: None,
-            version: Some(U64::from(1)),
-            reference: None,
-            memo: None,
-        };
-
-        let evm_env = create_evm_env(false);
-        let tx_env = request
-            .try_into_tx_env(&evm_env)
-            .expect("explicit version should trigger MorphTx tx env");
-
-        assert_eq!(tx_env.inner.tx_type, morph_primitives::MORPH_TX_TYPE_ID);
-        assert_eq!(
-            tx_env.version,
-            Some(morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_1)
-        );
-    }
-
-    #[test]
-    fn try_into_sim_tx_explicit_version_triggers_morph_tx() {
-        let request: MorphTransactionRequest = serde_json::from_value(serde_json::json!({
+    fn json_request(extra: serde_json::Value) -> MorphTransactionRequest {
+        let mut value = serde_json::json!({
             "from": "0x0000000000000000000000000000000000000001",
             "to": "0x0000000000000000000000000000000000000002",
             "gas": "0x186a0",
@@ -629,25 +533,78 @@ mod tests {
             "maxPriorityFeePerGas": "0x5f5e100",
             "value": "0x0",
             "nonce": "0x1",
-            "chainId": "0xb02",
-            "version": "0x1"
-        }))
-        .expect("request should deserialize");
+            "chainId": "0xb02"
+        });
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(value).expect("request should deserialize")
+    }
 
-        let envelope = request
-            .try_into_sim_tx()
-            .expect("explicit version should build a MorphTx");
+    /// A legacy `version` key is not a Morph field: on its own it does not
+    /// make the request a MorphTx, and it never overrides the derived version.
+    #[test]
+    fn test_legacy_version_key_does_not_trigger_or_select_morph_tx() {
+        let tx_env = json_request(serde_json::json!({ "version": "0x1" }))
+            .try_into_tx_env(&create_evm_env(false))
+            .expect("a legacy version key alone is a standard request");
+        assert_ne!(tx_env.inner.tx_type, morph_primitives::MORPH_TX_TYPE_ID);
+        assert!(tx_env.version.is_none());
 
-        match envelope {
-            MorphTxEnvelope::Morph(signed) => {
-                assert_eq!(
-                    signed.tx().version,
-                    morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_1
-                );
-                assert_eq!(signed.tx().fee_token_id, 0);
-            }
-            other => panic!("expected Morph variant, got {other:?}"),
+        let tx_env = json_request(serde_json::json!({ "feeTokenID": "0x1", "version": "0x2" }))
+            .try_into_tx_env(&create_evm_env(false))
+            .expect("token fee request");
+        assert_eq!(tx_env.inner.tx_type, morph_primitives::MORPH_TX_TYPE_ID);
+        assert_eq!(
+            tx_env.version,
+            Some(MORPH_TX_VERSION_1),
+            "version key is ignored"
+        );
+    }
+
+    #[test]
+    fn try_into_sim_tx_ignores_legacy_version_key() {
+        // Alone: standard EIP-1559, and an out-of-range value is not an error.
+        for version in ["0x1", "0x9"] {
+            let envelope = json_request(serde_json::json!({ "version": version }))
+                .try_into_sim_tx()
+                .expect("a legacy version key alone builds a standard transaction");
+            assert!(
+                matches!(envelope, MorphTxEnvelope::Eip1559(_)),
+                "got {envelope:?}"
+            );
         }
+
+        // With a Morph field: the version comes from the content only.
+        let envelope = json_request(serde_json::json!({ "feeTokenID": "0x1", "version": "0x2" }))
+            .try_into_sim_tx()
+            .expect("token fee request builds a MorphTx");
+        let MorphTxEnvelope::Morph(signed) = envelope else {
+            panic!("expected Morph variant");
+        };
+        assert_eq!(signed.tx().version, MORPH_TX_VERSION_1);
+        assert!(signed.tx().authorization_list.is_empty());
+
+        let envelope = json_request(serde_json::json!({
+            "feeTokenID": "0x1",
+            "version": "0x1",
+            "authorizationList": [{
+                "chainId": "0xb02",
+                "address": "0x2222222222222222222222222222222222222222",
+                "nonce": "0x1b",
+                "yParity": "0x1",
+                "r": "0x1",
+                "s": "0x2"
+            }]
+        }))
+        .try_into_sim_tx()
+        .expect("a list makes the request V2 whatever the legacy key says");
+        let MorphTxEnvelope::Morph(signed) = envelope else {
+            panic!("expected Morph variant");
+        };
+        assert_eq!(signed.tx().version, MORPH_TX_VERSION_2);
+        assert_eq!(signed.tx().authorization_list.len(), 1);
     }
 
     /// Simulation paths keep the Morph fields even when the request carries a
@@ -660,7 +617,6 @@ mod tests {
             inner: create_basic_transaction_request(),
             fee_token_id: Some(U64::from(1)),
             fee_limit: Some(U256::from(1000000)),
-            version: None,
             reference: None,
             memo: None,
         };
@@ -698,7 +654,6 @@ mod tests {
             inner,
             fee_token_id: Some(U64::from(1)),
             fee_limit: Some(U256::from(1000000)),
-            version: None,
             reference: None,
             memo: None,
         };
@@ -727,7 +682,6 @@ mod tests {
             inner: create_morph_transaction_request(),
             fee_token_id: Some(U64::from(1)),
             fee_limit: Some(U256::from(1000000)),
-            version: None,
             reference: Some(B256::random()),
             memo: Some(Bytes::from("test")),
         };
@@ -767,7 +721,6 @@ mod tests {
             inner: create_basic_transaction_request(),
             fee_token_id: None,
             fee_limit: None,
-            version: None,
             reference: None,
             memo: None,
         };
@@ -894,7 +847,7 @@ mod tests {
     #[test]
     fn try_build_morph_tx_returns_none_for_standard_tx() {
         let req = create_basic_transaction_request();
-        let result = try_build_morph_tx_from_request(&req, U64::ZERO, U256::ZERO, None, None, None);
+        let result = try_build_morph_tx_from_request(&req, U64::ZERO, U256::ZERO, None, None);
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
     }
@@ -902,35 +855,20 @@ mod tests {
     #[test]
     fn try_build_morph_tx_with_fee_token_id() {
         let req = create_morph_transaction_request();
-        let result = try_build_morph_tx_from_request(
-            &req,
-            U64::from(1),
-            U256::from(1_000_000),
-            None,
-            None,
-            None,
-        );
+        let result =
+            try_build_morph_tx_from_request(&req, U64::from(1), U256::from(1_000_000), None, None);
         assert!(result.is_ok());
         let tx = result.unwrap().unwrap();
         assert_eq!(tx.fee_token_id, 1);
         assert_eq!(tx.fee_limit, U256::from(1_000_000));
-        assert_eq!(
-            tx.version,
-            morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_0
-        );
+        assert_eq!(tx.version, MORPH_TX_VERSION_1, "V1 is the baseline");
     }
 
     #[test]
     fn try_build_morph_tx_treats_gas_price_with_morph_fields_as_standard_tx() {
         let req = create_basic_transaction_request();
-        let result = try_build_morph_tx_from_request(
-            &req,
-            U64::from(1),
-            U256::from(1_000_000),
-            None,
-            None,
-            None,
-        );
+        let result =
+            try_build_morph_tx_from_request(&req, U64::from(1), U256::from(1_000_000), None, None);
 
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
@@ -940,14 +878,8 @@ mod tests {
     fn try_build_morph_tx_with_reference_only() {
         let req = create_morph_transaction_request();
         let reference = B256::random();
-        let result = try_build_morph_tx_from_request(
-            &req,
-            U64::ZERO,
-            U256::ZERO,
-            None,
-            Some(reference),
-            None,
-        );
+        let result =
+            try_build_morph_tx_from_request(&req, U64::ZERO, U256::ZERO, Some(reference), None);
         assert!(result.is_ok());
         let tx = result.unwrap().unwrap();
         assert_eq!(tx.reference, Some(reference));
@@ -957,21 +889,12 @@ mod tests {
     #[test]
     fn try_build_morph_tx_treats_zero_reference_as_absent() {
         let req = create_morph_transaction_request();
-        let result = try_build_morph_tx_from_request(
-            &req,
-            U64::from(1),
-            U256::ZERO,
-            None,
-            Some(B256::ZERO),
-            None,
-        );
+        let result =
+            try_build_morph_tx_from_request(&req, U64::from(1), U256::ZERO, Some(B256::ZERO), None);
 
         assert!(result.is_ok());
         let tx = result.unwrap().unwrap();
-        assert_eq!(
-            tx.version,
-            morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_0
-        );
+        assert_eq!(tx.version, MORPH_TX_VERSION_1);
         assert_eq!(tx.reference, None);
     }
 
@@ -979,14 +902,8 @@ mod tests {
     fn try_build_morph_tx_with_memo_only() {
         let req = create_morph_transaction_request();
         let memo = Bytes::from("hello world");
-        let result = try_build_morph_tx_from_request(
-            &req,
-            U64::ZERO,
-            U256::ZERO,
-            None,
-            None,
-            Some(memo.clone()),
-        );
+        let result =
+            try_build_morph_tx_from_request(&req, U64::ZERO, U256::ZERO, None, Some(memo.clone()));
         assert!(result.is_ok());
         let tx = result.unwrap().unwrap();
         assert_eq!(tx.memo, Some(memo));
@@ -995,32 +912,11 @@ mod tests {
     #[test]
     fn try_build_morph_tx_empty_memo_is_not_trigger() {
         let req = create_morph_transaction_request();
-        let result = try_build_morph_tx_from_request(
-            &req,
-            U64::ZERO,
-            U256::ZERO,
-            None,
-            None,
-            Some(Bytes::new()),
-        );
+        let result =
+            try_build_morph_tx_from_request(&req, U64::ZERO, U256::ZERO, None, Some(Bytes::new()));
         assert!(result.is_ok());
         // Empty memo should NOT trigger MorphTx creation
         assert!(result.unwrap().is_none());
-    }
-
-    #[test]
-    fn try_build_morph_tx_rejects_unsupported_explicit_version() {
-        let req = create_morph_transaction_request();
-        let result = try_build_morph_tx_from_request(
-            &req,
-            U64::ZERO,
-            U256::ZERO,
-            Some(U64::from(3)),
-            None,
-            None,
-        );
-
-        assert_eq!(result.unwrap_err(), "unsupported MorphTx version");
     }
 
     // =========================================================================
@@ -1046,16 +942,10 @@ mod tests {
     #[test]
     fn try_build_morph_tx_with_authorization_list_selects_v2() {
         let req = create_v2_transaction_request();
-        let tx = try_build_morph_tx_from_request(
-            &req,
-            U64::from(1),
-            U256::from(1_000_000),
-            None,
-            None,
-            None,
-        )
-        .unwrap()
-        .expect("fee token + authorization list builds a MorphTx");
+        let tx =
+            try_build_morph_tx_from_request(&req, U64::from(1), U256::from(1_000_000), None, None)
+                .unwrap()
+                .expect("fee token + authorization list builds a MorphTx");
 
         assert_eq!(tx.version, MORPH_TX_VERSION_2);
         assert_eq!(tx.fee_token_id, 1);
@@ -1067,18 +957,17 @@ mod tests {
     fn try_build_morph_tx_authorization_list_without_morph_fields_is_standard_tx() {
         // No Morph field → stays a standard (EIP-7702) transaction.
         let req = create_v2_transaction_request();
-        let result = try_build_morph_tx_from_request(&req, U64::ZERO, U256::ZERO, None, None, None);
+        let result = try_build_morph_tx_from_request(&req, U64::ZERO, U256::ZERO, None, None);
         assert!(result.unwrap().is_none());
     }
 
     #[test]
-    fn try_build_morph_tx_explicit_v2_with_memo_only_selects_v2() {
+    fn try_build_morph_tx_memo_with_authorization_list_selects_v2() {
         let req = create_v2_transaction_request();
         let tx = try_build_morph_tx_from_request(
             &req,
             U64::ZERO,
             U256::ZERO,
-            None,
             None,
             Some(Bytes::from("memo")),
         )
@@ -1090,10 +979,10 @@ mod tests {
         assert_eq!(tx.memo, Some(Bytes::from("memo")));
     }
 
-    /// An explicit `version: 2` without authorizations is honoured: it builds a
-    /// V2 with an empty list (V1 semantics), whether the key is absent or `[]`.
+    /// Without authorizations the request is a V1, whether the list key is
+    /// absent or `[]`: an empty-list V2 cannot come out of the request layer.
     #[test]
-    fn try_build_morph_tx_explicit_v2_without_authorization_list_builds_empty_v2() {
+    fn try_build_morph_tx_without_authorizations_is_v1_never_empty_v2() {
         for authorization_list in [None, Some(vec![])] {
             let req = TransactionRequest {
                 authorization_list,
@@ -1103,68 +992,30 @@ mod tests {
                 &req,
                 U64::ZERO,
                 U256::ZERO,
-                Some(U64::from(2)),
                 None,
-                None,
+                Some(Bytes::from("memo")),
             )
             .unwrap()
-            .expect("explicit version 2 builds a MorphTx");
-            assert_eq!(tx.version, MORPH_TX_VERSION_2);
+            .expect("memo builds a MorphTx");
+            assert_eq!(tx.version, MORPH_TX_VERSION_1);
             assert!(tx.authorization_list.is_empty());
             assert!(tx.validate().is_ok());
         }
     }
 
-    /// Without authorizations a V2 may create a contract, like V1.
+    /// Without authorizations a MorphTx may create a contract.
     #[test]
-    fn try_build_morph_tx_explicit_v2_create_without_authorizations_is_allowed() {
+    fn try_build_morph_tx_create_without_authorizations_is_v1() {
         let mut req = create_morph_transaction_request();
         req.to = None;
         req.input = TransactionInput::new(Bytes::from_static(&[0x60, 0x80]));
 
-        let tx = try_build_morph_tx_from_request(
-            &req,
-            U64::from(1),
-            U256::from(100),
-            Some(U64::from(2)),
-            None,
-            None,
-        )
-        .unwrap()
-        .expect("explicit version 2 builds a MorphTx");
-        assert_eq!(tx.version, MORPH_TX_VERSION_2);
+        let tx = try_build_morph_tx_from_request(&req, U64::from(1), U256::from(100), None, None)
+            .unwrap()
+            .expect("token fee builds a MorphTx");
+        assert_eq!(tx.version, MORPH_TX_VERSION_1);
         assert!(tx.to.is_create());
         assert!(tx.validate().is_ok());
-    }
-
-    #[test]
-    fn try_build_morph_tx_explicit_v1_rejects_authorization_list() {
-        let req = create_v2_transaction_request();
-        let result = try_build_morph_tx_from_request(
-            &req,
-            U64::ZERO,
-            U256::ZERO,
-            Some(U64::from(1)),
-            None,
-            None,
-        );
-        assert_eq!(
-            result.unwrap_err(),
-            "version 1 MorphTx does not support authorization list"
-        );
-
-        let result = try_build_morph_tx_from_request(
-            &req,
-            U64::from(1),
-            U256::from(100),
-            Some(U64::from(0)),
-            None,
-            None,
-        );
-        assert_eq!(
-            result.unwrap_err(),
-            "version 0 MorphTx does not support authorization list"
-        );
     }
 
     #[test]
@@ -1173,11 +1024,10 @@ mod tests {
             authorization_list: Some(vec![]),
             ..create_morph_transaction_request()
         };
-        let tx =
-            try_build_morph_tx_from_request(&req, U64::from(1), U256::from(100), None, None, None)
-                .unwrap()
-                .unwrap();
-        assert_eq!(tx.version, MORPH_TX_VERSION_0);
+        let tx = try_build_morph_tx_from_request(&req, U64::from(1), U256::from(100), None, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(tx.version, MORPH_TX_VERSION_1);
         assert!(tx.authorization_list.is_empty());
     }
 
@@ -1188,10 +1038,10 @@ mod tests {
         req.input = TransactionInput::new(Bytes::from_static(&[0x60, 0x80]));
 
         let result =
-            try_build_morph_tx_from_request(&req, U64::from(1), U256::from(100), None, None, None);
+            try_build_morph_tx_from_request(&req, U64::from(1), U256::from(100), None, None);
         assert_eq!(
             result.unwrap_err(),
-            "version 2 MorphTx with an authorization list cannot create a contract"
+            "MorphTx with an authorization list cannot create a contract"
         );
     }
 
@@ -1203,7 +1053,6 @@ mod tests {
             inner: create_v2_transaction_request(),
             fee_token_id: Some(U64::from(1)),
             fee_limit: Some(U256::from(1000000)),
-            version: None,
             reference: None,
             memo: None,
         };
@@ -1235,58 +1084,63 @@ mod tests {
         );
     }
 
+    /// An ETH-fee request with a memo and a list simulates as a V2 (vector 2).
     #[test]
-    fn try_into_tx_env_explicit_v1_with_authorization_list_is_invalid_params() {
+    fn try_into_tx_env_memo_with_authorization_list_is_v2_env() {
         let request = MorphTransactionRequest {
             inner: create_v2_transaction_request(),
             fee_token_id: None,
             fee_limit: None,
-            version: Some(U64::from(1)),
             reference: None,
-            memo: None,
-        };
-
-        let err = request.try_into_tx_env(&create_evm_env(false)).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("MorphTx version 1 does not support an authorization list"),
-            "unexpected error: {err}"
-        );
-    }
-
-    /// `eth_call` / `eth_estimateGas` with an explicit `version: 2` and no list
-    /// simulate a V2 with an empty list and size the L1 fee as such.
-    #[test]
-    fn try_into_tx_env_explicit_v2_without_authorization_list_builds_empty_v2_env() {
-        let request = MorphTransactionRequest {
-            inner: create_morph_transaction_request(),
-            fee_token_id: None,
-            fee_limit: None,
-            version: Some(U64::from(2)),
-            reference: None,
-            memo: None,
+            memo: Some(Bytes::from("memo")),
         };
 
         let tx_env = request
             .try_into_tx_env(&create_evm_env(false))
-            .expect("explicit version 2 without a list is valid");
+            .expect("memo + list is a valid V2 request");
         assert_eq!(tx_env.inner.tx_type, morph_primitives::MORPH_TX_TYPE_ID);
         assert_eq!(tx_env.version, Some(MORPH_TX_VERSION_2));
-        assert!(tx_env.inner.authorization_list.is_empty());
-
-        let encoded = tx_env.rlp_bytes.expect("rlp_bytes must be populated");
-        let envelope =
-            MorphTxEnvelope::decode_2718(&mut encoded.as_ref()).expect("RLP should decode");
-        let MorphTxEnvelope::Morph(signed) = envelope else {
-            panic!("expected Morph envelope");
-        };
-        assert_eq!(signed.tx().version, MORPH_TX_VERSION_2);
-        assert!(signed.tx().authorization_list.is_empty());
+        assert_eq!(tx_env.fee_token_id, None);
+        assert_eq!(tx_env.inner.authorization_list.len(), 1);
     }
 
-    /// Without authorizations a V2 simulation may create a contract, like V1.
+    /// `eth_call` / `eth_estimateGas` without authorizations (absent key or
+    /// `[]`) simulate a V1 and size the L1 fee as such: no empty-list V2.
     #[test]
-    fn try_into_tx_env_explicit_v2_create_without_authorizations_is_ok() {
+    fn try_into_tx_env_empty_authorization_list_builds_v1_env() {
+        for authorization_list in [None, Some(vec![])] {
+            let request = MorphTransactionRequest {
+                inner: TransactionRequest {
+                    authorization_list,
+                    ..create_morph_transaction_request()
+                },
+                fee_token_id: None,
+                fee_limit: None,
+                reference: None,
+                memo: Some(Bytes::from("memo")),
+            };
+
+            let tx_env = request
+                .try_into_tx_env(&create_evm_env(false))
+                .expect("memo without a list is a valid V1 request");
+            assert_eq!(tx_env.inner.tx_type, morph_primitives::MORPH_TX_TYPE_ID);
+            assert_eq!(tx_env.version, Some(MORPH_TX_VERSION_1));
+            assert!(tx_env.inner.authorization_list.is_empty());
+
+            let encoded = tx_env.rlp_bytes.expect("rlp_bytes must be populated");
+            let envelope =
+                MorphTxEnvelope::decode_2718(&mut encoded.as_ref()).expect("RLP should decode");
+            let MorphTxEnvelope::Morph(signed) = envelope else {
+                panic!("expected Morph envelope");
+            };
+            assert_eq!(signed.tx().version, MORPH_TX_VERSION_1);
+            assert!(signed.tx().authorization_list.is_empty());
+        }
+    }
+
+    /// Without authorizations a simulated MorphTx may create a contract.
+    #[test]
+    fn try_into_tx_env_create_without_authorizations_is_v1() {
         let mut inner = create_morph_transaction_request();
         inner.to = None;
         inner.input = TransactionInput::new(Bytes::from_static(&[0x60, 0x80]));
@@ -1294,15 +1148,14 @@ mod tests {
             inner,
             fee_token_id: Some(U64::from(1)),
             fee_limit: Some(U256::from(1000)),
-            version: Some(U64::from(2)),
             reference: None,
             memo: None,
         };
 
         let tx_env = request
             .try_into_tx_env(&create_evm_env(false))
-            .expect("V2 CREATE without authorizations is valid");
-        assert_eq!(tx_env.version, Some(MORPH_TX_VERSION_2));
+            .expect("CREATE without authorizations is valid");
+        assert_eq!(tx_env.version, Some(MORPH_TX_VERSION_1));
         assert!(tx_env.inner.kind.is_create());
     }
 
@@ -1315,7 +1168,6 @@ mod tests {
             inner,
             fee_token_id: Some(U64::from(1)),
             fee_limit: Some(U256::from(1000)),
-            version: None,
             reference: None,
             memo: None,
         };
@@ -1323,7 +1175,7 @@ mod tests {
         let err = request.try_into_tx_env(&create_evm_env(false)).unwrap_err();
         assert!(
             err.to_string()
-                .contains("MorphTx version 2 with an authorization list cannot create a contract"),
+                .contains("MorphTx with an authorization list cannot create a contract"),
             "unexpected error: {err}"
         );
     }
@@ -1334,7 +1186,6 @@ mod tests {
             inner: create_v2_transaction_request(),
             fee_token_id: None,
             fee_limit: None,
-            version: None,
             reference: None,
             memo: None,
         };
@@ -1440,7 +1291,7 @@ mod tests {
         let mut req = create_morph_transaction_request();
         req.chain_id = None;
         let result =
-            try_build_morph_tx_from_request(&req, U64::from(1), U256::from(100), None, None, None);
+            try_build_morph_tx_from_request(&req, U64::from(1), U256::from(100), None, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("chain_id"));
     }
@@ -1454,7 +1305,7 @@ mod tests {
         };
 
         let result =
-            try_build_morph_tx_from_request(&req, U64::from(1), U256::from(100), None, None, None);
+            try_build_morph_tx_from_request(&req, U64::from(1), U256::from(100), None, None);
 
         assert_eq!(result.unwrap_err(), "data and input fields must match");
     }
@@ -1465,7 +1316,7 @@ mod tests {
         req.to = None;
 
         let result =
-            try_build_morph_tx_from_request(&req, U64::from(1), U256::from(100), None, None, None);
+            try_build_morph_tx_from_request(&req, U64::from(1), U256::from(100), None, None);
 
         assert_eq!(result.unwrap_err(), "contract creation requires initcode");
     }
@@ -1477,7 +1328,6 @@ mod tests {
             &req,
             U64::from(2),
             U256::from(500_000),
-            None,
             Some(B256::random()),
             Some(Bytes::from("memo")),
         );

@@ -573,7 +573,9 @@ async fn transaction_by_hash_exposes_authorization_list_for_morph_tx_v2() -> eyr
 
 /// `eth_estimateGas` for a MorphTx v2 request executes with the authorization
 /// list, so the estimate covers the 25 000 gas per authorization on top of the
-/// plain-call cost.
+/// plain-call cost. The version is never part of the request: a memo makes the
+/// request a MorphTx (V1), the list raises it to V2, and a legacy `version`
+/// key changes nothing.
 #[tokio::test(flavor = "multi_thread")]
 async fn estimate_gas_for_morph_tx_v2_includes_authorization_gas() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -604,15 +606,22 @@ async fn estimate_gas_for_morph_tx_v2_includes_authorization_gas() -> eyre::Resu
         "value": "0x0",
         "maxFeePerGas": "0x4a817c800",
         "maxPriorityFeePerGas": "0x4a817c800",
+        "memo": "0x6d",
     });
 
-    let mut v1_request = base_request.clone();
-    v1_request["version"] = serde_json::json!("0x1");
-    let v1_estimate: alloy_primitives::U64 =
-        client.request("eth_estimateGas", (v1_request,)).await?;
+    let v1_request = base_request.clone();
+    let v1_estimate: alloy_primitives::U64 = client
+        .request("eth_estimateGas", (v1_request.clone(),))
+        .await?;
+
+    // A legacy `version` key is ignored: same request, same estimate.
+    let mut legacy_request = v1_request;
+    legacy_request["version"] = serde_json::json!("0x1");
+    let legacy_estimate: alloy_primitives::U64 =
+        client.request("eth_estimateGas", (legacy_request,)).await?;
+    assert_eq!(legacy_estimate, v1_estimate);
 
     let mut v2_request = base_request;
-    v2_request["version"] = serde_json::json!("0x2");
     v2_request["authorizationList"] = serde_json::json!([serde_json::to_value(&authorization)?]);
     let v2_estimate: alloy_primitives::U64 = client
         .request("eth_estimateGas", (v2_request.clone(),))
@@ -633,8 +642,8 @@ async fn estimate_gas_for_morph_tx_v2_includes_authorization_gas() -> eyre::Resu
         .await?;
     assert_eq!(call_result.as_str(), Some("0x"));
 
-    // Explicit v2 without authorizations (`[]` or no key at all) is a valid v2
-    // with an empty list: it costs exactly what the v1 estimate costs.
+    // Without authorizations (`[]` or no key at all) the request is a v1 again,
+    // so it costs exactly what the v1 estimate costs.
     let mut empty_v2_request = v2_request;
     empty_v2_request["authorizationList"] = serde_json::json!([]);
     let empty_v2_estimate: alloy_primitives::U64 = client
@@ -642,7 +651,7 @@ async fn estimate_gas_for_morph_tx_v2_includes_authorization_gas() -> eyre::Resu
         .await?;
     assert_eq!(
         empty_v2_estimate, v1_estimate,
-        "v2 without authorizations must cost the same gas as v1"
+        "an empty authorization list must cost the same gas as v1"
     );
     empty_v2_request
         .as_object_mut()
@@ -693,7 +702,7 @@ async fn simulation_of_morph_tx_v2_is_not_fork_gated_before_onyx() -> eyre::Resu
         "value": "0x0",
         "maxFeePerGas": "0x4a817c800",
         "maxPriorityFeePerGas": "0x4a817c800",
-        "version": "0x2",
+        "memo": "0x6d",
         "authorizationList": [serde_json::to_value(&authorization)?],
     });
     let estimate: alloy_primitives::U64 = client
@@ -762,7 +771,7 @@ async fn eth_call_applies_self_delegation_for_morph_tx_v2() -> eyre::Result<()> 
             "from": sender,
             "to": sender,
             "nonce": "0x1",
-            "version": "0x2",
+            "memo": "0x6d",
             "maxFeePerGas": "0x4a817c800",
             "maxPriorityFeePerGas": "0x4a817c800",
             "authorizationList": [serde_json::to_value(&authorization)?],

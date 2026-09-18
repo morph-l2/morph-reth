@@ -361,9 +361,7 @@ impl TxMorph {
                 // authorizations the transaction cannot be a CREATE, the same
                 // static rule as EIP-7702 SetCode transactions.
                 if self.has_authorizations() && self.to.is_create() {
-                    return Err(
-                        "version 2 MorphTx with an authorization list cannot create a contract",
-                    );
+                    return Err("MorphTx with an authorization list cannot create a contract");
                 }
             }
             _ => {
@@ -371,6 +369,31 @@ impl TxMorph {
             }
         }
         Ok(())
+    }
+
+    /// The version a MorphTx built from user intent gets.
+    ///
+    /// V1 is the baseline: it is a superset of V0, so the request layer never
+    /// produces V0 anymore (V0 transactions that already exist stay valid).
+    /// A non-empty authorization list raises the version to V2; an empty list
+    /// is the same as no list.
+    ///
+    /// Callers that build a [`TxMorph`] by hand must derive `version` through
+    /// this or [`Self::with_inferred_version`] instead of filling it in: the
+    /// V0 / V1 encodings cannot carry a list, and [`Self::validate`] rejects a
+    /// V0 / V1 that does.
+    pub const fn inferred_version(has_authorizations: bool) -> u8 {
+        if has_authorizations {
+            MORPH_TX_VERSION_2
+        } else {
+            MORPH_TX_VERSION_1
+        }
+    }
+
+    /// Sets `version` from the transaction content, see [`Self::inferred_version`].
+    pub fn with_inferred_version(mut self) -> Self {
+        self.version = Self::inferred_version(self.has_authorizations());
+        self
     }
 
     /// Returns true if this is a version 0 (legacy) MorphTx.
@@ -2661,7 +2684,7 @@ mod tests {
         };
         assert_eq!(
             create.validate().unwrap_err(),
-            "version 2 MorphTx with an authorization list cannot create a contract"
+            "MorphTx with an authorization list cannot create a contract"
         );
         let create_without_authorizations = TxMorph {
             authorization_list: Vec::new(),
@@ -2708,6 +2731,32 @@ mod tests {
             ..sample_v2_tx(0)
         };
         assert!(v1_empty_list.validate().is_ok());
+    }
+
+    /// V1 is the baseline for anything built from user intent; only a
+    /// non-empty authorization list raises it to V2, and a hand-filled version
+    /// is overwritten.
+    #[test]
+    fn inferred_version_is_v1_unless_authorizations_are_present() {
+        assert_eq!(TxMorph::inferred_version(false), MORPH_TX_VERSION_1);
+        assert_eq!(TxMorph::inferred_version(true), MORPH_TX_VERSION_2);
+
+        let with_list = TxMorph {
+            version: MORPH_TX_VERSION_0,
+            ..sample_v2_tx(1)
+        }
+        .with_inferred_version();
+        assert_eq!(with_list.version, MORPH_TX_VERSION_2);
+        assert!(with_list.validate().is_ok());
+
+        let without_list = TxMorph {
+            version: MORPH_TX_VERSION_2,
+            authorization_list: Vec::new(),
+            ..sample_v2_tx(1)
+        }
+        .with_inferred_version();
+        assert_eq!(without_list.version, MORPH_TX_VERSION_1);
+        assert!(without_list.validate().is_ok());
     }
 
     #[test]

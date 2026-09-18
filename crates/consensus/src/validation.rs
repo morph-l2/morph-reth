@@ -1984,7 +1984,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            err.contains("version 2 MorphTx with an authorization list cannot create a contract"),
+            err.contains("MorphTx with an authorization list cannot create a contract"),
             "unexpected error: {err}"
         );
     }
