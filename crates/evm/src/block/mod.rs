@@ -23,7 +23,6 @@ use alloy_evm::{
     },
 };
 use alloy_primitives::{Address, Log, U256};
-use morph_chainspec::{MorphChainSpec, MorphHardfork, MorphHardforks};
 use morph_primitives::{MorphReceipt, MorphTxEnvelope};
 use morph_revm::{L1_GAS_PRICE_ORACLE_ADDRESS, MorphHaltReason, TokenFeeInfo, evm::MorphContext};
 use reth_primitives_traits::Recovered;
@@ -84,8 +83,6 @@ impl TxResult for MorphTxResult {
 pub struct MorphBlockExecutor<DB: Database, I> {
     /// The EVM used by executor (owned, not a reference)
     evm: MorphEvm<DB, I>,
-    /// Chain specification
-    spec: std::sync::Arc<MorphChainSpec>,
     /// Receipt builder
     receipt_builder: DefaultMorphReceiptBuilder,
     /// Receipts of executed transactions
@@ -97,9 +94,6 @@ pub struct MorphBlockExecutor<DB: Database, I> {
     /// Unlike receipt gas, L1 messages reserve their full gas limit because Morph geth does not
     /// return their unused gas to the block gas pool.
     gas_pool_used: u64,
-    /// Cached hardfork for this block (constant across all transactions).
-    /// Set in `apply_pre_execution_changes`, reused in `commit_transaction`.
-    hardfork: MorphHardfork,
 }
 
 impl<DB, I> MorphBlockExecutor<DB, I>
@@ -111,21 +105,14 @@ where
     ///
     /// # Arguments
     /// * `evm` - The EVM instance configured for Morph execution
-    /// * `spec` - Chain specification containing hardfork information
     /// * `receipt_builder` - Builder for constructing transaction receipts
-    pub(crate) fn new(
-        evm: MorphEvm<DB, I>,
-        spec: std::sync::Arc<MorphChainSpec>,
-        receipt_builder: DefaultMorphReceiptBuilder,
-    ) -> Self {
+    pub(crate) fn new(evm: MorphEvm<DB, I>, receipt_builder: DefaultMorphReceiptBuilder) -> Self {
         Self {
             evm,
-            spec,
             receipt_builder,
             receipts: Vec::new(),
             gas_used: 0,
             gas_pool_used: 0,
-            hardfork: MorphHardfork::default(),
         }
     }
 
@@ -138,7 +125,6 @@ where
         &mut self,
         tx: &MorphTxEnvelope,
         sender: Address,
-        hardfork: MorphHardfork,
     ) -> Result<Option<MorphReceiptTxFields>, BlockExecutionError> {
         if !tx.is_morph_tx() {
             return Ok(None);
@@ -169,12 +155,13 @@ where
 
         let token_info = match self.evm.cached_token_fee_info() {
             Some(info) => Some(info),
-            None => {
-                TokenFeeInfo::load_for_caller(self.evm.db_mut(), fee_token_id, sender, hardfork)
-                    .map_err(|e| {
-                        BlockExecutionError::msg(format!("Failed to fetch token fee info: {e:?}"))
-                    })?
-            }
+            // Only `price_ratio` and `scale` are read below, and both come straight from
+            // registry storage. `load_storage_only` reads exactly that and never builds a
+            // temporary EVM to resolve a balance this receipt has no use for.
+            None => TokenFeeInfo::load_storage_only(self.evm.db_mut(), fee_token_id, sender)
+                .map_err(|e| {
+                    BlockExecutionError::msg(format!("Failed to fetch token fee info: {e:?}"))
+                })?,
         };
 
         Ok(token_info.map(|info| MorphReceiptTxFields {
@@ -217,12 +204,6 @@ where
             .db_mut()
             .basic(L1_GAS_PRICE_ORACLE_ADDRESS)
             .map_err(BlockExecutionError::other)?;
-
-        let block_number: u64 = self.evm.block().number.to();
-        let hardfork = self
-            .spec
-            .morph_hardfork_at(block_number, self.evm.block().timestamp.to::<u64>());
-        self.hardfork = hardfork;
 
         Ok(())
     }
@@ -300,7 +281,7 @@ where
         // are tracing-only — the trait API no longer permits us to surface errors
         // from `commit_transaction`.
         let (tx, signer) = recovered.into_parts();
-        let morph_tx_fields = match self.get_morph_tx_fields(&tx, signer, self.hardfork) {
+        let morph_tx_fields = match self.get_morph_tx_fields(&tx, signer) {
             Ok(fields) => fields,
             Err(err) => {
                 tracing::error!(
