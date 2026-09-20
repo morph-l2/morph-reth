@@ -841,12 +841,33 @@ impl L1MessageBuilder {
 /// - token_address = `TEST_TOKEN_ADDRESS`
 /// - price_ratio = 1e18 (1:1 with ETH)
 /// - decimals = 18, isActive = true
+/// - balanceSlot = 0, i.e. EVM-call mode
+///
+/// Call mode is what mainnet runs: every registered fee token there has its
+/// `balanceSlot` cleared, so the fee is moved by real `balanceOf` / `transfer`
+/// calls into the token contract and the receipt carries their `Transfer` events.
 pub const TEST_TOKEN_ID: u16 = 1;
 
 /// Address of the test ERC20 token deployed in the test genesis.
 ///
 /// Pre-funded with 1000 tokens (1e21 wei) for test accounts 0 and 1.
 /// Address: `0x5300000000000000000000000000000000000022`
+///
+/// The genesis gives it the optimized runtime of:
+///
+/// ```solidity
+/// contract Slot1Token {
+///     uint256 private dummy;
+///     mapping(address => uint256) public balanceOf; // slot 1
+///     event Transfer(address indexed from, address indexed to, uint256 value);
+///     function transfer(address to, uint256 amount) external returns (bool) { ... }
+/// }
+/// ```
+///
+/// Real code is what makes the registry's EVM-call mode usable: the fee path calls
+/// `balanceOf` and `transfer` on this contract rather than writing its storage
+/// directly. Keeping `balanceOf` at slot 1 also lets [`test_token_balance_slot`]
+/// derive the same slot independently as a test oracle.
 pub const TEST_TOKEN_ADDRESS: Address = Address::new([
     0x53, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x22,
@@ -862,9 +883,9 @@ pub const TEST_FEE_VAULT_ADDRESS: Address = Address::new([
 
 /// Base slot of the test token's `balances` mapping.
 ///
-/// The registry stores this one-based so that zero means "unknown", and
-/// `morph_revm`'s token-fee reader subtracts one. The test genesis registers `2`
-/// for `TEST_TOKEN_ID`, so the effective base slot is `1`.
+/// The registry's own `balanceSlot` is zero (call mode), so this is not read from
+/// the registry — it mirrors the layout of the token contract's bytecode so tests
+/// can check balances without going through the fee-token code under test.
 const TEST_TOKEN_BALANCE_BASE_SLOT: u64 = 1;
 
 /// Storage slot holding `account`'s balance of the test ERC20 token.

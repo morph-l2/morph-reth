@@ -11,7 +11,7 @@ use morph_primitives::{
     MorphTxEnvelope,
     transaction::morph_transaction::{MORPH_TX_VERSION_1, MORPH_TX_VERSION_2},
 };
-use morph_revm::TokenFeeInfo;
+use morph_revm::{MorphEvmEnv, TokenFeeInfo};
 
 use crate::MorphTxError;
 
@@ -121,7 +121,15 @@ pub fn validate_morph_tx<DB: Database>(
         });
     }
 
-    let token_info = TokenFeeInfo::load_for_caller(db, fee_token_id, input.sender, input.hardfork)
+    // Pool admission has no block environment, so a call-mode token's `balanceOf`
+    // is evaluated under the hardfork's defaults. That matches the pool's previous
+    // behaviour; threading the real head environment through admission is txpool
+    // work and does not belong in this change.
+    let env = MorphEvmEnv::new(
+        reth_revm::revm::context::CfgEnv::new_with_spec(input.hardfork),
+        morph_revm::MorphBlockEnv::default(),
+    );
+    let token_info = TokenFeeInfo::load_for_caller(db, fee_token_id, input.sender, &env)
         .map_err(|err| MorphTxError::TokenInfoFetchFailed {
             token_id: fee_token_id,
             message: format!("{err:?}"),
@@ -150,14 +158,9 @@ pub fn validate_morph_tx<DB: Database>(
     let total_token_fee = token_gas_fee.saturating_add(input.l1_data_fee);
     let required_token_amount = token_info.eth_to_token_amount(total_token_fee);
 
-    // Match REVM semantics:
-    // - fee_limit == 0 => use token balance as effective limit
-    // - fee_limit > balance => cap by token balance
-    let effective_limit = if fee_limit.is_zero() || fee_limit > token_info.balance {
-        token_info.balance
-    } else {
-        fee_limit
-    };
+    // Share the execution layer's clamp rather than restating it: a zero `fee_limit`
+    // means the whole token balance, and a larger one is capped by it.
+    let effective_limit = token_info.effective_fee_limit(fee_limit);
 
     // Check token balance against effective limit.
     if effective_limit < required_token_amount {

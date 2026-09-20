@@ -379,21 +379,6 @@ fn address_topic(address: Address) -> B256 {
     B256::from(topic)
 }
 
-/// Optimized runtime for:
-///
-/// ```solidity
-/// contract Slot1Token {
-///     uint256 private dummy;
-///     mapping(address => uint256) public balanceOf; // slot 1
-///     event Transfer(address indexed from, address indexed to, uint256 value);
-///     function transfer(address to, uint256 amount) external returns (bool) { ... }
-/// }
-/// ```
-///
-/// Keeping `balanceOf` at slot 1 lets the test token use the same storage layout
-/// as `tests/assets/test-genesis.json` and the token registry's direct-slot path.
-const SLOT1_ERC20_RUNTIME_CODE: &str = "0x608060405234801561000f575f5ffd5b5060043610610034575f3560e01c806370a0823114610038578063a9059cbb1461006a575b5f5ffd5b61005761004636600461015e565b60016020525f908152604090205481565b6040519081526020015b60405180910390f35b61007d61007836600461017e565b61008d565b6040519015158152602001610061565b335f90815260016020526040812054828110156100da5760405162461bcd60e51b815260206004820152600760248201526662616c616e636560c81b604482015260640160405180910390fd5b335f81815260016020908152604080832087860390556001600160a01b03881680845292819020805488019055518681529192917fddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef910160405180910390a35060019392505050565b80356001600160a01b0381168114610159575f5ffd5b919050565b5f6020828403121561016e575f5ffd5b61017782610143565b9392505050565b5f5f6040838503121561018f575f5ffd5b61019883610143565b94602093909301359350505056";
-
 /// After a successful MorphTx v0 with ERC20 fee, the sender's token balance
 /// must decrease (fee was charged from tokens, not ETH).
 #[tokio::test(flavor = "multi_thread")]
@@ -495,7 +480,6 @@ async fn token_fee_transfer_gas_regression(
     let token_addr = morph_node::test_utils::TEST_TOKEN_ADDRESS;
     let (mut nodes, wallet) = TestNodeBuilder::new()
         .with_schedule(schedule)
-        .with_account_code(token_addr, SLOT1_ERC20_RUNTIME_CODE)
         .build()
         .await?;
     let mut node = nodes.pop().unwrap();
@@ -563,17 +547,24 @@ async fn token_fee_transfer_gas_regression(
         .iter()
         .filter(|log| log.address == token_addr && log.topics().first() == Some(&transfer_topic))
         .collect();
+    // In call mode the fee is moved by real ERC20 calls, so the transaction's own
+    // transfer arrives bracketed by them, in go-ethereum's order: deduction, main,
+    // reimbursement.
     assert_eq!(
         transfer_logs.len(),
-        1,
-        "the main ERC20 transfer should execute against the fee token contract"
+        3,
+        "receipt should carry the fee deduction, the main transfer and the fee refund"
     );
     assert_eq!(transfer_logs[0].topics()[1], address_topic(sender));
-    assert_eq!(transfer_logs[0].topics()[2], address_topic(recipient));
+    assert_eq!(transfer_logs[0].topics()[2], address_topic(fee_vault));
+    assert_eq!(transfer_logs[1].topics()[1], address_topic(sender));
+    assert_eq!(transfer_logs[1].topics()[2], address_topic(recipient));
     assert_eq!(
-        transfer_logs[0].data.data.as_ref(),
+        transfer_logs[1].data.data.as_ref(),
         amount.to_be_bytes::<32>()
     );
+    assert_eq!(transfer_logs[2].topics()[1], address_topic(fee_vault));
+    assert_eq!(transfer_logs[2].topics()[2], address_topic(sender));
 
     let state_after = node.inner.provider.latest()?;
     let sender_after = state_after
@@ -643,10 +634,21 @@ const RUNTIME_REVERT_INIT: &[u8] = &[
 ///   1. Block 1: Deploy a contract whose runtime always reverts (EIP-1559 tx)
 ///   2. Block 2: Call that contract with MorphTx v0 (ERC20 fee)
 ///   3. Verify: receipt.status = false, but token balance decreased
+///   4. Verify: the receipt still carries both fee `Transfer` events
 ///
 /// This exercises the handler's `validate_and_deduct_token_fee` (charges fee
 /// upfront) and `reimburse_caller_token_fee` (partial refund for unused gas)
 /// paths when the main transaction execution reverts.
+///
+/// The log assertion is the point of running the fee path on a *reverting* main
+/// frame. go-ethereum keeps `StateDB.logs` outside the state snapshot/revert
+/// mechanism, so the deduction's `Transfer` survives a main-frame revert; that
+/// is the entire reason morph-reth caches fee logs in `pre_fee_logs` /
+/// `post_fee_logs` instead of leaving them in the journal (`crates/evm/src/block/receipt.rs`).
+/// A regression there -- the fee logs dropped, or restored into the reverted
+/// frame -- changes the receipt's logs and therefore the block's receipts root,
+/// and no state assertion in this test would notice. This is the only test that
+/// runs the production receipt builder against a reverting main frame.
 #[tokio::test(flavor = "multi_thread")]
 async fn morph_tx_v0_token_fee_still_charged_on_revert() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -721,6 +723,40 @@ async fn morph_tx_v0_token_fee_still_charged_on_revert() -> eyre::Result<()> {
         "token balance must decrease even when main tx reverts \
          (fee deducted upfront, partial refund for unused gas). \
          before={bal_before}, after={bal_after}"
+    );
+
+    // Both fee transfers must survive the main frame's revert: go-ethereum keeps
+    // `StateDB.logs` outside the state snapshot/revert mechanism, so the deduction's
+    // `Transfer` is still in the receipt while the reverted main frame contributes
+    // none. Order is go-ethereum's: deduction, (empty) main frame, reimbursement.
+    let fee_vault = morph_node::test_utils::TEST_FEE_VAULT_ADDRESS;
+    let transfer_topic = erc20_transfer_topic();
+    let transfer_logs: Vec<_> = receipt
+        .logs()
+        .iter()
+        .filter(|log| log.address == token_addr && log.topics().first() == Some(&transfer_topic))
+        .collect();
+    assert_eq!(
+        transfer_logs.len(),
+        2,
+        "receipt must carry the fee deduction and the fee reimbursement even though \
+         the main frame reverted; dropping the deduction's log changes the receipts root. \
+         got {transfer_logs:?}"
+    );
+    assert_eq!(
+        (transfer_logs[0].topics()[1], transfer_logs[0].topics()[2]),
+        (address_topic(sender), address_topic(fee_vault)),
+        "first log must be the fee deduction (sender -> fee vault)"
+    );
+    assert_ne!(
+        transfer_logs[0].data.data.as_ref(),
+        [0u8; 32],
+        "the deduction must move a non-zero fee"
+    );
+    assert_eq!(
+        (transfer_logs[1].topics()[1], transfer_logs[1].topics()[2]),
+        (address_topic(fee_vault), address_topic(sender)),
+        "second log must be the fee reimbursement (fee vault -> sender)"
     );
 
     // The receipt should carry MorphTx-specific fee fields

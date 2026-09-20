@@ -100,6 +100,9 @@ pub struct MorphEvm<DB: Database, I> {
     /// receipt-building path (the handler already has the encoded bytes via
     /// `MorphTxEnv.rlp_bytes`).
     pub(crate) cached_l1_data_fee: U256,
+    /// Signed refund counter from a successful fee deduction call.
+    /// Applied before the final refund cap; refund-transfer refunds are excluded.
+    pub(crate) pre_fee_refund: i64,
     /// Transfer event logs from token fee deduction (pre-execution phase).
     ///
     /// In go-ethereum, `buyAltTokenGas()` emits Transfer events into `StateDB.logs`
@@ -113,6 +116,14 @@ pub struct MorphEvm<DB: Database, I> {
 }
 
 impl<DB: Database, I> MorphEvm<DB, I> {
+    /// Constructs an EVM from the full environment used by both execution and pool queries.
+    pub fn from_env(db: DB, env: crate::MorphEvmEnv, inspector: I) -> Self {
+        let ctx = MorphContext::new(db, *env.cfg_env.spec())
+            .with_cfg(env.cfg_env)
+            .with_block(env.block_env);
+        Self::new(ctx, inspector)
+    }
+
     /// Create a new Morph EVM.
     ///
     /// The precompiles are automatically selected based on the hardfork spec
@@ -173,6 +184,7 @@ impl<DB: Database, I> MorphEvm<DB, I> {
             inner,
             cached_token_fee_info: None,
             cached_l1_data_fee: U256::ZERO,
+            pre_fee_refund: 0,
             pre_fee_logs: Vec::new(),
             post_fee_logs: Vec::new(),
         }
