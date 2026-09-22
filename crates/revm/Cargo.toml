@@ -15,7 +15,7 @@ morph-primitives.workspace = true
 morph-chainspec.workspace = true
 
 reth-evm.workspace = true
-reth-ethereum-primitives = { workspace = true, features = ["std", "serde"] }
+reth-ethereum-primitives = { workspace = true, features = ["serde"] }
 reth-storage-api = { workspace = true, optional = true }
 reth-rpc-eth-types = { workspace = true, optional = true }
 
@@ -39,3 +39,10 @@ alloy-primitives = { workspace = true, features = ["rand"] }
 [features]
 reth = ["dep:reth-storage-api"]
 rpc = ["dep:reth-rpc-eth-types"]
+
+# `reth-evm/std` transitively enables `reth-ethereum-primitives/std` ->
+# `reth-primitives-traits/quanta`, which does not compile for SP1's zkvm
+# target. The workspace declaration of `reth-evm` is `default-features = false`
+# and `std` is added back here for non-zkvm targets only.
+[target.'cfg(not(target_os = "zkvm"))'.dependencies]
+reth-evm = { workspace = true, features = ["std"] }

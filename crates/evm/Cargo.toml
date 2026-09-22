@@ -15,7 +15,6 @@ workspace = true
 morph-chainspec.workspace = true
 morph-primitives = { workspace = true, features = ["serde-bincode-compat"] }
 morph-revm.workspace = true
-morph-payload-types.workspace = true
 
 reth-chainspec.workspace = true
 reth-evm.workspace = true
@@ -45,3 +44,16 @@ serde-bincode-compat = [
     "morph-primitives/serde-bincode-compat",
 ]
 rpc = ["dep:reth-rpc-eth-api", "morph-revm/rpc"]
+
+# Host-only dependencies/features: `reth-evm/std` and `reth-revm/std`
+# transitively enable `reth-ethereum-primitives/std` ->
+# `reth-primitives-traits/quanta`, which does not compile for SP1's zkvm
+# target; the workspace declarations stay `default-features = false` and `std`
+# is added back here for non-zkvm targets only. `morph-payload-types` is only
+# used by the `engine` module, which is also host-only; its subtree
+# (`morph-primitives/reth-codec` -> `reth-db-api` ->
+# `reth-ethereum-primitives/reth-codec`) hits the same `quanta` chain.
+[target.'cfg(not(target_os = "zkvm"))'.dependencies]
+morph-payload-types.workspace = true
+reth-evm = { workspace = true, features = ["std"] }
+reth-revm = { workspace = true, features = ["std"] }

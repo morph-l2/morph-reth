@@ -31,7 +31,7 @@ reth-chainspec.workspace = true
 reth-engine-local.workspace = true
 reth-engine-tree.workspace = true
 reth-errors.workspace = true
-reth-evm.workspace = true
+reth-evm = { workspace = true, features = ["std"] }
 reth-execution-cache.workspace = true
 reth-node-api.workspace = true
 reth-node-builder.workspace = true

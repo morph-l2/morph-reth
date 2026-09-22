@@ -61,6 +61,9 @@ use alloy_rpc_types_eth as _;
 use reth_ethereum_primitives as _;
 
 mod config;
+// Engine-API payload execution relies on `reth-evm/std` (e.g. `ConfigureEngineEvm`),
+// which is unavailable on SP1's zkvm target; it is only used by node-side code.
+#[cfg(not(target_os = "zkvm"))]
 mod engine;
 
 mod assemble;
