@@ -15,7 +15,7 @@ workspace = true
 morph-chainspec.workspace = true
 morph-primitives = { workspace = true, features = ["serde-bincode-compat"] }
 morph-revm.workspace = true
-morph-payload-types.workspace = true
+morph-payload-types = { workspace = true, optional = true }
 
 reth-chainspec.workspace = true
 reth-evm.workspace = true
@@ -44,4 +44,10 @@ default = []
 serde-bincode-compat = [
     "morph-primitives/serde-bincode-compat",
 ]
+# Engine-API payload execution (the `engine` module) requires `reth-evm/std`
+# (`ConfigureEngineEvm`) and `morph-payload-types`; both transitively pull in
+# `reth-primitives-traits/quanta`, which does not compile for SP1's zkvm
+# target. Kept off by default so zkvm guest builds stay quanta-free; node
+# compositions enable it (see `morph-node`).
+engine = ["dep:morph-payload-types", "reth-evm/std"]
 rpc = ["dep:reth-rpc-eth-api", "morph-revm/rpc"]
