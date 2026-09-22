@@ -61,6 +61,10 @@ use alloy_rpc_types_eth as _;
 use reth_ethereum_primitives as _;
 
 mod config;
+// Engine-API payload execution requires `reth-evm/std` (`ConfigureEngineEvm`)
+// and `morph-payload-types`, which transitively pull in `quanta` — unavailable
+// on SP1's zkvm target. Only node compositions enable it.
+#[cfg(feature = "engine")]
 mod engine;
 
 mod assemble;
