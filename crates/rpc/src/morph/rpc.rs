@@ -33,7 +33,7 @@ pub trait MorphRpc {
     /// opening the index.
     ///
     /// When the durable index cursor lags the canonical head, waits for up to
-    /// 100 ms for the index to catch up. Returns `-32000 "reference index is
+    /// 300 ms for the index to catch up. Returns `-32000 "reference index is
     /// behind"` if the cursor still does not exactly match the canonical head
     /// number and hash, or while indexing is intentionally deferred.
     ///

@@ -38,7 +38,7 @@ pub struct MorphTxValidationResult {
     pub token_info: Option<TokenFeeInfo>,
     /// The required token amount
     pub required_token_amount: U256,
-    /// The amount that will be paid (min of fee_limit and required)
+    /// The amount that will be paid (equal to `required_token_amount`)
     pub amount_to_pay: U256,
 }
 

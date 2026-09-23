@@ -438,7 +438,7 @@ where
 
         // Attempt token refund. Matches go-ethereum's refundGas() which silently logs
         // and continues on failure: "Continue execution even if refund fails - refund
-        // should not cause transaction to fail" (state_transition.go:698).
+        // should not cause transaction to fail" (state_transition.go:711).
         let refund_result = if let Some(balance_slot) = token_fee_info.balance_slot {
             let journal = evm.ctx().journal_mut();
             transfer_erc20_with_slot(

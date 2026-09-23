@@ -50,7 +50,7 @@ where
         }
     }
 
-    /// Run forever (until `cancel`), executing one prune pass per `task_run_interval`.
+    /// Run forever (until `signal` fires), executing one prune pass per `task_run_interval`.
     pub async fn run(self, mut signal: GracefulShutdown) {
         info!(
             target: "trie::pruner_task",

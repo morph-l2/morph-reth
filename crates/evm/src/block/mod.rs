@@ -78,7 +78,7 @@ impl TxResult for MorphTxResult {
 /// ## Execution Flow
 /// 1. `apply_pre_execution_changes`: Set up state and load contracts
 /// 2. `execute_transaction_without_commit`: Execute transaction in EVM
-/// 3. `commit_transaction`: Calculate fees, build receipt, commit state
+/// 3. `commit_transaction`: Build receipt from the cached fee info, commit state
 /// 4. `finish`: Return final execution result with all receipts
 pub struct MorphBlockExecutor<DB: Database, I> {
     /// The EVM used by executor (owned, not a reference)

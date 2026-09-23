@@ -24,17 +24,17 @@ pub(crate) struct MorphEngineApiMetrics {
     // -------------------------------------------------------------------------
     // assembleL2Block
     // -------------------------------------------------------------------------
-    /// Latency for `engine_assembleL2Block` calls.
+    /// Latency for `engine_assembleL2Block` and `engine_assembleL2BlockV2` calls.
     pub(crate) assemble_l2_block_duration_seconds: Histogram,
-    /// Number of `engine_assembleL2Block` calls that returned an error.
+    /// Number of `engine_assembleL2Block`/`engine_assembleL2BlockV2` calls that returned an error.
     pub(crate) assemble_l2_block_failures_total: Counter,
 
     // -------------------------------------------------------------------------
     // newL2Block
     // -------------------------------------------------------------------------
-    /// Latency for `engine_newL2Block` calls.
+    /// Latency for `engine_newL2Block` and `engine_newL2BlockV2` calls.
     pub(crate) new_l2_block_duration_seconds: Histogram,
-    /// Number of `engine_newL2Block` calls that returned an error.
+    /// Number of `engine_newL2Block`/`engine_newL2BlockV2` calls that returned an error.
     pub(crate) new_l2_block_failures_total: Counter,
 
     // -------------------------------------------------------------------------
@@ -42,7 +42,7 @@ pub(crate) struct MorphEngineApiMetrics {
     // -------------------------------------------------------------------------
     /// Latency for `engine_validateL2Block` calls.
     pub(crate) validate_l2_block_duration_seconds: Histogram,
-    /// Number of `engine_validateL2Block` calls that returned `success: false`.
+    /// Number of `engine_validateL2Block` calls that returned an error or `success: false`.
     pub(crate) validate_l2_block_failures_total: Counter,
 
     // -------------------------------------------------------------------------

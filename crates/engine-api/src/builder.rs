@@ -826,8 +826,7 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
         // FCU safe/finalized must be canonical ancestors. Unsafe imports pass safe zero;
         // new_safe_l2_block passes the imported block itself, never a cached old safe.
         // Forward only the L1-derived finalized tag; zero is a no-op when it is absent,
-        // and pinned reth v2.2.0 still cleans changesets/canonical memory without
-        // finalized.
+        // and reth still cleans changesets/canonical memory without finalized.
         let forkchoice = alloy_rpc_types_engine::ForkchoiceState {
             head_block_hash: data.hash,
             safe_block_hash,
@@ -892,7 +891,7 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
 
         let logs_bloom = alloy_primitives::Bloom::from_slice(data.logs_bloom.as_ref());
         // Override coinbase to empty address when FeeVault is enabled,
-        // matching go-ethereum's executableDataToBlock (l2_api.go:292-293).
+        // matching go-ethereum's executableDataToBlock (l2_api.go).
         let beneficiary = if self.chain_spec.is_fee_vault_enabled() {
             Address::ZERO
         } else {

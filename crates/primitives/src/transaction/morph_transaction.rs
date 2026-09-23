@@ -90,16 +90,16 @@ pub struct TxMorph {
     /// A scalar value equal to the maximum amount of gas that should be used
     /// in executing this transaction. This is paid up-front, before any
     /// computation is done and may not be increased later.
-    /// Matches go-ethereum's `AltFeeTx.Gas` (uint64).
+    /// Matches go-ethereum's `MorphTx.Gas` (uint64).
     #[cfg_attr(
         feature = "serde",
         serde(with = "alloy_serde::quantity", rename = "gas", alias = "gasLimit")
     )]
     pub gas_limit: u64,
 
-    /// A scalar value equal to the maximum amount of gas that should be used
-    /// in executing this transaction. This is paid up-front, before any
-    /// computation is done and may not be increased later.
+    /// A scalar value equal to the maximum total fee per unit of gas
+    /// the sender is willing to pay. The actual fee paid per gas is
+    /// the minimum of this and `base_fee + max_priority_fee_per_gas`.
     ///
     /// This is also known as `GasFeeCap`.
     #[cfg_attr(feature = "serde", serde(with = "alloy_serde::quantity"))]
@@ -917,8 +917,9 @@ mod compact_txmorph {
     /// Follows the same pattern as reth's `TxEip1559` compact helper
     /// (see `reth-codecs/src/alloy/transaction/eip1559.rs`).
     ///
-    /// - `version` and `fee_token_id` are stored as `u64` because `u8`/`u16` don't
-    ///   implement `Compact` in reth_codecs. The conversion is lossless.
+    /// - `version` and `fee_token_id` are stored as `u64` because the derive only accepts
+    ///   a `u8` field in last position and `u16` has no `Compact` impl in reth_codecs.
+    ///   The conversion is lossless.
     /// - `memo` and `input` are packed into a single `Bytes` field (`data`) because
     ///   the derive macro only allows one `Bytes` field and it must be last.
     ///   Format: `[memo_len: u8][memo_bytes][input_bytes]`.
@@ -933,7 +934,7 @@ mod compact_txmorph {
         to: TxKind,
         value: U256,
         access_list: AccessList,
-        /// Stored as u64 for Compact compatibility (u8 doesn't implement Compact)
+        /// Stored as u64 for Compact compatibility (the derive rejects a non-last u8 field)
         version: u64,
         /// Stored as u64 for Compact compatibility (u16 doesn't implement Compact)
         fee_token_id: u64,
@@ -1694,7 +1695,7 @@ mod tests {
 
     #[test]
     fn test_morph_transaction_memo_validation() {
-        // Valid memo (under 64 bytes) - use V1 since it doesn't require fee_token_id
+        // Valid memo (exactly 64 bytes) - use V1 since it doesn't require fee_token_id
         let valid_tx = TxMorph {
             version: MORPH_TX_VERSION_1,
             memo: Some(Bytes::from(vec![0u8; 64])),

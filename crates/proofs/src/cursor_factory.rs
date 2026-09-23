@@ -24,7 +24,7 @@ use crate::{
 /// Request-scoped factory that opens trie cursors against a shared read-only transaction.
 ///
 /// Holds a borrow of the transaction so every cursor allocation reuses the same MDBX
-/// reader slot. See [`MorphProofsStore::Tx`] for the underlying contention story.
+/// reader slot.
 #[derive(Debug, Clone)]
 pub struct MorphProofsTrieCursorFactory<'tx, 'db, S: MorphProofsStore> {
     storage: &'db MorphProofsStorage<S>,

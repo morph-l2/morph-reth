@@ -36,7 +36,7 @@ use crate::{
 
 /// State provider for external proofs storage.
 pub struct MorphProofsStateProviderRef<'a, Storage: MorphProofsStore> {
-    /// Historical state provider for non-state related tasks.
+    /// Latest state provider for non-state related tasks (block hashes and bytecode).
     latest: Box<dyn StateProvider + Send + 'a>,
 
     /// Storage provider for state lookups.

@@ -23,7 +23,7 @@ pub struct MorphRpcReceipt {
     #[serde(rename = "l1Fee")]
     pub l1_fee: U256,
 
-    /// MorphTx version (only for MorphTx type 0x7F).
+    /// MorphTx version (`0x0` for non-MorphTx receipts, as in morph-geth).
     /// 0 = legacy format, 1 = with reference/memo support.
     pub version: Option<U64>,
 

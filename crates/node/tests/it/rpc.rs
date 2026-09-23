@@ -546,8 +546,8 @@ async fn build_standard_jade_block_for_debug_trace() -> eyre::Result<(MorphTestN
 
 /// Comprehensive test: debug + trace replay APIs on a standard Jade block with Cancun active.
 ///
-/// Uses internal APIs (debug_api / trace_api) directly via `node.rpc.inner`,
-/// matching the approach on `main`.  This avoids HTTP serialization overhead
+/// Uses internal APIs (debug_api / trace_api) directly via `node.rpc.inner`.
+/// This avoids HTTP serialization overhead
 /// and the TaskManager lifetime pitfalls of the HTTP path.
 #[tokio::test(flavor = "multi_thread")]
 async fn debug_trace_replay_apis_work_for_standard_jade_block() -> eyre::Result<()> {
@@ -827,7 +827,7 @@ async fn eth_call_token_fee_does_not_reject_zero_eth_sender() -> eyre::Result<()
 /// `eth_estimateGas` rejects a request whose sender cannot afford `tx.value`.
 ///
 /// Exercises the first balance check in `MorphEthApi::caller_gas_allowance`
-/// — the one that fires before the L1 fee is even computed.
+/// — the `value` check that fires before the L1 fee is compared to the balance.
 ///
 /// Setup:
 /// - An unfunded random sender (`balance = 0`).

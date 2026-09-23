@@ -14,8 +14,8 @@ use alloy_primitives::Address;
 /// in the standard reth `ConsensusError`.
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
 pub enum MorphConsensusError {
-    /// Invalid L1 message order - either L1 messages are not at the start of the block
-    /// or queue indices are not strictly sequential.
+    /// Invalid L1 message order - an L1 message appears after an L2 transaction
+    /// (L1 messages must be at the start of the block).
     #[error("Invalid L1 message order")]
     InvalidL1MessageOrder,
 

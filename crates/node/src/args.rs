@@ -23,7 +23,8 @@ pub const MORPH_DEFAULT_MAX_TX_PAYLOAD_BYTES: u64 = MORPH_MAX_TX_PAYLOAD_BYTES_P
 /// budget, and `--morph.max-tx-payload-bytes` (the uncompressed L2 payload
 /// that must fit in one 6-blob batch).
 ///
-/// Note: Block building deadline is configured via reth's built-in `--builder.deadline` flag.
+/// Note: reth's `--builder.deadline` only bounds the payload job as a whole; the per-build
+/// packing time budget is `MorphBuilderConfig::time_limit` (1s), which has no CLI flag.
 #[derive(Debug, Clone, Args)]
 #[command(next_help_heading = "Morph")]
 pub struct MorphArgs {

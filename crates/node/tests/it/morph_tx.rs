@@ -429,17 +429,19 @@ async fn morph_tx_v0_token_balance_decreases() -> eyre::Result<()> {
 /// - mainnet gas used: 59_335
 ///
 /// The important shape is not the exact mainnet state, but that the MorphTx pays
-/// fees in the same ERC20 contract it calls. Fee deduction touches the sender's
-/// balance slot before the main ERC20 `transfer` SLOAD/SSTORE pair, so this
-/// catches regressions in the `sload_morph`, `sstore_morph`, and reimburse
-/// cold/warm-state handling.
+/// fees in the same ERC20 contract it calls. Fee deduction writes the sender's
+/// balance slot before the main ERC20 `transfer` SLOAD/SSTORE pair and leaves it
+/// cold, with its DB-committed `original_value` and the deducted present value.
+/// Morph relies on revm's native SLOAD/SSTORE to charge geth-equivalent gas for
+/// that state (see `MorphEvm::new` in `crates/revm/src/evm.rs`), so this test
+/// guards it together with the reimburse cold/warm-state handling.
 ///
-/// `EXPECTED_GAS_USED = 48_128` is the sandbox golden, NOT the mainnet
+/// The expected `48_128` is the sandbox golden, NOT the mainnet
 /// 59_335. The sandbox uses a minimal hand-written ERC20 with one
 /// storage slot per `transfer`, while the mainnet token's compiled
 /// bytecode does extra checks; initial balances and call data sizes also
-/// differ. What's locked is the bug-vs-fix delta: a regression in
-/// `sload_morph`/`sstore_morph` causes the main tx's SSTORE on
+/// differ. What's locked is the bug-vs-fix delta: a regression that
+/// re-baselines the slot's `original_value` causes the main tx's SSTORE on
 /// `sender.balanceOf` to be charged 2900 (SSTORE_RESET) instead of 100
 /// (dirty), pushing `cumulative_gas_used` ~2800 above the golden and
 /// tripping this assertion before the change reaches mainnet.

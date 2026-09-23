@@ -31,7 +31,6 @@
 //! │  │   - Calculates L1 data fee for all L2 transactions     │   │
 //! │  │   - Extracts token fee info for MorphTx (0x7F)         │   │
 //! │  │   - Builds receipts with full Morph-specific context   │   │
-//! │  │   - Applies hardfork state changes (Curie, etc.)       │   │
 //! │  └─────────────────────────────────────────────────────────┘   │
 //! └─────────────────────────────────────────────────────────────────┘
 //! ```
@@ -100,9 +99,6 @@ pub use morph_revm::{MorphBlockEnv, MorphHaltReason};
 /// - Block executor creation with Morph-specific execution logic
 /// - Block assembler for constructing `MorphHeader` blocks
 ///
-/// # Usage
-///
-/// Create with a chain specification:
 /// # Trait Implementations
 ///
 /// - `ConfigureEvm`: Provides EVM environment setup and block context creation

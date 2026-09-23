@@ -1,8 +1,8 @@
 //! Morph-Reth version metadata.
 //!
 //! Overrides reth's default version info so `--version` reports morph-reth's
-//! own version, commit SHA, and build timestamp instead of the upstream reth
-//! fork's values.
+//! own version, commit SHA, and build timestamp instead of upstream reth's
+//! values.
 
 use reth_node_core::version::{RethCliVersionConsts, try_init_version_metadata};
 use std::{borrow::Cow, env};

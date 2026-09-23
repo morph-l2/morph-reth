@@ -113,11 +113,11 @@ where
     }
 }
 
-/// Proofs `ExEx` - processes blocks and tracks state changes within fault proof window.
+/// Proofs `ExEx` - processes blocks and tracks state changes within the proof-history window.
 ///
-/// Saves and serves trie nodes to make proofs faster. This handles the process of
-/// saving the current state, new blocks as they're added, and serving proof RPCs
-/// based on the saved data.
+/// Saves trie nodes to make proofs faster. This handles the process of saving new
+/// blocks as they're added on top of the state written by `morph-reth proofs init`;
+/// the proof RPC overrides are served from the saved data.
 ///
 #[derive(Debug)]
 pub struct MorphProofsExEx<Node, Storage>
@@ -307,8 +307,9 @@ where
     /// Drains pending sync states for the lifetime of the node.
     ///
     /// Proof history is a best-effort side index: no failure propagates out of this loop. A failed
-    /// turn is classified for observability and then abandoned; later notifications may supply
-    /// recovery work. Structural failures additionally clear the health gauge so
+    /// turn is classified for observability; a transient forward-sync failure is re-armed after a
+    /// backoff, and any other failure is abandoned until later notifications supply recovery
+    /// work. Structural failures additionally clear the health gauge so
     /// `debug_proofsSyncStatus` and the RPC canonical-anchor check remain the authority on whether
     /// the index can be served.
     async fn sync_loop(
@@ -1165,8 +1166,8 @@ mod tests {
     ///
     /// Right after `proofs init` the store holds only its anchor, so `earliest == latest` and any
     /// reorg of the tip is already "beyond earliest" — the single most likely reorg to hit a freshly
-    /// initialized node. `handle_revert` therefore has to contain that failure: it runs inside a
-    /// critical task whose error path is a panic, so returning `Err` here would shut the node down.
+    /// initialized node. `run_revert` therefore has to contain that failure: it runs inside a
+    /// critical task whose error path is a panic, so propagating `Err` would shut the node down.
     #[tokio::test]
     async fn handle_revert_contains_unwind_failure() {
         let dir = tempdir_path();
