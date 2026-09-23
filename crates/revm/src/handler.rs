@@ -1736,13 +1736,13 @@ mod tests {
         authority: Address,
         delegate: Address,
         chain_id: u64,
-        nonce: u64,
+        auth_nonce: u64,
     ) -> Either<SignedAuthorization, RecoveredAuthorization> {
         Either::Right(RecoveredAuthorization::new_unchecked(
             Authorization {
                 chain_id: U256::from(chain_id),
                 address: delegate,
-                nonce,
+                nonce: auth_nonce,
             },
             RecoveredAuthority::Valid(authority),
         ))

@@ -549,18 +549,22 @@ pub fn wallet_at_index(idx: u32, chain_id: u64) -> PrivateKeySigner {
 /// Creates a signed EIP-1559 transfer transaction with an explicit nonce.
 ///
 /// Public version for use in test helpers outside this module.
-pub async fn make_transfer_tx(chain_id: u64, signer: PrivateKeySigner, nonce: u64) -> Bytes {
-    transfer_tx_with_nonce(chain_id, signer, nonce).await
+pub async fn make_transfer_tx(chain_id: u64, signer: PrivateKeySigner, tx_nonce: u64) -> Bytes {
+    transfer_tx_with_nonce(chain_id, signer, tx_nonce).await
 }
 
 /// Creates a signed EIP-2930 (type 0x01) transaction.
-pub fn make_eip2930_tx(chain_id: u64, signer: PrivateKeySigner, nonce: u64) -> eyre::Result<Bytes> {
+pub fn make_eip2930_tx(
+    chain_id: u64,
+    signer: PrivateKeySigner,
+    tx_nonce: u64,
+) -> eyre::Result<Bytes> {
     use alloy_consensus::{SignableTransaction, TxEip2930};
     use alloy_signer::SignerSync;
 
     let tx = TxEip2930 {
         chain_id,
-        nonce,
+        nonce: tx_nonce,
         gas_price: 20_000_000_000u128,
         gas_limit: 21_000,
         to: TxKind::Call(Address::with_last_byte(0x42)),
@@ -576,13 +580,17 @@ pub fn make_eip2930_tx(chain_id: u64, signer: PrivateKeySigner, nonce: u64) -> e
 }
 
 /// Creates a signed EIP-4844 (type 0x03) transaction.
-pub fn make_eip4844_tx(chain_id: u64, signer: PrivateKeySigner, nonce: u64) -> eyre::Result<Bytes> {
+pub fn make_eip4844_tx(
+    chain_id: u64,
+    signer: PrivateKeySigner,
+    tx_nonce: u64,
+) -> eyre::Result<Bytes> {
     use alloy_consensus::{EthereumTxEnvelope, SignableTransaction, TxEip4844};
     use alloy_signer::SignerSync;
 
     let tx = TxEip4844 {
         chain_id,
-        nonce,
+        nonce: tx_nonce,
         gas_limit: 100_000,
         max_fee_per_gas: 20_000_000_000u128,
         max_priority_fee_per_gas: 20_000_000_000u128,
@@ -601,7 +609,11 @@ pub fn make_eip4844_tx(chain_id: u64, signer: PrivateKeySigner, nonce: u64) -> e
 }
 
 /// Creates a signed EIP-7702 (type 0x04) transaction.
-pub fn make_eip7702_tx(chain_id: u64, signer: PrivateKeySigner, nonce: u64) -> eyre::Result<Bytes> {
+pub fn make_eip7702_tx(
+    chain_id: u64,
+    signer: PrivateKeySigner,
+    tx_nonce: u64,
+) -> eyre::Result<Bytes> {
     use alloy_consensus::{SignableTransaction, TxEip7702};
     use alloy_eips::eip7702::Authorization;
     use alloy_signer::SignerSync;
@@ -610,7 +622,7 @@ pub fn make_eip7702_tx(chain_id: u64, signer: PrivateKeySigner, nonce: u64) -> e
     let authorization = Authorization {
         chain_id: U256::from(chain_id),
         address: delegate_to,
-        nonce,
+        nonce: tx_nonce,
     };
     let auth_sig = signer
         .sign_hash_sync(&authorization.signature_hash())
@@ -619,7 +631,7 @@ pub fn make_eip7702_tx(chain_id: u64, signer: PrivateKeySigner, nonce: u64) -> e
 
     let tx = TxEip7702 {
         chain_id,
-        nonce,
+        nonce: tx_nonce,
         gas_limit: 100_000,
         max_fee_per_gas: 20_000_000_000u128,
         max_priority_fee_per_gas: 20_000_000_000u128,
@@ -639,11 +651,11 @@ pub fn make_eip7702_tx(chain_id: u64, signer: PrivateKeySigner, nonce: u64) -> e
 /// Creates a signed EIP-1559 contract deployment transaction (CREATE).
 ///
 /// The returned bytes can be injected into the pool via `node.rpc.inject_tx()`.
-/// The deployed contract address is computed by `Address::create(sender, nonce)`.
+/// The deployed contract address is computed by `Address::create(sender, tx_nonce)`.
 pub fn make_deploy_tx(
     chain_id: u64,
     signer: PrivateKeySigner,
-    nonce: u64,
+    tx_nonce: u64,
     init_code: impl Into<Bytes>,
 ) -> eyre::Result<Bytes> {
     use alloy_consensus::{SignableTransaction, TxEip1559};
@@ -651,7 +663,7 @@ pub fn make_deploy_tx(
 
     let tx = TxEip1559 {
         chain_id,
-        nonce,
+        nonce: tx_nonce,
         gas_limit: 500_000,
         max_fee_per_gas: 20_000_000_000u128,
         max_priority_fee_per_gas: 20_000_000_000u128,
@@ -668,9 +680,9 @@ pub fn make_deploy_tx(
 }
 
 /// Creates a signed EIP-1559 transfer transaction with an explicit nonce.
-async fn transfer_tx_with_nonce(chain_id: u64, signer: PrivateKeySigner, nonce: u64) -> Bytes {
+async fn transfer_tx_with_nonce(chain_id: u64, signer: PrivateKeySigner, tx_nonce: u64) -> Bytes {
     let tx = TransactionRequest {
-        nonce: Some(nonce),
+        nonce: Some(tx_nonce),
         value: Some(U256::from(100)),
         to: Some(TxKind::Call(Address::random())),
         gas: Some(21_000),
@@ -915,7 +927,7 @@ pub fn test_token_balance_slot(account: Address) -> B256 {
 /// ```ignore
 /// use morph_node::test_utils::{MorphTxBuilder, TEST_TOKEN_ID};
 ///
-/// let raw = MorphTxBuilder::new(chain_id, signer, nonce)
+/// let raw = MorphTxBuilder::new(chain_id, signer, tx_nonce)
 ///     .with_v0_token_fee(TEST_TOKEN_ID)
 ///     .build_signed()?;
 /// ```
@@ -923,7 +935,7 @@ pub fn test_token_balance_slot(account: Address) -> B256 {
 /// # Example — v1 ETH fee
 ///
 /// ```ignore
-/// let raw = MorphTxBuilder::new(chain_id, signer, nonce)
+/// let raw = MorphTxBuilder::new(chain_id, signer, tx_nonce)
 ///     .with_v1_eth_fee()
 ///     .build_signed()?;
 /// ```
@@ -951,11 +963,11 @@ impl MorphTxBuilder {
     ///
     /// Defaults to v0, fee_token_id=0 (must call `with_v0_token_fee` or
     /// `with_v1_eth_fee` before building).
-    pub fn new(chain_id: u64, signer: PrivateKeySigner, nonce: u64) -> Self {
+    pub fn new(chain_id: u64, signer: PrivateKeySigner, tx_nonce: u64) -> Self {
         Self {
             chain_id,
             signer,
-            nonce,
+            nonce: tx_nonce,
             gas_limit: 100_000,
             max_fee_per_gas: 20_000_000_000u128,
             max_priority_fee_per_gas: 20_000_000_000u128,
@@ -1143,20 +1155,20 @@ impl MorphTxBuilder {
 /// Signs an EIP-7702 authorization tuple delegating `authority` (the signer)
 /// to `delegate`, for use in `0x04` or MorphTx v2 authorization lists.
 ///
-/// `nonce` must be the authority's nonce at the time the tuple is applied:
+/// `auth_nonce` must be the authority's nonce at the time the tuple is applied:
 /// for a self-delegating sender that is `tx.nonce + 1`.
 pub fn sign_authorization(
     signer: &PrivateKeySigner,
     chain_id: u64,
     delegate: Address,
-    nonce: u64,
+    auth_nonce: u64,
 ) -> eyre::Result<alloy_eips::eip7702::SignedAuthorization> {
     use alloy_signer::SignerSync;
 
     let authorization = alloy_eips::eip7702::Authorization {
         chain_id: U256::from(chain_id),
         address: delegate,
-        nonce,
+        nonce: auth_nonce,
     };
     let auth_sig = signer
         .sign_hash_sync(&authorization.signature_hash())

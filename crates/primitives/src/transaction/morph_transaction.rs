@@ -2624,11 +2624,11 @@ mod tests {
 
     /// A syntactically valid authorization tuple (the signature is not
     /// recoverable; recovery only matters at execution time).
-    fn sample_authorization(nonce: u64) -> SignedAuthorization {
+    fn sample_authorization(auth_nonce: u64) -> SignedAuthorization {
         Authorization {
             chain_id: U256::from(2818),
             address: address!("2222222222222222222222222222222222222222"),
-            nonce,
+            nonce: auth_nonce,
         }
         .into_signed(Signature::new(
             U256::from(0x1111u64),
