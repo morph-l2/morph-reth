@@ -118,9 +118,11 @@ where
     type AddOns = MorphAddOns<NodeAdapter<N>>;
 
     fn components_builder(&self) -> Self::ComponentsBuilder {
-        Self::components(
-            MorphBuilderConfig::default().with_max_da_block_size(self.args.max_tx_payload_bytes),
-        )
+        let mut config = MorphBuilderConfig::default();
+        if let Some(max_tx_payload_bytes) = self.args.max_tx_payload_bytes {
+            config = config.with_max_da_block_size(max_tx_payload_bytes);
+        }
+        Self::components(config)
     }
 
     fn add_ons(&self) -> Self::AddOns {

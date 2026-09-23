@@ -24,7 +24,7 @@
     "morph": {
       "useZktrie": false,
       "maxTxPerBlock": 100,
-      "maxTxPayloadBytesPerBlock": 122880,
+      "maxTxPayloadBytesPerBlock": 737280,
       "feeVaultAddress": "0x530000000000000000000000000000000000000a"
     }
   },

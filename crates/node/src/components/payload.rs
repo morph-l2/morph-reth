@@ -35,6 +35,22 @@ impl MorphPayloadBuilderBuilder {
     }
 }
 
+fn apply_chain_payload_limit(
+    mut config: MorphBuilderConfig,
+    chain_max_tx_payload_bytes: u64,
+) -> eyre::Result<MorphBuilderConfig> {
+    let max_da_block_size = config
+        .max_da_block_size
+        .unwrap_or(chain_max_tx_payload_bytes);
+    eyre::ensure!(
+        max_da_block_size <= chain_max_tx_payload_bytes,
+        "--morph.max-tx-payload-bytes ({max_da_block_size}) exceeds the chain consensus limit \
+         ({chain_max_tx_payload_bytes})"
+    );
+    config = config.with_max_da_block_size(max_da_block_size);
+    Ok(config)
+}
+
 impl<Node>
     PayloadBuilderBuilder<
         Node,
@@ -55,7 +71,12 @@ where
         pool: morph_txpool::MorphTransactionPool<Node::Provider, InMemoryBlobStore>,
         evm_config: MorphEvmConfig,
     ) -> eyre::Result<Self::PayloadBuilder> {
-        let mut config = self.config;
+        let chain_max_tx_payload_bytes = ctx.chain_spec().max_tx_payload_bytes_per_block();
+        let mut config = apply_chain_payload_limit(self.config, chain_max_tx_payload_bytes)?;
+        let max_da_block_size = config
+            .max_da_block_size
+            .expect("chain payload limit is always applied");
+
         let desired_gas_limit = ctx.payload_builder_config().gas_limit();
         if let Some(desired) = desired_gas_limit {
             config = config.with_desired_gas_limit(desired);
@@ -67,9 +88,45 @@ where
         info!(
             target: "morph::node",
             ?desired_gas_limit,
+            max_da_block_size,
+            chain_max_tx_payload_bytes,
             "Payload builder initialized"
         );
 
         Ok(builder)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chain_limit_is_the_default_builder_limit() {
+        let config = apply_chain_payload_limit(MorphBuilderConfig::default(), 1024).unwrap();
+        assert_eq!(config.max_da_block_size, Some(1024));
+    }
+
+    #[test]
+    fn builder_limit_can_be_lower_than_chain_limit() {
+        let config = apply_chain_payload_limit(
+            MorphBuilderConfig::default().with_max_da_block_size(512),
+            1024,
+        )
+        .unwrap();
+        assert_eq!(config.max_da_block_size, Some(512));
+    }
+
+    #[test]
+    fn builder_limit_cannot_exceed_chain_limit() {
+        let err = apply_chain_payload_limit(
+            MorphBuilderConfig::default().with_max_da_block_size(1025),
+            1024,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("exceeds the chain consensus limit")
+        );
     }
 }
