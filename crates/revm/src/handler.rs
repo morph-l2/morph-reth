@@ -2,7 +2,6 @@
 
 use alloy_primitives::{Address, Bytes, U256};
 use revm::{
-    ExecuteEvm,
     context::{
         Cfg, ContextTr, JournalTr, Transaction,
         result::{EVMError, ExecutionResult, InvalidTransaction},
@@ -106,8 +105,6 @@ where
         evm.cached_l1_data_fee = U256::ZERO;
         evm.pre_fee_refund = 0;
         evm.cached_token_fee_info = None;
-        evm.pre_fee_logs.clear();
-        evm.post_fee_logs.clear();
 
         let (_, tx, _, journal, _, _) = evm.ctx().all_mut();
 
@@ -451,25 +448,17 @@ where
             )
             .map(|_| ())
         } else {
-            // Cache refund Transfer logs separately, matching the pre_fee_logs
-            // pattern from validate_and_deduct_token_fee.
-            let log_count_before = evm.ctx_mut().journal_mut().logs.len();
-            let result = transfer_erc20_with_evm(
+            // The refund's Transfer logs stay in the journal, after the main frame's, which is
+            // where go-ethereum's `StateDB.logs` records them too.
+            transfer_erc20_with_evm(
                 evm,
                 beneficiary,
                 caller,
                 token_fee_info.token_address,
                 token_amount_required,
                 None,
-            );
-            let refund_logs: Vec<_> = evm
-                .ctx_mut()
-                .journal_mut()
-                .logs
-                .drain(log_count_before..)
-                .collect();
-            evm.post_fee_logs = refund_logs;
-            result.map(|_| ())
+            )
+            .map(|_| ())
         };
 
         if let Err(err) = refund_result {
@@ -642,27 +631,15 @@ where
         if token_fee_info.balance_slot.is_none() {
             // balanceOf runs even for a zero fee. Geth Prepare clears its access
             // list/transient storage before the main transaction in that case too.
-            // Cache fee Transfer logs separately from the journal.
             //
-            // go-ethereum's StateDB.logs is independent of the state snapshot/revert
-            // mechanism — fee logs survive regardless of main tx result. In revm they
-            // would not: the `finalize()` below clears the journal's logs, and whatever
-            // survived would still be dropped when `execution_result` commits the
-            // transaction. So the fee logs are kept out of the handler pipeline entirely
-            // and merged back in the receipt builder.
-            evm.pre_fee_logs = std::mem::take(&mut evm.ctx_mut().journal_mut().logs);
-
-            // State changes should be marked cold to avoid warm access in the main tx execution.
-            // Fee deduction ran a real EVM frame, so its state writes must survive while the
-            // frame's metadata must not: go-ethereum's `StateDB.Prepare` rebuilds the access
+            // Fee deduction ran real EVM frames, so their state writes must survive while the
+            // frames' metadata must not: go-ethereum's `StateDB.Prepare` rebuilds the access
             // list and resets transient storage before the main transaction
-            // (core/state/statedb.go:1066). `finalize()` is the nearest revm equivalent — it
-            // commits the deduction's state and drops the journal, undo history, logs and
-            // transient storage.
+            // (core/state/statedb.go:1066). Those are the only two things done here.
             //
-            // `mark_cold` below only has to *drop* the warmth this frame's own CALL created; it
-            // does not restore what `Prepare` would have left warm, and must not try to. That
-            // warmth arrives later from upstream, which is why the two cannot be swapped:
+            // `mark_cold` below only has to *drop* the warmth these frames created; it does not
+            // restore what `Prepare` would have left warm, and must not try to. That warmth
+            // arrives later from upstream, which is why the two cannot be swapped:
             // `run_without_catch_error` runs this deduction inside `validate()`, then
             // `pre_execution()` → `pre_execution::load_accounts` re-warms the coinbase
             // (EIP-3651) and the transaction's access list, and the nonce bump just below
@@ -670,35 +647,32 @@ where
             // reads `COINBASE` would be charged 2600 instead of go-ethereum's 100; nothing here
             // would catch it, because no fixture's main frame touches the coinbase.
             //
-            // The `transaction_id` handling inside `finalize()` is load-bearing, not incidental.
-            // Warming a slot goes through `EvmStorageSlot::mark_warm_with_transaction_id`, which
-            // re-baselines the EIP-2200 `original_value` to the present value whenever the slot's
-            // transaction id differs from the journal's (revm-state/src/lib.rs). That must not
-            // happen to the slot the deduction just cleared: re-baselining it to zero would make
-            // the main frame's SSTORE a *create* (SSTORE_SET, 20000) rather than a *recreate*
-            // (100), and would drop the `SubRefund` that cancels the deduction frame's `+4800`.
-            // Measured on `main_restores_cleared_slot`: 23_291 gas becomes 38_391 (+19_900
-            // -4_800), and the state root moves with the fee it implies.
+            // `mark_cold` leaves each slot's transaction id alone, and revm-state re-baselines
+            // the EIP-2200 `original_value` only when that id changes (bluealloy/revm#3746), so
+            // the main frame still prices its SSTOREs against the value committed before this
+            // transaction, as go-ethereum's `GetCommittedState` does. Re-baselining the slot
+            // the deduction just cleared would turn the main frame's restoring SSTORE into a
+            // create and drop the `SubRefund` that cancels the deduction's `+4800`: measured on
+            // `main_restores_cleared_slot`, 23_291 gas becomes 38_391. Nothing here depends on
+            // the journal's own id either, so batched execution (`ExecuteEvm::transact_many`)
+            // prices the same as one `transact` per transaction.
             //
-            // It does not happen because ids stay equal throughout execution. revm advances the
-            // id only when a transaction finishes — `commit_tx()` from `execution_result`, or
-            // `discard_tx()` on the error path — both after the main frame is done;
-            // `ExecuteEvm::finalize` then resets it to ZERO before the next transaction. So
-            // across this deduction and the main frame the journal's id is 0 — and this
-            // `finalize()` keeps it at 0 rather than advancing it. Swapping in `commit_tx()` here
-            // would leave the deduction-warmed slots holding 0 while the journal held 1, and the
-            // main frame's first touch of them would re-baseline `original_value`; the call-path
-            // fixtures under `bin/morph-statetest` catch exactly that. An explicit `mark_cold`
-            // carries no such risk: it drives only the warm/cold gas decision, never the
-            // re-baseline.
-            let mut state = evm.finalize();
-            state.iter_mut().for_each(|(_, acc)| {
-                acc.mark_cold();
-                acc.storage.iter_mut().for_each(|(_, slot)| {
-                    slot.mark_cold();
-                });
-            });
-            evm.ctx_mut().journal_mut().state.extend(state);
+            // The deduction's Transfer logs and undo history stay in the journal. The main
+            // frame's checkpoint is taken after this point, so a revert or halt there truncates
+            // only its own logs, and `post_execution::output` returns
+            // `[deduction] + [main frame, on success] + [refund]` for every outcome: the order
+            // go-ethereum's `StateDB.logs` produces, since those logs sit outside its
+            // snapshot/revert mechanism. The undo history lets `catch_error` still roll the
+            // deduction back.
+            let journal = evm.ctx_mut().journal_mut();
+            journal.transient_storage.clear();
+            for account in journal.state.values_mut() {
+                account.mark_cold();
+                account
+                    .storage
+                    .values_mut()
+                    .for_each(|slot| slot.mark_cold());
+            }
         }
 
         // CREATE nonce is bumped later in make_create_frame
@@ -1160,6 +1134,7 @@ mod tests {
     use morph_chainspec::hardfork::MorphHardfork;
     use morph_primitives::MORPH_TX_TYPE_ID;
     use revm::{
+        ExecuteEvm,
         context::{BlockEnv, TxEnv},
         context_interface::{cfg::gas_params::GasId, result::InvalidTransaction},
         database::{CacheDB, EmptyDB},
@@ -2023,7 +1998,13 @@ mod tests {
     }
 
     fn fee_refund_evm(payer_token_balance: U256) -> MorphEvm<CacheDB<EmptyDB>, NoOpInspector> {
-        let code = fee_refund_slotless_erc20_code();
+        fee_refund_evm_with_token_code(fee_refund_slotless_erc20_code(), payer_token_balance)
+    }
+
+    fn fee_refund_evm_with_token_code(
+        code: Bytes,
+        payer_token_balance: U256,
+    ) -> MorphEvm<CacheDB<EmptyDB>, NoOpInspector> {
         let mut db = CacheDB::new(EmptyDB::default());
         db.insert_account_info(FEE_REFUND_CALLER, AccountInfo::default());
         db.insert_account_info(
@@ -2122,6 +2103,174 @@ mod tests {
             gas_refunded,
             fee_refund_present_value(&evm, FEE_REFUND_CALLER),
         )
+    }
+
+    /// `fee_refund_slotless_erc20_code` whose `transfer` also emits
+    /// `Transfer(msg.sender, to, amount)`, so fee frames leave logs behind.
+    fn fee_refund_logging_erc20_code() -> Bytes {
+        let mut code = vec![
+            0x36, // CALLDATASIZE
+            0x60, 0x44, // PUSH1 68
+            0x14, // EQ
+            0x60, 0x13, // PUSH1 19 (transfer JUMPDEST)
+            0x57, // JUMPI
+            // balanceOf(address)
+            0x60, 0x04, // PUSH1 4
+            0x35, // CALLDATALOAD
+            0x54, // SLOAD
+            0x60, 0x00, // PUSH1 0
+            0x52, // MSTORE
+            0x60, 0x20, // PUSH1 32
+            0x60, 0x00, // PUSH1 0
+            0xf3, // RETURN
+            // transfer(address,uint256)
+            0x5b, // JUMPDEST (pc 19)
+            0x60, 0x24, // PUSH1 36
+            0x35, // CALLDATALOAD  -> amount
+            0x80, // DUP1          -> amount amount
+            0x33, // CALLER        -> caller amount amount
+            0x54, // SLOAD         -> bal_from amount amount
+            0x03, // SUB           -> bal_from-amount amount
+            0x33, // CALLER        -> caller new_from amount
+            0x55, // SSTORE        -> amount
+            0x60, 0x04, // PUSH1 4
+            0x35, // CALLDATALOAD  -> to amount
+            0x80, // DUP1          -> to to amount
+            0x54, // SLOAD         -> bal_to to amount
+            0x82, // DUP3          -> amount bal_to to amount
+            0x01, // ADD           -> new_to to amount
+            0x90, // SWAP1         -> to new_to amount
+            0x55, // SSTORE        -> amount
+            0x60, 0x00, // PUSH1 0
+            0x52, // MSTORE        -> memory[0..32] = amount
+            0x60, 0x04, // PUSH1 4
+            0x35, // CALLDATALOAD  -> to
+            0x33, // CALLER        -> caller to
+            0x7f, // PUSH32 Transfer topic
+        ];
+        code.extend_from_slice(keccak256("Transfer(address,address,uint256)").as_slice());
+        code.extend_from_slice(&[
+            0x60, 0x20, // PUSH1 32
+            0x60, 0x00, // PUSH1 0
+            0xa3, // LOG3          -> Transfer(caller, to, amount)
+            0x60, 0x01, // PUSH1 1
+            0x60, 0x00, // PUSH1 0
+            0x52, // MSTORE
+            0x60, 0x20, // PUSH1 32
+            0x60, 0x00, // PUSH1 0
+            0xf3, // RETURN
+        ]);
+        Bytes::from(code)
+    }
+
+    fn fee_log_tx(nonce: u64, to: Address, data: Bytes) -> MorphTxEnv {
+        MorphTxEnv {
+            inner: TxEnv {
+                tx_type: MORPH_TX_TYPE_ID,
+                caller: FEE_REFUND_CALLER,
+                gas_limit: FEE_REFUND_GAS_LIMIT,
+                gas_price: FEE_REFUND_GAS_PRICE,
+                kind: TxKind::Call(to),
+                data,
+                nonce,
+                ..Default::default()
+            },
+            fee_token_id: Some(FEE_REFUND_TOKEN_ID),
+            ..Default::default()
+        }
+    }
+
+    /// Asserts `log` is the logging token's `Transfer(from, to, ..)`.
+    fn assert_fee_transfer(log: &alloy_primitives::Log, from: Address, to: Address) {
+        assert_eq!(log.address, FEE_REFUND_TOKEN);
+        assert_eq!(
+            log.topics(),
+            &[
+                keccak256("Transfer(address,address,uint256)"),
+                from.into_word(),
+                to.into_word()
+            ]
+        );
+    }
+
+    /// go-ethereum keeps the fee Transfers in `StateDB.logs`, outside the snapshot the main
+    /// frame reverts, so they reach the receipt even when the transaction fails. revm returns
+    /// the journal's logs for every outcome, and the main frame's checkpoint is taken after the
+    /// deduction, so the same two logs come back on a revert, deduction first.
+    #[test]
+    fn fee_transfer_logs_survive_a_reverting_main_frame() {
+        const REVERTER: Address = address!("5000000000000000000000000000000000000005");
+        let mut evm = fee_refund_evm_with_token_code(
+            fee_refund_logging_erc20_code(),
+            U256::from(10).pow(U256::from(18)),
+        );
+        let code = Bytes::from_static(&[0x60, 0x00, 0x60, 0x00, 0xfd]); // REVERT(0, 0)
+        evm.ctx_mut().db_mut().insert_account_info(
+            REVERTER,
+            AccountInfo {
+                code_hash: keccak256(code.as_ref()),
+                code: Some(Bytecode::new_raw(code)),
+                ..Default::default()
+            },
+        );
+
+        let result = evm
+            .transact_one(fee_log_tx(0, REVERTER, Bytes::new()))
+            .expect("a reverting main frame is still a valid transaction");
+        assert!(
+            matches!(result, ExecutionResult::Revert { .. }),
+            "{result:?}"
+        );
+        let logs = result.into_logs();
+        assert_eq!(logs.len(), 2, "deduction and refund Transfers: {logs:?}");
+        assert_fee_transfer(&logs[0], FEE_REFUND_CALLER, FEE_REFUND_BENEFICIARY);
+        assert_fee_transfer(&logs[1], FEE_REFUND_BENEFICIARY, FEE_REFUND_CALLER);
+    }
+
+    /// Batched execution (`transact_many`, no `finalize` between transactions) must price and
+    /// log exactly like one `transact` per transaction. The second transaction pays in the
+    /// token and then moves it in its main frame, touching the balance slot the deduction just
+    /// wrote: were the slot's EIP-2200 original value re-baselined between the two, that
+    /// SSTORE would be charged as a reset (2900) instead of a dirty write (100).
+    #[test]
+    fn batched_transactions_match_individual_execution() {
+        let balance = U256::from(10).pow(U256::from(18));
+        let txs = [
+            fee_log_tx(0, FEE_REFUND_TARGET, Bytes::new()),
+            fee_log_tx(
+                1,
+                FEE_REFUND_TOKEN,
+                build_transfer_calldata(FEE_REFUND_TARGET, U256::from(1)),
+            ),
+        ];
+
+        let mut individual =
+            fee_refund_evm_with_token_code(fee_refund_logging_erc20_code(), balance);
+        let individual_results: Vec<_> = txs
+            .iter()
+            .map(|tx| {
+                revm::ExecuteCommitEvm::transact_commit(&mut individual, tx.clone())
+                    .expect("token-fee MorphTx must execute")
+            })
+            .collect();
+
+        let mut batched = fee_refund_evm_with_token_code(fee_refund_logging_erc20_code(), balance);
+        let batched_results = batched
+            .transact_many(txs.into_iter())
+            .expect("token-fee MorphTx must execute");
+
+        for (individual, batched) in individual_results.iter().zip(&batched_results) {
+            assert!(individual.is_success(), "{individual:?}");
+            assert_eq!(individual.tx_gas_used(), batched.tx_gas_used());
+            assert_eq!(individual.logs(), batched.logs());
+        }
+
+        // The second transaction's logs: deduction, the main frame's own transfer, refund.
+        let logs = individual_results[1].logs();
+        assert_eq!(logs.len(), 3, "{logs:?}");
+        assert_fee_transfer(&logs[0], FEE_REFUND_CALLER, FEE_REFUND_BENEFICIARY);
+        assert_fee_transfer(&logs[1], FEE_REFUND_CALLER, FEE_REFUND_TARGET);
+        assert_fee_transfer(&logs[2], FEE_REFUND_BENEFICIARY, FEE_REFUND_CALLER);
     }
 
     #[test]
