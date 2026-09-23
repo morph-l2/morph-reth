@@ -476,16 +476,14 @@ mod tests {
     }
 
     #[test]
-    fn transactions_already_executed_by_the_block_do_not_consume_the_budget_again() {
-        // The block executed nonce 0, which cost far less than the `TX_TOKEN_BUDGET` it
-        // reserved, so the post-state still affords nonce 1 — but not both at max fee.
-        let mut db = test_state(1, 0, TX_TOKEN_BUDGET + TX_TOKEN_BUDGET / 2);
+    fn transactions_already_executed_by_the_block_are_skipped_not_taken_for_a_gap() {
+        // The new block executed nonce 0, but this task can still see it: reth's own maintenance
+        // removes it on the same notification, in no guaranteed order. Reading it as a nonce gap
+        // would end the walk before nonce 1, which the post-state can no longer pay for.
+        let mut db = test_state(1, 0, TX_TOKEN_BUDGET - 1);
         let (tx0, tx1) = (token_fee_tx(0), token_fee_tx(1));
 
-        assert!(
-            removable(&mut db, vec![&tx0, &tx1]).is_empty(),
-            "nonce 1 is affordable against the post-state and nonce 0 is already mined"
-        );
+        assert_eq!(removable(&mut db, vec![&tx0, &tx1]), vec![*tx1.hash()]);
     }
 
     #[test]
@@ -1308,11 +1306,12 @@ mod tests {
 
         // nonce 0 pays in tokens, nonce 1 is a plain ETH transaction that only depends on
         // nonce 0 through the nonce sequence.
-        futures::executor::block_on(pool.add_transaction(
+        let unpayable = futures::executor::block_on(pool.add_transaction(
             reth_transaction_pool::TransactionOrigin::Local,
             token_fee_tx(0),
         ))
-        .unwrap();
+        .unwrap()
+        .hash;
         let descendant = futures::executor::block_on(pool.add_transaction(
             reth_transaction_pool::TransactionOrigin::Local,
             legacy_tx(1),
@@ -1330,8 +1329,15 @@ mod tests {
             futures::stream::iter([event]),
         ));
 
+        // Without the removal, every early return of the maintenance round would pass the
+        // descendant check below as well.
         assert!(
-            pool.get(&descendant).is_some(),
+            pool.get(&unpayable).is_none(),
+            "the transaction the sender can no longer pay for must be removed"
+        );
+        let queued = pool.all_transactions().queued;
+        assert!(
+            queued.iter().any(|tx| *tx.hash() == descendant),
             "an independently affordable ETH-fee successor must be parked, not deleted"
         );
     }
