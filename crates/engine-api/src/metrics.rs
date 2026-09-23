@@ -26,7 +26,8 @@ pub(crate) struct MorphEngineApiMetrics {
     // -------------------------------------------------------------------------
     /// Latency for `engine_assembleL2Block` and `engine_assembleL2BlockV2` calls.
     pub(crate) assemble_l2_block_duration_seconds: Histogram,
-    /// Number of `engine_assembleL2Block`/`engine_assembleL2BlockV2` calls that returned an error.
+    /// Number of `engine_assembleL2Block`/`engine_assembleL2BlockV2` calls whose payload build
+    /// failed.
     pub(crate) assemble_l2_block_failures_total: Counter,
 
     // -------------------------------------------------------------------------
@@ -34,7 +35,8 @@ pub(crate) struct MorphEngineApiMetrics {
     // -------------------------------------------------------------------------
     /// Latency for `engine_newL2Block` and `engine_newL2BlockV2` calls.
     pub(crate) new_l2_block_duration_seconds: Histogram,
-    /// Number of `engine_newL2Block`/`engine_newL2BlockV2` calls that returned an error.
+    /// Number of `engine_newL2Block`/`engine_newL2BlockV2` calls rejected for a discontinuous
+    /// block number or parent hash mismatch, or whose engine import failed.
     pub(crate) new_l2_block_failures_total: Counter,
 
     // -------------------------------------------------------------------------
@@ -42,7 +44,8 @@ pub(crate) struct MorphEngineApiMetrics {
     // -------------------------------------------------------------------------
     /// Latency for `engine_validateL2Block` calls.
     pub(crate) validate_l2_block_duration_seconds: Histogram,
-    /// Number of `engine_validateL2Block` calls that returned an error or `success: false`.
+    /// Number of `engine_validateL2Block` calls rejected for a discontinuous block number or
+    /// parent hash mismatch, or that returned `success: false`.
     pub(crate) validate_l2_block_failures_total: Counter,
 
     // -------------------------------------------------------------------------

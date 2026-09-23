@@ -1194,8 +1194,11 @@ impl MorphProofsStore for MdbxProofsStorage {
         })?
     }
 
-    /// Prune all historical trie data till `new_earliest_block_ref` (inclusive) using
-    /// the [`BlockChangeSet`] index.
+    /// Prune trie and hashed-state history up to `new_earliest_block_ref`, using the
+    /// [`BlockChangeSet`] index to find the keys changed in the pruned range. Each such key keeps
+    /// only its latest version at or below the new earliest block (none if that version is a
+    /// deletion), so state at that block stays readable. The pruned blocks' change sets are
+    /// deleted and the earliest pointer moves to the new block.
     ///
     /// Arguments:
     /// - `new_earliest_block_ref`: The new earliest block reference; only its block number and
