@@ -56,7 +56,7 @@ pub struct TokenFeeInfo {
 
 /// Fee-token registry metadata without any caller-specific balance state.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct TokenRegistryEntry {
+pub struct TokenRegistryEntry {
     token_address: Address,
     is_active: bool,
     decimals: u8,
@@ -79,10 +79,7 @@ impl TokenRegistryEntry {
     }
 
     /// Load fee-token metadata without reading a caller's token balance.
-    pub(crate) fn load<DB: RevmDatabase>(
-        db: &mut DB,
-        token_id: u16,
-    ) -> Result<Option<Self>, DB::Error> {
+    pub fn load<DB: RevmDatabase>(db: &mut DB, token_id: u16) -> Result<Option<Self>, DB::Error> {
         read_registry_entry(db, token_id)
     }
 
@@ -98,7 +95,7 @@ impl TokenRegistryEntry {
     }
 
     /// Resolve the caller's balance to produce complete fee information.
-    pub(crate) fn load_for_caller<DB: Database>(
+    pub fn load_for_caller<DB: Database>(
         self,
         db: &mut DB,
         caller: Address,

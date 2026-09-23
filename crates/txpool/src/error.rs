@@ -54,12 +54,10 @@ pub enum MorphTxError {
         value: U256,
     },
 
-    /// Failed to fetch token information from state.
-    TokenInfoFetchFailed {
-        /// The token ID.
+    /// The token's balanceOf call reverted or returned malformed data.
+    TokenBalanceQueryFailed {
+        /// Token whose balance could not be evaluated.
         token_id: u16,
-        /// Error message.
-        message: String,
     },
 
     /// MorphTx format validation failed (version, memo length, gas fee ordering).
@@ -105,8 +103,8 @@ impl fmt::Display for MorphTxError {
                     "insufficient ETH balance for transaction value: balance {balance}, value {value}"
                 )
             }
-            Self::TokenInfoFetchFailed { token_id, message } => {
-                write!(f, "failed to fetch token info for ID {token_id}: {message}")
+            Self::TokenBalanceQueryFailed { token_id } => {
+                write!(f, "balanceOf failed for token ID {token_id}")
             }
             Self::InvalidFormat { reason } => {
                 write!(f, "invalid MorphTx format: {reason}")
@@ -129,11 +127,9 @@ impl PoolTransactionError for MorphTxError {
             // Token not found or not active - could be due to temporary state, not penalizable
             Self::TokenNotFound { .. } | Self::TokenNotActive { .. } => false,
             // Invalid price ratio - configuration issue, not penalizable
-            Self::InvalidPriceRatio { .. } => false,
+            Self::InvalidPriceRatio { .. } | Self::TokenBalanceQueryFailed { .. } => false,
             // Insufficient balance or fee limit - normal validation failure
             Self::InsufficientTokenBalance { .. } | Self::InsufficientEthForValue { .. } => false,
-            // Fetch failures - infrastructure issue, not penalizable
-            Self::TokenInfoFetchFailed { .. } => false,
         }
     }
 
@@ -157,6 +153,22 @@ impl From<MorphTxError> for InvalidPoolTransactionError {
             },
             _ => Self::Other(Box::new(err)),
         }
+    }
+}
+
+/// Separates a transaction verdict from an unavailable validation state.
+/// Only `Invalid` can become an `InvalidPoolTransactionError`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum MorphTxValidationError<E> {
+    /// The state was read successfully and the transaction failed validation.
+    Invalid(MorphTxError),
+    /// Validation could not read the required state; retry without blaming the transaction.
+    State(E),
+}
+
+impl<E> From<MorphTxError> for MorphTxValidationError<E> {
+    fn from(error: MorphTxError) -> Self {
+        Self::Invalid(error)
     }
 }
 
@@ -258,13 +270,6 @@ mod tests {
         assert!(!MorphTxError::TokenNotFound { token_id: 1 }.is_bad_transaction());
         assert!(!MorphTxError::TokenNotActive { token_id: 1 }.is_bad_transaction());
         assert!(!MorphTxError::InvalidPriceRatio { token_id: 1 }.is_bad_transaction());
-        assert!(
-            !MorphTxError::TokenInfoFetchFailed {
-                token_id: 1,
-                message: "error".into()
-            }
-            .is_bad_transaction()
-        );
     }
 
     #[test]
@@ -284,10 +289,6 @@ mod tests {
             MorphTxError::InsufficientEthForValue {
                 balance: U256::from(5u64),
                 value: U256::from(10u64),
-            },
-            MorphTxError::TokenInfoFetchFailed {
-                token_id: 5,
-                message: "db error".into(),
             },
             MorphTxError::InvalidFormat {
                 reason: "bad version".into(),
