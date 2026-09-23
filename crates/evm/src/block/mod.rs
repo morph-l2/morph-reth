@@ -22,7 +22,7 @@ use alloy_evm::{
         BlockExecutionError, BlockExecutionResult, BlockExecutor, ExecutableTx, GasOutput, TxResult,
     },
 };
-use alloy_primitives::{Address, Log, U256};
+use alloy_primitives::{Address, U256};
 use morph_primitives::{MorphReceipt, MorphTxEnvelope};
 use morph_revm::{L1_GAS_PRICE_ORACLE_ADDRESS, MorphHaltReason, TokenFeeInfo, evm::MorphContext};
 use reth_primitives_traits::Recovered;
@@ -40,10 +40,6 @@ pub struct MorphTxResult {
     pub recovered: Recovered<MorphTxEnvelope>,
     /// L1 data fee read from the handler cache immediately after execution.
     pub l1_fee: U256,
-    /// Token-fee deduction Transfer logs (survive main-tx revert).
-    pub pre_fee_logs: Vec<Log>,
-    /// Token-fee reimbursement Transfer logs (survive main-tx revert).
-    pub post_fee_logs: Vec<Log>,
 }
 
 impl TxResult for MorphTxResult {
@@ -242,15 +238,11 @@ where
 
         // Read caches from the EVM immediately after execution, before the next tx resets them.
         let l1_fee = self.evm.cached_l1_data_fee();
-        let pre_fee_logs = self.evm.take_pre_fee_logs();
-        let post_fee_logs = self.evm.take_post_fee_logs();
 
         Ok(MorphTxResult {
             result,
             recovered: Recovered::new_unchecked(consensus_tx, signer),
             l1_fee,
-            pre_fee_logs,
-            post_fee_logs,
         })
     }
 
@@ -259,8 +251,6 @@ where
             result: ResultAndState { result, state },
             recovered,
             l1_fee,
-            pre_fee_logs,
-            post_fee_logs,
         } = output;
 
         // EIP-8037 separates regular and state gas; pre-Amsterdam morph treats
@@ -300,8 +290,6 @@ where
             cumulative_gas_used: self.gas_used,
             l1_fee,
             morph_tx_fields,
-            pre_fee_logs,
-            post_fee_logs,
         };
         self.receipts.push(self.receipt_builder.build_receipt(ctx));
 
