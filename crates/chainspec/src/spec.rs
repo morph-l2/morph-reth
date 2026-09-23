@@ -105,12 +105,13 @@ fn build_hardforks(genesis: &Genesis, chain_info: &MorphGenesisInfo) -> ChainHar
     .into_iter()
     .filter_map(|(fork, block)| block.map(|b| (fork, ForkCondition::Block(b))));
 
-    // Morph timestamp-based hardforks (Morph203, Viridian, Emerald, Jade)
+    // Morph timestamp-based hardforks (Morph203, Viridian, Emerald, Jade, Celadon)
     let time_forks = vec![
         (MorphHardfork::Morph203, hardfork_info.morph203_time),
         (MorphHardfork::Viridian, hardfork_info.viridian_time),
         (MorphHardfork::Emerald, hardfork_info.emerald_time),
         (MorphHardfork::Jade, hardfork_info.jade_fork_time),
+        (MorphHardfork::Celadon, hardfork_info.celadon_time),
     ]
     .into_iter()
     .filter_map(|(fork, time)| time.map(|t| (fork, ForkCondition::Timestamp(t))));
@@ -642,6 +643,63 @@ mod tests {
             chainspec.morph_hardfork_at(600, 6000),
             MorphHardfork::Emerald
         );
+    }
+
+    #[test]
+    fn test_celadon_activation_from_genesis() {
+        let genesis_json = json!({
+            "config": {
+                "chainId": 1337,
+                "homesteadBlock": 0,
+                "eip150Block": 0,
+                "eip155Block": 0,
+                "eip158Block": 0,
+                "byzantiumBlock": 0,
+                "constantinopleBlock": 0,
+                "petersburgBlock": 0,
+                "istanbulBlock": 0,
+                "berlinBlock": 0,
+                "londonBlock": 0,
+                "mergeNetsplitBlock": 0,
+                "terminalTotalDifficulty": 0,
+                "terminalTotalDifficultyPassed": true,
+                "shanghaiTime": 0,
+                "cancunTime": 0,
+                "bernoulliBlock": 0,
+                "curieBlock": 0,
+                "morph203Time": 0,
+                "viridianTime": 0,
+                "emeraldTime": 0,
+                "jadeForkTime": 6000,
+                "celadonTime": 7000,
+                "morph": {}
+            },
+            "alloc": {}
+        });
+
+        let genesis: Genesis =
+            serde_json::from_value(genesis_json).expect("genesis should be valid");
+        let chainspec = MorphChainSpec::from(genesis);
+
+        assert_eq!(
+            chainspec.fork(MorphHardfork::Celadon),
+            ForkCondition::Timestamp(7000)
+        );
+        assert!(!chainspec.is_celadon_active_at_timestamp(6999));
+        assert!(chainspec.is_celadon_active_at_timestamp(7000));
+
+        // Celadon must be reported as the latest fork once active, and must not
+        // shadow Jade before its own activation.
+        assert_eq!(chainspec.morph_hardfork_at(1, 6000), MorphHardfork::Jade);
+        assert_eq!(chainspec.morph_hardfork_at(1, 7000), MorphHardfork::Celadon);
+    }
+
+    #[test]
+    fn test_celadon_absent_from_genesis_never_activates() {
+        // The bundled mainnet/hoodi chainspecs are scheduled through Jade only.
+        let chainspec = MorphChainSpec::from(create_test_genesis());
+        assert!(!chainspec.is_celadon_active_at_timestamp(0));
+        assert!(!chainspec.is_celadon_active_at_timestamp(u64::MAX));
     }
 
     #[test]
