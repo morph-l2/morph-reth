@@ -39,21 +39,59 @@
 //! and `demoteUnexecutables` (tx_pool.go), but implemented as a separate
 //! maintenance task since we cannot modify reth's internal pool logic.
 
-use crate::{MorphPooledTransaction, MorphTxValidationError};
+use crate::{MorphPooledTransaction, MorphTxValidationError, MorphValidationState};
 use alloy_consensus::Transaction;
 use alloy_consensus::Typed2718;
-use alloy_primitives::{Address, TxHash};
+use alloy_primitives::{Address, B256, TxHash};
 use futures::{FutureExt, StreamExt};
 use morph_chainspec::hardfork::{MorphHardfork, MorphHardforks};
 use morph_revm::{L1BlockInfo, MorphBlockEnv, MorphEvmEnv};
 use reth_chainspec::ChainSpecProvider;
 use reth_evm::{ConfigureEvm, EvmFactory, EvmFactoryFor};
-use reth_primitives_traits::AlloyBlockHeader;
+use reth_primitives_traits::{AlloyBlockHeader, HeaderTy, NodePrimitives, SealedHeader};
 use reth_provider::CanonStateSubscriptions;
 use reth_revm::database::StateProviderDatabase;
-use reth_storage_api::StateProviderFactory;
+use reth_storage_api::{BlockReaderIdExt, StateProviderFactory};
 use reth_transaction_pool::{PoolTransaction, TransactionPool};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+/// Chain access for the maintenance loop.
+///
+/// The node reads everything from its provider ([`ProviderFeeState`]). Tests supply a
+/// separate state per block, which the mock provider cannot do.
+trait FeeStateSource<N: NodePrimitives> {
+    /// Opens the state, L1 fee parameters and EVM environment of `header`.
+    fn state_for(&self, header: &HeaderTy<N>) -> Result<MorphValidationState, BoxError>;
+
+    /// Returns the current canonical head.
+    fn canonical_head(&self) -> Result<Option<SealedHeader<HeaderTy<N>>>, BoxError>;
+}
+
+/// [`FeeStateSource`] backed by the node's provider.
+struct ProviderFeeState<Client, Evm> {
+    client: Client,
+    evm_config: Evm,
+}
+
+impl<Client, Evm> FeeStateSource<Evm::Primitives> for ProviderFeeState<Client, Evm>
+where
+    Client: StateProviderFactory + BlockReaderIdExt<Header = HeaderTy<Evm::Primitives>>,
+    Evm: ConfigureEvm,
+    EvmFactoryFor<Evm>: EvmFactory<Spec = MorphHardfork, BlockEnv = MorphBlockEnv>,
+{
+    fn state_for(
+        &self,
+        header: &HeaderTy<Evm::Primitives>,
+    ) -> Result<MorphValidationState, BoxError> {
+        crate::validator::validation_state_for_header(&self.client, &self.evm_config, header)
+    }
+
+    fn canonical_head(&self) -> Result<Option<SealedHeader<HeaderTy<Evm::Primitives>>>, BoxError> {
+        Ok(self.client.latest_header()?)
+    }
+}
 
 fn exceeds_block_gas_limit(tx_gas_limit: u64, block_gas_limit: u64) -> bool {
     tx_gas_limit > block_gas_limit
@@ -214,6 +252,76 @@ fn collect_removable_transactions<DB: alloy_evm::Database>(
     to_remove
 }
 
+/// Keeps the removal candidates that are still removable at the canonical head.
+///
+/// A round judges the pool at the block its notification named. By the time it ends, the
+/// canonical head can be newer: blocks keep arriving while it runs, and the skip-ahead can
+/// stop short of the newest notification. A verdict about an older block must not remove a
+/// transaction the head can pay for, so the candidates' senders are judged again at the head
+/// and only candidates that fail there too are kept. Anything only the head would remove is
+/// left for the round of that head. Nothing is removed if the head cannot be read.
+fn recheck_at_canonical_head<Pool, N, Source>(
+    pool: &Pool,
+    source: &Source,
+    judged_at: B256,
+    candidates: Vec<TxHash>,
+) -> Vec<TxHash>
+where
+    Pool: TransactionPool<Transaction = MorphPooledTransaction>,
+    N: NodePrimitives,
+    Source: FeeStateSource<N>,
+{
+    if candidates.is_empty() {
+        return candidates;
+    }
+    let head = match source.canonical_head() {
+        Ok(Some(head)) => head,
+        Ok(None) => {
+            tracing::warn!(target: "morph::txpool::maintain", "No canonical head; skipping removals");
+            return Vec::new();
+        }
+        Err(err) => {
+            tracing::warn!(target: "morph::txpool::maintain", %err, "Failed to read the canonical head; skipping removals");
+            return Vec::new();
+        }
+    };
+    if head.hash() == judged_at {
+        return candidates;
+    }
+    let state = match source.state_for(head.header()) {
+        Ok(state) => state,
+        Err(err) => {
+            tracing::warn!(target: "morph::txpool::maintain", %err, "Failed to open the canonical head; skipping removals");
+            return Vec::new();
+        }
+    };
+
+    let senders: HashSet<Address> = candidates
+        .iter()
+        .filter_map(|hash| pool.get(hash))
+        .map(|tx| tx.sender())
+        .collect();
+    let sender_txs: Vec<_> = senders
+        .into_iter()
+        .flat_map(|sender| pool.get_transactions_by_sender(sender))
+        .collect();
+    let mut db = StateProviderDatabase::new(state.provider);
+    let still_removable: HashSet<TxHash> = collect_removable_transactions(
+        &mut db,
+        &state.head.l1_block_info,
+        &state.head.evm_env,
+        head.gas_limit(),
+        sender_txs.iter().map(|tx| &tx.transaction).collect(),
+    )
+    .into_iter()
+    .collect();
+
+    candidates
+        .into_iter()
+        .filter(|hash| still_removable.contains(hash))
+        .collect()
+}
+
 /// Maintains the Morph transaction pool by revalidating L1 fees and token balances.
 ///
 /// This task runs continuously and:
@@ -223,12 +331,14 @@ fn collect_removable_transactions<DB: alloy_evm::Database>(
 /// - Re-validates L1 fee affordability for every sender, including ordinary-only senders
 /// - Removes ordinary transactions whose L1 fees make them individually unaffordable,
 ///   parking their descendants
+/// - Re-checks every removal at the canonical head right before applying it
 ///
 pub async fn maintain_morph_pool<Pool, Client, Evm>(pool: Pool, client: Client, evm_config: Evm)
 where
     Pool: TransactionPool<Transaction = MorphPooledTransaction> + Clone,
     Client: ChainSpecProvider<ChainSpec: MorphHardforks>
         + StateProviderFactory
+        + BlockReaderIdExt<Header = HeaderTy<Evm::Primitives>>
         + CanonStateSubscriptions
         + Clone
         + 'static,
@@ -239,35 +349,22 @@ where
 
     tracing::info!(target: "morph::txpool::maintain", "Starting Morph fee maintenance task");
 
-    maintain_morph_pool_with(pool, client, evm_config, chain_events).await;
+    maintain_morph_pool_with(pool, ProviderFeeState { client, evm_config }, chain_events).await;
 }
 
-/// [`maintain_morph_pool`] with an explicit canonical event stream.
-async fn maintain_morph_pool_with<Pool, Client, Evm, Events>(
+/// [`maintain_morph_pool`] with an explicit state source and canonical event stream.
+async fn maintain_morph_pool_with<Pool, N, Source, Events>(
     pool: Pool,
-    client: Client,
-    evm_config: Evm,
+    source: Source,
     mut chain_events: Events,
 ) where
     Pool: TransactionPool<Transaction = MorphPooledTransaction> + Clone,
-    Client: ChainSpecProvider<ChainSpec: MorphHardforks>
-        + StateProviderFactory
-        + CanonStateSubscriptions
-        + Clone
-        + 'static,
-    Evm: ConfigureEvm<Primitives = <Client as reth_provider::NodePrimitivesProvider>::Primitives>,
-    EvmFactoryFor<Evm>: EvmFactory<Spec = MorphHardfork, BlockEnv = MorphBlockEnv>,
-    Events:
-        futures::Stream<Item = reth_provider::CanonStateNotification<Client::Primitives>> + Unpin,
+    N: NodePrimitives,
+    Source: FeeStateSource<N>,
+    Events: futures::Stream<Item = reth_provider::CanonStateNotification<N>> + Unpin,
 {
-    let mut pending_event = None;
     loop {
-        // Reuse a newer notification that superseded the previous scan.
-        let event = match pending_event.take() {
-            Some(event) => Some(event),
-            None => chain_events.next().await,
-        };
-        let Some(mut event) = event else {
+        let Some(mut event) = chain_events.next().await else {
             tracing::debug!(target: "morph::txpool::maintain", "Chain event stream ended");
             break;
         };
@@ -275,7 +372,9 @@ async fn maintain_morph_pool_with<Pool, Client, Evm, Events>(
         // Skip ahead to the newest queued notification. A round reads each sender's account
         // and any fee-token state, so the chain can advance while we are working; the verdicts
         // this task produces are a pure function of the latest state, which makes every
-        // intermediate block wasted work against a stale view of the pool.
+        // intermediate block wasted work against a stale view of the pool. This is only an
+        // optimisation: under tokio's cooperative budget `now_or_never` reports an empty
+        // stream after 128 items, so removals are re-checked at the canonical head below.
         while let Some(next) = chain_events.next().now_or_never().flatten() {
             event = next;
         }
@@ -304,11 +403,7 @@ async fn maintain_morph_pool_with<Pool, Client, Evm, Events>(
             continue;
         }
 
-        let state = match crate::validator::validation_state_for_header(
-            &client,
-            &evm_config,
-            new_tip.header(),
-        ) {
+        let state = match source.state_for(new_tip.header()) {
             Ok(state) => state,
             Err(err) => {
                 tracing::warn!(target: "morph::txpool::maintain", %err, "Failed to prepare fee revalidation state");
@@ -333,12 +428,7 @@ async fn maintain_morph_pool_with<Pool, Client, Evm, Events>(
             pool_txs,
         );
 
-        // A new block may arrive during this synchronous scan. Its balance changes
-        // supersede the verdicts we just calculated; re-scan before deleting anything.
-        if let Some(event) = chain_events.next().now_or_never().flatten() {
-            pending_event = Some(event);
-            continue;
-        }
+        let to_remove = recheck_at_canonical_head(&pool, &source, new_tip.hash(), to_remove);
 
         // Remove the offending transactions. `remove_transactions` *parks* each removed
         // transaction's descendants instead of deleting them (upstream
@@ -748,7 +838,13 @@ mod tests {
 
     /// A canonical commit of [`head_block`].
     fn commit_event() -> reth_provider::CanonStateNotification<MorphPrimitives> {
-        let block = head_block();
+        commit_event_of(head_block())
+    }
+
+    /// A canonical commit of `block`.
+    fn commit_event_of(
+        block: morph_primitives::Block,
+    ) -> reth_provider::CanonStateNotification<MorphPrimitives> {
         reth_provider::CanonStateNotification::Commit {
             new: std::sync::Arc::new(reth_provider::Chain::new(
                 [reth_primitives_traits::RecoveredBlock::new_unhashed(
@@ -784,12 +880,67 @@ mod tests {
         MorphPooledTransaction::new(recovered, encoded_len)
     }
 
-    #[test]
-    fn a_new_head_arriving_during_a_scan_supersedes_its_removals() {
-        let client = mock_provider(0, TX_TOKEN_BUDGET);
+    /// Runs the maintenance loop against the provider, as the node does.
+    fn provider_state(client: TestProvider) -> ProviderFeeState<TestProvider, MorphEvmConfig> {
+        ProviderFeeState {
+            client,
+            evm_config: MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone()),
+        }
+    }
+
+    /// A [`FeeStateSource`] with a separate state per block, unlike [`MockEthProvider`],
+    /// whose state ignores the block hash. `head` is the canonical head.
+    struct BlockStates {
+        states: HashMap<B256, TestProvider>,
+        head: SealedHeader<morph_primitives::MorphHeader>,
+    }
+
+    impl FeeStateSource<MorphPrimitives> for BlockStates {
+        fn state_for(
+            &self,
+            header: &morph_primitives::MorphHeader,
+        ) -> Result<MorphValidationState, BoxError> {
+            let client = self
+                .states
+                .get(&header.hash_slow())
+                .ok_or("no state for this block")?;
+            crate::validator::validation_state_for_header(
+                client,
+                &MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone()),
+                header,
+            )
+        }
+
+        fn canonical_head(
+            &self,
+        ) -> Result<Option<SealedHeader<morph_primitives::MorphHeader>>, BoxError> {
+            Ok(Some(self.head.clone()))
+        }
+    }
+
+    /// The block after [`head_block`].
+    fn next_block() -> morph_primitives::Block {
+        let mut block = head_block();
+        block.header.inner.number = 2;
+        block.header.inner.timestamp += 1;
+        block
+    }
+
+    /// Admits [`token_fee_tx`] 0 while [`SIGNER`] can pay, then runs maintenance on `events`
+    /// with the sender's tokens drained at [`head_block`] and `head_token_balance` at the
+    /// canonical head, [`next_block`]. Returns whether the transaction is still pooled.
+    ///
+    /// The events go through a tokio broadcast channel, like reth's canonical stream, and the
+    /// loop runs the way `spawn_critical_blocking_task` runs it: `Handle::block_on` on a
+    /// blocking thread, where tokio's cooperative budget applies.
+    fn survives_a_stale_round(
+        head_token_balance: u64,
+        events: Vec<reth_provider::CanonStateNotification<MorphPrimitives>>,
+    ) -> bool {
+        let judged = mock_provider(0, TX_TOKEN_BUDGET);
         let validator = crate::MorphTransactionValidator::new(
             EthTransactionValidatorBuilder::new(
-                client.clone(),
+                judged.clone(),
                 MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone()),
             )
             .disable_balance_check()
@@ -808,46 +959,57 @@ mod tests {
         ))
         .unwrap()
         .hash;
-        set_token_balance(&client, 0);
-        let mut polls = 0;
-        let events = futures::stream::poll_fn(|_| {
-            let poll = polls;
-            polls += 1;
-            match poll {
-                0 => std::task::Poll::Ready(Some(commit_event())),
-                // The queue is empty immediately before the synchronous scan.
-                1 => std::task::Poll::Pending,
-                // The next block restores funds while the scan runs.
-                2 => {
-                    set_token_balance(&client, TX_TOKEN_BUDGET);
-                    let mut block = head_block();
-                    block.header.inner.number = 2;
-                    block.header.inner.timestamp += 1;
-                    client.add_block(block.header.hash_slow(), block.clone());
-                    std::task::Poll::Ready(Some(reth_provider::CanonStateNotification::Commit {
-                        new: std::sync::Arc::new(reth_provider::Chain::new(
-                            [reth_primitives_traits::RecoveredBlock::new_unhashed(
-                                block,
-                                Vec::new(),
-                            )],
-                            Default::default(),
-                            Default::default(),
-                        )),
-                    }))
-                }
-                _ => std::task::Poll::Ready(None),
-            }
+        set_token_balance(&judged, 0);
+        let head = next_block().header;
+        let source = BlockStates {
+            states: HashMap::from([
+                (head_block().header.hash_slow(), judged),
+                (head.hash_slow(), mock_provider(0, head_token_balance)),
+            ]),
+            head: SealedHeader::seal_slow(head),
+        };
+
+        let (sender, receiver) = tokio::sync::broadcast::channel(events.len());
+        for event in events {
+            sender.send(event).unwrap();
+        }
+        drop(sender);
+        let events = tokio_stream::wrappers::BroadcastStream::new(receiver)
+            .map(|event| event.expect("the channel holds every event"));
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let handle = runtime.handle().clone();
+        let loop_pool = pool.clone();
+        let task = runtime.spawn_blocking(move || {
+            handle.block_on(maintain_morph_pool_with(loop_pool, source, events))
         });
-        futures::executor::block_on(maintain_morph_pool_with(
-            pool.clone(),
-            client.clone(),
-            MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone()),
-            events,
-        ));
-        assert!(
-            pool.get(&hash).is_some(),
-            "do not apply a verdict superseded by a queued head"
-        );
+        runtime.block_on(task).unwrap();
+        pool.get(&hash).is_some()
+    }
+
+    #[test]
+    fn removals_judged_at_an_older_block_are_rechecked_at_the_canonical_head() {
+        for backlog in [false, true] {
+            // Without a backlog, the head moved on before its notification arrived. With one,
+            // 128 notifications exhaust tokio's cooperative budget within a single poll, so the
+            // loop cannot see the head's notification behind them before it removes anything.
+            let events = || {
+                let mut events: Vec<_> = std::iter::repeat_with(commit_event)
+                    .take(if backlog { 128 } else { 1 })
+                    .collect();
+                if backlog {
+                    events.push(commit_event_of(next_block()));
+                }
+                events
+            };
+            assert!(
+                survives_a_stale_round(TX_TOKEN_BUDGET, events()),
+                "backlog={backlog}: payable at the canonical head, so it must stay"
+            );
+            assert!(
+                !survives_a_stale_round(0, events()),
+                "backlog={backlog}: still unpayable at the canonical head, so it must go"
+            );
+        }
     }
 
     #[test]
@@ -891,8 +1053,7 @@ mod tests {
         assert_eq!(pool.all_transactions().pending.len(), 3);
         futures::executor::block_on(maintain_morph_pool_with(
             pool.clone(),
-            client,
-            MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone()),
+            provider_state(client),
             futures::stream::iter([commit_event()]),
         ));
         assert!(hashes.iter().all(|hash| pool.get(hash).is_some()));
@@ -987,8 +1148,7 @@ mod tests {
                 for _ in 0..3 {
                     futures::executor::block_on(maintain_morph_pool_with(
                         pool.clone(),
-                        client.clone(),
-                        MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone()),
+                        provider_state(client.clone()),
                         futures::stream::iter([event.clone()]),
                     ));
                 }
@@ -1072,8 +1232,7 @@ mod tests {
             // Run Morph first to cover a pool snapshot that still contains a mined nonce.
             futures::executor::block_on(maintain_morph_pool_with(
                 pool.clone(),
-                client.clone(),
-                MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone()),
+                provider_state(client.clone()),
                 futures::stream::iter([event.clone()]),
             ));
             pool.on_canonical_state_change(reth_transaction_pool::CanonicalStateUpdate {
@@ -1091,8 +1250,7 @@ mod tests {
             // And run after reth parks/removes transactions, covering either task order.
             futures::executor::block_on(maintain_morph_pool_with(
                 pool.clone(),
-                client,
-                MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone()),
+                provider_state(client),
                 futures::stream::iter([event]),
             ));
             let all = pool.all_transactions();
@@ -1143,8 +1301,7 @@ mod tests {
         set_token_balance(&client, 0);
         futures::executor::block_on(maintain_morph_pool_with(
             pool.clone(),
-            client,
-            MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone()),
+            provider_state(client),
             futures::stream::iter([commit_event()]),
         ));
 
@@ -1250,8 +1407,7 @@ mod tests {
             for _ in 0..3 {
                 futures::executor::block_on(maintain_morph_pool_with(
                     pool.clone(),
-                    client.clone(),
-                    MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone()),
+                    provider_state(client.clone()),
                     futures::stream::iter([event.clone()]),
                 ));
             }
@@ -1324,8 +1480,7 @@ mod tests {
         let event = commit_event();
         futures::executor::block_on(maintain_morph_pool_with(
             pool.clone(),
-            client,
-            MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone()),
+            provider_state(client),
             futures::stream::iter([event]),
         ));
 
