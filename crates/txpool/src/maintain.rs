@@ -380,13 +380,15 @@ mod tests {
     // descendant handling that only the pool can show.
     // ---------------------------------------------------------------------------------
 
+    use crate::morph_tx_validation::tests::{
+        BALANCE_OF_RUNTIME, FAILING_BALANCE_OF, TokenRead, UnreadableTokenDb,
+        call_mode_registry_storage, call_mode_token_state, token_balance_key,
+    };
     use alloy_consensus::{Signed, transaction::Recovered};
     use alloy_eips::eip2718::Encodable2718;
     use alloy_primitives::{Signature, TxKind, address};
     use morph_primitives::{MorphTxEnvelope, TxMorph};
-    use morph_revm::{
-        L2_TOKEN_REGISTRY_ADDRESS, compute_mapping_slot, compute_mapping_slot_for_address,
-    };
+    use morph_revm::L2_TOKEN_REGISTRY_ADDRESS;
     use reth_revm::revm;
     use reth_revm::revm::database::{CacheDB, EmptyDB};
     use reth_revm::revm::state::AccountInfo;
@@ -394,20 +396,30 @@ mod tests {
     const SIGNER: Address = address!("0000000000000000000000000000000000000001");
     const FEE_TOKEN: Address = address!("5300000000000000000000000000000000000042");
     const TOKEN_ID: u16 = 1;
-    const BALANCE_SLOT: u64 = 7;
     /// `gas_limit * max_fee_per_gas` of [`token_fee_tx`]; at a 1:1 price ratio this is also
     /// the per-transaction token requirement at admission and revalidation.
     const TX_TOKEN_BUDGET: u64 = 21_000 * 100;
 
-    fn token_id_key(token_id: u16) -> [u8; 32] {
-        let mut key = [0u8; 32];
-        key[30..32].copy_from_slice(&token_id.to_be_bytes());
-        key
+    /// State with [`TOKEN_ID`] registered as an active call-mode fee token at a 1:1 price
+    /// ratio, whose `balanceOf` reports `token_balance` for [`SIGNER`].
+    fn test_state(account_nonce: u64, eth_balance: u64, token_balance: u64) -> CacheDB<EmptyDB> {
+        test_state_with_token_code(
+            account_nonce,
+            eth_balance,
+            token_balance,
+            BALANCE_OF_RUNTIME,
+        )
     }
 
-    /// State with [`TOKEN_ID`] registered as an active slot-mode token at a 1:1 price ratio.
-    fn test_state(account_nonce: u64, eth_balance: u64, token_balance: u64) -> CacheDB<EmptyDB> {
-        let mut db = CacheDB::new(EmptyDB::default());
+    /// [`test_state`] with the fee token's `balanceOf` replaced by `code`.
+    fn test_state_with_token_code(
+        account_nonce: u64,
+        eth_balance: u64,
+        token_balance: u64,
+        code: &'static [u8],
+    ) -> CacheDB<EmptyDB> {
+        let mut db =
+            call_mode_token_state(TOKEN_ID, FEE_TOKEN, code, SIGNER, U256::from(token_balance));
         db.insert_account_info(
             SIGNER,
             AccountInfo {
@@ -416,34 +428,6 @@ mod tests {
                 ..Default::default()
             },
         );
-
-        let token_key = token_id_key(TOKEN_ID);
-        let base = compute_mapping_slot(U256::from(151), &token_key);
-        let mut packed = [0u8; 32];
-        packed[30] = 18; // decimals
-        packed[31] = 1; // isActive
-        for (slot, value) in [
-            (base, U256::from_be_bytes(FEE_TOKEN.into_word().0)),
-            // `balanceSlot` is stored as the actual slot plus one.
-            (base + U256::from(1), U256::from(BALANCE_SLOT + 1)),
-            (base + U256::from(2), U256::from_be_bytes(packed)),
-            (base + U256::from(3), U256::from(1)), // scale
-            (
-                compute_mapping_slot(U256::from(153), &token_key),
-                U256::from(1), // priceRatio
-            ),
-        ] {
-            db.insert_account_storage(L2_TOKEN_REGISTRY_ADDRESS, slot, value)
-                .unwrap();
-        }
-
-        db.insert_account_storage(
-            FEE_TOKEN,
-            compute_mapping_slot_for_address(U256::from(BALANCE_SLOT), SIGNER),
-            U256::from(token_balance),
-        )
-        .unwrap();
-
         db
     }
 
@@ -584,36 +568,6 @@ mod tests {
         assert!(removable(&mut db, vec![&gapped]).is_empty());
     }
 
-    /// Fails every storage read of the fee token, leaving the rest of the state readable.
-    #[derive(Debug)]
-    struct UnreadableToken(CacheDB<EmptyDB>);
-
-    impl reth_revm::Database for UnreadableToken {
-        type Error = reth_provider::ProviderError;
-
-        fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
-            Ok(self.0.basic(address).unwrap())
-        }
-
-        fn code_by_hash(
-            &mut self,
-            code_hash: alloy_primitives::B256,
-        ) -> Result<reth_revm::revm::bytecode::Bytecode, Self::Error> {
-            Ok(self.0.code_by_hash(code_hash).unwrap())
-        }
-
-        fn storage(&mut self, address: Address, index: U256) -> Result<U256, Self::Error> {
-            if address == FEE_TOKEN {
-                return Err(reth_provider::ProviderError::BestBlockNotFound);
-            }
-            Ok(self.0.storage(address, index).unwrap())
-        }
-
-        fn block_hash(&mut self, number: u64) -> Result<alloy_primitives::B256, Self::Error> {
-            Ok(self.0.block_hash(number).unwrap())
-        }
-    }
-
     #[derive(Debug)]
     struct CountingDb {
         inner: CacheDB<EmptyDB>,
@@ -642,96 +596,85 @@ mod tests {
 
     #[test]
     fn token_cache_is_shared_within_a_round_and_refreshed_next_round() {
-        for call_mode in [false, true] {
-            let mut inner = test_state(0, 0, TX_TOKEN_BUDGET);
-            if call_mode {
-                let base = compute_mapping_slot(U256::from(151), &token_id_key(TOKEN_ID));
-                inner
-                    .insert_account_storage(
-                        L2_TOKEN_REGISTRY_ADDRESS,
-                        base + U256::from(1),
-                        U256::ZERO,
-                    )
-                    .unwrap();
-                // balanceOf reads slot zero; count real EVM SLOADs as well as registry reads.
-                let code = revm::state::Bytecode::new_raw(alloy_primitives::Bytes::from_static(&[
-                    0x5f, 0x54, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3,
-                ]));
-                inner.insert_account_info(
-                    FEE_TOKEN,
-                    AccountInfo {
-                        code_hash: code.hash_slow(),
-                        code: Some(code),
-                        ..Default::default()
-                    },
-                );
-                inner
-                    .insert_account_storage(FEE_TOKEN, U256::ZERO, U256::from(TX_TOKEN_BUDGET))
-                    .unwrap();
-            }
-            let mut db = CountingDb {
-                inner,
-                reads: HashMap::new(),
-            };
-            let txs: Vec<_> = (0..3).map(token_fee_tx).collect();
-            assert!(
-                collect_removable_transactions(
-                    &mut db,
-                    &L1BlockInfo::default(),
-                    &test_evm_env(),
-                    30_000_000,
-                    txs.iter().collect()
-                )
-                .is_empty()
-            );
-            assert_eq!(db.reads[&L2_TOKEN_REGISTRY_ADDRESS], 5);
-            assert_eq!(db.reads[&FEE_TOKEN], 1);
-            let balance_key = if call_mode {
-                U256::ZERO
-            } else {
-                compute_mapping_slot_for_address(U256::from(BALANCE_SLOT), SIGNER)
-            };
-            db.inner
-                .insert_account_storage(FEE_TOKEN, balance_key, U256::ZERO)
-                .unwrap();
-            assert_eq!(
-                collect_removable_transactions(
-                    &mut db,
-                    &L1BlockInfo::default(),
-                    &test_evm_env(),
-                    30_000_000,
-                    txs.iter().collect()
-                ),
-                vec![*txs[0].hash()]
-            );
-            assert_eq!(db.reads[&L2_TOKEN_REGISTRY_ADDRESS], 10);
-            assert_eq!(db.reads[&FEE_TOKEN], 2);
-        }
+        let mut db = CountingDb {
+            inner: test_state(0, 0, TX_TOKEN_BUDGET),
+            reads: HashMap::new(),
+        };
+        let txs: Vec<_> = (0..3).map(token_fee_tx).collect();
+        assert!(
+            collect_removable_transactions(
+                &mut db,
+                &L1BlockInfo::default(),
+                &test_evm_env(),
+                30_000_000,
+                txs.iter().collect()
+            )
+            .is_empty()
+        );
+        // Three transactions share one registry entry (five words) and one `balanceOf` SLOAD.
+        assert_eq!(db.reads[&L2_TOKEN_REGISTRY_ADDRESS], 5);
+        assert_eq!(db.reads[&FEE_TOKEN], 1);
+
+        // The next round reads both again, so it sees the balance spent in between.
+        db.inner
+            .insert_account_storage(FEE_TOKEN, token_balance_key(SIGNER), U256::ZERO)
+            .unwrap();
+        assert_eq!(
+            collect_removable_transactions(
+                &mut db,
+                &L1BlockInfo::default(),
+                &test_evm_env(),
+                30_000_000,
+                txs.iter().collect()
+            ),
+            vec![*txs[0].hash()]
+        );
+        assert_eq!(db.reads[&L2_TOKEN_REGISTRY_ADDRESS], 10);
+        assert_eq!(db.reads[&FEE_TOKEN], 2);
     }
 
     #[test]
     fn unreadable_token_state_does_not_remove_transactions() {
         let tx = token_fee_tx(0);
-        let mut db = UnreadableToken(test_state(0, 0, 10 * TX_TOKEN_BUDGET));
 
         // Sanity check: the same transaction against readable state is kept as well, so the
-        // assertion below is about the read failure and not about affordability.
+        // assertions below are about the read failure and not about affordability.
         assert!(
-            removable(&mut db.0.clone(), vec![&tx]).is_empty(),
+            removable(&mut test_state(0, 0, 10 * TX_TOKEN_BUDGET), vec![&tx]).is_empty(),
             "transaction is affordable when the token balance can be read"
         );
 
-        let to_remove = collect_removable_transactions(
-            &mut db,
-            &L1BlockInfo::default(),
-            &test_evm_env(),
-            30_000_000,
-            vec![&tx],
-        );
-        assert!(
-            to_remove.is_empty(),
-            "a transient state-read failure must not be treated as an invalid transaction"
-        );
+        for failing in [TokenRead::Storage, TokenRead::Code] {
+            let mut db = UnreadableTokenDb {
+                inner: test_state(0, 0, 10 * TX_TOKEN_BUDGET),
+                token: FEE_TOKEN,
+                failing,
+            };
+            let to_remove = collect_removable_transactions(
+                &mut db,
+                &L1BlockInfo::default(),
+                &test_evm_env(),
+                30_000_000,
+                vec![&tx],
+            );
+            assert!(
+                to_remove.is_empty(),
+                "a {failing:?} read failure inside balanceOf is not an invalid transaction"
+            );
+        }
+    }
+
+    #[test]
+    fn a_balance_query_without_a_balance_removes_the_transaction() {
+        let tx = token_fee_tx(0);
+        for code in FAILING_BALANCE_OF {
+            let mut db = test_state_with_token_code(0, 0, 10 * TX_TOKEN_BUDGET, code);
+            assert_eq!(
+                removable(&mut db, vec![&tx]),
+                vec![*tx.hash()],
+                "balanceOf code {code:02x?}"
+            );
+        }
     }
 
     // ---------------------------------------------------------------------------------
@@ -781,48 +724,27 @@ mod tests {
         client.add_block(head.header.hash_slow(), head);
 
         client.add_account(SIGNER, ExtendedAccount::new(0, U256::from(eth_balance)));
-
-        let token_key = token_id_key(TOKEN_ID);
-        let base = compute_mapping_slot(U256::from(151), &token_key);
-        let mut packed = [0u8; 32];
-        packed[30] = 18;
-        packed[31] = 1;
         client.add_account(
             L2_TOKEN_REGISTRY_ADDRESS,
-            ExtendedAccount::new(0, U256::ZERO).extend_storage([
-                (
-                    storage_key(base),
-                    U256::from_be_bytes(FEE_TOKEN.into_word().0),
-                ),
-                (
-                    storage_key(base + U256::from(1)),
-                    U256::from(BALANCE_SLOT + 1),
-                ),
-                (
-                    storage_key(base + U256::from(2)),
-                    U256::from_be_bytes(packed),
-                ),
-                (storage_key(base + U256::from(3)), U256::from(1)),
-                (
-                    storage_key(compute_mapping_slot(U256::from(153), &token_key)),
-                    U256::from(1),
-                ),
-            ]),
+            ExtendedAccount::new(0, U256::ZERO).extend_storage(
+                call_mode_registry_storage(TOKEN_ID, FEE_TOKEN)
+                    .map(|(slot, value)| (storage_key(slot), value)),
+            ),
         );
         set_token_balance(&client, token_balance);
         client
     }
 
+    /// Deploys the call-mode fee token with `token_balance` recorded for [`SIGNER`].
     fn set_token_balance(client: &TestProvider, token_balance: u64) {
         client.add_account(
             FEE_TOKEN,
-            ExtendedAccount::new(0, U256::ZERO).extend_storage([(
-                storage_key(compute_mapping_slot_for_address(
-                    U256::from(BALANCE_SLOT),
-                    SIGNER,
-                )),
-                U256::from(token_balance),
-            )]),
+            ExtendedAccount::new(0, U256::ZERO)
+                .with_bytecode(alloy_primitives::Bytes::from_static(BALANCE_OF_RUNTIME))
+                .extend_storage([(
+                    storage_key(token_balance_key(SIGNER)),
+                    U256::from(token_balance),
+                )]),
         );
     }
 

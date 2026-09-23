@@ -640,15 +640,16 @@ fn is_morph_tx(tx: &impl Typed2718) -> bool {
 mod tests {
     use super::*;
     use crate::MorphTxError;
+    use crate::morph_tx_validation::tests::{
+        BALANCE_OF_RUNTIME, FAILING_BALANCE_OF, call_mode_registry_storage, token_balance_key,
+    };
     use alloy_consensus::{Sealable, Signed, TxEip1559, TxLegacy};
     use alloy_eips::eip2718::Encodable2718;
-    use alloy_primitives::{B256, Signature, TxKind, address};
+    use alloy_primitives::{B256, Bytes, Signature, TxKind, address};
     use morph_chainspec::{MORPH_MAINNET, MorphChainSpec};
     use morph_evm::MorphEvmConfig;
     use morph_primitives::{MorphPrimitives, TxL1Msg, TxMorph};
-    use morph_revm::{
-        L2_TOKEN_REGISTRY_ADDRESS, compute_mapping_slot, compute_mapping_slot_for_address,
-    };
+    use morph_revm::L2_TOKEN_REGISTRY_ADDRESS;
     use reth_primitives_traits::Recovered;
     use reth_provider::test_utils::{ExtendedAccount, MockEthProvider};
     use reth_transaction_pool::{
@@ -666,53 +667,23 @@ mod tests {
         B256::from(slot.to_be_bytes::<32>())
     }
 
-    fn token_id_key(token_id: u16) -> [u8; 32] {
-        let mut key = [0u8; 32];
-        key[30..32].copy_from_slice(&token_id.to_be_bytes());
-        key
+    /// The registry account with `token` registered as call-mode fee token `token_id`.
+    fn token_registry_account(token_id: u16, token: alloy_primitives::Address) -> ExtendedAccount {
+        ExtendedAccount::new(0, U256::ZERO).extend_storage(
+            call_mode_registry_storage(token_id, token)
+                .map(|(slot, value)| (storage_key(slot), value)),
+        )
     }
 
-    fn token_registry_account(
-        token_id: u16,
-        token_address: alloy_primitives::Address,
-        balance_slot: U256,
-        token_balance: U256,
+    /// A fee token whose `balanceOf` runs `code`, with `balance` recorded for `holder`.
+    fn fee_token_account(
+        code: &'static [u8],
+        holder: alloy_primitives::Address,
+        balance: U256,
     ) -> ExtendedAccount {
-        let token_registry_slot = U256::from(151);
-        let price_ratio_slot = U256::from(153);
-        let token_key = token_id_key(token_id);
-        let base = compute_mapping_slot(token_registry_slot, &token_key);
-
-        let mut slot_2 = [0u8; 32];
-        slot_2[30] = 18;
-        slot_2[31] = 1;
-
-        ExtendedAccount::new(0, U256::ZERO).extend_storage([
-            (
-                storage_key(base),
-                U256::from_be_bytes(token_address.into_word().0),
-            ),
-            (
-                storage_key(base + U256::from(1)),
-                balance_slot + U256::from(1),
-            ),
-            (
-                storage_key(base + U256::from(2)),
-                U256::from_be_bytes(slot_2),
-            ),
-            (storage_key(base + U256::from(3)), U256::from(1)),
-            (
-                storage_key(compute_mapping_slot(price_ratio_slot, &token_key)),
-                U256::from(1),
-            ),
-            (
-                storage_key(compute_mapping_slot_for_address(
-                    balance_slot,
-                    address!("0000000000000000000000000000000000000001"),
-                )),
-                token_balance,
-            ),
-        ])
+        ExtendedAccount::new(0, U256::ZERO)
+            .with_bytecode(Bytes::from_static(code))
+            .extend_storage([(storage_key(token_balance_key(holder)), balance)])
     }
 
     type TokenFeeValidator = MorphTransactionValidator<
@@ -721,7 +692,7 @@ mod tests {
         MorphEvmConfig,
     >;
 
-    /// Registered token with a 1:1 price ratio at an Emerald-active head.
+    /// Registered call-mode token with a 1:1 price ratio at an Emerald-active head.
     fn token_fee_validator(
         eth_balance: U256,
         token_balance: U256,
@@ -731,7 +702,6 @@ mod tests {
         let client = new_mock_provider();
         let signer = address!("0000000000000000000000000000000000000001");
         let token = address!("5300000000000000000000000000000000000042");
-        let balance_slot = U256::from(7);
         let header = morph_primitives::MorphHeader::from(alloy_consensus::Header {
             number: 1,
             timestamp: 1_767_765_600,
@@ -747,16 +717,10 @@ mod tests {
             },
         );
         client.add_account(signer, ExtendedAccount::new(0, eth_balance));
-        client.add_account(
-            L2_TOKEN_REGISTRY_ADDRESS,
-            token_registry_account(1, token, balance_slot, token_balance),
-        );
+        client.add_account(L2_TOKEN_REGISTRY_ADDRESS, token_registry_account(1, token));
         client.add_account(
             token,
-            ExtendedAccount::new(0, U256::ZERO).extend_storage([(
-                storage_key(compute_mapping_slot_for_address(balance_slot, signer)),
-                token_balance,
-            )]),
+            fee_token_account(BALANCE_OF_RUNTIME, signer, token_balance),
         );
         let inner = EthTransactionValidatorBuilder::new(
             client,
@@ -797,12 +761,6 @@ mod tests {
             token_fee_validator(U256::ZERO, U256::from(10_000_000), 0, Default::default());
         let client = validator.client();
         let token = address!("5300000000000000000000000000000000000042");
-        let base = compute_mapping_slot(U256::from(151), &token_id_key(1));
-        client.add_account(
-            L2_TOKEN_REGISTRY_ADDRESS,
-            token_registry_account(1, token, U256::from(7), U256::ZERO)
-                .extend_storage([(storage_key(base + U256::from(1)), U256::ZERO)]),
-        );
         // Return 10,000,000 only at the old head's timestamp. The token state stays
         // unchanged so both reads of the cached provider must use the old environment.
         let old_timestamp = 1_767_765_600u32;
@@ -872,6 +830,42 @@ mod tests {
             matches!(fresh, TransactionValidationOutcome::Invalid(..)),
             "a fresh validation must see the published head: {fresh:?}"
         );
+    }
+
+    /// A `balanceOf` that yields no balance rejects the transaction without blaming the
+    /// peer that relayed it: the fault lies with the token, not the sender.
+    #[test]
+    fn a_failing_balance_query_is_rejected_without_penalizing_the_peer() {
+        for code in FAILING_BALANCE_OF {
+            let validator =
+                token_fee_validator(U256::ZERO, U256::from(10_000_000), 0, Default::default());
+            validator.client().add_account(
+                address!("5300000000000000000000000000000000000042"),
+                fee_token_account(
+                    code,
+                    address!("0000000000000000000000000000000000000001"),
+                    U256::from(10_000_000),
+                ),
+            );
+            let outcome = validator.validate_one(
+                TransactionOrigin::External,
+                token_fee_transaction(0, U256::ZERO),
+            );
+            let err = match outcome {
+                TransactionValidationOutcome::Invalid(_, err) => err,
+                other => panic!("balanceOf code {code:02x?}: {other:?}"),
+            };
+            assert_eq!(
+                err.downcast_other_ref::<MorphTxError>(),
+                Some(&MorphTxError::TokenBalanceQueryFailed { token_id: 1 }),
+                "balanceOf code {code:02x?}"
+            );
+            assert_eq!(
+                err.as_other().map(|other| other.is_bad_transaction()),
+                Some(false),
+                "balanceOf code {code:02x?}"
+            );
+        }
     }
 
     #[test]
