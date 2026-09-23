@@ -27,6 +27,11 @@ pub enum MorphInvalidTransaction {
     #[error("Token with ID {0} has invalid fee configuration")]
     InvalidTokenConfig(u16),
 
+    /// The token balance call reverted, violated static execution, or returned malformed data.
+    #[error("Token balance query failed")]
+    TokenBalanceQueryFailed,
+
+    /// The transfer failed or its return value/balance delta was invalid.
     #[error("Token transfer failed: {reason}")]
     TokenTransferFailed {
         /// Token transfer failure reason.
@@ -43,6 +48,23 @@ pub enum MorphInvalidTransaction {
         /// Available token balance.
         available: U256,
     },
+
+    /// A MorphTx below version 2 carries an EIP-7702 authorization list.
+    ///
+    /// Only MorphTx V2 (Celadon onwards) may carry authorizations; the RLP decoders
+    /// never produce this shape, so it only surfaces for malformed simulation
+    /// requests.
+    #[error("MorphTx version {version} does not support an authorization list")]
+    AuthorizationListNotSupported {
+        /// The transaction's MorphTx version.
+        version: u8,
+    },
+
+    /// A MorphTx carrying an EIP-7702 authorization list is a contract creation.
+    ///
+    /// Same rule as `ErrSetCodeTxCreate` for `0x04` transactions.
+    #[error("MorphTx with an authorization list cannot create a contract")]
+    AuthorizationListCreate,
 }
 
 impl InvalidTxError for MorphInvalidTransaction {

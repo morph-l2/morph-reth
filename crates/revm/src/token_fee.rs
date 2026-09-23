@@ -9,11 +9,17 @@ use alloy_evm::Database;
 use alloy_primitives::{Address, Bytes, U256, address, keccak256};
 use morph_chainspec::hardfork::MorphHardfork;
 use revm::Database as RevmDatabase;
-use revm::SystemCallEvm;
 use revm::{context_interface::result::EVMError, inspector::NoOpInspector};
 
-use crate::evm::MorphContext;
 use crate::{MorphEvm, MorphInvalidTransaction};
+
+/// The environment a fee-token `balanceOf` call is evaluated in.
+///
+/// Produced by `ConfigureEvm::evm_env` for the block whose state is being read, so the pool
+/// resolves the same balance the execution layer would. go-ethereum builds the equivalent
+/// `vm.BlockContext` from the header before querying a call-mode token
+/// (`pool.getBalanceFunc`, core/tx_pool.go:330).
+pub type MorphEvmEnv = alloy_evm::EvmEnv<MorphHardfork, crate::MorphBlockEnv>;
 
 /// L2 Token Registry contract address on Morph L2.
 /// Reference: <https://github.com/morph-l2/morph/blob/main/contracts/contracts/l2/system/L2TokenRegistry.sol>
@@ -60,6 +66,18 @@ pub(crate) struct TokenRegistryEntry {
 }
 
 impl TokenRegistryEntry {
+    /// The registered ERC20 contract.
+    pub(crate) const fn token_address(&self) -> Address {
+        self.token_address
+    }
+
+    /// The caller's balance storage slot, when the registry declares one.
+    ///
+    /// `None` means call mode: the balance has to be read by calling `balanceOf`.
+    pub(crate) const fn balance_slot(&self) -> Option<U256> {
+        self.balance_slot
+    }
+
     /// Load fee-token metadata without reading a caller's token balance.
     pub(crate) fn load<DB: RevmDatabase>(
         db: &mut DB,
@@ -84,14 +102,14 @@ impl TokenRegistryEntry {
         self,
         db: &mut DB,
         caller: Address,
-        hardfork: MorphHardfork,
-    ) -> Result<TokenFeeInfo, DB::Error> {
+        env: &MorphEvmEnv,
+    ) -> Result<TokenFeeInfo, EVMError<DB::Error, MorphInvalidTransaction>> {
         let balance = read_token_balance_with_fallback(
             db,
             self.token_address,
             caller,
             self.balance_slot,
-            hardfork,
+            env,
         )?;
         Ok(self.into_fee_info(caller, balance))
     }
@@ -109,7 +127,7 @@ impl TokenRegistryEntry {
         Ok(self.into_fee_info(caller, balance))
     }
 
-    fn into_fee_info(self, caller: Address, balance: U256) -> TokenFeeInfo {
+    pub(crate) fn into_fee_info(self, caller: Address, balance: U256) -> TokenFeeInfo {
         TokenFeeInfo {
             token_address: self.token_address,
             is_active: self.is_active,
@@ -124,6 +142,16 @@ impl TokenRegistryEntry {
 }
 
 impl TokenFeeInfo {
+    /// Maximum permitted token debit, bounded by the available balance.
+    /// A zero fee limit means that the whole balance is available.
+    pub fn effective_fee_limit(&self, fee_limit: U256) -> U256 {
+        if fee_limit.is_zero() {
+            self.balance
+        } else {
+            self.balance.min(fee_limit)
+        }
+    }
+
     /// Load token fee information with EVM call fallback.
     ///
     /// Reads token parameters from L2 Token Registry storage. If the token's
@@ -133,14 +161,14 @@ impl TokenFeeInfo {
         db: &mut DB,
         token_id: u16,
         caller: Address,
-        hardfork: MorphHardfork,
-    ) -> Result<Option<Self>, DB::Error> {
+        env: &MorphEvmEnv,
+    ) -> Result<Option<Self>, EVMError<DB::Error, MorphInvalidTransaction>> {
         let entry = match TokenRegistryEntry::load(db, token_id)? {
             Some(e) => e,
             None => return Ok(None),
         };
 
-        entry.load_for_caller(db, caller, hardfork).map(Some)
+        entry.load_for_caller(db, caller, env).map(Some)
     }
 
     /// Storage-only variant of [`Self::load_for_caller`].
@@ -171,15 +199,30 @@ impl TokenFeeInfo {
         entry.load_storage_only(db, caller).map(Some)
     }
 
-    /// Calculate the token amount required for a given ETH amount.
+    /// Calculate the token amount required for a given ETH amount, rounding up.
     ///
     /// Uses the price ratio and scale to convert ETH value to token amount.
     #[inline]
     pub fn eth_to_token_amount(&self, eth_amount: U256) -> U256 {
+        self.eth_to_token_amount_with_credit(eth_amount).0
+    }
+
+    /// Same as [`Self::eth_to_token_amount`], and also returns the numerator the
+    /// rounding-up overcharged.
+    ///
+    /// The credit is `price_ratio - remainder` (zero when the division is exact):
+    /// the part of one whole token unit the caller paid for but did not use. From
+    /// Celadon on, [`Self::eth_to_token_amount_floor`] hands it back on the refund
+    /// so that the caller is charged `ceil` of the *net* fee rather than
+    /// `ceil(prepaid) - ceil(refund)`, which under-collects.
+    ///
+    /// Mirrors go-ethereum's `types.EthToAlt`.
+    #[inline]
+    pub fn eth_to_token_amount_with_credit(&self, eth_amount: U256) -> (U256, U256) {
         // If price_ratio or scale is zero (misconfigured token), return MAX to prevent
         // free-ride transactions. The caller's balance check will reject the tx.
         if self.price_ratio.is_zero() || self.scale.is_zero() {
-            return U256::MAX;
+            return (U256::MAX, U256::ZERO);
         }
 
         // token_amount = eth_amount * scale / price_ratio
@@ -187,11 +230,37 @@ impl TokenFeeInfo {
             .saturating_mul(self.scale)
             .div_rem(self.price_ratio);
         // If there's a remainder, round up by adding 1
-        if !remainder.is_zero() {
-            token_amount.saturating_add(U256::from(1))
+        if remainder.is_zero() {
+            (token_amount, U256::ZERO)
         } else {
-            token_amount
+            (
+                token_amount.saturating_add(U256::from(1)),
+                self.price_ratio - remainder,
+            )
         }
+    }
+
+    /// Convert an ETH amount plus the prepaid rounding credit into token units,
+    /// rounding down.
+    ///
+    /// `rounding_credit` comes from the matching
+    /// [`Self::eth_to_token_amount_with_credit`] call made when the fee was
+    /// deducted. Mirrors go-ethereum's `types.EthToAltFloor`.
+    ///
+    /// A misconfigured token refunds nothing. That is the conservative direction
+    /// (the ceiling path returns `U256::MAX` for the same input to make the
+    /// deduction fail), and it is unreachable in practice: such a transaction
+    /// never gets past the balance check at deduction time.
+    #[inline]
+    pub fn eth_to_token_amount_floor(&self, eth_amount: U256, rounding_credit: U256) -> U256 {
+        if self.price_ratio.is_zero() || self.scale.is_zero() {
+            return U256::ZERO;
+        }
+
+        eth_amount
+            .saturating_mul(self.scale)
+            .saturating_add(rounding_credit)
+            / self.price_ratio
     }
 }
 
@@ -292,26 +361,33 @@ fn read_token_balance_with_fallback<DB: Database>(
     token: Address,
     account: Address,
     balance_slot: Option<U256>,
-    hardfork: MorphHardfork,
-) -> Result<U256, DB::Error> {
+    env: &MorphEvmEnv,
+) -> Result<U256, EVMError<DB::Error, MorphInvalidTransaction>> {
     if let Some(slot) = balance_slot {
-        return read_balance_from_storage(db, token, account, slot);
+        return Ok(read_balance_from_storage(db, token, account, slot)?);
     }
 
-    // EVM fallback: construct temporary MorphEvm for balanceOf call
+    // Call mode: stand the EVM up in the caller's environment rather than a default one,
+    // and make the same `balanceOf` call the execution layer makes, so both reach the same
+    // answer for a token whose balance depends on block context or `msg.sender`.
     let db: &mut dyn Database<Error = DB::Error> = db;
-    let mut evm = MorphEvm::new(MorphContext::new(db, hardfork), NoOpInspector {});
-
-    match query_balance_via_system_call(&mut evm, token, account) {
-        Ok(balance) => Ok(balance),
-        Err(EVMError::Database(e)) => Err(e),
-        Err(_) => Ok(U256::ZERO), // Non-DB errors → zero (safe fallback)
-    }
+    let mut evm = MorphEvm::from_env(db, env.clone(), NoOpInspector {});
+    // ORIGIN follows this client's own execution layer, which resolves the same
+    // `balanceOf` against the transaction's `caller`. go-ethereum's pool instead builds
+    // its query on an empty `vm.TxContext{}` (core/tx_pool.go:341), leaving ORIGIN at the
+    // zero address and disagreeing with go-ethereum's own execution layer. Admission
+    // exists to predict what the builder will be able to include, so it follows execution
+    // rather than the other client's pool. GASPRICE is the one input this query still
+    // cannot match: it stays at the `TxEnv` default of zero because the effective price
+    // depends on the next block's base fee, which admission does not know. go-ethereum's
+    // pool has the same gap.
+    evm.tx.inner.caller = account;
+    crate::handler::evm_call_balance_of(&mut evm, token, account)
 }
 
 /// Read ERC20 balance directly from storage slot.
 #[inline]
-fn read_balance_from_storage<DB: RevmDatabase>(
+pub(crate) fn read_balance_from_storage<DB: RevmDatabase>(
     db: &mut DB,
     token: Address,
     account: Address,
@@ -320,44 +396,6 @@ fn read_balance_from_storage<DB: RevmDatabase>(
     let mut key = [0u8; 32];
     key[12..32].copy_from_slice(account.as_slice());
     read_mapping_value(db, token, balance_slot, &key)
-}
-
-/// Execute EVM `balanceOf(address)` call.
-fn query_balance_via_system_call<DB, I>(
-    evm: &mut MorphEvm<DB, I>,
-    token: Address,
-    account: Address,
-) -> Result<U256, EVMError<DB::Error, MorphInvalidTransaction>>
-where
-    DB: Database,
-{
-    let calldata = encode_balance_of_calldata(account);
-    match evm.system_call_one(token, calldata) {
-        Ok(result) if result.is_success() => {
-            if let Some(output) = result.output()
-                && output.len() >= 32
-            {
-                return Ok(U256::from_be_slice(&output[..32]));
-            }
-            Ok(U256::ZERO)
-        }
-        Ok(_) => Ok(U256::ZERO),
-        Err(_) => Ok(U256::ZERO),
-    }
-}
-
-/// Query ERC20 balance via EVM call.
-///
-/// Use this when you have a `MorphEvm` instance and need to call `balanceOf`.
-pub fn query_erc20_balance<DB, I>(
-    evm: &mut MorphEvm<DB, I>,
-    token: Address,
-    account: Address,
-) -> Result<U256, EVMError<DB::Error, MorphInvalidTransaction>>
-where
-    DB: Database,
-{
-    query_balance_via_system_call(evm, token, account)
 }
 
 /// Encode ERC20 `balanceOf(address)` calldata.
@@ -373,8 +411,165 @@ pub fn encode_balance_of_calldata(account: Address) -> Bytes {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    use alloy_primitives::{B256, address, bytes};
+    use revm::bytecode::Bytecode;
+    use revm::database::{CacheDB, EmptyDB};
+    use revm::state::AccountInfo;
+
+    /// The storage read failure injected by [`UnreadableTokenDb`], distinguishable from any
+    /// error a real database would report. Shared with the handler tests.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) struct TokenReadFailure;
+
+    impl core::fmt::Display for TokenReadFailure {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.write_str("injected token storage read failure")
+        }
+    }
+
+    impl core::error::Error for TokenReadFailure {}
+
+    impl revm::database_interface::DBErrorMarker for TokenReadFailure {}
+
+    /// Fails every storage read of `token` with [`TokenReadFailure`]; everything else reads
+    /// normally, so a failure a test observes comes from that token's storage. Shared with the
+    /// handler tests.
+    #[derive(Debug)]
+    pub(crate) struct UnreadableTokenDb {
+        pub(crate) inner: CacheDB<EmptyDB>,
+        pub(crate) token: Address,
+    }
+
+    impl RevmDatabase for UnreadableTokenDb {
+        type Error = TokenReadFailure;
+
+        fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
+            Ok(self.inner.basic(address).unwrap())
+        }
+
+        fn code_by_hash(&mut self, code_hash: B256) -> Result<Bytecode, Self::Error> {
+            Ok(self.inner.code_by_hash(code_hash).unwrap())
+        }
+
+        fn storage(&mut self, address: Address, index: U256) -> Result<U256, Self::Error> {
+            if address == self.token {
+                return Err(TokenReadFailure);
+            }
+            Ok(self.inner.storage(address, index).unwrap())
+        }
+
+        fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error> {
+            Ok(self.inner.block_hash(number).unwrap())
+        }
+    }
+
+    /// Registry state for a call-mode token (no `balanceSlot`) whose `balanceOf` returns
+    /// storage slot 0, so reading it is a storage read of the token contract.
+    fn call_mode_token_state(token: Address, balance: u64) -> CacheDB<EmptyDB> {
+        call_mode_token_state_with_code(token, balance, bytes!("6000545f5260205ff3"))
+    }
+
+    /// As [`call_mode_token_state`], with an explicit `balanceOf` implementation.
+    fn call_mode_token_state_with_code(
+        token: Address,
+        balance: u64,
+        code: Bytes,
+    ) -> CacheDB<EmptyDB> {
+        let mut db = CacheDB::new(EmptyDB::default());
+        let mut token_id_bytes = [0u8; 32];
+        token_id_bytes[31] = 1;
+        let base = compute_mapping_slot(TOKEN_REGISTRY_SLOT, &token_id_bytes);
+
+        let mut packed = [0u8; 32];
+        packed[30] = 18; // decimals
+        packed[31] = 1; // isActive
+        for (slot, value) in [
+            (base, U256::from_be_bytes(token.into_word().0)),
+            // Zero means "no known balance slot": the EVM `balanceOf` fallback is used.
+            (base + U256::from(1), U256::ZERO),
+            (base + U256::from(2), U256::from_be_bytes(packed)),
+            (base + U256::from(3), U256::from(1)), // scale
+            (
+                compute_mapping_slot(PRICE_RATIO_SLOT, &token_id_bytes),
+                U256::from(1), // priceRatio
+            ),
+        ] {
+            db.insert_account_storage(L2_TOKEN_REGISTRY_ADDRESS, slot, value)
+                .unwrap();
+        }
+
+        db.insert_account_info(
+            token,
+            AccountInfo {
+                code_hash: alloy_primitives::keccak256(code.as_ref()),
+                code: Some(Bytecode::new_raw(code)),
+                ..Default::default()
+            },
+        );
+        db.insert_account_storage(token, U256::ZERO, U256::from(balance))
+            .unwrap();
+        db
+    }
+
+    #[test]
+    fn call_mode_balance_is_read_under_the_supplied_block_environment() {
+        const TIMESTAMP: u64 = 1_767_765_600;
+        let token = address!("5300000000000000000000000000000000000042");
+        let caller = address!("0000000000000000000000000000000000000001");
+
+        // TIMESTAMP PUSH0 MSTORE PUSH1 0x20 PUSH0 RETURN — a `balanceOf` that reports the
+        // block time, so an answer produced under the wrong environment is visible.
+        let mut db = call_mode_token_state_with_code(token, 0, bytes!("425f5260205ff3"));
+
+        let env = MorphEvmEnv::new(
+            revm::context::CfgEnv::new_with_spec(MorphHardfork::Emerald),
+            crate::MorphBlockEnv {
+                inner: revm::context::BlockEnv {
+                    timestamp: U256::from(TIMESTAMP),
+                    ..Default::default()
+                },
+            },
+        );
+
+        let info = TokenFeeInfo::load_for_caller(&mut db, 1, caller, &env)
+            .unwrap()
+            .unwrap();
+
+        // `BlockEnv::default()` reports timestamp 1, which is what the pool answered with
+        // regardless of the block it was validating against.
+        assert_eq!(info.balance, U256::from(TIMESTAMP));
+    }
+
+    #[test]
+    fn balance_of_fallback_reports_a_failed_state_read_instead_of_a_zero_balance() {
+        let token = address!("5300000000000000000000000000000000000042");
+        let caller = address!("0000000000000000000000000000000000000001");
+        let env = MorphEvmEnv::new(
+            revm::context::CfgEnv::new_with_spec(MorphHardfork::Emerald),
+            crate::MorphBlockEnv::default(),
+        );
+
+        // Readable state: the fallback reaches the token and reads the balance.
+        let mut readable = call_mode_token_state(token, 10_000_000);
+        let info = TokenFeeInfo::load_for_caller(&mut readable, 1, caller, &env)
+            .unwrap()
+            .unwrap();
+        assert_eq!(info.balance, U256::from(10_000_000));
+
+        // Same state, but the token's storage cannot be read. Reporting a zero balance here
+        // would be indistinguishable from an account that genuinely cannot pay.
+        let mut unreadable = UnreadableTokenDb {
+            inner: call_mode_token_state(token, 10_000_000),
+            token,
+        };
+        assert_eq!(
+            TokenFeeInfo::load_for_caller(&mut unreadable, 1, caller, &env).unwrap_err(),
+            EVMError::Database(TokenReadFailure)
+        );
+    }
 
     #[test]
     fn test_token_fee_info_default() {
@@ -433,6 +628,124 @@ mod tests {
         let token_amount = info.eth_to_token_amount(eth_amount);
         // Misconfigured token returns MAX to prevent free-ride transactions
         assert_eq!(token_amount, U256::MAX);
+    }
+
+    /// Rounding up the prepaid fee leaves `price_ratio - remainder` of a token
+    /// unit paid for but unused, which is exactly what the refund gets back.
+    #[test]
+    fn eth_to_token_amount_reports_the_rounding_credit() {
+        let info = TokenFeeInfo {
+            price_ratio: U256::from(3u64),
+            scale: U256::from(1u64),
+            ..Default::default()
+        };
+
+        // 10 / 3 = 3 remainder 1 → charge 4, one third of a unit unused → 3 - 1 = 2.
+        let (amount, credit) = info.eth_to_token_amount_with_credit(U256::from(10u64));
+        assert_eq!(amount, U256::from(4u64));
+        assert_eq!(credit, U256::from(2u64));
+
+        // An exact division overcharges nothing.
+        let (amount, credit) = info.eth_to_token_amount_with_credit(U256::from(9u64));
+        assert_eq!(amount, U256::from(3u64));
+        assert_eq!(credit, U256::ZERO);
+
+        // The plain ceiling accessor stays the first half of the pair.
+        assert_eq!(
+            info.eth_to_token_amount(U256::from(10u64)),
+            U256::from(4u64)
+        );
+    }
+
+    /// The credit is what makes deduct-then-refund add up to `ceil(net fee)`.
+    /// Without it, both halves round up independently and the chain
+    /// under-collects — for `remaining = 4` below, by a whole token unit.
+    #[test]
+    fn floor_refund_charges_the_ceiling_of_the_net_fee() {
+        let info = TokenFeeInfo {
+            price_ratio: U256::from(3u64),
+            scale: U256::from(1u64),
+            ..Default::default()
+        };
+
+        for prepaid_eth in 0u64..40 {
+            let (charged, credit) = info.eth_to_token_amount_with_credit(U256::from(prepaid_eth));
+            for remaining_eth in 0..=prepaid_eth {
+                let refunded = info.eth_to_token_amount_floor(U256::from(remaining_eth), credit);
+                let net_eth = U256::from(prepaid_eth - remaining_eth);
+                assert_eq!(
+                    charged - refunded,
+                    info.eth_to_token_amount(net_eth),
+                    "prepaid {prepaid_eth}, remaining {remaining_eth}"
+                );
+            }
+        }
+    }
+
+    /// The Celadon change is observable, so the fork gate in the handler is not
+    /// cosmetic: on an exact deduction the credit is zero and the two roundings
+    /// disagree for every inexact refund.
+    #[test]
+    fn floor_and_ceiling_refunds_differ() {
+        let info = TokenFeeInfo {
+            price_ratio: U256::from(3u64),
+            scale: U256::from(1u64),
+            ..Default::default()
+        };
+
+        // Exact deduction (9 / 3) → no credit; refunding 4 ceils to 2, floors to 1.
+        let (_, credit) = info.eth_to_token_amount_with_credit(U256::from(9u64));
+        assert_eq!(credit, U256::ZERO);
+        assert_eq!(info.eth_to_token_amount(U256::from(4u64)), U256::from(2u64));
+        assert_eq!(
+            info.eth_to_token_amount_floor(U256::from(4u64), credit),
+            U256::from(1u64)
+        );
+    }
+
+    /// Flooring can reach zero where the ceiling never does. The handler skips
+    /// the transfer in that case, matching go-ethereum's `TransferAltTokenHybrid`.
+    #[test]
+    fn floor_refund_can_be_zero() {
+        let info = TokenFeeInfo {
+            price_ratio: U256::from(5u64),
+            scale: U256::from(1u64),
+            ..Default::default()
+        };
+
+        let (_, credit) = info.eth_to_token_amount_with_credit(U256::from(5u64));
+        assert_eq!(credit, U256::ZERO);
+        assert_eq!(info.eth_to_token_amount(U256::from(1u64)), U256::from(1u64));
+        assert_eq!(
+            info.eth_to_token_amount_floor(U256::from(1u64), credit),
+            U256::ZERO
+        );
+    }
+
+    /// A misconfigured token refunds nothing rather than the `U256::MAX` the
+    /// ceiling path returns to make the deduction fail.
+    #[test]
+    fn floor_refund_of_a_misconfigured_token_is_zero() {
+        for info in [
+            TokenFeeInfo {
+                price_ratio: U256::ZERO,
+                scale: U256::from(1u64),
+                ..Default::default()
+            },
+            TokenFeeInfo {
+                price_ratio: U256::from(1u64),
+                scale: U256::ZERO,
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(
+                info.eth_to_token_amount_floor(U256::from(10u64), U256::from(3u64)),
+                U256::ZERO
+            );
+            let (amount, credit) = info.eth_to_token_amount_with_credit(U256::from(10u64));
+            assert_eq!(amount, U256::MAX);
+            assert_eq!(credit, U256::ZERO);
+        }
     }
 
     #[test]

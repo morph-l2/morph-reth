@@ -13,7 +13,6 @@ use alloy_evm::{
 use alloy_primitives::{Address, Bytes};
 use morph_chainspec::hardfork::MorphHardfork;
 use morph_revm::{MorphHaltReason, MorphInvalidTransaction, MorphTxEnv, evm::MorphContext};
-use reth_revm::MainContext;
 use std::ops::{Deref, DerefMut};
 
 use crate::MorphBlockEnv;
@@ -66,17 +65,7 @@ pub struct MorphEvm<DB: Database, I = NoOpInspector> {
 impl<DB: Database> MorphEvm<DB> {
     /// Create a new [`MorphEvm`] instance.
     pub fn new(db: DB, input: EvmEnv<MorphHardfork, MorphBlockEnv>) -> Self {
-        let ctx = Context::mainnet()
-            .with_db(db)
-            .with_block(input.block_env)
-            .with_cfg(input.cfg_env)
-            .with_tx(Default::default())
-            .with_chain(morph_revm::l1block::L1BlockInfo::default());
-
-        // Build the inner MorphEvm which creates precompiles once.
-        // Derive the PrecompilesMap from the inner's precompiles to avoid
-        // a second MorphPrecompiles::new_with_spec call.
-        let inner = morph_revm::MorphEvm::new(ctx, NoOpInspector {});
+        let inner = morph_revm::MorphEvm::from_env(db, input, NoOpInspector {});
         let precompiles_map = PrecompilesMap::from_static(inner.precompiles.precompiles());
 
         Self {
