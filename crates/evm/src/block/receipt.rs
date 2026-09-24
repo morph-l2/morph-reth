@@ -161,8 +161,12 @@ impl MorphReceiptBuilder for DefaultMorphReceiptBuilder {
 
         // Assemble logs in chronological order matching go-ethereum:
         //   [deduct Transfer] + [main tx logs] + [refund Transfer]
-        // Fee logs are cached separately from the journal so they survive
-        // main tx revert (revm's ExecutionResult::Revert carries no logs).
+        // The fee logs cannot come from `result`. The call-mode deduction runs a
+        // mid-transaction `finalize()` that clears the journal's logs, so the handler
+        // moves them out first, and it drains the refund's logs the same way. `result`
+        // carries only the main frame's logs, which a revert has already discarded,
+        // while the fee logs survive it as they do in go-ethereum, whose `StateDB.logs`
+        // sit outside the snapshot/revert mechanism.
         let is_success = result.is_success();
         let main_logs = result.into_logs();
         let mut logs =
