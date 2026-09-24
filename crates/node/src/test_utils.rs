@@ -204,6 +204,8 @@ pub struct TestNodeBuilder {
     num_nodes: usize,
     is_dev: bool,
     desired_gas_limit: Option<u64>,
+    debug_tip: Option<B256>,
+    trusted_peer: Option<String>,
     morph_args: Option<MorphArgs>,
 }
 
@@ -229,6 +231,8 @@ impl TestNodeBuilder {
             num_nodes: 1,
             is_dev: false,
             desired_gas_limit: None,
+            debug_tip: None,
+            trusted_peer: None,
             morph_args: None,
         }
     }
@@ -285,6 +289,18 @@ impl TestNodeBuilder {
         self
     }
 
+    /// Start an initial pipeline backfill toward the given block hash.
+    pub fn with_debug_tip(mut self, tip: B256) -> Self {
+        self.debug_tip = Some(tip);
+        self
+    }
+
+    /// Dial a trusted peer during node startup, before an initial backfill runs.
+    pub fn with_trusted_peer(mut self, enode: impl Into<String>) -> Self {
+        self.trusted_peer = Some(enode.into());
+        self
+    }
+
     /// Override the maximum pool-transaction payload bytes included in a block.
     ///
     /// Restricted to single-node setups.
@@ -323,6 +339,8 @@ impl TestNodeBuilder {
         // can carry `--builder.gaslimit`, which `setup_engine` gives no way to set.
         let is_dev = self.is_dev;
         let desired_gas_limit = self.desired_gas_limit;
+        let debug_tip = self.debug_tip;
+        let trusted_peer = self.trusted_peer;
         reth_e2e_test_utils::E2ETestSetupBuilder::<MorphNode, _>::new(
             self.num_nodes,
             Arc::new(chain_spec),
@@ -330,6 +348,10 @@ impl TestNodeBuilder {
         )
         .with_node_config_modifier(move |mut config| {
             config.builder.gas_limit = desired_gas_limit;
+            config.debug.tip = debug_tip;
+            if let Some(ref enode) = trusted_peer {
+                config.network.trusted_peers = vec![enode.parse().expect("valid trusted enode")];
+            }
             config.set_dev(is_dev)
         })
         .build()
