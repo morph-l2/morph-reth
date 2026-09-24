@@ -47,12 +47,6 @@ fn apply_morph_cli_defaults(
             .gas_price_oracle
             .default_suggested_fee
             .get_or_insert_with(morph_default_suggested_fee);
-        // reth ignores transactions from peers until its first canonical block after startup,
-        // including the one-off pool announcement each peer sends when a session opens, and
-        // peers do not repeat it. Blocks only ever arrive from the consensus client, so there is
-        // nothing to catch up on over p2p, and a restarted sequencer would otherwise never see
-        // the transactions RPC nodes held while it was down.
-        command.debug.startup_sync_state_idle = true;
     }
 }
 
@@ -203,16 +197,5 @@ mod tests {
         };
         assert!(!command.ext.proofs_history);
         assert_eq!(command.rpc.rpc_eth_proof_window, 0);
-    }
-
-    #[test]
-    fn node_command_accepts_peer_transactions_from_startup() {
-        let mut cli = MorphCli::try_parse_from(["morph-reth", "node", "--chain", "hoodi"])
-            .expect("node command must parse");
-        apply_morph_cli_defaults(&mut cli);
-        let Commands::Node(command) = cli.command else {
-            panic!("expected node command")
-        };
-        assert!(command.debug.startup_sync_state_idle);
     }
 }
