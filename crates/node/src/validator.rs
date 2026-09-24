@@ -69,8 +69,9 @@ where
 
 /// Builder for Morph tree engine validator.
 ///
-/// This wires [`MorphEngineValidator`] into both payload validation and state-root
-/// decision/validation hooks.
+/// This wires [`MorphEngineValidator`] into upstream payload validation, installs the
+/// pre-Jade-aware `MorphStateRootStrategy`, and wraps the result in
+/// [`MorphTreeEngineValidator`] for the L1-queue and withdraw-trie-root checks.
 #[derive(Debug, Clone)]
 pub struct MorphTreeEngineValidatorBuilder<PVB = MorphEngineValidatorBuilder> {
     payload_validator_builder: PVB,
@@ -945,7 +946,7 @@ mod tests {
     }
 
     /// Block-input path (P2P sync, pipeline backfill) reaches
-    /// `validate_block_post_execution_with_hashed_state` without calling
+    /// `validate_withdraw_trie_root_update` without calling
     /// `convert_payload_to_block`, so no expectation is registered. The
     /// validator must treat the missing entry as `SkipValidation` and
     /// return `Ok` — otherwise sync stalls. The upstream strict state-root

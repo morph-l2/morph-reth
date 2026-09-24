@@ -75,13 +75,13 @@ pub(crate) struct MorphReceiptBuilderCtx<'a, E: Evm> {
 ///
 /// # Token Fee Calculation Formula
 /// ```text
-/// token_fee = eth_fee * fee_rate / token_scale
+/// token_fee = eth_fee * token_scale / fee_rate (rounded up)
 /// ```
 ///
 /// # Fields
 /// - `version`: The version of the Morph transaction format (0 = legacy, 1 = with reference/memo)
 /// - `fee_token_id`: ID of the ERC20 token registered in L2TokenRegistry
-/// - `fee_rate`: Exchange rate from L2TokenRegistry (token per ETH)
+/// - `fee_rate`: Price ratio from L2TokenRegistry (token price relative to ETH)
 /// - `token_scale`: Decimal scale factor for the token (e.g., 10^18)
 /// - `fee_limit`: Maximum tokens the user agreed to pay
 /// - `reference`: 32-byte key for transaction indexing by external systems
@@ -203,7 +203,7 @@ impl MorphReceiptBuilder for DefaultMorphReceiptBuilder {
                 // MorphTx transactions should always have MorphTx-specific fields.
                 // If fields are missing, it indicates one of the following:
                 // 1. The fee token is not registered in L2TokenRegistry
-                // 2. TokenFeeInfo::fetch returned None (token inactive or query failed)
+                // 2. The token registry lookup failed (logged by commit_transaction)
                 // 3. A bug in get_morph_tx_fields logic
                 //
                 // We log a warning and fallback to L1-fee-only receipt to avoid

@@ -258,8 +258,7 @@ async fn new_l2_block_v2_imports_block_on_current_head() -> eyre::Result<()> {
 /// second — which builds on the same parent, not on the new head — must reorg the head
 /// onto it. This is the core capability the centralized sequencer relies on
 /// (`NewL2BlockV2` + `SetCanonical`); the V1 path would reject the sibling with a
-/// wrong-parent-hash error. Near-wall-clock timestamps keep the blocks out of the
-/// historical-finalization fallback so the engine permits the reorg.
+/// wrong-parent-hash error.
 #[tokio::test(flavor = "multi_thread")]
 async fn new_l2_block_v2_reorgs_onto_sibling_block() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -274,9 +273,8 @@ async fn new_l2_block_v2_reorgs_onto_sibling_block() -> eyre::Result<()> {
         .unwrap()
         .as_secs();
 
-    // Block 1 on genesis. Timestamps sit a few seconds in the past: recent enough to
-    // stay out of the historical-finalization fallback (so the engine permits the
-    // reorg) but not in the future (which header validation would reject).
+    // Block 1 on genesis. Timestamps sit a few seconds in the past, not in the future
+    // (which header validation would reject).
     let mut params = AssembleL2BlockParams::empty(1);
     params.timestamp = Some(now - 6);
     let block1: ExecutableL2Data = client.request("engine_assembleL2Block", (params,)).await?;
@@ -348,9 +346,8 @@ async fn new_safe_l2_block_with_parent_hash_reorgs_onto_non_head_parent() -> eyr
         .unwrap()
         .as_secs();
 
-    // Block 1 on genesis (live import). Past-but-recent timestamps keep the blocks out
-    // of the historical-finalization fallback (so the reorg is permitted) without
-    // tripping the future-timestamp header check.
+    // Block 1 on genesis (live import). Past timestamps avoid tripping the
+    // future-timestamp header check.
     let mut p1 = AssembleL2BlockParams::empty(1);
     p1.timestamp = Some(now - 6);
     let block1: ExecutableL2Data = client.request("engine_assembleL2Block", (p1,)).await?;
@@ -999,7 +996,7 @@ async fn new_safe_l2_block_rejects_transactions_over_gas_limit() -> eyre::Result
     import_l2_block(&node, block1).await?;
     let head_before = canonical_snapshot(&node)?;
 
-    // First transaction fits; the second one alone exceeds the whole block gas limit, so the
+    // First transaction fits; the second one's limit equals the whole block gas limit, so the
     // pair cannot be executed under it.
     let fits = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
         .with_v1_token_fee(TEST_TOKEN_ID)

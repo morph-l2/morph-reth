@@ -53,7 +53,6 @@ impl<Provider> MorphRpc<Provider> {
 
 // ── Handler ───────────────────────────────────────────────────────────────────
 
-/// Handler that wraps [`MorphRpc`] and implements the jsonrpsee server trait.
 #[cfg(test)]
 #[derive(Clone)]
 struct WaitObserver(std::sync::Arc<dyn Fn(bool) + Send + Sync>);
@@ -65,6 +64,7 @@ impl std::fmt::Debug for WaitObserver {
     }
 }
 
+/// Handler that wraps [`MorphRpc`] and implements the jsonrpsee server trait.
 #[derive(Debug, Clone)]
 pub struct MorphRpcHandler<Provider> {
     ctx: MorphRpc<Provider>,

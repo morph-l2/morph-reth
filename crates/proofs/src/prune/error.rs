@@ -63,7 +63,7 @@ impl PrunerOutput {
 /// Error returned by the pruner.
 #[derive(Debug, Error)]
 pub enum PrunerError {
-    /// Wrapped error from the underlying `MorphProofStorage` layer.
+    /// Wrapped error from the underlying `MorphProofsStorage` layer.
     #[error(transparent)]
     Storage(#[from] MorphProofsStorageError),
 

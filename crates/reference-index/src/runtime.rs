@@ -314,7 +314,8 @@ impl<C: CanonicalChain> ReferenceIndexRuntime<C> {
         Ok(())
     }
 
-    /// Run the non-critical background reconciler until node shutdown.
+    /// Run the non-critical background reconciler until node shutdown, or until it
+    /// stops in [`ReferenceIndexPhase::Unavailable`].
     ///
     /// Notifications are wake-ups and rate signals only. Canonical data is
     /// always re-read through [`CanonicalChain`] before a durable commit.

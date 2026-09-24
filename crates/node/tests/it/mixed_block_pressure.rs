@@ -64,9 +64,9 @@ fn assert_l1_prefix(block: &Block, expected_l1_messages: u64) {
     assert_eq!(block.header.next_l1_msg_index, expected_l1_messages);
 }
 
-/// Data-availability bytes the builder attributes to a block, which is the RLP
-/// network length of each pool transaction. L1 messages are excluded because
-/// their data already lives on L1.
+/// Data-availability bytes of a block's pool transactions, summed as RLP network
+/// lengths (never below the EIP-2718 lengths the builder counts). L1 messages are
+/// excluded because their data already lives on L1.
 fn l2_da_bytes(block: &Block) -> u64 {
     block
         .body

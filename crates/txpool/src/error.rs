@@ -39,18 +39,19 @@ pub enum MorphTxError {
         token_id: u16,
         /// The token address.
         token_address: Address,
-        /// The actual token balance.
+        /// The spendable token amount: the balance, capped by a non-zero `fee_limit`.
         balance: U256,
         /// The required token amount.
         required: U256,
     },
 
     /// Insufficient ETH balance to pay for transaction value.
-    /// MorphTx still requires ETH for the `value` field.
+    /// MorphTx still requires ETH for the `value` field. On the `fee_token_id == 0`
+    /// ETH-fee path this also covers the full cost (gas + L1 data fee + value).
     InsufficientEthForValue {
         /// The ETH balance.
         balance: U256,
-        /// The transaction value.
+        /// The transaction value, or the full ETH cost on the ETH-fee path.
         value: U256,
     },
 

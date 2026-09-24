@@ -5,6 +5,7 @@
 //! - Rejection of EIP-4844 blob transactions
 //! - EIP-3860 max initcode size enforcement
 //! - Rejection of L1 message transactions from the pool
+//! - Rejection of EIP-7702 transactions before Viridian and MorphTx before Emerald
 //! - L1 data fee validation
 //! - MorphTx (0x7F) ERC20 token balance validation
 
@@ -102,12 +103,15 @@ impl MorphL1BlockInfo {
 /// This validator extends [`EthTransactionValidator`] with Morph-specific checks:
 /// - Rejects EIP-4844 blob transactions (not supported on L2)
 /// - Rejects L1 message transactions (only included by sequencer)
+/// - Rejects EIP-7702 transactions before Viridian and MorphTx before Emerald
+/// - Enforces the EIP-3860 initcode size limit regardless of Shanghai activation
 /// - Validates L1 data fee affordability
 /// - Validates MorphTx (0x7F) ERC20 token balance and fee_limit
 ///
 /// # MorphTx Validation
 ///
-/// For MorphTx (type 0x7F), this validator performs additional checks:
+/// For token-fee MorphTx (type 0x7F, `fee_token_id > 0`), this validator performs
+/// additional checks:
 /// 1. Token must be registered and active in L2TokenRegistry
 /// 2. Fee limit must be sufficient for the calculated token cost
 /// 3. Token balance must cover the fee
@@ -251,6 +255,8 @@ where
     /// This behaves the same as [`EthTransactionValidator::validate_one`], but in addition:
     /// - Rejects EIP-4844 blob transactions
     /// - Rejects L1 message transactions
+    /// - Rejects EIP-7702 transactions before Viridian and MorphTx before Emerald
+    /// - Enforces the EIP-3860 initcode size limit regardless of Shanghai activation
     /// - Validates MorphTx (0x7F) ERC20 token balance and fee_limit
     /// - Ensures that the account has enough balance to cover the L1 gas cost
     pub fn validate_one(
@@ -415,11 +421,12 @@ where
     /// to avoid a redundant second `clone_into_consensus()`.
     ///
     /// This method performs the following checks (reference: go-ethereum tx_pool.go:727-791):
-    /// 1. `fee_token_id == 0`: ETH-fee path, require ETH affordability for `cost + l1_fee`
-    /// 2. `fee_token_id > 0`: token must be registered and active in L2TokenRegistry
-    /// 3. Token price ratio must be valid (non-zero)
-    /// 4. Effective token limit must cover required token amount
-    /// 5. ETH balance must be >= transaction value (value is still in ETH)
+    /// 1. Structural MorphTx rules (`version`, `fee_limit`, memo length, fee ordering)
+    /// 2. ETH balance must be >= transaction value (value is still in ETH)
+    /// 3. `fee_token_id == 0`: ETH-fee path, require ETH affordability for `cost + l1_fee`
+    /// 4. `fee_token_id > 0`: token must be registered and active in L2TokenRegistry
+    /// 5. Token price ratio must be valid (non-zero)
+    /// 6. Effective token limit must cover required token amount
     fn validate_morph_tx_balance(
         &self,
         consensus_tx: &reth_primitives_traits::Recovered<MorphTxEnvelope>,
@@ -783,7 +790,7 @@ mod tests {
     /// (inherited from scroll-tech go-ethereum) that alloy's `Genesis` parser
     /// ignores, leaving Shanghai un-registered in the hardforks table and
     /// `is_shanghai_active_at_timestamp` permanently `false` — which means reth's
-    /// Shanghai-gated EIP-3860 check (`EthTransactionValidator`, `eth.rs:468`) is
+    /// Shanghai-gated EIP-3860 check (`EthTransactionValidator::validate_stateless`) is
     /// always skipped. The rejection is therefore enforced unconditionally by
     /// `MorphTransactionValidator` itself (see `validate_one_with_state`), not by
     /// the chainspec or the inner reth validator.

@@ -217,7 +217,7 @@ pub trait MorphProofsStore: Send + Sync + Debug {
         new_earliest_block_ref: BlockWithParent,
     ) -> MorphProofsStorageResult<WriteCounts>;
 
-    /// Remove account, storage and trie updates from historical storage for all blocks till
+    /// Remove account, storage and trie updates from historical storage for all blocks from
     /// the specified block (inclusive).
     fn unwind_history(&self, to: BlockWithParent) -> MorphProofsStorageResult<()>;
 

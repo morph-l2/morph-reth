@@ -193,13 +193,13 @@ where
     /// Handles chain reorganizations by replacing block updates after a common ancestor.
     ///
     /// This method removes all block updates after the latest common ancestor (the block before
-    /// the first block in `new_blocks`) and replaces them with the updates from the provided new
-    /// chain.
+    /// the first block in `block_updates`) and replaces them with the updates from the provided
+    /// new chain.
     ///
     /// # Arguments
     ///
-    /// * `new_blocks` - A vector of references to `RecoveredBlock` instances representing the new
-    ///   blocks to be added to the trie storage.
+    /// * `block_updates` - The new chain's blocks, each with its sorted trie updates and hashed
+    ///   post-state, to be added to the trie storage.
     pub fn unwind_and_store_block_updates(
         &self,
         block_updates: Vec<(

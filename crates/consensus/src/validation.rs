@@ -29,6 +29,8 @@
 //! - Transaction root must be valid
 //! - L2 transaction payload (EIP-2718 encoded, L1 messages excluded) must not
 //!   exceed [`morph_chainspec::MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK`]
+//! - MorphTx (0x7F) must be active (Emerald), use an active version (V1 needs Jade),
+//!   and pass field validation
 //!
 //! ## Post-Execution Validation
 //!
@@ -85,7 +87,7 @@ const GAS_LIMIT_BOUND_DIVISOR: u64 = 1024;
 /// L1 message ordering requires both body data (transactions) and parent header data.
 /// Since reth's `Consensus` trait methods provide these separately — `validate_block_pre_execution`
 /// has the block body but not the parent header, while `validate_header_against_parent` has
-/// both headers but not the body — the validation is split into two independent checks:
+/// both headers but not the body — the validation is split into three independent checks:
 ///
 /// 1. **Internal consistency** (`validate_block_pre_execution`): L1 messages are at the block
 ///    start, have sequential queue indices, and are consistent with `header.next_l1_msg_index`.
@@ -96,10 +98,10 @@ const GAS_LIMIT_BOUND_DIVISOR: u64 = 1024;
 ///    from `parent.next_l1_msg_index` and the block's leading L1 messages.
 ///
 /// The consensus trait methods have no ordering dependency and share no mutable state. The strict
-/// cross-block equality check (`header.next == parent.next + l1_count`) requires simultaneous
-/// access to both parent header and block body, which reth's trait API does not provide in
-/// any single method, so Morph performs that final check in the engine tree payload validator
-/// before a block is accepted.
+/// cross-block equality check (`header.next` equals `parent.next` advanced past the block's
+/// leading L1 messages) requires simultaneous access to both parent header and block body,
+/// which reth's trait API does not provide in any single method, so Morph performs that final
+/// check in the engine tree payload validator before a block is accepted.
 #[derive(Debug, Clone)]
 pub struct MorphConsensus {
     /// Chain specification containing hardfork information and chain config.
@@ -214,8 +216,9 @@ impl HeaderValidator<MorphHeader> for MorphConsensus {
     ///
     /// 1. **Parent Hash**: Header's parent_hash must match parent's hash
     /// 2. **Block Number**: Header's number must be parent's number + 1
-    /// 3. **Timestamp**: Header's timestamp must be >= parent's timestamp
+    /// 3. **Timestamp**: Header's timestamp must be > parent's timestamp (>= from Emerald onward)
     /// 4. **Gas Limit**: Change must be within 1/1024 of parent's limit
+    /// 5. **L1 Message Index**: `next_l1_msg_index` must not decrease relative to the parent
     fn validate_header_against_parent(
         &self,
         header: &SealedHeader<MorphHeader>,
@@ -275,7 +278,8 @@ impl Consensus<Block> for MorphConsensus {
     /// 4. **Withdrawals**: Must be empty (Morph L2 doesn't support withdrawals)
     /// 5. **L2 Payload Size**: Encoded L2 txs (L1 messages excluded) must not
     ///    exceed [`MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK`]
-    /// 6. **L1 Messages**: Must be ordered correctly (sequential queue indices, L1 before L2)
+    /// 6. **MorphTx**: Type active (Emerald), version active (V1 needs Jade), fields valid
+    /// 7. **L1 Messages**: Must be ordered correctly (sequential queue indices, L1 before L2)
     fn validate_block_pre_execution(
         &self,
         block: &SealedBlock<Block>,
@@ -689,12 +693,8 @@ fn validate_morph_txs(
 // Receipts Validation
 // ============================================================================
 
-/// Verifies the receipts root and logs bloom against the expected values.
-///
-/// This function:
-/// 1. Calculates the receipts root from the provided receipts
-/// 2. Calculates the logs bloom by combining all receipt blooms
-/// 3. Compares both against the expected values from the block header
+/// Compares a receipts root and logs bloom pre-computed by the executor against the
+/// expected values from the block header.
 #[inline]
 fn verify_receipts_precomputed(
     expected_receipts_root: B256,
@@ -723,6 +723,12 @@ fn verify_receipts_precomputed(
     Ok(())
 }
 
+/// Verifies the receipts root and logs bloom against the expected values.
+///
+/// This function:
+/// 1. Calculates the receipts root from the provided receipts
+/// 2. Calculates the logs bloom by combining all receipt blooms
+/// 3. Compares both against the expected values from the block header
 fn verify_receipts(
     expected_receipts_root: B256,
     expected_logs_bloom: Bloom,
@@ -1144,7 +1150,7 @@ mod tests {
             create_regular_tx(),
         ];
 
-        // Header says 2 but should be 3 (last=2, 2+1=3). Value < min_expected triggers error.
+        // Header says 2 but should be 3 (last=2, 2+1=3). Value != expected triggers error.
         let result = validate_l1_messages_in_block(&txs, 2, true);
         assert!(result.is_err());
         let err_str = result.unwrap_err().to_string();
