@@ -59,7 +59,8 @@ pub trait MorphL2EngineApi: Send + Sync {
     /// * `params` - The parameters for assembling the block, including:
     ///   - `parent_hash`: Hash of the parent block to build on
     ///   - `transactions`: RLP-encoded transactions to include in the block
-    ///   - `timestamp`: Optional block timestamp; defaults to a local clock value
+    ///   - `timestamp`: Optional block timestamp; defaults to a local clock value, and one
+    ///     behind the parent is raised to the earliest timestamp the header rules accept
     ///
     /// # Returns
     ///
