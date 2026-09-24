@@ -50,4 +50,4 @@ serde-bincode-compat = [
 # target. Kept off by default so zkvm guest builds stay quanta-free; node
 # compositions enable it (see `morph-node`).
 engine = ["dep:morph-payload-types", "reth-evm/std"]
-rpc = ["dep:reth-rpc-eth-api", "morph-revm/rpc"]
+rpc = ["dep:reth-rpc-eth-api", "morph-revm/rpc", "morph-primitives/reth-codec"]
