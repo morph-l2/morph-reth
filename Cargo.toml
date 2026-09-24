@@ -141,6 +141,7 @@ reth-evm = { git = "https://github.com/paradigmxyz/reth", tag = "v2.5.2" }
 reth-evm-ethereum = { git = "https://github.com/paradigmxyz/reth", tag = "v2.5.2" }
 reth-execution-types = { git = "https://github.com/paradigmxyz/reth", tag = "v2.5.2" }
 reth-metrics = { git = "https://github.com/paradigmxyz/reth", tag = "v2.5.2" }
+reth-network = { git = "https://github.com/paradigmxyz/reth", tag = "v2.5.2" }
 reth-network-peers = { git = "https://github.com/paradigmxyz/reth", tag = "v2.5.2" }
 reth-node-api = { git = "https://github.com/paradigmxyz/reth", tag = "v2.5.2" }
 reth-node-builder = { git = "https://github.com/paradigmxyz/reth", tag = "v2.5.2" }
