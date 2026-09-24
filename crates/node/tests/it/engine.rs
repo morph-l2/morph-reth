@@ -18,10 +18,13 @@ use morph_payload_types::{
     MorphPayloadTypes, SafeL2Data,
 };
 use morph_primitives::MorphHeader;
-use reth_node_api::PayloadTypes;
+use reth_node_api::{PayloadTypes, TreeConfig};
 use reth_payload_builder::BuildNewPayload;
 use reth_payload_primitives::BuiltPayload;
-use reth_provider::{BlockIdReader, BlockReaderIdExt};
+use reth_provider::{
+    BlockIdReader, BlockNumReader, BlockReaderIdExt, ChainStateBlockReader, DatabaseProviderFactory,
+};
+use std::time::Duration;
 
 use super::helpers::{
     assemble_l2_block, build_block_no_submit, canonical_block, canonical_snapshot,
@@ -198,6 +201,88 @@ async fn new_l2_block_does_not_advance_safe_tag() -> eyre::Result<()> {
         safe_after_unsafe_imports,
         Some(block1_hash),
         "unsafe import must not mark the previous unsafe block as safe"
+    );
+
+    Ok(())
+}
+
+/// `engine_setBlockTags` writes safe and finalized to the database, so they survive an EL
+/// restart.
+///
+/// reth persists tags only when a forkchoice update changes them, and every import after
+/// `engine_setBlockTags` repeats the values it set, so nothing else writes them. Tags above the
+/// persisted chain are stored capped to its tip; the RPC-visible tags keep the exact blocks.
+#[tokio::test(flavor = "multi_thread")]
+async fn set_block_tags_persists_safe_and_finalized() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
+    let node = nodes.pop().unwrap();
+    let client = node.auth_server_handle().http_client();
+
+    let head = 20;
+    let mut hashes = vec![B256::ZERO];
+    for number in 1..=head {
+        let mut params = AssembleL2BlockParams::empty(number);
+        params.timestamp = Some(number);
+        let block = assemble_l2_block(&node, params).await?;
+        hashes.push(block.hash);
+        import_l2_block(&node, block).await?;
+    }
+
+    // Persistence runs only when the head moves more than the threshold past the persisted
+    // tip, so once it is within the threshold no round is left in flight and the tip is final.
+    let threshold = TreeConfig::default().persistence_threshold();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let persisted = loop {
+        let persisted = node
+            .inner
+            .provider
+            .database_provider_ro()?
+            .best_block_number()?;
+        if head - persisted <= threshold {
+            break persisted;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "persistence never caught up"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+    assert!(
+        persisted < head,
+        "the newest blocks must still be in memory"
+    );
+    let stored_tags = || -> eyre::Result<(Option<u64>, Option<u64>)> {
+        let db = node.inner.provider.database_provider_ro()?;
+        Ok((
+            db.last_safe_block_number()?,
+            db.last_finalized_block_number()?,
+        ))
+    };
+
+    // Persisted blocks are stored exactly.
+    let (safe, finalized) = (persisted, persisted - 3);
+    let _: () = client
+        .request(
+            "engine_setBlockTags",
+            (hashes[safe as usize], hashes[finalized as usize]),
+        )
+        .await?;
+    assert_eq!(stored_tags()?, (Some(safe), Some(finalized)));
+
+    // A safe block still in memory is stored as the persisted tip.
+    let _: () = client
+        .request(
+            "engine_setBlockTags",
+            (hashes[head as usize], hashes[persisted as usize]),
+        )
+        .await?;
+    assert_eq!(stored_tags()?, (Some(persisted), Some(persisted)));
+    assert_eq!(node.inner.provider.safe_block_number()?, Some(head));
+    assert_eq!(
+        node.inner.provider.finalized_block_number()?,
+        Some(persisted)
     );
 
     Ok(())

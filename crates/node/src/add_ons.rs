@@ -27,7 +27,8 @@ use reth_node_builder::{
     },
 };
 use reth_provider::{
-    BlockWriter, CanonChainTracker, ChainSpecProvider, DBProvider, DatabaseProviderFactory,
+    BlockNumReader, BlockWriter, CanonChainTracker, ChainSpecProvider, ChainStateBlockWriter,
+    DBProvider, DatabaseProviderFactory,
 };
 use reth_prune_types::PruneMode;
 use reth_rpc_builder::{Identity, RethRpcModule};
@@ -69,6 +70,7 @@ where
     N::Provider: CanonChainTracker<Header = MorphHeader> + DatabaseProviderFactory,
     <N::Provider as DatabaseProviderFactory>::ProviderRW:
         BlockWriter<Block = Block, Receipt = MorphReceipt> + DBProvider,
+    <N::Provider as DatabaseProviderFactory>::ProviderRW: ChainStateBlockWriter + BlockNumReader,
 {
     /// Creates a new [`MorphAddOns`] with default configuration.
     pub fn new() -> Self {
@@ -117,6 +119,7 @@ where
     N::Provider: CanonChainTracker<Header = MorphHeader> + DatabaseProviderFactory,
     <N::Provider as DatabaseProviderFactory>::ProviderRW:
         BlockWriter<Block = Block, Receipt = MorphReceipt> + DBProvider,
+    <N::Provider as DatabaseProviderFactory>::ProviderRW: ChainStateBlockWriter + BlockNumReader,
 {
     fn default() -> Self {
         Self::new()
@@ -129,6 +132,7 @@ where
     N::Provider: CanonChainTracker<Header = MorphHeader> + DatabaseProviderFactory,
     <N::Provider as DatabaseProviderFactory>::ProviderRW:
         BlockWriter<Block = Block, Receipt = MorphReceipt> + DBProvider,
+    <N::Provider as DatabaseProviderFactory>::ProviderRW: ChainStateBlockWriter + BlockNumReader,
     EthB: EthApiBuilder<N>,
     PVB: Send + PayloadValidatorBuilder<N>,
     EVB: EngineValidatorBuilder<N>,
@@ -311,6 +315,7 @@ where
     N::Provider: CanonChainTracker<Header = MorphHeader> + DatabaseProviderFactory,
     <N::Provider as DatabaseProviderFactory>::ProviderRW:
         BlockWriter<Block = Block, Receipt = MorphReceipt> + DBProvider,
+    <N::Provider as DatabaseProviderFactory>::ProviderRW: ChainStateBlockWriter + BlockNumReader,
     EthB: EthApiBuilder<N>,
     PVB: PayloadValidatorBuilder<N>,
     EVB: EngineValidatorBuilder<N>,

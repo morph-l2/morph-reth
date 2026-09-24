@@ -36,8 +36,8 @@ use reth_node_ethereum::EthereumNetworkBuilder;
 use reth_payload_primitives::PayloadAttributesBuilder;
 use reth_primitives_traits::SealedHeader;
 use reth_provider::{
-    BlockWriter, CanonChainTracker, DBProvider, DatabaseProviderFactory, EthStorage,
-    providers::ProviderFactoryBuilder,
+    BlockNumReader, BlockWriter, CanonChainTracker, ChainStateBlockWriter, DBProvider,
+    DatabaseProviderFactory, EthStorage, providers::ProviderFactoryBuilder,
 };
 use std::sync::Arc;
 
@@ -105,6 +105,7 @@ where
     N::Provider: CanonChainTracker<Header = MorphHeader> + DatabaseProviderFactory,
     <N::Provider as DatabaseProviderFactory>::ProviderRW:
         BlockWriter<Block = Block, Receipt = MorphReceipt> + DBProvider,
+    <N::Provider as DatabaseProviderFactory>::ProviderRW: ChainStateBlockWriter + BlockNumReader,
 {
     type ComponentsBuilder = ComponentsBuilder<
         N,
@@ -138,6 +139,7 @@ where
     N::Provider: CanonChainTracker<Header = MorphHeader> + DatabaseProviderFactory,
     <N::Provider as DatabaseProviderFactory>::ProviderRW:
         BlockWriter<Block = Block, Receipt = MorphReceipt> + DBProvider,
+    <N::Provider as DatabaseProviderFactory>::ProviderRW: ChainStateBlockWriter + BlockNumReader,
 {
     type RpcBlock = alloy_rpc_types_eth::Block<MorphTxEnvelope>;
 

@@ -22,7 +22,10 @@ use reth_payload_builder::{BuildNewPayload, PayloadBuilderHandle};
 #[cfg(test)]
 use reth_primitives_traits::RecoveredBlock;
 use reth_primitives_traits::{FastInstant as Instant, SealedBlock, SealedHeader};
-use reth_provider::{BlockNumReader, BlockReaderIdExt, CanonChainTracker, HeaderProvider};
+use reth_provider::{
+    BlockNumReader, BlockReaderIdExt, CanonChainTracker, ChainStateBlockWriter, DBProvider,
+    DatabaseProviderFactory, HeaderProvider,
+};
 use std::sync::Arc;
 
 // =============================================================================
@@ -164,6 +167,7 @@ where
         + BlockNumReader
         + BlockReaderIdExt<Header = MorphHeader>
         + CanonChainTracker<Header = MorphHeader>
+        + DatabaseProviderFactory<ProviderRW: ChainStateBlockWriter + BlockNumReader>
         + Clone
         + Send
         + Sync
@@ -614,12 +618,17 @@ where
             return Ok(());
         }
 
+        let safe_number = safe.as_ref().map(|header| header.number());
+        let finalized_number = finalized.as_ref().map(|header| header.number());
         let canonical_head = self.current_head()?;
-        validate_resolved_block_tags(
-            safe.as_ref().map(|header| header.number()),
-            finalized.as_ref().map(|header| header.number()),
-            canonical_head.number,
-        )?;
+        validate_resolved_block_tags(safe_number, finalized_number, canonical_head.number)?;
+
+        // reth persists tags only when a forkchoice update changes them, and every update
+        // after this call repeats the values set here, so they would otherwise live in memory
+        // only and an EL restart would lose them. Writing before publishing means a failed
+        // write changes nothing and the consensus client can simply retry.
+        self.persist_block_tags(safe_number, finalized_number)
+            .await?;
 
         if let Some(sealed) = safe {
             self.provider.set_safe(sealed);
@@ -654,6 +663,41 @@ where
 }
 
 impl<Provider> RealMorphL2EngineApi<Provider> {
+    /// Writes the safe and finalized block numbers to the database so the tags survive a
+    /// restart.
+    ///
+    /// Numbers above the persisted chain are capped to its tip, as reth's persistence task
+    /// does when it writes these tags, so they never point at blocks a crash could lose.
+    async fn persist_block_tags(
+        &self,
+        safe_number: Option<u64>,
+        finalized_number: Option<u64>,
+    ) -> EngineApiResult<()>
+    where
+        Provider: DatabaseProviderFactory<ProviderRW: ChainStateBlockWriter + BlockNumReader>
+            + Clone
+            + Send
+            + 'static,
+    {
+        let provider = self.provider.clone();
+        tokio::task::spawn_blocking(move || {
+            // The database admits one writer at a time, so this waits for any block
+            // persistence in flight.
+            let provider_rw = provider.database_provider_rw()?;
+            let persisted_tip = provider_rw.best_block_number()?;
+            if let Some(number) = safe_number {
+                provider_rw.save_safe_block_number(number.min(persisted_tip))?;
+            }
+            if let Some(number) = finalized_number {
+                provider_rw.save_finalized_block_number(number.min(persisted_tip))?;
+            }
+            provider_rw.commit()
+        })
+        .await
+        .map_err(|e| MorphEngineApiError::Internal(format!("block tag write task failed: {e}")))?
+        .map_err(|e| MorphEngineApiError::Database(e.to_string()))
+    }
+
     /// Looks up a sealed header by hash.
     ///
     /// Used by `set_block_tags` to validate both tag updates before mutating provider state.
