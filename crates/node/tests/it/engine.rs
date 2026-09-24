@@ -12,10 +12,11 @@ use alloy_rpc_types_engine::PayloadAttributes;
 use jsonrpsee::core::client::ClientT;
 use morph_node::test_utils::{
     HardforkSchedule, L1MessageBuilder, MorphTxBuilder, TEST_TOKEN_ID, TestNodeBuilder,
+    make_transfer_tx,
 };
 use morph_payload_types::{
-    AssembleL2BlockParams, ExecutableL2Data, GenericResponse, MorphPayloadAttributes,
-    MorphPayloadTypes, SafeL2Data,
+    AssembleL2BlockParams, AssembleL2BlockV2Params, ExecutableL2Data, GenericResponse,
+    MorphPayloadAttributes, MorphPayloadTypes, SafeL2Data,
 };
 use morph_primitives::MorphHeader;
 use reth_node_api::PayloadTypes;
@@ -24,9 +25,9 @@ use reth_payload_primitives::BuiltPayload;
 use reth_provider::{BlockIdReader, BlockReaderIdExt};
 
 use super::helpers::{
-    assemble_l2_block, build_block_no_submit, canonical_block, canonical_snapshot,
-    craft_and_try_import_block, head_timestamp, import_l2_block, transaction_hashes,
-    wait_until_pooled,
+    LOCAL_POLL_BUDGET, POLL_INTERVAL, assemble_l2_block, assemble_l2_block_v2,
+    build_block_no_submit, canonical_block, canonical_snapshot, craft_and_try_import_block,
+    head_timestamp, import_l2_block, transaction_hashes, wait_until_pooled,
 };
 
 /// Pre-Jade: a block with a wrong state root is still accepted.
@@ -1034,6 +1035,142 @@ async fn new_safe_l2_block_rejects_transactions_over_gas_limit() -> eyre::Result
         canonical_snapshot(&node)?,
         head_before,
         "a rejected safe block must leave the canonical chain untouched"
+    );
+
+    Ok(())
+}
+
+/// An assembled empty candidate leaves nothing behind in the engine tree.
+///
+/// The CL's fast tick assembles a candidate on the head and discards it when it carries
+/// no transactions, without telling the EL. reth pre-inserts resolved payloads into the
+/// engine tree (surfacing them as the pending block) and only prunes non-canonical tree
+/// blocks below a finalized block, which a sequencer never receives. Empty candidates are
+/// therefore not pre-inserted at all, while a candidate with a transaction still is, so
+/// that its import stays a no-op.
+#[tokio::test(flavor = "multi_thread")]
+async fn empty_candidate_is_not_pre_inserted_into_engine_tree() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let node = nodes.pop().unwrap();
+
+    let head = canonical_snapshot(&node)?;
+    let timestamp = head_timestamp(&node)? + 1;
+
+    // The discarded-candidate shape: assemble on the head and never import.
+    let empty = assemble_l2_block_v2(
+        &node,
+        AssembleL2BlockV2Params {
+            parent_hash: head.hash,
+            transactions: vec![],
+            timestamp: Some(timestamp),
+        },
+    )
+    .await?;
+    assert!(
+        empty.transactions.is_empty(),
+        "precondition: the candidate must be empty"
+    );
+
+    // The built-payload event reaches the tree asynchronously; give it ample time.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert_eq!(
+        node.inner.provider.pending_block_num_hash()?,
+        None,
+        "an empty candidate must not be pre-inserted as the pending block"
+    );
+
+    // A candidate with a transaction is still pre-inserted.
+    let raw_tx = make_transfer_tx(wallet.chain_id, wallet.inner.clone(), 0).await;
+    let tx_hash = node.rpc.inject_tx(raw_tx).await?;
+    wait_until_pooled(&node, tx_hash).await?;
+    let candidate = assemble_l2_block_v2(
+        &node,
+        AssembleL2BlockV2Params {
+            parent_hash: head.hash,
+            transactions: vec![],
+            timestamp: Some(timestamp),
+        },
+    )
+    .await?;
+    assert_eq!(
+        candidate.transactions.len(),
+        1,
+        "precondition: the candidate must carry the transfer"
+    );
+
+    let deadline = tokio::time::Instant::now() + LOCAL_POLL_BUDGET;
+    loop {
+        let pending = node.inner.provider.pending_block_num_hash()?;
+        if pending.map(|p| p.hash) == Some(candidate.hash) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "a candidate with a transaction should be pre-inserted as the pending block, got {pending:?}"
+        );
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+
+    let header = import_l2_block(&node, candidate.clone()).await?;
+    assert_eq!(header.hash_slow(), candidate.hash);
+    assert_eq!(
+        canonical_snapshot(&node)?.hash,
+        candidate.hash,
+        "the pre-inserted candidate should become the canonical head"
+    );
+
+    Ok(())
+}
+
+/// A committed empty block is validated on import instead of taking the already-seen
+/// shortcut.
+///
+/// With no execution artifacts to pre-insert, `engine_newL2BlockV2` executes and
+/// validates an empty block the way every follower does. An empty block whose timestamp
+/// precedes its parent is therefore rejected by the sequencer itself instead of being
+/// written to its chain and rejected everywhere else.
+#[tokio::test(flavor = "multi_thread")]
+async fn empty_block_with_past_timestamp_is_rejected_on_import() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
+    let node = nodes.pop().unwrap();
+
+    let mut params = AssembleL2BlockParams::empty(1);
+    params.timestamp = Some(10);
+    let block1 = assemble_l2_block(&node, params).await?;
+    import_l2_block(&node, block1.clone()).await?;
+    let before = canonical_snapshot(&node)?;
+    assert_eq!(before.hash, block1.hash, "block 1 should be the head");
+
+    // The builder does not clamp a caller-supplied timestamp, so this candidate is built.
+    let stale = assemble_l2_block_v2(
+        &node,
+        AssembleL2BlockV2Params {
+            parent_hash: block1.hash,
+            transactions: vec![],
+            timestamp: Some(5),
+        },
+    )
+    .await?;
+    assert_eq!(
+        stale.timestamp, 5,
+        "precondition: the candidate keeps the stale timestamp"
+    );
+
+    let err = import_l2_block(&node, stale)
+        .await
+        .expect_err("an empty block with a timestamp before its parent must be rejected");
+    assert!(
+        err.to_string().contains("timestamp"),
+        "rejection should name the timestamp rule, got: {err}"
+    );
+    assert_eq!(
+        canonical_snapshot(&node)?,
+        before,
+        "a rejected block must leave the canonical chain untouched"
     );
 
     Ok(())
