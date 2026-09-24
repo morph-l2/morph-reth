@@ -336,8 +336,22 @@ impl Consensus<Block> for MorphConsensus {
         Ok(())
     }
 
+    /// Rejections that reth must not record in its invalid-header cache.
+    ///
+    /// Besides a timestamp from the future, this covers every check that can fail
+    /// because of a payload field the block hash does not commit to (see
+    /// [`MorphConsensusError::is_unhashed_field_error`]). A peer can relay a validly
+    /// signed block with such a field corrupted; caching that rejection under the block
+    /// hash would make the tree refuse the honest block, which shares the hash, without
+    /// re-validating it until the entry is evicted or the node restarts.
     fn is_transient_error(&self, error: &ConsensusError) -> bool {
-        matches!(error, ConsensusError::TimestampIsInFuture { .. })
+        match error {
+            ConsensusError::TimestampIsInFuture { .. } => true,
+            ConsensusError::Other(err) => err
+                .downcast_ref::<MorphConsensusError>()
+                .is_some_and(MorphConsensusError::is_unhashed_field_error),
+            _ => false,
+        }
     }
 }
 
@@ -1205,6 +1219,43 @@ mod tests {
         };
 
         assert!(Consensus::<Block>::is_transient_error(&consensus, &error));
+    }
+
+    #[test]
+    fn unhashed_field_rejections_are_transient_errors() {
+        let consensus = MorphConsensus::new(create_test_chainspec());
+        for error in [
+            MorphConsensusError::InvalidNextL1MessageIndex {
+                expected: 1,
+                actual: 2,
+            },
+            MorphConsensusError::WithdrawTrieRootMismatch {
+                expected: alloy_primitives::B256::ZERO,
+                actual: alloy_primitives::B256::with_last_byte(1),
+            },
+        ] {
+            assert!(
+                Consensus::<Block>::is_transient_error(
+                    &consensus,
+                    &ConsensusError::other(error.clone())
+                ),
+                "{error} must not be cached by block hash"
+            );
+        }
+    }
+
+    #[test]
+    fn rejections_of_hashed_content_are_not_transient_errors() {
+        let consensus = MorphConsensus::new(create_test_chainspec());
+        let in_past = ConsensusError::TimestampIsInPast {
+            parent_timestamp: 2,
+            timestamp: 1,
+        };
+        assert!(!Consensus::<Block>::is_transient_error(
+            &consensus, &in_past
+        ));
+        let order = ConsensusError::other(MorphConsensusError::InvalidL1MessageOrder);
+        assert!(!Consensus::<Block>::is_transient_error(&consensus, &order));
     }
 
     #[test]
