@@ -1124,15 +1124,10 @@ async fn empty_candidate_is_not_pre_inserted_into_engine_tree() -> eyre::Result<
     Ok(())
 }
 
-/// A committed empty block is validated on import instead of taking the already-seen
-/// shortcut.
-///
-/// With no execution artifacts to pre-insert, `engine_newL2BlockV2` executes and
-/// validates an empty block the way every follower does. An empty block whose timestamp
-/// precedes its parent is therefore rejected by the sequencer itself instead of being
-/// written to its chain and rejected everywhere else.
+/// A committed empty block is executed on import after being omitted from the
+/// tree's pre-inserted payloads.
 #[tokio::test(flavor = "multi_thread")]
-async fn empty_block_with_past_timestamp_is_rejected_on_import() -> eyre::Result<()> {
+async fn empty_block_is_imported_without_execution_artifacts() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
@@ -1142,35 +1137,28 @@ async fn empty_block_with_past_timestamp_is_rejected_on_import() -> eyre::Result
     params.timestamp = Some(10);
     let block1 = assemble_l2_block(&node, params).await?;
     import_l2_block(&node, block1.clone()).await?;
-    let before = canonical_snapshot(&node)?;
-    assert_eq!(before.hash, block1.hash, "block 1 should be the head");
-
-    // The builder does not clamp a caller-supplied timestamp, so this candidate is built.
-    let stale = assemble_l2_block_v2(
+    let empty = assemble_l2_block_v2(
         &node,
         AssembleL2BlockV2Params {
             parent_hash: block1.hash,
             transactions: vec![],
-            timestamp: Some(5),
+            timestamp: Some(11),
         },
     )
     .await?;
-    assert_eq!(
-        stale.timestamp, 5,
-        "precondition: the candidate keeps the stale timestamp"
-    );
+    assert!(empty.transactions.is_empty());
 
-    let err = import_l2_block(&node, stale)
-        .await
-        .expect_err("an empty block with a timestamp before its parent must be rejected");
-    assert!(
-        err.to_string().contains("timestamp"),
-        "rejection should name the timestamp rule, got: {err}"
-    );
+    // The built-payload event is asynchronous. An empty payload must remain absent
+    // from the pending tree before import, then take the normal import path.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert_eq!(node.inner.provider.pending_block_num_hash()?, None);
+
+    let imported = import_l2_block(&node, empty.clone()).await?;
+    assert_eq!(imported.hash_slow(), empty.hash);
     assert_eq!(
-        canonical_snapshot(&node)?,
-        before,
-        "a rejected block must leave the canonical chain untouched"
+        canonical_snapshot(&node)?.hash,
+        empty.hash,
+        "the empty block must become canonical through normal import"
     );
 
     Ok(())
