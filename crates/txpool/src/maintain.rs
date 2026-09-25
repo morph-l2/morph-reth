@@ -13,7 +13,8 @@
 //!
 //! This maintenance task solves this by:
 //! 1. Listening to canonical state changes (new blocks)
-//! 2. Re-validating each sender's contiguous nonce sequence against current account balances
+//! 2. Re-validating every pooled transaction, including those parked behind a nonce gap,
+//!    against the sender's current account balances
 //! 3. Removing the first transaction with an L1 fee or token shortfall that reth cannot
 //!    handle, letting the pool park its descendants
 //!
@@ -140,9 +141,6 @@ fn collect_removable_transactions<DB: alloy_evm::Database>(
             }
         };
 
-        // The nonce the next executable transaction of this sender must carry.
-        let mut next_nonce_in_line = account.nonce;
-
         for tx in sender_txs {
             // Access the consensus tx by reference (via Deref chain) instead of
             // cloning. Use the pool tx's cached EIP-2718 encoding for L1 fee.
@@ -151,23 +149,20 @@ fn collect_removable_transactions<DB: alloy_evm::Database>(
             // Already executed by the new block. reth's own maintenance task removes these
             // when it applies the same canonical update; both tasks subscribe to the
             // canonical stream independently, so this one can still observe them here.
-            // Charging them would consume a budget the sender no longer owes and strand the
-            // sender's next, genuinely affordable transaction.
+            // Judging them is pointless, and removing one here would park the sender's next
+            // transaction until reth's own update re-promotes it.
             if consensus_tx.nonce() < account.nonce {
                 continue;
             }
 
-            // Nonce gap: the transactions filling it are not in the pool, so how much of
-            // this sender's balance is still owed by the time this one executes is unknown,
-            // and nothing from here on is executable anyway. Upstream's
-            // `AllTransactions::update` short-circuits the sender on a gap for the same
-            // reason, and go-ethereum only ever applies a per-transaction cost check to its
-            // queue, never a cumulative one. Anything left behind the gap sits in the queued
-            // sub-pool, where reth's own stale eviction reaps it.
-            if consensus_tx.nonce() != next_nonce_in_line {
-                break;
-            }
-            next_nonce_in_line = next_nonce_in_line.saturating_add(1);
+            // A nonce gap does not stop the walk. Every check below is per transaction
+            // against the sender's current balances, which is what admission applies and
+            // what go-ethereum's `promoteExecutables` applies to its whole queue (`FilterF`)
+            // before `Ready` promotes anything. Nothing here accumulates the costs of the
+            // missing predecessors, so a transaction parked behind a gap can be judged on its
+            // own. Left unchecked, reth would promote it unvalidated the moment the gap is
+            // filled: `AllTransactions::insert_tx` only recomputes the ETH cost bits, which
+            // for a token-fee MorphTx cover its value alone.
 
             // Reth only sets its block-gas-limit flag at insertion, so a later
             // limit reduction needs the same explicit removal for both tx types.
@@ -256,10 +251,15 @@ fn collect_removable_transactions<DB: alloy_evm::Database>(
 ///
 /// A round judges the pool at the block its notification named. By the time it ends, the
 /// canonical head can be newer: blocks keep arriving while it runs, and the skip-ahead can
-/// stop short of the newest notification. A verdict about an older block must not remove a
+/// stop short of the newest notification. A verdict about an older block should not remove a
 /// transaction the head can pay for, so the candidates' senders are judged again at the head
 /// and only candidates that fail there too are kept. Anything only the head would remove is
 /// left for the round of that head. Nothing is removed if the head cannot be read.
+///
+/// This narrows the window to the re-check itself; it does not close it. The head can move
+/// again during the few milliseconds the re-check takes, and a candidate that block makes
+/// payable is still removed. That is the exposure any pool has between reading a state and
+/// acting on it, and the sender resolves it by resubmitting.
 fn recheck_at_canonical_head<Pool, N, Source>(
     pool: &Pool,
     source: &Source,
@@ -331,6 +331,7 @@ where
 /// - Re-validates L1 fee affordability for every sender, including ordinary-only senders
 /// - Removes ordinary transactions whose L1 fees make them individually unaffordable,
 ///   parking their descendants
+/// - Judges each transaction on its own, including those parked behind a nonce gap
 /// - Re-checks every removal at the canonical head right before applying it
 ///
 pub async fn maintain_morph_pool<Pool, Client, Evm>(pool: Pool, client: Client, evm_config: Evm)
@@ -389,8 +390,8 @@ async fn maintain_morph_pool_with<Pool, N, Source, Events>(
             "Processing new block for pool fee validation"
         );
 
-        // Preserve each sender's complete nonce sequence, including ordinary ETH-fee
-        // transactions between MorphTx. Filtering first would create false nonce gaps.
+        // Every transaction type is revalidated (ordinary ones for their L1 fee), and a
+        // sender's full nonce order decides which offender is removed first.
         let all_txs = pool.all_transactions();
         let pool_txs: Vec<&MorphPooledTransaction> = all_txs
             .pending
@@ -523,14 +524,23 @@ mod tests {
 
     /// A token-fee MorphTx requiring [`TX_TOKEN_BUDGET`] tokens and no ETH.
     fn token_fee_tx(tx_nonce: u64) -> MorphPooledTransaction {
-        token_fee_tx_with_value(tx_nonce, U256::ZERO)
+        token_fee_tx_with(tx_nonce, U256::ZERO, 21_000)
     }
 
     fn token_fee_tx_with_value(tx_nonce: u64, value: U256) -> MorphPooledTransaction {
+        token_fee_tx_with(tx_nonce, value, 21_000)
+    }
+
+    /// [`token_fee_tx`] with `gas_limit`, so its token requirement scales with it.
+    fn token_fee_tx_with_gas_limit(tx_nonce: u64, gas_limit: u64) -> MorphPooledTransaction {
+        token_fee_tx_with(tx_nonce, U256::ZERO, gas_limit)
+    }
+
+    fn token_fee_tx_with(tx_nonce: u64, value: U256, gas_limit: u64) -> MorphPooledTransaction {
         let tx = TxMorph {
             chain_id: 2818,
             nonce: tx_nonce,
-            gas_limit: 21_000,
+            gas_limit,
             max_fee_per_gas: 100,
             max_priority_fee_per_gas: 10,
             to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
@@ -635,25 +645,36 @@ mod tests {
     }
 
     #[test]
-    fn transactions_behind_nonce_gaps_are_left_queued() {
-        // Future nonces stay queued; missing predecessors may alter fee balances.
+    fn a_payable_transaction_behind_a_nonce_gap_is_kept() {
+        // The gap only decides where the transaction sits; affordability is judged on its own.
         let mut db = test_state(0, 0, TX_TOKEN_BUDGET);
         let (tx0, gapped) = (token_fee_tx(0), token_fee_tx(10));
 
-        assert!(
-            removable(&mut db, vec![&tx0, &gapped]).is_empty(),
-            "transactions behind a gap are left to queued-pool maintenance"
+        assert!(removable(&mut db, vec![&tx0, &gapped]).is_empty());
+    }
+
+    #[test]
+    fn an_unpayable_transaction_behind_a_nonce_gap_is_removed() {
+        // Nonce 0 needs one budget, nonce 10 needs two, and the sender holds one. Stopping at
+        // the gap would leave nonce 10 in place for reth to promote unvalidated once nonces
+        // 1 to 9 arrive.
+        let mut db = test_state(0, 0, TX_TOKEN_BUDGET);
+        let (tx0, gapped) = (token_fee_tx(0), token_fee_tx_with_gas_limit(10, 2 * 21_000));
+
+        assert_eq!(
+            removable(&mut db, vec![&tx0, &gapped]),
+            vec![*gapped.hash()]
         );
     }
 
     #[test]
-    fn a_sender_holding_only_future_nonces_is_left_alone() {
-        // Nothing this sender holds is executable at the current state nonce, so there is no
-        // executable front to evaluate — not even for a sender that now holds no tokens.
+    fn a_sender_holding_only_future_nonces_is_still_revalidated() {
+        // go-ethereum's `promoteExecutables` filters the whole queue per transaction before
+        // promoting anything; a sender that no longer holds tokens loses its parked MorphTx.
         let mut db = test_state(0, 0, 0);
         let gapped = token_fee_tx(5);
 
-        assert!(removable(&mut db, vec![&gapped]).is_empty());
+        assert_eq!(removable(&mut db, vec![&gapped]), vec![*gapped.hash()]);
     }
 
     #[derive(Debug)]
@@ -1144,7 +1165,8 @@ mod tests {
                     "standard maintenance cannot see the L1 fee shortfall"
                 );
 
-                // Later rounds must retain parked descendants behind the removed nonce.
+                // Later rounds judge the parked descendants on their own, one per round; none
+                // of them can cover the same L1 fee either.
                 for _ in 0..3 {
                     futures::executor::block_on(maintain_morph_pool_with(
                         pool.clone(),
@@ -1171,7 +1193,13 @@ mod tests {
                         "remove the first L1-unaffordable ordinary transaction; unrelated MorphTx={unrelated_morph}"
                     );
                     assert_eq!(pending, ordinary[..index]);
-                    assert_eq!(queued, ordinary[index + 1..]);
+                    assert!(
+                        ordinary[index..]
+                            .iter()
+                            .all(|hash| pool.get(hash).is_none()),
+                        "parked descendants that cannot pay either are removed by later rounds"
+                    );
+                    assert!(queued.is_empty());
                 } else {
                     assert_eq!(pending, ordinary);
                     assert!(queued.is_empty());
@@ -1186,7 +1214,9 @@ mod tests {
 
         for (nonces, state_nonce, eth_balance, pending_nonces, queued_nonces) in [
             (vec![0, 2], 0, 3_100_000u64, vec![0], vec![2]),
-            (vec![5], 0, 2_100_000, vec![], vec![5]),
+            (vec![5], 0, 3_100_000, vec![], vec![5]),
+            // Parked behind a gap and unable to cover its L1 fee: removed, not left for later.
+            (vec![5], 0, 2_100_000, vec![], vec![]),
             (vec![0, 1], 0, 2_000_000, vec![], vec![0, 1]),
             (vec![0, 1], 1, 3_100_000, vec![1], vec![]),
         ] {
@@ -1432,11 +1462,19 @@ mod tests {
                 );
                 assert!(affordable.iter().all(|hash| pool.get(hash).is_some()));
                 assert_eq!(all.pending.len(), affordable.len());
-                assert_eq!(
-                    all.queued.iter().map(|tx| *tx.hash()).collect::<Vec<_>>(),
-                    [token_tx],
-                    "preserve the successor in queued, including when it still has tokens"
-                );
+                if token_balance == 0 {
+                    assert!(
+                        pool.get(&token_tx).is_none(),
+                        "a parked successor the sender cannot pay for is removed by a later round"
+                    );
+                    assert!(all.queued.is_empty());
+                } else {
+                    assert_eq!(
+                        all.queued.iter().map(|tx| *tx.hash()).collect::<Vec<_>>(),
+                        [token_tx],
+                        "preserve the successor in queued while it still has tokens"
+                    );
+                }
             }
         }
     }
@@ -1495,5 +1533,60 @@ mod tests {
             queued.iter().any(|tx| *tx.hash() == descendant),
             "an independently affordable ETH-fee successor must be parked, not deleted"
         );
+    }
+
+    #[test]
+    fn a_morph_tx_parked_behind_a_nonce_gap_is_removed_before_the_gap_is_filled() {
+        let client = mock_provider(10_000_000, 10 * TX_TOKEN_BUDGET);
+        let validator = crate::MorphTransactionValidator::new(
+            EthTransactionValidatorBuilder::new(
+                client.clone(),
+                MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone()),
+            )
+            .disable_balance_check()
+            .with_custom_tx_type(morph_primitives::MORPH_TX_TYPE_ID)
+            .build::<MorphPooledTransaction, _>(InMemoryBlobStore::default()),
+        );
+        let pool = Pool::new(
+            validator,
+            CoinbaseTipOrdering::default(),
+            InMemoryBlobStore::default(),
+            Default::default(),
+        );
+
+        // Admitted while the sender could pay, then parked: nonce 0 is missing.
+        let parked = futures::executor::block_on(pool.add_transaction(
+            reth_transaction_pool::TransactionOrigin::Local,
+            token_fee_tx(1),
+        ))
+        .unwrap()
+        .hash;
+        assert_eq!(pool.all_transactions().queued.len(), 1);
+
+        // The sender spends every token before nonce 0 shows up.
+        set_token_balance(&client, 0);
+        futures::executor::block_on(maintain_morph_pool_with(
+            pool.clone(),
+            provider_state(client),
+            futures::stream::iter([commit_event()]),
+        ));
+        assert!(
+            pool.get(&parked).is_none(),
+            "a parked MorphTx the sender can no longer pay for must be removed"
+        );
+
+        // Filling the gap promotes whatever is parked without running the validator again, so
+        // an unpayable nonce 1 left in place would now be pending and offered to the builder.
+        futures::executor::block_on(pool.add_transaction(
+            reth_transaction_pool::TransactionOrigin::Local,
+            legacy_tx(0),
+        ))
+        .unwrap();
+        let all = pool.all_transactions();
+        assert_eq!(
+            all.pending.iter().map(|tx| tx.nonce()).collect::<Vec<_>>(),
+            [0]
+        );
+        assert!(all.queued.is_empty());
     }
 }
