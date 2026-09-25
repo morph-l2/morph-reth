@@ -56,7 +56,7 @@ pub struct TokenFeeInfo {
 
 /// Fee-token registry metadata without any caller-specific balance state.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct TokenRegistryEntry {
+pub struct TokenRegistryEntry {
     token_address: Address,
     is_active: bool,
     decimals: u8,
@@ -79,10 +79,7 @@ impl TokenRegistryEntry {
     }
 
     /// Load fee-token metadata without reading a caller's token balance.
-    pub(crate) fn load<DB: RevmDatabase>(
-        db: &mut DB,
-        token_id: u16,
-    ) -> Result<Option<Self>, DB::Error> {
+    pub fn load<DB: RevmDatabase>(db: &mut DB, token_id: u16) -> Result<Option<Self>, DB::Error> {
         read_registry_entry(db, token_id)
     }
 
@@ -98,7 +95,7 @@ impl TokenRegistryEntry {
     }
 
     /// Resolve the caller's balance to produce complete fee information.
-    pub(crate) fn load_for_caller<DB: Database>(
+    pub fn load_for_caller<DB: Database>(
         self,
         db: &mut DB,
         caller: Address,
@@ -199,15 +196,30 @@ impl TokenFeeInfo {
         entry.load_storage_only(db, caller).map(Some)
     }
 
-    /// Calculate the token amount required for a given ETH amount.
+    /// Calculate the token amount required for a given ETH amount, rounding up.
     ///
     /// Uses the price ratio and scale to convert ETH value to token amount.
     #[inline]
     pub fn eth_to_token_amount(&self, eth_amount: U256) -> U256 {
+        self.eth_to_token_amount_with_credit(eth_amount).0
+    }
+
+    /// Same as [`Self::eth_to_token_amount`], and also returns the numerator the
+    /// rounding-up overcharged.
+    ///
+    /// The credit is `price_ratio - remainder` (zero when the division is exact):
+    /// the part of one whole token unit the caller paid for but did not use. From
+    /// Celadon on, [`Self::eth_to_token_amount_floor`] hands it back on the refund
+    /// so that the caller is charged `ceil` of the *net* fee rather than
+    /// `ceil(prepaid) - ceil(refund)`, which under-collects.
+    ///
+    /// Mirrors go-ethereum's `types.EthToAlt`.
+    #[inline]
+    pub fn eth_to_token_amount_with_credit(&self, eth_amount: U256) -> (U256, U256) {
         // If price_ratio or scale is zero (misconfigured token), return MAX to prevent
         // free-ride transactions. The caller's balance check will reject the tx.
         if self.price_ratio.is_zero() || self.scale.is_zero() {
-            return U256::MAX;
+            return (U256::MAX, U256::ZERO);
         }
 
         // token_amount = eth_amount * scale / price_ratio
@@ -215,11 +227,37 @@ impl TokenFeeInfo {
             .saturating_mul(self.scale)
             .div_rem(self.price_ratio);
         // If there's a remainder, round up by adding 1
-        if !remainder.is_zero() {
-            token_amount.saturating_add(U256::from(1))
+        if remainder.is_zero() {
+            (token_amount, U256::ZERO)
         } else {
-            token_amount
+            (
+                token_amount.saturating_add(U256::from(1)),
+                self.price_ratio - remainder,
+            )
         }
+    }
+
+    /// Convert an ETH amount plus the prepaid rounding credit into token units,
+    /// rounding down.
+    ///
+    /// `rounding_credit` comes from the matching
+    /// [`Self::eth_to_token_amount_with_credit`] call made when the fee was
+    /// deducted. Mirrors go-ethereum's `types.EthToAltFloor`.
+    ///
+    /// A misconfigured token refunds nothing. That is the conservative direction
+    /// (the ceiling path returns `U256::MAX` for the same input to make the
+    /// deduction fail), and it is unreachable in practice: such a transaction
+    /// never gets past the balance check at deduction time.
+    #[inline]
+    pub fn eth_to_token_amount_floor(&self, eth_amount: U256, rounding_credit: U256) -> U256 {
+        if self.price_ratio.is_zero() || self.scale.is_zero() {
+            return U256::ZERO;
+        }
+
+        eth_amount
+            .saturating_mul(self.scale)
+            .saturating_add(rounding_credit)
+            / self.price_ratio
     }
 }
 
@@ -587,6 +625,124 @@ pub(crate) mod tests {
         let token_amount = info.eth_to_token_amount(eth_amount);
         // Misconfigured token returns MAX to prevent free-ride transactions
         assert_eq!(token_amount, U256::MAX);
+    }
+
+    /// Rounding up the prepaid fee leaves `price_ratio - remainder` of a token
+    /// unit paid for but unused, which is exactly what the refund gets back.
+    #[test]
+    fn eth_to_token_amount_reports_the_rounding_credit() {
+        let info = TokenFeeInfo {
+            price_ratio: U256::from(3u64),
+            scale: U256::from(1u64),
+            ..Default::default()
+        };
+
+        // 10 / 3 = 3 remainder 1 → charge 4, one third of a unit unused → 3 - 1 = 2.
+        let (amount, credit) = info.eth_to_token_amount_with_credit(U256::from(10u64));
+        assert_eq!(amount, U256::from(4u64));
+        assert_eq!(credit, U256::from(2u64));
+
+        // An exact division overcharges nothing.
+        let (amount, credit) = info.eth_to_token_amount_with_credit(U256::from(9u64));
+        assert_eq!(amount, U256::from(3u64));
+        assert_eq!(credit, U256::ZERO);
+
+        // The plain ceiling accessor stays the first half of the pair.
+        assert_eq!(
+            info.eth_to_token_amount(U256::from(10u64)),
+            U256::from(4u64)
+        );
+    }
+
+    /// The credit is what makes deduct-then-refund add up to `ceil(net fee)`.
+    /// Without it, both halves round up independently and the chain
+    /// under-collects — for `remaining = 4` below, by a whole token unit.
+    #[test]
+    fn floor_refund_charges_the_ceiling_of_the_net_fee() {
+        let info = TokenFeeInfo {
+            price_ratio: U256::from(3u64),
+            scale: U256::from(1u64),
+            ..Default::default()
+        };
+
+        for prepaid_eth in 0u64..40 {
+            let (charged, credit) = info.eth_to_token_amount_with_credit(U256::from(prepaid_eth));
+            for remaining_eth in 0..=prepaid_eth {
+                let refunded = info.eth_to_token_amount_floor(U256::from(remaining_eth), credit);
+                let net_eth = U256::from(prepaid_eth - remaining_eth);
+                assert_eq!(
+                    charged - refunded,
+                    info.eth_to_token_amount(net_eth),
+                    "prepaid {prepaid_eth}, remaining {remaining_eth}"
+                );
+            }
+        }
+    }
+
+    /// The Celadon change is observable, so the fork gate in the handler is not
+    /// cosmetic: on an exact deduction the credit is zero and the two roundings
+    /// disagree for every inexact refund.
+    #[test]
+    fn floor_and_ceiling_refunds_differ() {
+        let info = TokenFeeInfo {
+            price_ratio: U256::from(3u64),
+            scale: U256::from(1u64),
+            ..Default::default()
+        };
+
+        // Exact deduction (9 / 3) → no credit; refunding 4 ceils to 2, floors to 1.
+        let (_, credit) = info.eth_to_token_amount_with_credit(U256::from(9u64));
+        assert_eq!(credit, U256::ZERO);
+        assert_eq!(info.eth_to_token_amount(U256::from(4u64)), U256::from(2u64));
+        assert_eq!(
+            info.eth_to_token_amount_floor(U256::from(4u64), credit),
+            U256::from(1u64)
+        );
+    }
+
+    /// Flooring can reach zero where the ceiling never does. The handler skips
+    /// the transfer in that case, matching go-ethereum's `TransferAltTokenHybrid`.
+    #[test]
+    fn floor_refund_can_be_zero() {
+        let info = TokenFeeInfo {
+            price_ratio: U256::from(5u64),
+            scale: U256::from(1u64),
+            ..Default::default()
+        };
+
+        let (_, credit) = info.eth_to_token_amount_with_credit(U256::from(5u64));
+        assert_eq!(credit, U256::ZERO);
+        assert_eq!(info.eth_to_token_amount(U256::from(1u64)), U256::from(1u64));
+        assert_eq!(
+            info.eth_to_token_amount_floor(U256::from(1u64), credit),
+            U256::ZERO
+        );
+    }
+
+    /// A misconfigured token refunds nothing rather than the `U256::MAX` the
+    /// ceiling path returns to make the deduction fail.
+    #[test]
+    fn floor_refund_of_a_misconfigured_token_is_zero() {
+        for info in [
+            TokenFeeInfo {
+                price_ratio: U256::ZERO,
+                scale: U256::from(1u64),
+                ..Default::default()
+            },
+            TokenFeeInfo {
+                price_ratio: U256::from(1u64),
+                scale: U256::ZERO,
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(
+                info.eth_to_token_amount_floor(U256::from(10u64), U256::from(3u64)),
+                U256::ZERO
+            );
+            let (amount, credit) = info.eth_to_token_amount_with_credit(U256::from(10u64));
+            assert_eq!(amount, U256::MAX);
+            assert_eq!(credit, U256::ZERO);
+        }
     }
 
     #[test]
