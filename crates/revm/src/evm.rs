@@ -103,16 +103,6 @@ pub struct MorphEvm<DB: Database, I> {
     /// Signed refund counter from a successful fee deduction call.
     /// Applied before the final refund cap; refund-transfer refunds are excluded.
     pub(crate) pre_fee_refund: i64,
-    /// Transfer event logs from token fee deduction (pre-execution phase).
-    ///
-    /// In go-ethereum, `buyAltTokenGas()` emits Transfer events into `StateDB.logs`
-    /// which is independent of the state snapshot/revert mechanism — logs survive
-    /// regardless of main tx result. revm's `ExecutionResult::Revert` has no `logs`
-    /// field, so we cache fee-related logs separately from the journal and merge
-    /// them into the receipt in the block executor.
-    pub(crate) pre_fee_logs: Vec<alloy_primitives::Log>,
-    /// Transfer event logs from token fee reimbursement (post-execution phase).
-    pub(crate) post_fee_logs: Vec<alloy_primitives::Log>,
 }
 
 impl<DB: Database, I> MorphEvm<DB, I> {
@@ -185,8 +175,6 @@ impl<DB: Database, I> MorphEvm<DB, I> {
             cached_token_fee_info: None,
             cached_l1_data_fee: U256::ZERO,
             pre_fee_refund: 0,
-            pre_fee_logs: Vec::new(),
-            post_fee_logs: Vec::new(),
         }
     }
 }
@@ -225,18 +213,6 @@ impl<DB: Database, I> MorphEvm<DB, I> {
     #[inline]
     pub fn cached_l1_data_fee(&self) -> U256 {
         self.cached_l1_data_fee
-    }
-
-    /// Takes the cached pre-execution fee logs (token fee deduction Transfer events).
-    #[inline]
-    pub fn take_pre_fee_logs(&mut self) -> Vec<alloy_primitives::Log> {
-        std::mem::take(&mut self.pre_fee_logs)
-    }
-
-    /// Takes the cached post-execution fee logs (token fee reimbursement Transfer events).
-    #[inline]
-    pub fn take_post_fee_logs(&mut self) -> Vec<alloy_primitives::Log> {
-        std::mem::take(&mut self.post_fee_logs)
     }
 }
 

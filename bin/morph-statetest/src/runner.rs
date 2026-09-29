@@ -151,7 +151,7 @@ fn execute_case(
             .with_inspector(TracerEip3155::buffered(stderr()).without_summary());
         evm.enable_inspector();
         let exec_result = evm.transact_commit(tx);
-        let receipt_logs = collect_receipt_logs(&mut evm, &exec_result);
+        let receipt_logs = result_logs(&exec_result);
         return Ok(build_outcome(
             name,
             fork_name,
@@ -165,7 +165,7 @@ fn execute_case(
 
     let mut evm = MorphEvm::new(&mut state, env);
     let exec_result = evm.transact_commit(tx);
-    let receipt_logs = collect_receipt_logs(&mut evm, &exec_result);
+    let receipt_logs = result_logs(&exec_result);
     Ok(build_outcome(
         name,
         fork_name,
@@ -220,20 +220,15 @@ where
     }
 }
 
-fn collect_receipt_logs<DB, I, E>(
-    evm: &mut MorphEvm<DB, I>,
+/// A token-fee transaction's deduction and refund Transfers are part of the result's logs,
+/// including when the main frame reverted or halted.
+fn result_logs<E>(
     exec_result: &Result<ExecutionResult<morph_revm::MorphHaltReason>, E>,
-) -> Vec<Log>
-where
-    DB: alloy_evm::Database,
-    I: revm::Inspector<morph_revm::evm::MorphContext<DB>>,
-{
-    let mut logs = evm.take_pre_fee_logs();
-    if let Ok(result) = exec_result {
-        logs.extend(result.logs().iter().cloned());
-    }
-    logs.extend(evm.take_post_fee_logs());
-    logs
+) -> Vec<Log> {
+    exec_result
+        .as_ref()
+        .map(|result| result.logs().to_vec())
+        .unwrap_or_default()
 }
 
 fn validation_error<E>(

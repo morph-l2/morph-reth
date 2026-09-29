@@ -639,9 +639,10 @@ const RUNTIME_REVERT_INIT: &[u8] = &[
 ///
 /// The log assertion is the point of running the fee path on a *reverting* main
 /// frame. go-ethereum keeps `StateDB.logs` outside the state snapshot/revert
-/// mechanism, so the deduction's `Transfer` survives a main-frame revert; that
-/// is the entire reason morph-reth caches fee logs in `pre_fee_logs` /
-/// `post_fee_logs` instead of leaving them in the journal (`crates/evm/src/block/receipt.rs`).
+/// mechanism, so the deduction's `Transfer` survives a main-frame revert.
+/// morph-reth gets the same result by leaving the fee logs in the journal: the
+/// main frame's checkpoint is taken after the deduction, so its revert drops only
+/// its own logs, and revm returns the rest with the reverted result.
 /// A regression there -- the fee logs dropped, or restored into the reverted
 /// frame -- changes the receipt's logs and therefore the block's receipts root,
 /// and no state assertion in this test would notice. This is the only test that

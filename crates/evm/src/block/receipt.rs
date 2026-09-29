@@ -28,7 +28,7 @@
 use alloy_consensus::Receipt;
 use alloy_consensus::transaction::TxHashRef;
 use alloy_evm::Evm;
-use alloy_primitives::{B256, Bytes, Log, U256};
+use alloy_primitives::{B256, Bytes, U256};
 use morph_primitives::{MorphReceipt, MorphTransactionReceipt, MorphTxEnvelope, MorphTxType};
 use revm::context::result::ExecutionResult;
 use tracing::warn;
@@ -45,8 +45,6 @@ use tracing::warn;
 /// - `cumulative_gas_used`: Running total of gas used in the block
 /// - `l1_fee`: Pre-calculated L1 data fee for this transaction
 /// - `morph_tx_fields`: MorphTx-specific fields (token fee info, version, reference, memo)
-/// - `pre_fee_logs`: Transfer event logs from token fee deduction (survives tx revert)
-/// - `post_fee_logs`: Transfer event logs from token fee reimbursement
 #[derive(Debug)]
 pub(crate) struct MorphReceiptBuilderCtx<'a, E: Evm> {
     /// The executed transaction
@@ -59,11 +57,6 @@ pub(crate) struct MorphReceiptBuilderCtx<'a, E: Evm> {
     pub l1_fee: U256,
     /// MorphTx-specific fields (token fee info, version, reference, memo)
     pub morph_tx_fields: Option<MorphReceiptTxFields>,
-    /// Transfer event logs from token fee deduction (before main tx execution).
-    /// Managed separately from the handler pipeline to survive main tx revert.
-    pub pre_fee_logs: Vec<Log>,
-    /// Transfer event logs from token fee reimbursement (after main tx execution).
-    pub post_fee_logs: Vec<Log>,
 }
 
 /// MorphTx (0x7F) specific fields for receipts.
@@ -155,25 +148,16 @@ impl MorphReceiptBuilder for DefaultMorphReceiptBuilder {
             cumulative_gas_used,
             l1_fee,
             morph_tx_fields,
-            pre_fee_logs,
-            post_fee_logs,
         } = ctx;
 
-        // Assemble logs in chronological order matching go-ethereum:
-        //   [deduct Transfer] + [main tx logs] + [refund Transfer]
-        // The fee logs cannot come from `result`. The call-mode deduction runs a
-        // mid-transaction `finalize()` that clears the journal's logs, so the handler
-        // moves them out first, and it drains the refund's logs the same way. `result`
-        // carries only the main frame's logs, which a revert has already discarded,
-        // while the fee logs survive it as they do in go-ethereum, whose `StateDB.logs`
-        // sit outside the snapshot/revert mechanism.
+        // For a token-fee MorphTx `result` already holds the logs in go-ethereum's order:
+        //   [deduct Transfer] + [main tx logs, on success] + [refund Transfer]
+        // The handler leaves both fee transfers' logs in the journal and the main frame
+        // reverts only back to its own checkpoint, so they survive a failed main frame,
+        // as they do in go-ethereum, whose `StateDB.logs` sit outside the snapshot/revert
+        // mechanism. revm returns the journal's logs for successes, reverts and halts alike.
         let is_success = result.is_success();
-        let main_logs = result.into_logs();
-        let mut logs =
-            Vec::with_capacity(pre_fee_logs.len() + main_logs.len() + post_fee_logs.len());
-        logs.extend(pre_fee_logs);
-        logs.extend(main_logs);
-        logs.extend(post_fee_logs);
+        let logs = result.into_logs();
 
         let inner = Receipt {
             status: is_success.into(),
@@ -361,8 +345,6 @@ mod tests {
             cumulative_gas_used: 21000,
             l1_fee,
             morph_tx_fields: None,
-            pre_fee_logs: vec![],
-            post_fee_logs: vec![],
         };
 
         let receipt = builder.build_receipt(ctx);
@@ -384,8 +366,6 @@ mod tests {
             cumulative_gas_used: 42000,
             l1_fee,
             morph_tx_fields: None,
-            pre_fee_logs: vec![],
-            post_fee_logs: vec![],
         };
 
         let receipt = builder.build_receipt(ctx);
@@ -407,8 +387,6 @@ mod tests {
             // L1 message gas is prepaid on L1, so no L1 fee should appear in the receipt.
             l1_fee: U256::from(999_999),
             morph_tx_fields: None,
-            pre_fee_logs: vec![],
-            post_fee_logs: vec![],
         };
 
         let receipt = builder.build_receipt(ctx);
@@ -439,8 +417,6 @@ mod tests {
             cumulative_gas_used: 21000,
             l1_fee,
             morph_tx_fields: Some(fields),
-            pre_fee_logs: vec![],
-            post_fee_logs: vec![],
         };
 
         let receipt = builder.build_receipt(ctx);
@@ -475,8 +451,6 @@ mod tests {
             cumulative_gas_used: 21000,
             l1_fee,
             morph_tx_fields: None,
-            pre_fee_logs: vec![],
-            post_fee_logs: vec![],
         };
 
         let receipt = builder.build_receipt(ctx);
@@ -508,8 +482,6 @@ mod tests {
             cumulative_gas_used: 15000,
             l1_fee: U256::from(100u64),
             morph_tx_fields: None,
-            pre_fee_logs: vec![],
-            post_fee_logs: vec![],
         };
 
         let receipt = builder.build_receipt(ctx);
@@ -536,8 +508,6 @@ mod tests {
             cumulative_gas_used: 21000,
             l1_fee: U256::ZERO,
             morph_tx_fields: None,
-            pre_fee_logs: vec![],
-            post_fee_logs: vec![],
         };
 
         let receipt = builder.build_receipt(ctx);
@@ -553,28 +523,28 @@ mod tests {
         .unwrap()
     }
 
-    /// Fee Transfer logs (pre/post) survive when the main transaction reverts.
-    ///
-    /// go-ethereum's StateDB.logs is independent of snapshot/revert — fee logs
-    /// are always included. revm's ExecutionResult::Revert carries no logs field,
-    /// so morph-reth caches fee logs in pre_fee_logs/post_fee_logs and merges
-    /// them unconditionally in the receipt builder.
+    /// A reverted or halted `ExecutionResult` still carries the logs emitted before the
+    /// main frame failed, which is where the handler leaves a token-fee transaction's
+    /// deduction and refund Transfers (go-ethereum keeps them in `StateDB.logs`, outside
+    /// the snapshot/revert mechanism). The receipt must keep them, in order.
     #[test]
-    fn test_fee_logs_survive_main_tx_revert() {
+    fn test_reverted_receipt_keeps_fee_logs() {
         let builder = DefaultMorphReceiptBuilder;
-        let tx = create_legacy_tx();
+        let tx = create_morph_tx();
 
-        let pre_log = make_fee_log(0xAA); // fee deduction Transfer
-        let post_log = make_fee_log(0xBB); // fee refund Transfer
+        let deduct_log = make_fee_log(0xAA);
+        let refund_log = make_fee_log(0xBB);
 
         let ctx = MorphReceiptBuilderCtx::<TestEvm> {
             tx: &tx,
-            result: make_revert_result(20_000),
+            result: ExecutionResult::Revert {
+                gas: result_gas(20_000),
+                logs: vec![deduct_log.clone(), refund_log.clone()],
+                output: alloy_primitives::Bytes::new(),
+            },
             cumulative_gas_used: 20_000,
             l1_fee: U256::ZERO,
             morph_tx_fields: None,
-            pre_fee_logs: vec![pre_log.clone()],
-            post_fee_logs: vec![post_log.clone()],
         };
 
         let receipt = builder.build_receipt(ctx);
@@ -583,92 +553,28 @@ mod tests {
             !TxReceipt::status(&receipt),
             "reverted tx must have status=false"
         );
-
-        let logs = TxReceipt::logs(&receipt);
-        // Main tx logs are absent (revert), but fee logs must still be present.
-        assert_eq!(
-            logs.len(),
-            2,
-            "pre_fee_log + post_fee_log must appear despite revert"
-        );
-        assert_eq!(
-            logs[0].address, pre_log.address,
-            "first log must be pre_fee_log"
-        );
-        assert_eq!(
-            logs[1].address, post_log.address,
-            "second log must be post_fee_log"
-        );
+        assert_eq!(TxReceipt::logs(&receipt), &[deduct_log, refund_log]);
     }
 
-    /// Log ordering on successful tx: [pre_fee_log, main_tx_log, post_fee_log].
-    ///
-    /// Matches go-ethereum's receipt log ordering where fee deduction comes
-    /// first (before main tx), and fee refund comes last (after main tx).
+    /// On success the result's logs, `[deduct] + [main] + [refund]`, reach the receipt
+    /// unchanged.
     #[test]
-    fn test_fee_log_ordering_on_success() {
+    fn test_successful_receipt_keeps_log_order() {
         let builder = DefaultMorphReceiptBuilder;
-        let tx = create_legacy_tx();
+        let tx = create_morph_tx();
 
-        let pre_log = make_fee_log(0xAA);
-        let main_log = make_fee_log(0xCC);
-        let post_log = make_fee_log(0xBB);
+        let logs = vec![make_fee_log(0xAA), make_fee_log(0xCC), make_fee_log(0xBB)];
 
         let ctx = MorphReceiptBuilderCtx::<TestEvm> {
             tx: &tx,
-            result: make_success_with_logs(21_000, vec![main_log.clone()]),
+            result: make_success_with_logs(21_000, logs.clone()),
             cumulative_gas_used: 21_000,
             l1_fee: U256::ZERO,
             morph_tx_fields: None,
-            pre_fee_logs: vec![pre_log.clone()],
-            post_fee_logs: vec![post_log.clone()],
         };
 
         let receipt = builder.build_receipt(ctx);
         assert!(TxReceipt::status(&receipt));
-
-        let logs = TxReceipt::logs(&receipt);
-        assert_eq!(logs.len(), 3, "pre_fee + main + post_fee = 3 logs");
-        assert_eq!(
-            logs[0].address, pre_log.address,
-            "pre_fee_log must be first"
-        );
-        assert_eq!(
-            logs[1].address, main_log.address,
-            "main_tx_log must be second"
-        );
-        assert_eq!(
-            logs[2].address, post_log.address,
-            "post_fee_log must be last"
-        );
-    }
-
-    /// Fee logs without refund: only pre_fee_log when no gas is refunded.
-    ///
-    /// If all gas is consumed exactly (no unused gas), the post_fee_log
-    /// may be empty. But the pre_fee_log must always appear.
-    #[test]
-    fn test_pre_fee_log_only_no_post_fee() {
-        let builder = DefaultMorphReceiptBuilder;
-        let tx = create_legacy_tx();
-
-        let pre_log = make_fee_log(0xAA);
-
-        let ctx = MorphReceiptBuilderCtx::<TestEvm> {
-            tx: &tx,
-            result: make_revert_result(21_000),
-            cumulative_gas_used: 21_000,
-            l1_fee: U256::ZERO,
-            morph_tx_fields: None,
-            pre_fee_logs: vec![pre_log.clone()],
-            post_fee_logs: vec![], // no refund
-        };
-
-        let receipt = builder.build_receipt(ctx);
-        assert!(!TxReceipt::status(&receipt));
-
-        let logs = TxReceipt::logs(&receipt);
-        assert_eq!(logs.len(), 1, "only pre_fee_log when there is no refund");
-        assert_eq!(logs[0].address, pre_log.address);
+        assert_eq!(TxReceipt::logs(&receipt), logs.as_slice());
     }
 }
