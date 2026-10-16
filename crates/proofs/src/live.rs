@@ -22,6 +22,9 @@ use crate::{
 };
 
 /// Live trie collector for external proofs storage.
+// `Constructor` emits `field: field`. Clippy 1.99 reports that on the field span
+// (rust-lang/rust-clippy#17525); the derive forwards this allow onto `new`.
+#[allow(clippy::redundant_field_names)]
 #[derive(Debug, Constructor)]
 pub struct LiveTrieCollector<'tx, Evm, Provider, PreimageStore>
 where

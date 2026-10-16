@@ -9,7 +9,8 @@ use alloy_primitives::{Address, B256, Bytes, Sealable, TxKind, U256};
 use alloy_signer::SignerSync;
 use jsonrpsee::core::client::ClientT;
 use morph_node::test_utils::{
-    MorphTestNode, MorphTxBuilder, TEST_TOKEN_ID, TestNodeBuilder, advance_chain, make_transfer_tx,
+    HardforkSchedule, MorphTestNode, MorphTxBuilder, TEST_TOKEN_ID, TestNodeBuilder, advance_chain,
+    make_transfer_tx, sign_authorization, wallet_at_index,
 };
 use morph_primitives::MorphTxEnvelope;
 use reth_payload_primitives::BuiltPayload;
@@ -503,6 +504,303 @@ async fn transaction_by_hash_exposes_morph_fields_over_rpc() -> eyre::Result<()>
     assert!(tx["feeLimit"].as_str().is_some());
     assert_eq!(tx["reference"].as_str(), Some(expected_reference.as_str()));
     assert_eq!(tx["memo"].as_str(), Some(expected_memo.as_str()));
+
+    Ok(())
+}
+
+/// `eth_getTransactionByHash` exposes the MorphTx v2 authorization list with the
+/// same tuple shape as an EIP-7702 transaction.
+#[tokio::test(flavor = "multi_thread")]
+async fn transaction_by_hash_exposes_authorization_list_for_morph_tx_v2() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+    let chain_id = wallet.chain_id;
+
+    let authority_signer = wallet_at_index(1, chain_id);
+    let delegate = Address::with_last_byte(0x42);
+    let authorization = sign_authorization(&authority_signer, chain_id, delegate, 0)?;
+    let expected_tuple = serde_json::to_value(&authorization)?;
+
+    let raw_tx = MorphTxBuilder::new(chain_id, wallet.inner.clone(), 0)
+        .with_v2_token_fee(TEST_TOKEN_ID)
+        .with_authorization_list(vec![authorization])
+        .with_to(Address::with_last_byte(0x99))
+        .build_signed()?;
+    node.rpc.inject_tx(raw_tx).await?;
+
+    let payload = node.advance_block().await?;
+    let tx_hash = *payload
+        .block()
+        .body()
+        .transactions
+        .first()
+        .unwrap()
+        .tx_hash();
+    let client = node
+        .rpc_client()
+        .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
+
+    let tx: Value = client
+        .request("eth_getTransactionByHash", (tx_hash,))
+        .await?;
+
+    assert_eq!(tx["type"].as_str(), Some("0x7f"));
+    assert_eq!(tx["version"].as_str(), Some("0x2"));
+    assert_eq!(tx["feeTokenID"].as_str(), Some("0x1"));
+    let list = tx["authorizationList"]
+        .as_array()
+        .expect("MorphTx v2 must expose authorizationList");
+    assert_eq!(list.len(), 1);
+    for key in ["chainId", "address", "nonce", "yParity", "r", "s"] {
+        assert_eq!(
+            list[0][key], expected_tuple[key],
+            "authorization tuple `{key}` must match the 0x04 JSON shape"
+        );
+    }
+
+    // Receipt shape is unchanged: only `version` moves to 0x2.
+    let receipt: Value = client
+        .request("eth_getTransactionReceipt", (tx_hash,))
+        .await?;
+    assert_eq!(receipt["type"].as_str(), Some("0x7f"));
+    assert_eq!(receipt["version"].as_str(), Some("0x2"));
+    assert!(receipt.get("authorizationList").is_none());
+
+    Ok(())
+}
+
+/// `eth_estimateGas` for a MorphTx v2 request executes with the authorization
+/// list, so the estimate covers the 25 000 gas per authorization on top of the
+/// plain-call cost. The version is never part of the request: a memo makes the
+/// request a MorphTx (V1), the list raises it to V2, and a legacy `version`
+/// key changes nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn estimate_gas_for_morph_tx_v2_includes_authorization_gas() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+    let chain_id = wallet.chain_id;
+    let sender = wallet.inner.address();
+
+    // Produce a block so the L1 gas oracle state (genesis alloc) is live.
+    advance_chain(1, &mut node, wallet_to_arc(wallet)).await?;
+
+    let client = node
+        .rpc_client()
+        .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
+
+    let authority_signer = wallet_at_index(1, chain_id);
+    let authorization = sign_authorization(
+        &authority_signer,
+        chain_id,
+        Address::with_last_byte(0x42),
+        0,
+    )?;
+
+    let base_request = serde_json::json!({
+        "from": sender,
+        "to": Address::with_last_byte(0x99),
+        "value": "0x0",
+        "maxFeePerGas": "0x4a817c800",
+        "maxPriorityFeePerGas": "0x4a817c800",
+        "memo": "0x6d",
+    });
+
+    let v1_request = base_request.clone();
+    let v1_estimate: alloy_primitives::U64 = client
+        .request("eth_estimateGas", (v1_request.clone(),))
+        .await?;
+
+    // A legacy `version` key is ignored: same request, same estimate.
+    let mut legacy_request = v1_request;
+    legacy_request["version"] = serde_json::json!("0x1");
+    let legacy_estimate: alloy_primitives::U64 =
+        client.request("eth_estimateGas", (legacy_request,)).await?;
+    assert_eq!(legacy_estimate, v1_estimate);
+
+    let mut v2_request = base_request;
+    v2_request["authorizationList"] = serde_json::json!([serde_json::to_value(&authorization)?]);
+    let v2_estimate: alloy_primitives::U64 = client
+        .request("eth_estimateGas", (v2_request.clone(),))
+        .await?;
+
+    assert!(
+        v1_estimate.to::<u64>() >= 21_000,
+        "v1 estimate: {v1_estimate}"
+    );
+    assert!(
+        v2_estimate.to::<u64>() >= v1_estimate.to::<u64>() + 25_000,
+        "v2 estimate {v2_estimate} must add the per-authorization intrinsic gas over v1 {v1_estimate}"
+    );
+
+    // `eth_call` takes the same V2 shape (fee charge disabled, list still applied).
+    let call_result: Value = client
+        .request("eth_call", (v2_request.clone(), "latest"))
+        .await?;
+    assert_eq!(call_result.as_str(), Some("0x"));
+
+    // Without authorizations (`[]` or no key at all) the request is a v1 again,
+    // so it costs exactly what the v1 estimate costs.
+    let mut empty_v2_request = v2_request;
+    empty_v2_request["authorizationList"] = serde_json::json!([]);
+    let empty_v2_estimate: alloy_primitives::U64 = client
+        .request("eth_estimateGas", (empty_v2_request.clone(),))
+        .await?;
+    assert_eq!(
+        empty_v2_estimate, v1_estimate,
+        "an empty authorization list must cost the same gas as v1"
+    );
+    empty_v2_request
+        .as_object_mut()
+        .unwrap()
+        .remove("authorizationList");
+    let absent_list_estimate: alloy_primitives::U64 = client
+        .request("eth_estimateGas", (empty_v2_request.clone(),))
+        .await?;
+    assert_eq!(absent_list_estimate, v1_estimate);
+    let call_result: Value = client
+        .request("eth_call", (empty_v2_request, "latest"))
+        .await?;
+    assert_eq!(call_result.as_str(), Some("0x"));
+
+    Ok(())
+}
+
+/// Simulation is not fork-gated, exactly like V1 (geth only gates
+/// `setDefaults`, i.e. the send paths): before Celadon `eth_estimateGas` and
+/// `eth_call` still simulate a V2 request, while sending the same transaction
+/// is rejected by the pool.
+#[tokio::test(flavor = "multi_thread")]
+async fn simulation_of_morph_tx_v2_is_not_fork_gated_before_celadon() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, wallet) = TestNodeBuilder::new()
+        .with_schedule(HardforkSchedule::PreCeladon)
+        .build()
+        .await?;
+    let node = nodes.pop().unwrap();
+    let chain_id = wallet.chain_id;
+    let sender = wallet.inner.address();
+    let client = node
+        .rpc_client()
+        .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
+
+    let authority_signer = wallet_at_index(1, chain_id);
+    let authorization = sign_authorization(
+        &authority_signer,
+        chain_id,
+        Address::with_last_byte(0x42),
+        0,
+    )?;
+
+    let request = serde_json::json!({
+        "from": sender,
+        "to": Address::with_last_byte(0x99),
+        "value": "0x0",
+        "maxFeePerGas": "0x4a817c800",
+        "maxPriorityFeePerGas": "0x4a817c800",
+        "memo": "0x6d",
+        "authorizationList": [serde_json::to_value(&authorization)?],
+    });
+    let estimate: alloy_primitives::U64 = client
+        .request("eth_estimateGas", (request.clone(),))
+        .await?;
+    assert!(
+        estimate.to::<u64>() >= 21_000 + 25_000,
+        "pre-Celadon estimate must still price the authorization: {estimate}"
+    );
+    let call_result: Value = client.request("eth_call", (request, "latest")).await?;
+    assert_eq!(call_result.as_str(), Some("0x"));
+
+    // Sending the same transaction is where the fork gate lives.
+    let raw_tx = MorphTxBuilder::new(chain_id, wallet.inner.clone(), 0)
+        .with_v2_eth_fee()
+        .with_authorization_list(vec![authorization])
+        .with_to(Address::with_last_byte(0x99))
+        .build_signed()?;
+    let err = node
+        .rpc
+        .inject_tx(raw_tx)
+        .await
+        .expect_err("MorphTx v2 must be rejected by the pool before Celadon");
+    assert!(
+        err.to_string().contains("not yet active"),
+        "unexpected error: {err}"
+    );
+
+    Ok(())
+}
+
+/// `eth_call` applies a self-delegating V2 authorization list before the call,
+/// with the same nonce rule as real execution: the sender's nonce is bumped
+/// first, so the tuple must carry `state nonce + 1`. Calling the sender itself
+/// then executes the delegate's code; a tuple signed with the current state
+/// nonce is skipped and the call hits an EOA (empty return).
+#[tokio::test(flavor = "multi_thread")]
+async fn eth_call_applies_self_delegation_for_morph_tx_v2() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+    use super::helpers::{RETURN_WORD_42_RUNTIME, init_code_for};
+    use morph_node::test_utils::make_deploy_tx;
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+    let chain_id = wallet.chain_id;
+    let sender = wallet.inner.address();
+
+    // Block 1: deploy the returning delegate; the sender's on-chain nonce is now 1.
+    let deploy_tx = make_deploy_tx(
+        chain_id,
+        wallet.inner.clone(),
+        0,
+        init_code_for(RETURN_WORD_42_RUNTIME),
+    )?;
+    node.rpc.inject_tx(deploy_tx).await?;
+    node.advance_block().await?;
+    let delegate = Address::create(&sender, 0);
+
+    let client = node
+        .rpc_client()
+        .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
+
+    let call_with_auth_nonce = |auth_nonce: u64| -> eyre::Result<serde_json::Value> {
+        let authorization = sign_authorization(&wallet.inner, chain_id, delegate, auth_nonce)?;
+        Ok(serde_json::json!({
+            "from": sender,
+            "to": sender,
+            "nonce": "0x1",
+            "memo": "0x6d",
+            "maxFeePerGas": "0x4a817c800",
+            "maxPriorityFeePerGas": "0x4a817c800",
+            "authorizationList": [serde_json::to_value(&authorization)?],
+        }))
+    };
+
+    // state nonce 1 → bumped to 2 before the list is applied → tuple nonce 2 applies.
+    let result: Value = client
+        .request("eth_call", (call_with_auth_nonce(2)?, "latest"))
+        .await?;
+    assert_eq!(
+        result.as_str(),
+        Some(format!("0x{:064x}", 0x42).as_str()),
+        "the call must execute the delegate's code via the sender"
+    );
+
+    // A tuple signed with the un-bumped nonce is skipped: the sender stays an EOA.
+    let result: Value = client
+        .request("eth_call", (call_with_auth_nonce(1)?, "latest"))
+        .await?;
+    assert_eq!(result.as_str(), Some("0x"));
+
+    // Nothing leaked from the simulation into the canonical state.
+    let state = node.inner.provider.latest()?;
+    assert!(
+        state
+            .account_code(&sender)?
+            .is_none_or(|code| code.is_empty())
+    );
 
     Ok(())
 }

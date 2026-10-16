@@ -209,7 +209,7 @@ revm-primitives = { version = "42.0.0", default-features = false }
 revm-statetest-types = { version = "42.0.0", default-features = false }
 arbitrary = { version = "1.3", features = ["derive"] }
 async-lock = "3.4.1"
-async-trait = "0.1"
+async-trait = "0.1.92"
 auto_impl = "1"
 axum = "0.8.4"
 base64 = "0.22"
@@ -220,7 +220,7 @@ clap = { version = "4.5.45", features = ["derive"] }
 const-hex = { version = "1.15.0" }
 dashmap = "6.0"
 derive_more = { version = "2.0.0" }
-eyre = "0.6.12"
+eyre = "0.6.14"
 futures = "0.3.31"
 governor = "0.10.2"
 indexmap = "2.11.0"

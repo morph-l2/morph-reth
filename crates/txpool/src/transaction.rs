@@ -273,6 +273,7 @@ mod tests {
             fee_limit: U256::from(1000u64),
             reference: None,
             memo: None,
+            authorization_list: Vec::new(),
             input: Bytes::new(),
         };
         let sig = Signature::test_signature();

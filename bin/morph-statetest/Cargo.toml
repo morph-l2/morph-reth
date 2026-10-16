@@ -16,6 +16,7 @@ eyre.workspace = true
 morph-chainspec.workspace = true
 morph-evm.workspace = true
 morph-revm.workspace = true
+morph-primitives.workspace = true
 revm = { workspace = true, features = ["tracer"] }
 revm-statetest-types.workspace = true
 serde.workspace = true

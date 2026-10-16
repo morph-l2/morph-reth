@@ -76,13 +76,18 @@ pub enum HardforkSchedule {
     #[default]
     AllActive,
 
-    /// Jade is NOT active; all other forks are active at t=0.
+    /// Celadon is NOT active; all other forks are active at t=0.
+    ///
+    /// Use this to test pre-Celadon behavior: MorphTx v2 (authorization list) rejected.
+    PreCeladon,
+
+    /// Jade and Celadon are NOT active; all other forks are active at t=0.
     ///
     /// Use this to test pre-Jade behavior: state root validation skipped,
     /// MorphTx v1 rejected, etc.
     PreJade,
 
-    /// Viridian, Emerald, and Jade are NOT active; all earlier forks are at t=0.
+    /// Viridian, Emerald, Jade, and Celadon are NOT active; all earlier forks are at t=0.
     ///
     /// Use this to test pre-Viridian behavior: EIP-7702 rejected, etc.
     PreViridian,
@@ -107,7 +112,7 @@ impl HardforkSchedule {
     /// used to determine which forks are currently active on those networks.
     fn reference_genesis_json(&self) -> Option<&'static str> {
         match self {
-            Self::AllActive | Self::PreJade | Self::PreViridian => None,
+            Self::AllActive | Self::PreCeladon | Self::PreJade | Self::PreViridian => None,
             Self::Hoodi => Some(include_str!("../../chainspec/res/genesis/hoodi.json")),
             Self::Mainnet => Some(include_str!("../../chainspec/res/genesis/mainnet.json")),
         }
@@ -116,7 +121,8 @@ impl HardforkSchedule {
     /// Apply this schedule's fork timestamps to a mutable genesis JSON value.
     ///
     /// - `AllActive`: no changes (test genesis already has all forks at 0)
-    /// - `PreJade`: set `jadeForkTime` to `u64::MAX`
+    /// - `PreCeladon`: set `celadonTime` to `u64::MAX`
+    /// - `PreJade`: set `jadeForkTime` and `celadonTime` to `u64::MAX`
     /// - `Hoodi`/`Mainnet`: compare each `*Time` key against the reference network;
     ///   forks active now → 0, forks not yet active → `u64::MAX`.
     ///   Block-based forks (`*Block`) are always kept at 0.
@@ -125,16 +131,23 @@ impl HardforkSchedule {
             Self::AllActive => {
                 // nothing to do — test genesis has all forks at 0
             }
+            Self::PreCeladon => {
+                // Disable only Celadon; all other forks remain at 0.
+                let config = genesis["config"].as_object_mut().expect("genesis.config");
+                config.insert("celadonTime".to_string(), serde_json::json!(u64::MAX));
+            }
             Self::PreJade => {
-                // Disable only Jade; all other forks remain at 0.
+                // Disable Jade and everything after it; all earlier forks remain at 0.
                 let config = genesis["config"].as_object_mut().expect("genesis.config");
                 config.insert("jadeForkTime".to_string(), serde_json::json!(u64::MAX));
+                config.insert("celadonTime".to_string(), serde_json::json!(u64::MAX));
             }
             Self::PreViridian => {
                 let config = genesis["config"].as_object_mut().expect("genesis.config");
                 config.insert("viridianTime".to_string(), serde_json::json!(u64::MAX));
                 config.insert("emeraldTime".to_string(), serde_json::json!(u64::MAX));
                 config.insert("jadeForkTime".to_string(), serde_json::json!(u64::MAX));
+                config.insert("celadonTime".to_string(), serde_json::json!(u64::MAX));
             }
             Self::Hoodi | Self::Mainnet => {
                 let reference_json = self.reference_genesis_json().unwrap();
@@ -536,18 +549,22 @@ pub fn wallet_at_index(idx: u32, chain_id: u64) -> PrivateKeySigner {
 /// Creates a signed EIP-1559 transfer transaction with an explicit nonce.
 ///
 /// Public version for use in test helpers outside this module.
-pub async fn make_transfer_tx(chain_id: u64, signer: PrivateKeySigner, nonce: u64) -> Bytes {
-    transfer_tx_with_nonce(chain_id, signer, nonce).await
+pub async fn make_transfer_tx(chain_id: u64, signer: PrivateKeySigner, tx_nonce: u64) -> Bytes {
+    transfer_tx_with_nonce(chain_id, signer, tx_nonce).await
 }
 
 /// Creates a signed EIP-2930 (type 0x01) transaction.
-pub fn make_eip2930_tx(chain_id: u64, signer: PrivateKeySigner, nonce: u64) -> eyre::Result<Bytes> {
+pub fn make_eip2930_tx(
+    chain_id: u64,
+    signer: PrivateKeySigner,
+    tx_nonce: u64,
+) -> eyre::Result<Bytes> {
     use alloy_consensus::{SignableTransaction, TxEip2930};
     use alloy_signer::SignerSync;
 
     let tx = TxEip2930 {
         chain_id,
-        nonce,
+        nonce: tx_nonce,
         gas_price: 20_000_000_000u128,
         gas_limit: 21_000,
         to: TxKind::Call(Address::with_last_byte(0x42)),
@@ -563,13 +580,17 @@ pub fn make_eip2930_tx(chain_id: u64, signer: PrivateKeySigner, nonce: u64) -> e
 }
 
 /// Creates a signed EIP-4844 (type 0x03) transaction.
-pub fn make_eip4844_tx(chain_id: u64, signer: PrivateKeySigner, nonce: u64) -> eyre::Result<Bytes> {
+pub fn make_eip4844_tx(
+    chain_id: u64,
+    signer: PrivateKeySigner,
+    tx_nonce: u64,
+) -> eyre::Result<Bytes> {
     use alloy_consensus::{EthereumTxEnvelope, SignableTransaction, TxEip4844};
     use alloy_signer::SignerSync;
 
     let tx = TxEip4844 {
         chain_id,
-        nonce,
+        nonce: tx_nonce,
         gas_limit: 100_000,
         max_fee_per_gas: 20_000_000_000u128,
         max_priority_fee_per_gas: 20_000_000_000u128,
@@ -588,7 +609,11 @@ pub fn make_eip4844_tx(chain_id: u64, signer: PrivateKeySigner, nonce: u64) -> e
 }
 
 /// Creates a signed EIP-7702 (type 0x04) transaction.
-pub fn make_eip7702_tx(chain_id: u64, signer: PrivateKeySigner, nonce: u64) -> eyre::Result<Bytes> {
+pub fn make_eip7702_tx(
+    chain_id: u64,
+    signer: PrivateKeySigner,
+    tx_nonce: u64,
+) -> eyre::Result<Bytes> {
     use alloy_consensus::{SignableTransaction, TxEip7702};
     use alloy_eips::eip7702::Authorization;
     use alloy_signer::SignerSync;
@@ -597,7 +622,7 @@ pub fn make_eip7702_tx(chain_id: u64, signer: PrivateKeySigner, nonce: u64) -> e
     let authorization = Authorization {
         chain_id: U256::from(chain_id),
         address: delegate_to,
-        nonce,
+        nonce: tx_nonce,
     };
     let auth_sig = signer
         .sign_hash_sync(&authorization.signature_hash())
@@ -606,7 +631,7 @@ pub fn make_eip7702_tx(chain_id: u64, signer: PrivateKeySigner, nonce: u64) -> e
 
     let tx = TxEip7702 {
         chain_id,
-        nonce,
+        nonce: tx_nonce,
         gas_limit: 100_000,
         max_fee_per_gas: 20_000_000_000u128,
         max_priority_fee_per_gas: 20_000_000_000u128,
@@ -626,11 +651,11 @@ pub fn make_eip7702_tx(chain_id: u64, signer: PrivateKeySigner, nonce: u64) -> e
 /// Creates a signed EIP-1559 contract deployment transaction (CREATE).
 ///
 /// The returned bytes can be injected into the pool via `node.rpc.inject_tx()`.
-/// The deployed contract address is computed by `Address::create(sender, nonce)`.
+/// The deployed contract address is computed by `Address::create(sender, tx_nonce)`.
 pub fn make_deploy_tx(
     chain_id: u64,
     signer: PrivateKeySigner,
-    nonce: u64,
+    tx_nonce: u64,
     init_code: impl Into<Bytes>,
 ) -> eyre::Result<Bytes> {
     use alloy_consensus::{SignableTransaction, TxEip1559};
@@ -638,7 +663,7 @@ pub fn make_deploy_tx(
 
     let tx = TxEip1559 {
         chain_id,
-        nonce,
+        nonce: tx_nonce,
         gas_limit: 500_000,
         max_fee_per_gas: 20_000_000_000u128,
         max_priority_fee_per_gas: 20_000_000_000u128,
@@ -655,9 +680,9 @@ pub fn make_deploy_tx(
 }
 
 /// Creates a signed EIP-1559 transfer transaction with an explicit nonce.
-async fn transfer_tx_with_nonce(chain_id: u64, signer: PrivateKeySigner, nonce: u64) -> Bytes {
+async fn transfer_tx_with_nonce(chain_id: u64, signer: PrivateKeySigner, tx_nonce: u64) -> Bytes {
     let tx = TransactionRequest {
-        nonce: Some(nonce),
+        nonce: Some(tx_nonce),
         value: Some(U256::from(100)),
         to: Some(TxKind::Call(Address::random())),
         gas: Some(21_000),
@@ -902,7 +927,7 @@ pub fn test_token_balance_slot(account: Address) -> B256 {
 /// ```ignore
 /// use morph_node::test_utils::{MorphTxBuilder, TEST_TOKEN_ID};
 ///
-/// let raw = MorphTxBuilder::new(chain_id, signer, nonce)
+/// let raw = MorphTxBuilder::new(chain_id, signer, tx_nonce)
 ///     .with_v0_token_fee(TEST_TOKEN_ID)
 ///     .build_signed()?;
 /// ```
@@ -910,7 +935,7 @@ pub fn test_token_balance_slot(account: Address) -> B256 {
 /// # Example — v1 ETH fee
 ///
 /// ```ignore
-/// let raw = MorphTxBuilder::new(chain_id, signer, nonce)
+/// let raw = MorphTxBuilder::new(chain_id, signer, tx_nonce)
 ///     .with_v1_eth_fee()
 ///     .build_signed()?;
 /// ```
@@ -930,6 +955,7 @@ pub struct MorphTxBuilder {
     access_list: alloy_eips::eip2930::AccessList,
     reference: Option<B256>,
     memo: Option<Bytes>,
+    authorization_list: Vec<alloy_eips::eip7702::SignedAuthorization>,
 }
 
 impl MorphTxBuilder {
@@ -937,11 +963,11 @@ impl MorphTxBuilder {
     ///
     /// Defaults to v0, fee_token_id=0 (must call `with_v0_token_fee` or
     /// `with_v1_eth_fee` before building).
-    pub fn new(chain_id: u64, signer: PrivateKeySigner, nonce: u64) -> Self {
+    pub fn new(chain_id: u64, signer: PrivateKeySigner, tx_nonce: u64) -> Self {
         Self {
             chain_id,
             signer,
-            nonce,
+            nonce: tx_nonce,
             gas_limit: 100_000,
             max_fee_per_gas: 20_000_000_000u128,
             max_priority_fee_per_gas: 20_000_000_000u128,
@@ -954,7 +980,39 @@ impl MorphTxBuilder {
             access_list: Default::default(),
             reference: None,
             memo: None,
+            authorization_list: Vec::new(),
         }
+    }
+
+    /// Configure as MorphTx **v2** with ETH fee payment (fee_token_id = 0).
+    ///
+    /// Add EIP-7702 authorizations with [`Self::with_authorization_list`];
+    /// without any the transaction behaves exactly like v1.
+    pub fn with_v2_eth_fee(mut self) -> Self {
+        self.version = 2;
+        self.fee_token_id = 0;
+        self.fee_limit = U256::ZERO;
+        self
+    }
+
+    /// Configure as MorphTx **v2** with ERC20 fee payment.
+    pub fn with_v2_token_fee(mut self, fee_token_id: u16) -> Self {
+        assert!(fee_token_id > 0, "v2 ERC20 fee requires fee_token_id > 0");
+        self.version = 2;
+        self.fee_token_id = fee_token_id;
+        self.fee_limit = U256::from(100_000_000_000_000_000_000u128); // 100 tokens
+        self
+    }
+
+    /// Set the EIP-7702 authorization list (v2 only; may be empty).
+    ///
+    /// Build tuples with [`sign_authorization`].
+    pub fn with_authorization_list(
+        mut self,
+        authorization_list: Vec<alloy_eips::eip7702::SignedAuthorization>,
+    ) -> Self {
+        self.authorization_list = authorization_list;
+        self
     }
 
     /// Configure as MorphTx **v0** with ERC20 fee payment.
@@ -1008,6 +1066,13 @@ impl MorphTxBuilder {
     /// Set the recipient address.
     pub fn with_to(mut self, to: Address) -> Self {
         self.to = TxKind::Call(to);
+        self
+    }
+
+    /// Make this a contract creation with the given init code.
+    pub fn with_create(mut self, init_code: impl Into<Bytes>) -> Self {
+        self.to = TxKind::Create;
+        self.input = init_code.into();
         self
     }
 
@@ -1073,6 +1138,7 @@ impl MorphTxBuilder {
             fee_limit: self.fee_limit,
             reference: self.reference,
             memo: self.memo,
+            authorization_list: self.authorization_list,
             input: self.input,
         };
 
@@ -1084,4 +1150,28 @@ impl MorphTxBuilder {
         let envelope = MorphTxEnvelope::Morph(signed);
         Ok(envelope.encoded_2718().into())
     }
+}
+
+/// Signs an EIP-7702 authorization tuple delegating `authority` (the signer)
+/// to `delegate`, for use in `0x04` or MorphTx v2 authorization lists.
+///
+/// `auth_nonce` must be the authority's nonce at the time the tuple is applied:
+/// for a self-delegating sender that is `tx.nonce + 1`.
+pub fn sign_authorization(
+    signer: &PrivateKeySigner,
+    chain_id: u64,
+    delegate: Address,
+    auth_nonce: u64,
+) -> eyre::Result<alloy_eips::eip7702::SignedAuthorization> {
+    use alloy_signer::SignerSync;
+
+    let authorization = alloy_eips::eip7702::Authorization {
+        chain_id: U256::from(chain_id),
+        address: delegate,
+        nonce: auth_nonce,
+    };
+    let auth_sig = signer
+        .sign_hash_sync(&authorization.signature_hash())
+        .map_err(|e| eyre::eyre!("auth signing failed: {e}"))?;
+    Ok(authorization.into_signed(auth_sig))
 }
