@@ -137,7 +137,7 @@ reth-ethereum-cli = { git = "https://github.com/paradigmxyz/reth", tag = "v2.5.2
 reth-ethereum-consensus = { git = "https://github.com/paradigmxyz/reth", tag = "v2.5.2" }
 reth-ethereum-engine-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v2.5.2" }
 reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v2.5.2", default-features = false }
-reth-evm = { git = "https://github.com/paradigmxyz/reth", tag = "v2.5.2" }
+reth-evm = { git = "https://github.com/paradigmxyz/reth", tag = "v2.5.2", default-features = false }
 reth-evm-ethereum = { git = "https://github.com/paradigmxyz/reth", tag = "v2.5.2" }
 reth-execution-types = { git = "https://github.com/paradigmxyz/reth", tag = "v2.5.2" }
 reth-metrics = { git = "https://github.com/paradigmxyz/reth", tag = "v2.5.2" }
@@ -173,8 +173,7 @@ reth-execution-cache = { git = "https://github.com/paradigmxyz/reth", tag = "v2.
 reth-trie-parallel = { git = "https://github.com/paradigmxyz/reth", tag = "v2.5.2" }
 reth-trie-sparse = { git = "https://github.com/paradigmxyz/reth", tag = "v2.5.2", default-features = false }
 
-reth-revm = { git = "https://github.com/paradigmxyz/reth", tag = "v2.5.2", features = [
-  "std",
+reth-revm = { git = "https://github.com/paradigmxyz/reth", tag = "v2.5.2", default-features = false, features = [
   "optional-checks",
 ] }
 revm = { version = "42.0.1", features = [

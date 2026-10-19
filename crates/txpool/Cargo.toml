@@ -20,10 +20,10 @@ morph-revm.workspace = true
 
 # Reth
 reth-chainspec.workspace = true
-reth-evm.workspace = true
+reth-evm = { workspace = true, features = ["std"] }
 reth-primitives-traits.workspace = true
 reth-provider.workspace = true
-reth-revm.workspace = true
+reth-revm = { workspace = true, features = ["std"] }
 reth-storage-api.workspace = true
 reth-transaction-pool.workspace = true
 

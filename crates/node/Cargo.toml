@@ -14,7 +14,7 @@ workspace = true
 morph-chainspec.workspace = true
 morph-consensus.workspace = true
 morph-engine-api.workspace = true
-morph-evm.workspace = true
+morph-evm = { workspace = true, features = ["engine"] }
 morph-payload-builder.workspace = true
 morph-payload-types.workspace = true
 morph-primitives = { workspace = true, features = ["reth-codec"] }
@@ -31,7 +31,7 @@ reth-chainspec.workspace = true
 reth-engine-local.workspace = true
 reth-engine-tree.workspace = true
 reth-errors.workspace = true
-reth-evm.workspace = true
+reth-evm = { workspace = true, features = ["std"] }
 reth-execution-cache.workspace = true
 reth-node-api.workspace = true
 reth-node-builder.workspace = true
