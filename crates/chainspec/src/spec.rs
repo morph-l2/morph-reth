@@ -696,7 +696,7 @@ mod tests {
 
     #[test]
     fn test_celadon_absent_from_genesis_never_activates() {
-        // The bundled mainnet/hoodi chainspecs are scheduled through Jade only.
+        // A genesis without celadonTime must leave Celadon unscheduled.
         let chainspec = MorphChainSpec::from(create_test_genesis());
         assert!(!chainspec.is_celadon_active_at_timestamp(0));
         assert!(!chainspec.is_celadon_active_at_timestamp(u64::MAX));

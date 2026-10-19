@@ -163,7 +163,7 @@ mod tests {
 
     #[test]
     fn test_extract_morph_hardfork_info_without_celadon() {
-        // Genesis files scheduled through Jade (current mainnet/hoodi) must keep parsing.
+        // Pre-Celadon genesis files (without celadonTime) must keep parsing.
         let genesis_info = r#"
         {
           "bernoulliBlock": 0,
