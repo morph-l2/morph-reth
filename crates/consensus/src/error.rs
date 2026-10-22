@@ -6,7 +6,7 @@
 //! For common errors (difficulty, nonce, ommers, gas, timestamp, base fee),
 //! use the standard `reth_consensus::ConsensusError` variants directly.
 
-use alloy_primitives::Address;
+use alloy_primitives::{Address, B256};
 
 /// Morph consensus validation error.
 ///
@@ -45,6 +45,15 @@ pub enum MorphConsensusError {
         actual: u64,
     },
 
+    /// The withdraw trie root committed by the engine payload does not match execution.
+    #[error("withdraw trie root mismatch: expected {expected}, got {actual}")]
+    WithdrawTrieRootMismatch {
+        /// Withdraw trie root the payload committed to.
+        expected: B256,
+        /// Withdraw trie root produced by execution.
+        actual: B256,
+    },
+
     /// Invalid coinbase (must be empty when FeeVault is enabled).
     #[error("Invalid coinbase: expected zero address, got {0}")]
     InvalidCoinbase(Address),
@@ -78,6 +87,24 @@ pub enum MorphConsensusError {
     },
 }
 
+impl MorphConsensusError {
+    /// Whether this rejection can be caused solely by a payload field that the block
+    /// hash does not commit to.
+    ///
+    /// `NextL1MsgIndex` is excluded from the header hash, and the withdraw trie root
+    /// travels in the engine payload rather than the header, so neither is covered by
+    /// the block hash or the sequencer signature: a peer can relay a validly signed
+    /// block with either field corrupted. reth caches rejected blocks by hash, and the
+    /// corrupted copy shares its hash with the honest block, so these rejections must
+    /// not be cached (see `MorphConsensus::is_transient_error`).
+    pub const fn is_unhashed_field_error(&self) -> bool {
+        matches!(
+            self,
+            Self::InvalidNextL1MessageIndex { .. } | Self::WithdrawTrieRootMismatch { .. }
+        )
+    }
+}
+
 impl From<alloy_rlp::Error> for MorphConsensusError {
     fn from(err: alloy_rlp::Error) -> Self {
         Self::TransactionDecodeError(err.to_string())
@@ -99,6 +126,32 @@ mod tests {
         assert!(
             error.contains("invalid block.NextL1MsgIndex"),
             "node treats this substring as a non-retryable error: {error}"
+        );
+    }
+
+    #[test]
+    fn only_unhashed_field_errors_are_classified_as_such() {
+        assert!(
+            MorphConsensusError::InvalidNextL1MessageIndex {
+                expected: 2,
+                actual: 3,
+            }
+            .is_unhashed_field_error()
+        );
+        assert!(
+            MorphConsensusError::WithdrawTrieRootMismatch {
+                expected: B256::ZERO,
+                actual: B256::with_last_byte(1),
+            }
+            .is_unhashed_field_error()
+        );
+        assert!(!MorphConsensusError::InvalidL1MessageOrder.is_unhashed_field_error());
+        assert!(
+            !MorphConsensusError::L1MessagesNotInOrder {
+                expected: 1,
+                actual: 2,
+            }
+            .is_unhashed_field_error()
         );
     }
 }
