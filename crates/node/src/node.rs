@@ -7,6 +7,7 @@
 //!
 //! The node is assembled from the following builders:
 //! - [`MorphPoolBuilder`]: Transaction pool with L1 fee validation
+//! - [`MorphNetworkBuilder`]: P2P network that accepts transaction gossip from start-up
 //! - [`MorphExecutorBuilder`]: EVM executor with Morph-specific logic
 //! - [`MorphConsensusBuilder`]: Consensus validation for L2 blocks
 //! - [`MorphPayloadBuilderBuilder`]: Block building with L1 message handling
@@ -16,7 +17,8 @@ use super::{
     add_ons::MorphAddOns,
     args::MorphArgs,
     components::{
-        MorphConsensusBuilder, MorphExecutorBuilder, MorphPayloadBuilderBuilder, MorphPoolBuilder,
+        MorphConsensusBuilder, MorphExecutorBuilder, MorphNetworkBuilder,
+        MorphPayloadBuilderBuilder, MorphPoolBuilder,
     },
 };
 use alloy_consensus::BlockHeader;
@@ -32,7 +34,6 @@ use reth_node_builder::{
     DebugNode, Node, NodeAdapter,
     components::{BasicPayloadServiceBuilder, ComponentsBuilder},
 };
-use reth_node_ethereum::EthereumNetworkBuilder;
 use reth_payload_primitives::PayloadAttributesBuilder;
 use reth_primitives_traits::SealedHeader;
 use reth_provider::{
@@ -73,7 +74,7 @@ impl MorphNode {
         N,
         MorphPoolBuilder,
         BasicPayloadServiceBuilder<MorphPayloadBuilderBuilder>,
-        EthereumNetworkBuilder,
+        MorphNetworkBuilder,
         MorphExecutorBuilder,
         MorphConsensusBuilder,
     >
@@ -87,7 +88,7 @@ impl MorphNode {
             .payload(BasicPayloadServiceBuilder::new(
                 MorphPayloadBuilderBuilder::new(payload_builder_config),
             ))
-            .network(EthereumNetworkBuilder::default())
+            .network(MorphNetworkBuilder::default())
             .consensus(MorphConsensusBuilder::default())
     }
 }
@@ -110,7 +111,7 @@ where
         N,
         MorphPoolBuilder,
         BasicPayloadServiceBuilder<MorphPayloadBuilderBuilder>,
-        EthereumNetworkBuilder,
+        MorphNetworkBuilder,
         MorphExecutorBuilder,
         MorphConsensusBuilder,
     >;
