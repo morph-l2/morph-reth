@@ -943,6 +943,7 @@ where
     // Build ExecutableL2Data from the sealed block
     // ExecutableL2Data expects raw 256-byte bloom, not RLP-encoded bytes.
     let logs_bloom_bytes = header.logs_bloom().as_slice().to_vec();
+    let has_transactions = !executed_txs.is_empty();
 
     let executable_data = ExecutableL2Data {
         parent_hash: header.parent_hash(),
@@ -961,25 +962,34 @@ where
         hash: sealed_block.hash(),
     };
 
-    let execution_output = BlockExecutionOutput {
-        result: execution_result,
-        state: db.take_bundle(),
-    };
-
-    let executed = BuiltPayloadExecutedBlock {
-        recovered_block: Arc::new(block),
-        execution_output: Arc::new(execution_output),
-        // Keep unsorted; conversion to sorted is deferred until required.
-        hashed_state: Arc::new(hashed_state),
-        trie_updates: Arc::new(trie_updates),
-    };
+    // reth inserts every resolved payload into the engine tree as an already-executed
+    // block, and the tree only prunes such non-canonical blocks below a finalized block.
+    // A sequencer assembles a candidate on every fast tick, discards the empty ones
+    // without telling the EL, and never receives a finalized tag, so pre-inserted empty
+    // candidates would stay in memory for the life of the process. Empty blocks
+    // therefore carry no execution artifacts: the ones the CL does commit are executed
+    // again on import, which costs nothing for a block without transactions. Blocks
+    // with transactions keep the artifacts so their import remains a no-op.
+    let executed = has_transactions.then(|| {
+        let execution_output = BlockExecutionOutput {
+            result: execution_result,
+            state: db.take_bundle(),
+        };
+        BuiltPayloadExecutedBlock {
+            recovered_block: Arc::new(block),
+            execution_output: Arc::new(execution_output),
+            // Keep unsorted; conversion to sorted is deferred until required.
+            hashed_state: Arc::new(hashed_state),
+            trie_updates: Arc::new(trie_updates),
+        }
+    });
 
     let payload = MorphBuiltPayload::new(
         ctx.payload_id(),
         sealed_block,
         info.total_fees,
         executable_data,
-        Some(executed),
+        executed,
     );
 
     // Only record block_transactions for successfully built payloads (not Aborted or Cancelled).
