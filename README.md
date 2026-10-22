@@ -119,7 +119,7 @@ openssl rand -hex 32 > jwt.hex
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--morph.max-tx-payload-bytes` | 737280 (720 KiB) | Maximum L2 tx payload bytes per block (fits one uncompressed 6-blob batch) |
+| `--morph.max-tx-payload-bytes` | Chain consensus limit | Optional lower sequencer packing limit; cannot exceed genesis `maxTxPayloadBytesPerBlock` |
 | `--proofs-history` | false | Enable historical `eth_getProof` / `eth_getMultiProof` and proof-history accumulation |
 | `--proofs-history.storage-path` | `<chain-datadir>/historical-proofs` | Override the proof MDBX directory |
 | `--proofs-history.window` | 604800 | Number of canonical blocks retained (7 days at 1s/block) |
