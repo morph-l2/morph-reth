@@ -19,7 +19,9 @@ pub struct AssembleL2BlockParams {
 
     /// Optional block timestamp.
     ///
-    /// If not provided, builder can choose a local current timestamp.
+    /// If not provided, builder can choose a local current timestamp. A timestamp behind the
+    /// parent's (or equal to it before Emerald) is raised to the earliest one the header rules
+    /// accept.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -66,7 +68,9 @@ pub struct AssembleL2BlockV2Params {
 
     /// Optional block timestamp.
     ///
-    /// If not provided, builder can choose a local current timestamp.
+    /// If not provided, builder can choose a local current timestamp. A timestamp behind the
+    /// parent's (or equal to it before Emerald) is raised to the earliest one the header rules
+    /// accept.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
