@@ -158,7 +158,8 @@
           "reducer": [
             "sum"
           ],
-          "show": false
+          "show": false,
+          "enablePagination": true
         },
         "showHeader": true,
         "sortBy": [
@@ -424,7 +425,8 @@
           "reducer": [
             "sum"
           ],
-          "show": false
+          "show": false,
+          "enablePagination": true
         },
         "showHeader": true,
         "sortBy": [
