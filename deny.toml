@@ -11,6 +11,10 @@ ignore = [
     # https://rustsec.org/advisories/RUSTSEC-2026-0173 proc-macro-error2 is unmaintained
     # build-time proc-macro pulled transitively via alloy-sol-macro; no fix available
     "RUSTSEC-2026-0173",
+    # https://rustsec.org/advisories/RUSTSEC-2026-0387 crypto-bigint timing variability
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5 comes in through elliptic-curve 0.13 (k256/p256/ecdsa via alloy and reth); the fix is only in 0.7.6+, which needs the elliptic-curve 0.14 major upgrade upstream" },
+    # https://rustsec.org/advisories/RUSTSEC-2026-0441 pin-utils is unmaintained
+    { id = "RUSTSEC-2026-0441", reason = "pulled in only by wasmtimer, a wasm32-only dependency of the alloy provider/transport crates, so it is not built for our targets; no maintained release to move to" },
 ]
 
 # This section is considered when running `cargo deny check bans`.
