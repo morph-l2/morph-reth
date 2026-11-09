@@ -1,10 +1,9 @@
 //! Error types for Morph RPC
 
 use alloy_primitives::B256;
-use morph_evm::MorphEvmConfig;
+use evm2::interpreter::InstrStop;
 use reth_errors::ProviderError;
-use reth_evm::revm::context::result::EVMError;
-use reth_evm::{HaltReasonFor, InvalidTxError};
+use reth_evm::BlockExecutionError;
 use reth_rpc_convert::TransactionConversionError;
 use reth_rpc_eth_types::{
     EthApiError,
@@ -90,9 +89,6 @@ pub enum MorphEthApiError {
 
 impl MorphEthApiError {
     /// JSON-RPC error code reported for [`Self::StateNotAvailable`].
-    ///
-    /// Exposed so other error types that mean the same thing to a client can report it without
-    /// duplicating the literal. Used by the historical-proof window errors in [`crate::state`].
     pub const STATE_NOT_AVAILABLE_CODE: i32 = -32005;
 }
 
@@ -172,8 +168,8 @@ impl AsEthApiError for MorphEthApiError {
 // We get it for free since we have `#[from] EthApiError` above.
 
 /// Converts EVM halt reasons to [`MorphEthApiError`].
-impl FromEvmHalt<HaltReasonFor<MorphEvmConfig>> for MorphEthApiError {
-    fn from_evm_halt(halt: HaltReasonFor<MorphEvmConfig>, gas_limit: u64) -> Self {
+impl FromEvmHalt<InstrStop> for MorphEthApiError {
+    fn from_evm_halt(halt: InstrStop, gas_limit: u64) -> Self {
         Self::Eth(EthApiError::from_evm_halt(halt, gas_limit))
     }
 }
@@ -192,13 +188,12 @@ impl From<ProviderError> for MorphEthApiError {
     }
 }
 
-/// Converts [`EVMError`] to [`MorphEthApiError`].
-impl<T, TxError> From<EVMError<T, TxError>> for MorphEthApiError
-where
-    T: Into<EthApiError>,
-    TxError: InvalidTxError,
-{
-    fn from(err: EVMError<T, TxError>) -> Self {
+/// Converts [`BlockExecutionError`] to [`MorphEthApiError`].
+///
+/// Standard rejections keep their Ethereum JSON-RPC error; Morph's own are reported with their
+/// message as a rejected transaction.
+impl From<BlockExecutionError> for MorphEthApiError {
+    fn from(err: BlockExecutionError) -> Self {
         Self::Eth(err.into())
     }
 }

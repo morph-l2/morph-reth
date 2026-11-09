@@ -14,19 +14,87 @@ pub use storage::*;
 mod change_set;
 mod kv;
 mod metadata;
-use std::fmt;
 
 use alloy_primitives::B256;
 pub use change_set::*;
 pub use kv::*;
 pub use metadata::*;
 use reth_db::{
-    TableSet, TableType, TableViewer,
-    table::{DupSort, TableInfo},
-    tables,
+    TableSet,
+    table::{DupSort, Table, TableInfo},
 };
 use reth_primitives_traits::Account;
 use reth_trie_common::{BranchNodeCompact, StoredNibbles};
+
+/// Declares this database's tables: a marker type with a [`Table`] impl per entry, plus the
+/// [`Tables`] set passed to `init_db_for`.
+///
+/// `reth_db::tables!` cannot be used here: it sets [`Table::TABLE`] to the enum it generates,
+/// while that constant has to name an entry of reth's own `Tables`. Tables defined outside that
+/// enum leave it at its default of `None`, which makes MDBX resolve them by name.
+macro_rules! tables {
+    (@is_dupsort) => { false };
+    (@is_dupsort $subkey:ty) => { true };
+
+    ($($(#[$attr:meta])* table $name:ident {
+        type Key = $key:ty;
+        type Value = $value:ty;
+        $(type SubKey = $subkey:ty;)?
+    })*) => {
+        $(
+            $(#[$attr])*
+            #[derive(Debug)]
+            pub enum $name {}
+
+            impl Table for $name {
+                const NAME: &'static str = stringify!($name);
+                const DUPSORT: bool = tables!(@is_dupsort $($subkey)?);
+
+                type Key = $key;
+                type Value = $value;
+            }
+
+            $(
+                impl DupSort for $name {
+                    type SubKey = $subkey;
+                }
+            )?
+        )*
+
+        /// A table in this database.
+        #[derive(Clone, Copy, Debug)]
+        pub enum Tables {
+            $(
+                #[doc = concat!("The [`", stringify!($name), "`] table.")]
+                $name,
+            )*
+        }
+
+        impl TableInfo for Tables {
+            fn name(&self) -> &'static str {
+                match self {
+                    $(Self::$name => stringify!($name),)*
+                }
+            }
+
+            fn is_dupsort(&self) -> bool {
+                match self {
+                    $(Self::$name => tables!(@is_dupsort $($subkey)?),)*
+                }
+            }
+        }
+
+        impl TableSet for Tables {
+            fn tables() -> Box<dyn Iterator<Item = Box<dyn TableInfo>>> {
+                Box::new(
+                    [$(Self::$name,)*]
+                        .into_iter()
+                        .map(|table| Box::new(table) as Box<dyn TableInfo>),
+                )
+            }
+        }
+    };
+}
 
 tables! {
     /// Stores historical branch nodes for the account state trie.

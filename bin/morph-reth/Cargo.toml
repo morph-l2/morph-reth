@@ -32,6 +32,7 @@ reth-cli-util.workspace = true
 reth-ethereum-cli.workspace = true
 reth-node-builder.workspace = true
 reth-provider.workspace = true
+reth-stages-types.workspace = true
 reth-rpc-server-types.workspace = true
 reth-tasks.workspace = true
 

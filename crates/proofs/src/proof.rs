@@ -120,14 +120,12 @@ where
         let nodes_sorted = input.nodes.into_sorted();
         let state_sorted = input.state.into_sorted();
         let (trie_factory, hashed_factory) = from_tx(storage, tx, block_number);
-        Proof::new(trie_factory.clone(), hashed_factory.clone())
-            .with_trie_cursor_factory(InMemoryTrieCursorFactory::new(trie_factory, &nodes_sorted))
-            .with_hashed_cursor_factory(HashedPostStateCursorFactory::new(
-                hashed_factory,
-                &state_sorted,
-            ))
-            .with_prefix_sets_mut(input.prefix_sets)
-            .account_proof(address, slots)
+        Proof::new(
+            InMemoryTrieCursorFactory::new(trie_factory, &nodes_sorted),
+            HashedPostStateCursorFactory::new(hashed_factory, &state_sorted),
+        )
+        .with_prefix_sets_mut(input.prefix_sets)
+        .account_proof(address, slots)
     }
 
     fn overlay_multiproof(
@@ -153,14 +151,12 @@ where
         let nodes_sorted = input.nodes.into_sorted();
         let state_sorted = input.state.into_sorted();
         let (trie_factory, hashed_factory) = from_tx(storage, tx, block_number);
-        Proof::new(trie_factory.clone(), hashed_factory.clone())
-            .with_trie_cursor_factory(InMemoryTrieCursorFactory::new(trie_factory, &nodes_sorted))
-            .with_hashed_cursor_factory(HashedPostStateCursorFactory::new(
-                hashed_factory,
-                &state_sorted,
-            ))
-            .with_prefix_sets_mut(input.prefix_sets)
-            .multiproof(targets)
+        Proof::new(
+            InMemoryTrieCursorFactory::new(trie_factory, &nodes_sorted),
+            HashedPostStateCursorFactory::new(hashed_factory, &state_sorted),
+        )
+        .with_prefix_sets_mut(input.prefix_sets)
+        .multiproof(targets)
     }
 }
 
@@ -187,7 +183,6 @@ pub trait DatabaseStorageProof<'tx, S: MorphProofsStore + 'tx> {
 
 impl<'tx, S> DatabaseStorageProof<'tx, S>
     for proof::StorageProof<
-        'static,
         MorphProofsTrieCursorFactory<'tx, 'tx, S>,
         MorphProofsHashedAccountCursorFactory<'tx, 'tx, S>,
     >
@@ -209,13 +204,13 @@ where
         );
         let tx = storage.ro_tx().map_err(Into::<DatabaseError>::into)?;
         let (trie_factory, hashed_factory) = from_tx(storage, &tx, block_number);
-        proof::StorageProof::new(trie_factory, hashed_factory.clone(), address)
-            .with_hashed_cursor_factory(HashedPostStateCursorFactory::new(
-                hashed_factory,
-                &state_sorted,
-            ))
-            .with_prefix_set_mut(prefix_set)
-            .storage_proof(slot)
+        proof::StorageProof::new(
+            trie_factory,
+            HashedPostStateCursorFactory::new(hashed_factory, &state_sorted),
+            address,
+        )
+        .with_prefix_set_mut(prefix_set)
+        .storage_proof(slot)
     }
 
     fn overlay_storage_multiproof(
@@ -234,13 +229,13 @@ where
         );
         let tx = storage.ro_tx().map_err(Into::<DatabaseError>::into)?;
         let (trie_factory, hashed_factory) = from_tx(storage, &tx, block_number);
-        proof::StorageProof::new(trie_factory, hashed_factory.clone(), address)
-            .with_hashed_cursor_factory(HashedPostStateCursorFactory::new(
-                hashed_factory,
-                &state_sorted,
-            ))
-            .with_prefix_set_mut(prefix_set)
-            .storage_multiproof(targets)
+        proof::StorageProof::new(
+            trie_factory,
+            HashedPostStateCursorFactory::new(hashed_factory, &state_sorted),
+            address,
+        )
+        .with_prefix_set_mut(prefix_set)
+        .storage_multiproof(targets)
     }
 }
 
@@ -461,14 +456,12 @@ where
         let nodes_sorted = input.nodes.into_sorted();
         let state_sorted = input.state.into_sorted();
         let (trie_factory, hashed_factory) = from_tx(storage, tx, block_number);
-        let witness = TrieWitness::new(trie_factory.clone(), hashed_factory.clone())
-            .with_trie_cursor_factory(InMemoryTrieCursorFactory::new(trie_factory, &nodes_sorted))
-            .with_hashed_cursor_factory(HashedPostStateCursorFactory::new(
-                hashed_factory,
-                &state_sorted,
-            ))
-            .with_prefix_sets_mut(input.prefix_sets)
-            .with_execution_witness_mode(mode);
+        let witness = TrieWitness::new(
+            InMemoryTrieCursorFactory::new(trie_factory, &nodes_sorted),
+            HashedPostStateCursorFactory::new(hashed_factory, &state_sorted),
+        )
+        .with_prefix_sets_mut(input.prefix_sets)
+        .with_execution_witness_mode(mode);
         // Deliberate divergence from the vendored Base source, which force-includes the root node
         // unconditionally: only the legacy shape carries it, and a canonical witness is defined
         // without it. Aligned with reth's own `HistoricalStateProviderRef::witness` so a caller

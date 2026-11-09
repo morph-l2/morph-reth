@@ -17,12 +17,11 @@ use morph_primitives::MorphTxEnvelope;
 use morph_revm::L1BlockInfo;
 use parking_lot::RwLock;
 use reth_chainspec::ChainSpecProvider;
-use reth_evm::ConfigureEvm;
+use reth_evm::{ConfigureEvm, database::StateProviderDatabase};
 use reth_primitives_traits::{
     Block, BlockTy, GotExpected, SealedBlock, transaction::error::InvalidTransactionError,
 };
-use reth_revm::database::StateProviderDatabase;
-use reth_storage_api::{BlockReaderIdExt, StateProviderFactory};
+use reth_storage_api::{BlockReaderIdExt, StateProvider as _, StateProviderFactory};
 use reth_transaction_pool::{
     EthPoolTransaction, EthTransactionValidator, PoolTransaction, TransactionOrigin,
     TransactionValidationOutcome, TransactionValidator,
@@ -34,12 +33,12 @@ use std::sync::{
 
 /// EIP-3860 max initcode size (`2 * MAX_CODE_SIZE = 2 * 24 576 = 49 152` bytes).
 ///
-/// Reuses revm's canonical constant — the same `eip3860::MAX_INITCODE_SIZE` that
-/// reth's `EthTransactionValidator` uses — so it stays pinned to the EIP-170
+/// Reuses evm2's canonical constant, the base of the limit reth's
+/// `EthTransactionValidator` applies, so it stays pinned to the EIP-170
 /// code-size base instead of a hand-copied literal. Enforced unconditionally at
 /// the txpool layer because Morph has been post-Shanghai since genesis; see
 /// `validate_one_with_state` for why we can't rely on reth's Shanghai-gated check.
-const MAX_INITCODE_SIZE: usize = reth_revm::revm::primitives::eip3860::MAX_INITCODE_SIZE;
+const MAX_INITCODE_SIZE: usize = evm2::constants::MAX_INITCODE_SIZE;
 
 /// Tracks L1 block info for the current chain head.
 ///
@@ -229,7 +228,7 @@ where
             }
         };
 
-        let mut db = StateProviderDatabase::new(provider);
+        let mut db = StateProviderDatabase::new((&provider).into_evm_state_provider());
         let hardfork = self
             .chain_spec()
             .morph_hardfork_at(header.number(), header.timestamp());
@@ -437,7 +436,7 @@ where
                 message: err.to_string(),
             })?;
 
-        let mut db = StateProviderDatabase::new(provider);
+        let mut db = StateProviderDatabase::new((&provider).into_evm_state_provider());
 
         // Use shared validation logic with unified API (includes ETH balance check)
         let input = crate::MorphTxValidationInput {

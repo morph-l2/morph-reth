@@ -25,7 +25,7 @@ use reth_engine_tree::tree::{
     },
 };
 use reth_errors::{ConsensusError, ProviderResult};
-use reth_evm::{ConfigureEvm, revm::context::Block as _};
+use reth_evm::{ConfigureEvm, EvmEnv as _};
 use reth_node_api::{
     AddOnsContext, FullNodeComponents, InvalidPayloadAttributesError, NewPayloadError, NodeTypes,
     PayloadAttributes, PayloadTypes, PayloadValidator,
@@ -35,13 +35,14 @@ use reth_node_builder::{
     rpc::{EngineValidatorBuilder, PayloadValidatorBuilder},
 };
 use reth_payload_primitives::BuiltPayloadExecutedBlock;
-use reth_primitives_traits::{RecoveredBlock, SealedBlock};
+use reth_primitives_traits::{RecoveredBlock, SealedBlock, SealedBlockWith};
 use reth_provider::{
-    BlockExecutionOutput, BlockNumReader, BlockReader, ChainSpecProvider, DatabaseProviderFactory,
-    PruneCheckpointReader, StageCheckpointReader, StateProviderFactory, StateReader,
-    StateRootProvider, StorageSettingsCache, TryIntoHistoricalStateProvider,
+    BlockExecutionOutput, BlockNumReader, BlockReader, ChainSpecProvider, ChangeSetReader,
+    DatabaseProviderFactory, DatabaseProviderROFactory, PruneCheckpointReader,
+    StageCheckpointReader, StateProviderFactory, StateReader, StateRootProvider,
+    StorageChangeSetReader, StorageSettingsCache,
 };
-use reth_storage_overlay::OverlayManager;
+use reth_storage_overlay::{OverlayManager, OverlayStateProviderFactory};
 use reth_tracing::tracing;
 use reth_transaction_pool::{
     BestTransactions, BestTransactionsAttributes, PoolTransaction, TransactionPool,
@@ -126,7 +127,11 @@ where
         let provider = ctx.node.provider().clone();
         let state_root_strategy: Arc<
             dyn StateRootStrategy<MorphPrimitives, Node::Provider, Node::Evm>,
-        > = Arc::new(MorphStateRootStrategy::new(chain_spec.clone()));
+        > = Arc::new(MorphStateRootStrategy::new(
+            chain_spec.clone(),
+            provider.clone(),
+            overlay_manager.clone(),
+        ));
         let tree_config = strict_morph_tree_config(tree_config);
         let txpool_prewarming = tree_config.txpool_prewarming();
         let mut validator = BasicEngineValidator::new(
@@ -388,11 +393,11 @@ where
 
     fn validate_block(
         &mut self,
-        block: SealedBlock<morph_primitives::Block>,
+        block: SealedBlockWith<morph_primitives::Block, Option<alloy_eip7928::bal::RawBal>>,
         ctx: TreeCtx<'_, MorphPrimitives>,
     ) -> reth_engine_tree::tree::ValidationOutcome<MorphPrimitives> {
-        let block_hash = block.hash();
-        let l1_validation = self.validate_next_l1_msg_index_for_block(&block, &ctx);
+        let block_hash = block.block().hash();
+        let l1_validation = self.validate_next_l1_msg_index_for_block(block.block(), &ctx);
         self.post_execution_validator
             .clear_withdraw_trie_root_expectation_on_error(block_hash, l1_validation)?;
 
@@ -440,21 +445,29 @@ where
 /// computes and persists the real MPT updates but trusts the historical header
 /// root, which is a ZK-trie commitment and cannot be compared to the MPT root.
 #[derive(Debug)]
-struct MorphStateRootStrategy {
+struct MorphStateRootStrategy<P> {
     chain_spec: Arc<MorphChainSpec>,
     default: DefaultStateRootStrategy,
+    provider: P,
+    overlay_manager: OverlayManager<MorphPrimitives>,
 }
 
-impl MorphStateRootStrategy {
-    fn new(chain_spec: Arc<MorphChainSpec>) -> Self {
+impl<P> MorphStateRootStrategy<P> {
+    fn new(
+        chain_spec: Arc<MorphChainSpec>,
+        provider: P,
+        overlay_manager: OverlayManager<MorphPrimitives>,
+    ) -> Self {
         Self {
             chain_spec,
             default: DefaultStateRootStrategy::default(),
+            provider,
+            overlay_manager,
         }
     }
 }
 
-impl<P, Evm> StateRootStrategy<MorphPrimitives, P, Evm> for MorphStateRootStrategy
+impl<P, Evm> StateRootStrategy<MorphPrimitives, P, Evm> for MorphStateRootStrategy<P>
 where
     P: DatabaseProviderFactory
         + BlockReader<Header = MorphHeader>
@@ -467,8 +480,9 @@ where
     P::Provider: BlockNumReader
         + PruneCheckpointReader
         + StageCheckpointReader
+        + ChangeSetReader
+        + StorageChangeSetReader
         + StorageSettingsCache
-        + TryIntoHistoricalStateProvider
         + 'static,
     Evm: ConfigureEvm<Primitives = MorphPrimitives> + 'static,
     DefaultStateRootStrategy: StateRootStrategy<MorphPrimitives, P, Evm>,
@@ -477,14 +491,18 @@ where
         &self,
         ctx: StateRootJobContext<'_, MorphPrimitives, P, Evm>,
     ) -> ProviderResult<PreparedStateRootJob<MorphPrimitives>> {
-        let timestamp: u64 = ctx.env().evm_env.block_env.timestamp().saturating_to();
+        let timestamp: u64 = ctx.env().evm_env.block_env().timestamp.saturating_to();
         if self.chain_spec.is_jade_active_at_timestamp(timestamp) {
             return self.default.prepare(ctx);
         }
 
         Ok(PreparedStateRootJob::new(
             Box::new(PreJadeStateRootJob {
-                provider_builder: ctx.provider_builder(),
+                state_provider_factory: OverlayStateProviderFactory::new(
+                    self.provider.clone(),
+                    self.overlay_manager
+                        .overlay_builder(ctx.parent_header().hash()),
+                ),
             }),
             None,
         ))
@@ -502,24 +520,18 @@ where
 }
 
 struct PreJadeStateRootJob<P> {
-    provider_builder: reth_engine_tree::tree::StateProviderBuilder<MorphPrimitives, P>,
+    state_provider_factory: OverlayStateProviderFactory<P, MorphPrimitives>,
 }
 
 impl<P> StateRootJob<MorphPrimitives> for PreJadeStateRootJob<P>
 where
-    P: DatabaseProviderFactory
-        + BlockReader
-        + StateProviderFactory
-        + StateReader
-        + Clone
-        + Send
-        + Sync
-        + 'static,
+    P: DatabaseProviderFactory + Clone + Send + Sync + 'static,
     P::Provider: BlockNumReader
         + PruneCheckpointReader
         + StageCheckpointReader
+        + ChangeSetReader
+        + StorageChangeSetReader
         + StorageSettingsCache
-        + TryIntoHistoricalStateProvider
         + 'static,
 {
     fn name(&self) -> &'static str {
@@ -532,7 +544,7 @@ where
         _output: Arc<BlockExecutionOutput<morph_primitives::MorphReceipt>>,
         hashed_state: &LazyHashedPostState,
     ) -> ProviderResult<StateRootJobOutcome> {
-        let provider = self.provider_builder.build()?;
+        let provider = self.state_provider_factory.database_provider_ro()?;
         let (_mpt_root, trie_updates) =
             provider.state_root_with_updates(hashed_state.get().as_ref().clone())?;
         Ok(StateRootJobOutcome::new(

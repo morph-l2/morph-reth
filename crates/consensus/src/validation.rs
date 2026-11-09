@@ -39,7 +39,6 @@
 use crate::MorphConsensusError;
 use alloy_consensus::{BlockHeader as _, EMPTY_OMMER_ROOT_HASH, TxReceipt};
 use alloy_eips::eip2718::Encodable2718;
-use alloy_evm::block::BlockExecutionResult;
 use alloy_primitives::{B256, Bloom};
 use morph_chainspec::{
     MINIMUM_GAS_LIMIT, MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK, MorphChainSpec, MorphHardforks,
@@ -52,6 +51,7 @@ use reth_consensus::{Consensus, ConsensusError, FullConsensus, HeaderValidator, 
 use reth_consensus_common::validation::{
     validate_against_parent_hash_number, validate_body_against_header,
 };
+use reth_execution_types::BlockExecutionResult;
 use reth_primitives_traits::{
     BlockBody as BlockBodyTrait, BlockHeader, GotExpected, RecoveredBlock, SealedBlock,
     SealedHeader,
@@ -2372,7 +2372,7 @@ mod tests {
             U256::ZERO,
         ));
 
-        let result = alloy_evm::block::BlockExecutionResult {
+        let result = BlockExecutionResult {
             receipts: vec![receipt],
             requests: Default::default(),
             gas_used: 21000,

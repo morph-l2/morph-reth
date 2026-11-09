@@ -28,7 +28,6 @@ reth-rpc-eth-api = { workspace = true, optional = true }
 evm2 = { workspace = true, features = ["std"] }
 
 alloy-consensus.workspace = true
-alloy-eips.workspace = true
 alloy-eip7928.workspace = true
 alloy-primitives.workspace = true
 alloy-rpc-types-eth.workspace = true
@@ -47,4 +46,4 @@ default = []
 serde-bincode-compat = [
     "morph-primitives/serde-bincode-compat",
 ]
-rpc = ["dep:reth-rpc-eth-api", "morph-revm/rpc"]
+rpc = ["dep:reth-rpc-eth-api"]

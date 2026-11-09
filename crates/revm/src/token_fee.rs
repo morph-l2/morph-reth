@@ -5,21 +5,17 @@
 //!
 //! Reference: <https://github.com/morph-l2/revm/blob/release/v42/crates/revm/src/morph/token_fee.rs>
 
-use alloy_evm::Database;
 use alloy_primitives::{Address, Bytes, U256, address, keccak256};
-use morph_chainspec::hardfork::MorphHardfork;
-use revm::Database as RevmDatabase;
-use revm::{context_interface::result::EVMError, inspector::NoOpInspector};
+use evm2::{
+    env::TxEnvExt,
+    evm::{Database, Db},
+    registry::HandlerError,
+};
 
-use crate::{MorphEvm, MorphInvalidTransaction};
-
-/// The environment a fee-token `balanceOf` call is evaluated in.
-///
-/// Produced by `ConfigureEvm::evm_env` for the block whose state is being read, so the pool
-/// resolves the same balance the execution layer would. go-ethereum builds the equivalent
-/// `vm.BlockContext` from the header before querying a call-mode token
-/// (`pool.getBalanceFunc`, core/tx_pool.go:330).
-pub type MorphEvmEnv = alloy_evm::EvmEnv<MorphHardfork, crate::MorphBlockEnv>;
+use crate::{
+    MorphInvalidTransaction,
+    evm::{MorphEvmEnv, morph_evm},
+};
 
 /// L2 Token Registry contract address on Morph L2.
 /// Reference: <https://github.com/morph-l2/morph/blob/main/contracts/contracts/l2/system/L2TokenRegistry.sol>
@@ -79,11 +75,19 @@ impl TokenRegistryEntry {
     }
 
     /// Load fee-token metadata without reading a caller's token balance.
-    pub(crate) fn load<DB: RevmDatabase>(
+    pub(crate) fn load<DB: Database>(
         db: &mut DB,
         token_id: u16,
     ) -> Result<Option<Self>, DB::Error> {
-        read_registry_entry(db, token_id)
+        Self::load_with(|address, slot| db.get_storage(&address, &slot), token_id)
+    }
+
+    /// As [`Self::load`], reading storage through `read`.
+    pub(crate) fn load_with<E>(
+        read: impl FnMut(Address, U256) -> Result<U256, E>,
+        token_id: u16,
+    ) -> Result<Option<Self>, E> {
+        read_registry_entry(read, token_id)
     }
 
     /// Reject registry entries that cannot produce a valid token-denominated fee.
@@ -103,7 +107,7 @@ impl TokenRegistryEntry {
         db: &mut DB,
         caller: Address,
         env: &MorphEvmEnv,
-    ) -> Result<TokenFeeInfo, EVMError<DB::Error, MorphInvalidTransaction>> {
+    ) -> Result<TokenFeeInfo, HandlerError> {
         let balance = read_token_balance_with_fallback(
             db,
             self.token_address,
@@ -114,13 +118,18 @@ impl TokenRegistryEntry {
         Ok(self.into_fee_info(caller, balance))
     }
 
-    fn load_storage_only<DB: RevmDatabase>(
+    fn load_storage_only<DB: Database>(
         self,
         db: &mut DB,
         caller: Address,
     ) -> Result<TokenFeeInfo, DB::Error> {
         let balance = if let Some(slot) = self.balance_slot {
-            read_balance_from_storage(db, self.token_address, caller, slot)?
+            read_balance_from_storage(
+                |address, slot| db.get_storage(&address, &slot),
+                self.token_address,
+                caller,
+                slot,
+            )?
         } else {
             U256::ZERO
         };
@@ -162,8 +171,8 @@ impl TokenFeeInfo {
         token_id: u16,
         caller: Address,
         env: &MorphEvmEnv,
-    ) -> Result<Option<Self>, EVMError<DB::Error, MorphInvalidTransaction>> {
-        let entry = match TokenRegistryEntry::load(db, token_id)? {
+    ) -> Result<Option<Self>, HandlerError> {
+        let entry = match TokenRegistryEntry::load(db, token_id).map_err(database_error::<DB>)? {
             Some(e) => e,
             None => return Ok(None),
         };
@@ -177,7 +186,7 @@ impl TokenFeeInfo {
     /// known — the caller's ERC20 balance directly from contract storage.
     /// Unlike [`Self::load_for_caller`] this never spins up a temporary
     /// `MorphEvm`, so it is callable from RPC code paths that only have
-    /// `revm::Database` (no `Debug` bound, no `MorphContext` setup).
+    /// a typed [`Database`] and no block environment.
     ///
     /// Behaviour:
     /// - Returns `Ok(None)` if the token is not registered.
@@ -186,7 +195,7 @@ impl TokenFeeInfo {
     ///   slot is unknown — callers are expected to skip token-balance
     ///   enforcement in that case (the handler re-checks the balance via
     ///   an EVM call during execution).
-    pub fn load_storage_only<DB: RevmDatabase>(
+    pub fn load_storage_only<DB: Database>(
         db: &mut DB,
         token_id: u16,
         caller: Address,
@@ -197,6 +206,23 @@ impl TokenFeeInfo {
         };
 
         entry.load_storage_only(db, caller).map(Some)
+    }
+
+    /// As [`Self::load_storage_only`], reading storage through `read`.
+    pub fn load_storage_only_with<E>(
+        mut read: impl FnMut(Address, U256) -> Result<U256, E>,
+        token_id: u16,
+        caller: Address,
+    ) -> Result<Option<Self>, E> {
+        let entry = match TokenRegistryEntry::load_with(&mut read, token_id)? {
+            Some(e) => e,
+            None => return Ok(None),
+        };
+        let balance = match entry.balance_slot {
+            Some(slot) => read_balance_from_storage(&mut read, entry.token_address, caller, slot)?,
+            None => U256::ZERO,
+        };
+        Ok(Some(entry.into_fee_info(caller, balance)))
     }
 
     /// Calculate the token amount required for a given ETH amount, rounding up.
@@ -264,10 +290,10 @@ impl TokenFeeInfo {
     }
 }
 
-fn read_registry_entry<DB: RevmDatabase>(
-    db: &mut DB,
+fn read_registry_entry<E>(
+    mut read: impl FnMut(Address, U256) -> Result<U256, E>,
     token_id: u16,
-) -> Result<Option<TokenRegistryEntry>, DB::Error> {
+) -> Result<Option<TokenRegistryEntry>, E> {
     // Get the base slot for this token_id in tokenRegistry mapping
     let mut token_id_bytes = [0u8; 32];
     token_id_bytes[30..32].copy_from_slice(&token_id.to_be_bytes());
@@ -279,13 +305,13 @@ fn read_registry_entry<DB: RevmDatabase>(
     // base + 2: isActive (1 byte) + decimals (1 byte) + padding
     // base + 3: scale (32 bytes)
 
-    let slot_0 = db.storage(L2_TOKEN_REGISTRY_ADDRESS, base)?;
+    let slot_0 = read(L2_TOKEN_REGISTRY_ADDRESS, base)?;
     let token_address = Address::from_word(slot_0.into());
     if token_address == Address::default() {
         return Ok(None);
     }
 
-    let balance_slot_raw = db.storage(L2_TOKEN_REGISTRY_ADDRESS, base + U256::from(1))?;
+    let balance_slot_raw = read(L2_TOKEN_REGISTRY_ADDRESS, base + U256::from(1))?;
     let balance_slot = if !balance_slot_raw.is_zero() {
         Some(balance_slot_raw.saturating_sub(U256::from(1)))
     } else {
@@ -293,16 +319,16 @@ fn read_registry_entry<DB: RevmDatabase>(
     };
 
     // isActive at byte 31, decimals at byte 30 (big-endian)
-    let slot_2 = db.storage(L2_TOKEN_REGISTRY_ADDRESS, base + U256::from(2))?;
+    let slot_2 = read(L2_TOKEN_REGISTRY_ADDRESS, base + U256::from(2))?;
     let bytes = slot_2.to_be_bytes::<32>();
     let is_active = bytes[31] != 0;
     let decimals = bytes[30];
 
-    let scale = db.storage(L2_TOKEN_REGISTRY_ADDRESS, base + U256::from(3))?;
+    let scale = read(L2_TOKEN_REGISTRY_ADDRESS, base + U256::from(3))?;
 
     // Get price ratio from priceRatio mapping
     let price_ratio = read_mapping_value(
-        db,
+        &mut read,
         L2_TOKEN_REGISTRY_ADDRESS,
         PRICE_RATIO_SLOT,
         &token_id_bytes,
@@ -343,13 +369,19 @@ pub fn compute_mapping_slot_for_address(base_slot: U256, account: Address) -> U2
 
 /// Load a value from a mapping in contract storage.
 #[inline]
-fn read_mapping_value<DB: RevmDatabase>(
-    db: &mut DB,
+fn read_mapping_value<E>(
+    read: &mut impl FnMut(Address, U256) -> Result<U256, E>,
     contract: Address,
     base_slot: U256,
     key: &[u8; 32],
-) -> Result<U256, DB::Error> {
-    db.storage(contract, compute_mapping_slot(base_slot, key))
+) -> Result<U256, E> {
+    read(contract, compute_mapping_slot(base_slot, key))
+}
+
+/// Wraps a typed database error the way evm2's database adapter does.
+fn database_error<DB: Database>(error: DB::Error) -> HandlerError {
+    let fatal = DB::is_fatal(&error);
+    evm2::DatabaseError::new(error, fatal).into()
 }
 
 /// Read ERC20 balance with EVM call fallback.
@@ -362,40 +394,48 @@ fn read_token_balance_with_fallback<DB: Database>(
     account: Address,
     balance_slot: Option<U256>,
     env: &MorphEvmEnv,
-) -> Result<U256, EVMError<DB::Error, MorphInvalidTransaction>> {
+) -> Result<U256, HandlerError> {
     if let Some(slot) = balance_slot {
-        return Ok(read_balance_from_storage(db, token, account, slot)?);
+        return read_balance_from_storage(
+            |address, slot| db.get_storage(&address, &slot),
+            token,
+            account,
+            slot,
+        )
+        .map_err(database_error::<DB>);
     }
 
     // Call mode: stand the EVM up in the caller's environment rather than a default one,
     // and make the same `balanceOf` call the execution layer makes, so both reach the same
     // answer for a token whose balance depends on block context or `msg.sender`.
-    let db: &mut dyn Database<Error = DB::Error> = db;
-    let mut evm = MorphEvm::from_env(db, env.clone(), NoOpInspector {});
+    let mut evm = morph_evm(Db::new(db), env.clone());
     // ORIGIN follows this client's own execution layer, which resolves the same
     // `balanceOf` against the transaction's `caller`. go-ethereum's pool instead builds
     // its query on an empty `vm.TxContext{}` (core/tx_pool.go:341), leaving ORIGIN at the
     // zero address and disagreeing with go-ethereum's own execution layer. Admission
     // exists to predict what the builder will be able to include, so it follows execution
     // rather than the other client's pool. GASPRICE is the one input this query still
-    // cannot match: it stays at the `TxEnv` default of zero because the effective price
-    // depends on the next block's base fee, which admission does not know. go-ethereum's
-    // pool has the same gap.
-    evm.tx.inner.caller = account;
-    crate::handler::evm_call_balance_of(&mut evm, token, account)
+    // cannot match: it stays at zero because the effective price depends on the next
+    // block's base fee, which admission does not know. go-ethereum's pool has the same gap.
+    let tx_env = TxEnvExt {
+        origin: account,
+        chain_id: U256::from(evm.version().chain_id),
+        ..TxEnvExt::default()
+    };
+    crate::handler::evm_call_balance_of(&mut evm, &tx_env, token, account)
 }
 
 /// Read ERC20 balance directly from storage slot.
 #[inline]
-pub(crate) fn read_balance_from_storage<DB: RevmDatabase>(
-    db: &mut DB,
+pub(crate) fn read_balance_from_storage<E>(
+    mut read: impl FnMut(Address, U256) -> Result<U256, E>,
     token: Address,
     account: Address,
     balance_slot: U256,
-) -> Result<U256, DB::Error> {
+) -> Result<U256, E> {
     let mut key = [0u8; 32];
     key[12..32].copy_from_slice(account.as_slice());
-    read_mapping_value(db, token, balance_slot, &key)
+    read_mapping_value(&mut read, token, balance_slot, &key)
 }
 
 /// Encode ERC20 `balanceOf(address)` calldata.
@@ -414,10 +454,14 @@ pub fn encode_balance_of_calldata(account: Address) -> Bytes {
 pub(crate) mod tests {
     use super::*;
 
+    use crate::MorphBlockEnv;
     use alloy_primitives::{B256, address, bytes};
-    use revm::bytecode::Bytecode;
-    use revm::database::{CacheDB, EmptyDB};
-    use revm::state::AccountInfo;
+    use evm2::{
+        bytecode::Bytecode,
+        evm::{AccountInfo, CacheDB, DynDatabase, EmptyDB, InMemoryDB},
+        interpreter::Word,
+    };
+    use morph_chainspec::hardfork::MorphHardfork;
 
     /// The storage read failure injected by [`UnreadableTokenDb`], distinguishable from any
     /// error a real database would report. Shared with the handler tests.
@@ -432,52 +476,76 @@ pub(crate) mod tests {
 
     impl core::error::Error for TokenReadFailure {}
 
-    impl revm::database_interface::DBErrorMarker for TokenReadFailure {}
-
     /// Fails every storage read of `token` with [`TokenReadFailure`]; everything else reads
     /// normally, so a failure a test observes comes from that token's storage. Shared with the
     /// handler tests.
     #[derive(Debug)]
     pub(crate) struct UnreadableTokenDb {
-        pub(crate) inner: CacheDB<EmptyDB>,
+        pub(crate) inner: InMemoryDB,
         pub(crate) token: Address,
     }
 
-    impl RevmDatabase for UnreadableTokenDb {
+    impl Database for UnreadableTokenDb {
         type Error = TokenReadFailure;
 
-        fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
-            Ok(self.inner.basic(address).unwrap())
+        fn get_account(&mut self, address: &Address) -> Result<Option<AccountInfo>, Self::Error> {
+            Ok(DynDatabase::get_account(&mut self.inner, address).unwrap())
         }
 
-        fn code_by_hash(&mut self, code_hash: B256) -> Result<Bytecode, Self::Error> {
-            Ok(self.inner.code_by_hash(code_hash).unwrap())
+        fn get_code_by_hash(&mut self, code_hash: &B256) -> Result<Bytecode, Self::Error> {
+            Ok(DynDatabase::get_code_by_hash(&mut self.inner, code_hash).unwrap())
         }
 
-        fn storage(&mut self, address: Address, index: U256) -> Result<U256, Self::Error> {
-            if address == self.token {
+        fn get_storage(&mut self, address: &Address, key: &Word) -> Result<Word, Self::Error> {
+            if *address == self.token {
                 return Err(TokenReadFailure);
             }
-            Ok(self.inner.storage(address, index).unwrap())
+            Ok(DynDatabase::get_storage(&mut self.inner, address, key).unwrap())
         }
 
-        fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error> {
-            Ok(self.inner.block_hash(number).unwrap())
+        fn get_block_hash(&mut self, number: &Word) -> Result<B256, Self::Error> {
+            Ok(DynDatabase::get_block_hash(&mut self.inner, number).unwrap())
+        }
+    }
+
+    /// Whether `error` carries the failure injected by [`UnreadableTokenDb`].
+    pub(crate) fn is_token_read_failure(error: &HandlerError) -> bool {
+        matches!(error, HandlerError::Database(db) if db.downcast_ref::<TokenReadFailure>().is_some())
+    }
+
+    /// Adapts an infallible in-memory database to the typed [`Database`] the public token-fee
+    /// helpers take.
+    #[derive(Debug)]
+    pub(crate) struct Plain(pub(crate) InMemoryDB);
+
+    impl Database for Plain {
+        type Error = evm2::DatabaseError;
+
+        fn get_account(&mut self, address: &Address) -> Result<Option<AccountInfo>, Self::Error> {
+            DynDatabase::get_account(&mut self.0, address)
+        }
+
+        fn get_code_by_hash(&mut self, code_hash: &B256) -> Result<Bytecode, Self::Error> {
+            DynDatabase::get_code_by_hash(&mut self.0, code_hash)
+        }
+
+        fn get_storage(&mut self, address: &Address, key: &Word) -> Result<Word, Self::Error> {
+            DynDatabase::get_storage(&mut self.0, address, key)
+        }
+
+        fn get_block_hash(&mut self, number: &Word) -> Result<B256, Self::Error> {
+            DynDatabase::get_block_hash(&mut self.0, number)
         }
     }
 
     /// Registry state for a call-mode token (no `balanceSlot`) whose `balanceOf` returns
     /// storage slot 0, so reading it is a storage read of the token contract.
-    fn call_mode_token_state(token: Address, balance: u64) -> CacheDB<EmptyDB> {
+    fn call_mode_token_state(token: Address, balance: u64) -> InMemoryDB {
         call_mode_token_state_with_code(token, balance, bytes!("6000545f5260205ff3"))
     }
 
     /// As [`call_mode_token_state`], with an explicit `balanceOf` implementation.
-    fn call_mode_token_state_with_code(
-        token: Address,
-        balance: u64,
-        code: Bytes,
-    ) -> CacheDB<EmptyDB> {
+    fn call_mode_token_state_with_code(token: Address, balance: u64, code: Bytes) -> InMemoryDB {
         let mut db = CacheDB::new(EmptyDB::default());
         let mut token_id_bytes = [0u8; 32];
         token_id_bytes[31] = 1;
@@ -497,20 +565,14 @@ pub(crate) mod tests {
                 U256::from(1), // priceRatio
             ),
         ] {
-            db.insert_account_storage(L2_TOKEN_REGISTRY_ADDRESS, slot, value)
-                .unwrap();
+            db.insert_account_storage(&L2_TOKEN_REGISTRY_ADDRESS, &slot, &value);
         }
 
         db.insert_account_info(
-            token,
-            AccountInfo {
-                code_hash: alloy_primitives::keccak256(code.as_ref()),
-                code: Some(Bytecode::new_raw(code)),
-                ..Default::default()
-            },
+            &token,
+            AccountInfo::default().with_code(Bytecode::new_legacy(code)),
         );
-        db.insert_account_storage(token, U256::ZERO, U256::from(balance))
-            .unwrap();
+        db.insert_account_storage(&token, &U256::ZERO, &U256::from(balance));
         db
     }
 
@@ -522,19 +584,18 @@ pub(crate) mod tests {
 
         // TIMESTAMP PUSH0 MSTORE PUSH1 0x20 PUSH0 RETURN — a `balanceOf` that reports the
         // block time, so an answer produced under the wrong environment is visible.
-        let mut db = call_mode_token_state_with_code(token, 0, bytes!("425f5260205ff3"));
+        let db = call_mode_token_state_with_code(token, 0, bytes!("425f5260205ff3"));
 
         let env = MorphEvmEnv::new(
-            revm::context::CfgEnv::new_with_spec(MorphHardfork::Emerald),
-            crate::MorphBlockEnv {
-                inner: revm::context::BlockEnv {
-                    timestamp: U256::from(TIMESTAMP),
-                    ..Default::default()
-                },
+            MorphHardfork::Emerald,
+            MorphBlockEnv {
+                timestamp: U256::from(TIMESTAMP),
+                ..Default::default()
             },
+            1,
         );
 
-        let info = TokenFeeInfo::load_for_caller(&mut db, 1, caller, &env)
+        let info = TokenFeeInfo::load_for_caller(&mut Plain(db), 1, caller, &env)
             .unwrap()
             .unwrap();
 
@@ -547,13 +608,10 @@ pub(crate) mod tests {
     fn balance_of_fallback_reports_a_failed_state_read_instead_of_a_zero_balance() {
         let token = address!("5300000000000000000000000000000000000042");
         let caller = address!("0000000000000000000000000000000000000001");
-        let env = MorphEvmEnv::new(
-            revm::context::CfgEnv::new_with_spec(MorphHardfork::Emerald),
-            crate::MorphBlockEnv::default(),
-        );
+        let env = MorphEvmEnv::new(MorphHardfork::Emerald, MorphBlockEnv::default(), 1);
 
         // Readable state: the fallback reaches the token and reads the balance.
-        let mut readable = call_mode_token_state(token, 10_000_000);
+        let mut readable = Plain(call_mode_token_state(token, 10_000_000));
         let info = TokenFeeInfo::load_for_caller(&mut readable, 1, caller, &env)
             .unwrap()
             .unwrap();
@@ -565,10 +623,8 @@ pub(crate) mod tests {
             inner: call_mode_token_state(token, 10_000_000),
             token,
         };
-        assert_eq!(
-            TokenFeeInfo::load_for_caller(&mut unreadable, 1, caller, &env).unwrap_err(),
-            EVMError::Database(TokenReadFailure)
-        );
+        let error = TokenFeeInfo::load_for_caller(&mut unreadable, 1, caller, &env).unwrap_err();
+        assert!(is_token_read_failure(&error), "{error:?}");
     }
 
     #[test]

@@ -1,59 +1,144 @@
+//! The Morph EVM type family and its construction.
+
 use crate::{
-    MorphBlockEnv, MorphTxEnv, l1block::L1BlockInfo, precompiles::MorphPrecompiles,
+    MorphBlockEnv, MorphTxEnv, handler::morph_tx_registry, precompiles::morph_precompiles,
     token_fee::TokenFeeInfo,
 };
-use alloy_evm::Database;
-use alloy_primitives::{U256, keccak256};
-use morph_chainspec::hardfork::MorphHardfork;
-use revm::{
-    Context, Inspector,
-    context::{CfgEnv, ContextError, Evm, FrameStack, Journal},
-    handler::{
-        EthFrame, EvmTr, FrameInitOrResult, FrameTr, ItemOrResult, instructions::EthInstructions,
-    },
-    inspector::InspectorEvmTr,
-    interpreter::{
-        Host, Instruction, InstructionContext, InstructionExecResult, InstructionResult,
-        gas::BLOCKHASH, interpreter::EthInterpreter, interpreter_types::StackTr,
-    },
-    primitives::BLOCK_HASH_HISTORY,
+use alloy_primitives::{Address, Log, U256, keccak256};
+use evm2::{
+    EvmConfig, EvmConfigSelector, EvmFeatures, EvmTypesHost, ExecutionConfig, Inspector,
+    OpcodeConfig, SpecId, Version,
+    constants::BLOCK_HASH_HISTORY,
+    evm::DynDatabase,
+    interpreter::{Interpreter, Message, MessageResult, Word, instructions::invalid, op},
 };
+use evm2_macros::instruction;
+use morph_chainspec::hardfork::MorphHardfork;
 
-/// The Morph EVM context type.
+/// The Morph runtime EVM type family.
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub struct MorphEvmTypes;
+
+impl EvmTypesHost for MorphEvmTypes {
+    type ConfigSelector = MorphConfigSelector;
+    type SpecId = MorphHardfork;
+    type Tx = MorphTxEnv;
+    type EvmExt = ();
+    type MessageExt = MorphMessageExt;
+    type MessageResultExt = ();
+    type TxEnvExt = ();
+    type TxResultExt = MorphTxResultExt;
+    type BlockEnvExt = ();
+    type Host<'a> = evm2::Evm<'a, Self>;
+}
+
+/// An evm2 EVM configured with the Morph type family.
+pub type MorphEvm<'a> = evm2::Evm<'a, MorphEvmTypes>;
+
+/// Environment a Morph EVM runs under: hardfork, runtime version and block fields.
 ///
-/// Uses [`L1BlockInfo`] as the `CHAIN` type parameter.  Note that L1 fee
-/// parameters are fetched **per-transaction** (not per-block) because the
-/// L1 Gas Price Oracle can be updated by a regular transaction mid-block.
-pub type MorphContext<DB> =
-    Context<MorphBlockEnv, MorphTxEnv, CfgEnv<MorphHardfork>, DB, Journal<DB>, L1BlockInfo>;
+/// Built by `ConfigureEvm::evm_env` for execution. The pool uses the same type so that the
+/// balance it resolves for a call-mode fee token matches what execution would see; go-ethereum
+/// likewise builds a `vm.BlockContext` from the header before querying one
+/// (`pool.getBalanceFunc`, core/tx_pool.go:330).
+pub type MorphEvmEnv = reth_evm_ethereum::EthEvmEnv<MorphEvmTypes>;
 
-#[inline]
-fn as_u64_saturated(value: U256) -> u64 {
-    let limbs = value.as_limbs();
-    if limbs[1] == 0 && limbs[2] == 0 && limbs[3] == 0 {
-        limbs[0]
-    } else {
-        u64::MAX
+/// Morph data carried by frame messages.
+///
+/// Default for every frame the interpreter creates, so it only ever identifies the top-level
+/// frames the handler starts on behalf of the protocol.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MorphMessageExt {
+    /// Whether this is a fee-token `balanceOf`/`transfer` frame.
+    pub fee_frame: bool,
+}
+
+/// Morph data carried by a transaction result, for receipts and RPC.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MorphTxResultExt {
+    /// The L1 data fee charged, zero for L1 messages and when fee charging is disabled.
+    pub l1_data_fee: U256,
+    /// The registry data used to charge a token fee, absent when the fee was paid in ETH.
+    pub token_fee_info: Option<TokenFeeInfo>,
+}
+
+/// Morph EVM configuration for one inherited base [`SpecId`].
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub struct MorphConfig<const BASE_SPEC_ID: u32, const CUSTOM_SPEC_ID: u32>;
+
+impl<const BASE_SPEC_ID: u32, const CUSTOM_SPEC_ID: u32> EvmConfig<MorphEvmTypes>
+    for MorphConfig<BASE_SPEC_ID, CUSTOM_SPEC_ID>
+{
+    const BASE_SPEC_ID: SpecId = SpecId::try_from_u32(BASE_SPEC_ID).unwrap();
+    const OPCODE_CONFIG: &'static OpcodeConfig<MorphEvmTypes> =
+        &morph_opcode_config::<BASE_SPEC_ID, CUSTOM_SPEC_ID>();
+}
+
+/// Applies Morph's opcode differences to the table of the inherited base spec.
+const fn morph_opcode_config<const BASE_SPEC_ID: u32, const CUSTOM_SPEC_ID: u32>()
+-> OpcodeConfig<MorphEvmTypes> {
+    let mut config =
+        OpcodeConfig::<MorphEvmTypes>::base::<MorphConfig<BASE_SPEC_ID, CUSTOM_SPEC_ID>>();
+    // Morph geth does not read header hashes for BLOCKHASH.
+    let blockhash_gas = config.static_gas(op::BLOCKHASH);
+    config.set_instruction::<morph_blockhash>(op::BLOCKHASH, blockhash_gas);
+    // SELFDESTRUCT, BLOBHASH and BLOBBASEFEE are disabled on Morph: they halt like an
+    // undefined opcode, which consumes all gas of the frame.
+    config.set_instruction::<invalid<MorphEvmTypes>>(op::SELFDESTRUCT, 0);
+    config.set_instruction::<invalid<MorphEvmTypes>>(op::BLOBHASH, 0);
+    config.set_instruction::<invalid<MorphEvmTypes>>(op::BLOBBASEFEE, 0);
+    config
+}
+
+/// Selects the opcode table for each Morph hardfork.
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub struct MorphConfigSelector;
+
+/// Morph's opcode overrides do not vary between its hardforks, so the only table parameter is
+/// the inherited base spec.
+const MORPH_CUSTOM_SPEC_ID: u32 = 0;
+
+impl EvmConfigSelector<MorphEvmTypes> for MorphConfigSelector {
+    type Config<const BASE_SPEC_ID: u32, const CUSTOM_SPEC_ID: u32> =
+        MorphConfig<BASE_SPEC_ID, CUSTOM_SPEC_ID>;
+
+    fn execution_config(spec_id: MorphHardfork) -> ExecutionConfig<MorphEvmTypes> {
+        let base = SpecId::from(spec_id);
+        if base.enables(SpecId::OSAKA) {
+            ExecutionConfig::for_config::<MorphConfig<{ SpecId::OSAKA as u32 }, MORPH_CUSTOM_SPEC_ID>>(
+            )
+        } else if base.enables(SpecId::PRAGUE) {
+            ExecutionConfig::for_config::<
+                MorphConfig<{ SpecId::PRAGUE as u32 }, MORPH_CUSTOM_SPEC_ID>,
+            >()
+        } else {
+            ExecutionConfig::for_config::<
+                MorphConfig<{ SpecId::CANCUN as u32 }, MORPH_CUSTOM_SPEC_ID>,
+            >()
+        }
     }
 }
 
 #[inline]
-fn morph_blockhash_value(chain_id: u64, number: u64) -> U256 {
+fn morph_blockhash_value(chain_id: u64, number: u64) -> Word {
     let mut input = [0_u8; 16];
     input[..8].copy_from_slice(&chain_id.to_be_bytes());
     input[8..].copy_from_slice(&number.to_be_bytes());
-    U256::from_be_bytes(keccak256(input).0)
+    Word::from_be_bytes(keccak256(input).0)
 }
 
 #[inline]
-fn morph_blockhash_result(chain_id: u64, current_number: u64, requested_number: u64) -> U256 {
+fn morph_blockhash_result(chain_id: u64, current_number: u64, requested_number: u64) -> Word {
     // Match Morph geth exactly:
     // valid range is [current-256, current), otherwise push zero.
     let lower = current_number.saturating_sub(BLOCK_HASH_HISTORY);
     if requested_number >= lower && requested_number < current_number {
         morph_blockhash_value(chain_id, requested_number)
     } else {
-        U256::ZERO
+        Word::ZERO
     }
 }
 
@@ -62,278 +147,175 @@ fn morph_blockhash_result(chain_id: u64, current_number: u64, requested_number: 
 /// Morph geth does not read historical header hashes for BLOCKHASH. Instead it returns:
 /// `keccak256(chain_id(8-byte big-endian) || block_number(8-byte big-endian))`
 /// for numbers within the 256-block lookup window.
-fn blockhash_morph<DB: Database>(
-    context: InstructionContext<'_, MorphContext<DB>, EthInterpreter>,
-) -> InstructionExecResult {
-    let Some(([], number)) = StackTr::popn_top::<0>(&mut context.interpreter.stack) else {
-        return Err(InstructionResult::StackUnderflow);
-    };
-
-    let requested_number_u64 = as_u64_saturated(*number);
-    let current_number_u64 = as_u64_saturated(context.host.block_number());
-    let chain_id_u64 = as_u64_saturated(context.host.chain_id());
-
-    *number = morph_blockhash_result(chain_id_u64, current_number_u64, requested_number_u64);
-    Ok(())
+#[instruction(EvmTypes = MorphEvmTypes)]
+pub fn morph_blockhash(cx: _, [number]: [Word]) -> out {
+    let requested_number = number.saturating_to::<u64>();
+    let current_number = cx.state.host().block().number.saturating_to::<u64>();
+    let chain_id = cx.state.tx().chain_id.saturating_to::<u64>();
+    *out = morph_blockhash_result(chain_id, current_number, requested_number);
 }
 
-/// MorphEvm extends the Evm with Morph specific types and logic.
-#[derive(Debug, derive_more::Deref, derive_more::DerefMut)]
-#[expect(clippy::type_complexity)]
-pub struct MorphEvm<DB: Database, I> {
-    /// Inner EVM type.
-    #[deref]
-    #[deref_mut]
-    pub inner: Evm<
-        MorphContext<DB>,
-        I,
-        EthInstructions<EthInterpreter, MorphContext<DB>>,
-        MorphPrecompiles,
-        EthFrame<EthInterpreter>,
-    >,
-    /// Cached token fee info from the validation/deduction phase.
-    /// Ensures consistent price_ratio/scale between deduct and reimburse,
-    /// matching go-ethereum's `st.feeRate`/`st.tokenScale` caching pattern.
-    pub(crate) cached_token_fee_info: Option<TokenFeeInfo>,
-    /// Token-unit numerator the fee deduction overcharged by rounding up.
-    ///
-    /// From Celadon on, the unused-gas refund adds this back before rounding
-    /// down, so the caller pays `ceil` of the net fee instead of
-    /// `ceil(prepaid) - ceil(refund)`, which under-collects. Mirrors
-    /// go-ethereum's `st.altFeeRoundingCredit`.
-    pub(crate) cached_alt_fee_rounding_credit: U256,
-    /// Cached L1 data fee calculated during handler validation.
-    /// Avoids re-encoding the full transaction RLP in the block executor's
-    /// receipt-building path (the handler already has the encoded bytes via
-    /// `MorphTxEnv.rlp_bytes`).
-    pub(crate) cached_l1_data_fee: U256,
-    /// Signed refund counter from a successful fee deduction call.
-    /// Applied before the final refund cap; refund-transfer refunds are excluded.
-    pub(crate) pre_fee_refund: i64,
-    /// Transfer event logs from token fee deduction (pre-execution phase).
-    ///
-    /// In go-ethereum, `buyAltTokenGas()` emits Transfer events into `StateDB.logs`
-    /// which is independent of the state snapshot/revert mechanism — logs survive
-    /// regardless of main tx result. revm's `ExecutionResult::Revert` has no `logs`
-    /// field, so we cache fee-related logs separately from the journal and merge
-    /// them into the receipt in the block executor.
-    pub(crate) pre_fee_logs: Vec<alloy_primitives::Log>,
-    /// Transfer event logs from token fee reimbursement (post-execution phase).
-    pub(crate) post_fee_logs: Vec<alloy_primitives::Log>,
+/// Returns the runtime version of a Morph block with the given chain id and gas limit.
+///
+/// Two standard rules do not apply to Morph:
+/// - EIP-7623 is off, matching Morph geth's calldata pricing.
+/// - The EIP-7825 transaction gas cap is the block gas limit. Historical mainnet transactions
+///   (e.g. block 20459477, `gas_limit=21,165,068`) exceed the EIP-7825 cap of 2^24 even though
+///   that rule arrives with the OSAKA spec Morph maps later hardforks to.
+pub fn morph_version(spec: MorphHardfork, chain_id: u64, block_gas_limit: u64) -> Version {
+    let mut version = Version::new(spec.into());
+    version.chain_id = chain_id;
+    version.features.remove(EvmFeatures::EIP7623);
+    version.tx_gas_limit_cap = block_gas_limit;
+    version
 }
 
-impl<DB: Database, I> MorphEvm<DB, I> {
-    /// Constructs an EVM from the full environment used by both execution and pool queries.
-    pub fn from_env(db: DB, env: crate::MorphEvmEnv, inspector: I) -> Self {
-        let ctx = MorphContext::new(db, *env.cfg_env.spec())
-            .with_cfg(env.cfg_env)
-            .with_block(env.block_env);
-        Self::new(ctx, inspector)
-    }
+/// Returns the environment of a Morph block.
+pub fn morph_evm_env(
+    spec: MorphHardfork,
+    chain_id: u64,
+    block_gas_limit: u64,
+    block: MorphBlockEnv,
+) -> MorphEvmEnv {
+    MorphEvmEnv::new_with_version(spec, block, morph_version(spec, chain_id, block_gas_limit))
+}
 
-    /// Create a new Morph EVM.
-    ///
-    /// The precompiles are automatically selected based on the hardfork spec
-    /// configured in the context's cfg.
-    pub fn new(ctx: MorphContext<DB>, inspector: I) -> Self {
-        // Get the current hardfork spec from context and create matching precompiles
-        let spec = ctx.cfg.spec;
-        let precompiles = MorphPrecompiles::new_with_spec(spec);
-        let mut instructions = EthInstructions::new_mainnet_with_spec(spec.into());
+/// Builds a Morph EVM over `database`.
+pub fn morph_evm<'a>(database: impl DynDatabase + 'a, env: MorphEvmEnv) -> MorphEvm<'a> {
+    let MorphEvmEnv {
+        spec,
+        version,
+        block,
+    } = env;
+    MorphEvm::new_with_execution_config(
+        ExecutionConfig::for_spec_and_version(spec, version),
+        spec,
+        block,
+        morph_tx_registry(spec),
+        database,
+        morph_precompiles(spec),
+    )
+}
 
-        // SLOAD (0x54) and SSTORE (0x55) are deliberately NOT overridden.
-        //
-        // Token fee deduction leaves the caller's fee-token slot with the DB-committed
-        // `original_value`, the deducted `present_value` and `is_cold = true` — the same
-        // triple morph-geth has, where EIP-2200 `GetCommittedState` and the EIP-2929
-        // access list are independent. revm <= 41 conflated the two and re-baselined
-        // `original_value` whenever a slot was cold, which forced Morph to hand-write both
-        // opcodes just to restore it. bluealloy/revm#3746 (revm-state 42) keys that
-        // re-baseline on the transaction boundary instead, so the native instructions now
-        // produce geth-equivalent gas on their own.
-        //
-        // `morph_tx_v0_token_fee_transfer_to_fee_token_contract_gas_regression` is the
-        // tripwire: it fails by exactly 2800 gas if that stops holding.
+/// Hides the protocol's fee-token frames from an inspector.
+///
+/// go-ethereum wraps those calls in `OnSystemCallStart`/`OnSystemCallEnd`, so tracers do not see
+/// them as part of the transaction. evm2 inspects every message it runs, and exposes no way for
+/// a handler to pause the inspector, so every inspector installed on a Morph EVM goes through
+/// this filter, which ignores everything between the start and end of a
+/// [`MorphMessageExt::fee_frame`] frame.
+#[derive(Debug)]
+pub struct FeeFrameFilter<I> {
+    inner: I,
+    in_fee_frame: bool,
+}
 
-        // Morph custom BLOCKHASH implementation (matches Morph geth).
-        instructions.insert_instruction(
-            0x40,
-            Instruction::new(blockhash_morph::<DB>),
-            BLOCKHASH as u16,
-        );
-        // SELFDESTRUCT is disabled in Morph
-        instructions.insert_instruction(0xff, Instruction::unknown(), 0);
-        // BLOBHASH is disabled in Morph
-        instructions.insert_instruction(0x49, Instruction::unknown(), 0);
-        // BLOBBASEFEE is disabled in Morph
-        instructions.insert_instruction(0x4a, Instruction::unknown(), 0);
-        Self::new_inner(Evm {
-            ctx,
-            inspector,
-            instruction: instructions,
-            precompiles,
-            frame_stack: FrameStack::new(),
-        })
-    }
-
-    #[inline]
-    #[expect(clippy::type_complexity)]
-    fn new_inner(
-        inner: Evm<
-            MorphContext<DB>,
-            I,
-            EthInstructions<EthInterpreter, MorphContext<DB>>,
-            MorphPrecompiles,
-            EthFrame<EthInterpreter>,
-        >,
-    ) -> Self {
+impl<I> FeeFrameFilter<I> {
+    /// Wraps `inner`.
+    pub const fn new(inner: I) -> Self {
         Self {
             inner,
-            cached_token_fee_info: None,
-            cached_alt_fee_rounding_credit: U256::ZERO,
-            cached_l1_data_fee: U256::ZERO,
-            pre_fee_refund: 0,
-            pre_fee_logs: Vec::new(),
-            post_fee_logs: Vec::new(),
+            in_fee_frame: false,
         }
     }
-}
 
-impl<DB: Database, I> MorphEvm<DB, I> {
-    /// Consumes self and returns a new Evm type with given Inspector.
-    pub fn with_inspector<OINSP>(self, inspector: OINSP) -> MorphEvm<DB, OINSP> {
-        MorphEvm::new_inner(self.inner.with_inspector(inspector))
+    /// Returns the wrapped inspector.
+    pub fn into_inner(self) -> I {
+        self.inner
     }
 
-    /// Consumes self and returns a new Evm type with given Precompiles.
-    pub fn with_precompiles(self, precompiles: MorphPrecompiles) -> Self {
-        Self::new_inner(self.inner.with_precompiles(precompiles))
-    }
-
-    /// Consumes self and returns the inner Inspector.
-    pub fn into_inspector(self) -> I {
-        self.inner.into_inspector()
-    }
-
-    /// Returns the cached token fee info set during handler validation.
-    ///
-    /// The cache is populated by `validate_and_deduct_token_fee` and persists
-    /// through the handler lifecycle so that post-execution code (e.g., the
-    /// block executor's receipt builder) can reuse it without re-reading the DB.
-    #[inline]
-    pub fn cached_token_fee_info(&self) -> Option<TokenFeeInfo> {
-        self.cached_token_fee_info
-    }
-
-    /// Returns the L1 data fee cached during handler validation.
-    ///
-    /// Set in `validate_and_deduct_eth_fee` / `validate_and_deduct_token_fee` and
-    /// reused by `reward_beneficiary` and the block executor's receipt builder,
-    /// avoiding redundant `calculate_tx_l1_cost` calls and RLP re-encoding.
-    #[inline]
-    pub fn cached_l1_data_fee(&self) -> U256 {
-        self.cached_l1_data_fee
-    }
-
-    /// Takes the cached pre-execution fee logs (token fee deduction Transfer events).
-    #[inline]
-    pub fn take_pre_fee_logs(&mut self) -> Vec<alloy_primitives::Log> {
-        std::mem::take(&mut self.pre_fee_logs)
-    }
-
-    /// Takes the cached post-execution fee logs (token fee reimbursement Transfer events).
-    #[inline]
-    pub fn take_post_fee_logs(&mut self) -> Vec<alloy_primitives::Log> {
-        std::mem::take(&mut self.post_fee_logs)
+    /// Returns the wrapped inspector.
+    pub const fn inner(&self) -> &I {
+        &self.inner
     }
 }
 
-impl<DB, I> EvmTr for MorphEvm<DB, I>
-where
-    DB: Database,
-{
-    type Context = MorphContext<DB>;
-    type Instructions = EthInstructions<EthInterpreter, MorphContext<DB>>;
-    type Precompiles = MorphPrecompiles;
-    type Frame = EthFrame<EthInterpreter>;
-
-    fn all(
-        &self,
-    ) -> (
-        &Self::Context,
-        &Self::Instructions,
-        &Self::Precompiles,
-        &FrameStack<Self::Frame>,
-    ) {
-        self.inner.all()
+impl<I: Inspector<MorphEvmTypes>> Inspector<MorphEvmTypes> for FeeFrameFilter<I> {
+    fn initialize_interp(&mut self, interp: &mut Interpreter<'_, '_, MorphEvmTypes>) {
+        if !self.in_fee_frame {
+            self.inner.initialize_interp(interp);
+        }
     }
 
-    fn all_mut(
+    fn step(&mut self, interp: &mut Interpreter<'_, '_, MorphEvmTypes>) {
+        if !self.in_fee_frame {
+            self.inner.step(interp);
+        }
+    }
+
+    fn step_end(&mut self, interp: &mut Interpreter<'_, '_, MorphEvmTypes>) {
+        if !self.in_fee_frame {
+            self.inner.step_end(interp);
+        }
+    }
+
+    fn log(&mut self, log: &Log, host: &mut MorphEvm<'_>) {
+        if !self.in_fee_frame {
+            self.inner.log(log, host);
+        }
+    }
+
+    fn call(
         &mut self,
-    ) -> (
-        &mut Self::Context,
-        &mut Self::Instructions,
-        &mut Self::Precompiles,
-        &mut FrameStack<Self::Frame>,
-    ) {
-        self.inner.all_mut()
+        interp: &mut Interpreter<'_, '_, MorphEvmTypes>,
+        message: &mut Message<MorphEvmTypes>,
+    ) -> Option<MessageResult<MorphEvmTypes>> {
+        if message.ext.fee_frame {
+            self.in_fee_frame = true;
+        }
+        if self.in_fee_frame {
+            return None;
+        }
+        self.inner.call(interp, message)
     }
 
-    fn frame_stack(&mut self) -> &mut FrameStack<Self::Frame> {
-        &mut self.inner.frame_stack
-    }
-
-    fn frame_init(
+    fn call_end(
         &mut self,
-        frame_input: <Self::Frame as FrameTr>::FrameInit,
-    ) -> Result<
-        ItemOrResult<&mut Self::Frame, <Self::Frame as FrameTr>::FrameResult>,
-        ContextError<DB::Error>,
-    > {
-        self.inner.frame_init(frame_input)
-    }
-
-    fn frame_run(&mut self) -> Result<FrameInitOrResult<Self::Frame>, ContextError<DB::Error>> {
-        self.inner.frame_run()
-    }
-
-    fn frame_return_result(
-        &mut self,
-        result: <Self::Frame as FrameTr>::FrameResult,
-    ) -> Result<Option<<Self::Frame as FrameTr>::FrameResult>, ContextError<DB::Error>> {
-        self.inner.frame_return_result(result)
-    }
-}
-
-impl<DB, I> InspectorEvmTr for MorphEvm<DB, I>
-where
-    DB: Database,
-    I: Inspector<MorphContext<DB>>,
-{
-    type Inspector = I;
-
-    fn all_inspector(
-        &self,
-    ) -> (
-        &Self::Context,
-        &Self::Instructions,
-        &Self::Precompiles,
-        &FrameStack<Self::Frame>,
-        &Self::Inspector,
+        interp: &mut Interpreter<'_, '_, MorphEvmTypes>,
+        message: &Message<MorphEvmTypes>,
+        result: &mut MessageResult<MorphEvmTypes>,
     ) {
-        self.inner.all_inspector()
+        if message.ext.fee_frame {
+            self.in_fee_frame = false;
+            return;
+        }
+        if !self.in_fee_frame {
+            self.inner.call_end(interp, message, result);
+        }
     }
 
-    fn all_mut_inspector(
+    fn create(
         &mut self,
-    ) -> (
-        &mut Self::Context,
-        &mut Self::Instructions,
-        &mut Self::Precompiles,
-        &mut FrameStack<Self::Frame>,
-        &mut Self::Inspector,
+        interp: &mut Interpreter<'_, '_, MorphEvmTypes>,
+        message: &mut Message<MorphEvmTypes>,
+    ) -> Option<MessageResult<MorphEvmTypes>> {
+        if self.in_fee_frame {
+            return None;
+        }
+        self.inner.create(interp, message)
+    }
+
+    fn create_end(
+        &mut self,
+        interp: &mut Interpreter<'_, '_, MorphEvmTypes>,
+        message: &Message<MorphEvmTypes>,
+        result: &mut MessageResult<MorphEvmTypes>,
     ) {
-        self.inner.all_mut_inspector()
+        if !self.in_fee_frame {
+            self.inner.create_end(interp, message, result);
+        }
+    }
+
+    fn selfdestruct(
+        &mut self,
+        contract: &Address,
+        target: &Address,
+        value: &U256,
+        host: &mut MorphEvm<'_>,
+    ) {
+        if !self.in_fee_frame {
+            self.inner.selfdestruct(contract, target, value, host);
+        }
     }
 }
 
@@ -346,7 +328,7 @@ mod tests {
     fn morph_blockhash_matches_geth_vector() {
         // Golden vector captured from geth debug_traceTransaction for block 2662438:
         // BLOCKHASH(2662437) => 0x6d24... using chain_id=2818.
-        let expected = U256::from_be_bytes(
+        let expected = Word::from_be_bytes(
             b256!("6d2426d9b8d6f63ec1a38d3a4e7b88f318ebe9f0d837c4781852168c5bd2678e").0,
         );
         assert_eq!(morph_blockhash_value(2818, 2_662_437), expected);
@@ -356,13 +338,13 @@ mod tests {
     fn morph_blockhash_block_zero() {
         // Block 0 requested from block 1 — block 0 is within [1-256, 1) = [0, 1), so valid
         let result = morph_blockhash_result(2818, 1, 0);
-        assert_ne!(result, U256::ZERO, "block 0 from block 1 should be valid");
+        assert_ne!(result, Word::ZERO, "block 0 from block 1 should be valid");
 
         // Block 0 requested from block 0 — current block returns zero
         let result = morph_blockhash_result(2818, 0, 0);
         assert_eq!(
             result,
-            U256::ZERO,
+            Word::ZERO,
             "block 0 from block 0 should be zero (current block)"
         );
     }
@@ -371,7 +353,7 @@ mod tests {
     fn morph_blockhash_chain_id_zero() {
         // chain_id=0 should still produce a deterministic hash
         let result = morph_blockhash_value(0, 100);
-        assert_ne!(result, U256::ZERO, "chain_id=0 should still produce a hash");
+        assert_ne!(result, Word::ZERO, "chain_id=0 should still produce a hash");
 
         // Different chain_ids produce different hashes
         let result_0 = morph_blockhash_value(0, 100);
@@ -390,12 +372,12 @@ mod tests {
         for n in 0..5 {
             assert_ne!(
                 morph_blockhash_result(chain_id, 5, n),
-                U256::ZERO,
+                Word::ZERO,
                 "block {n} from block 5 should be valid"
             );
         }
         // Block 5 (current) should be zero
-        assert_eq!(morph_blockhash_result(chain_id, 5, 5), U256::ZERO);
+        assert_eq!(morph_blockhash_result(chain_id, 5, 5), Word::ZERO);
     }
 
     #[test]
@@ -406,21 +388,21 @@ mod tests {
         // current - 256 = 44 (inclusive lower bound)
         assert_ne!(
             morph_blockhash_result(chain_id, current, 44),
-            U256::ZERO,
+            Word::ZERO,
             "block current-256 should be valid"
         );
 
         // current - 257 = 43 (out of range)
         assert_eq!(
             morph_blockhash_result(chain_id, current, 43),
-            U256::ZERO,
+            Word::ZERO,
             "block current-257 should be zero"
         );
 
         // current - 1 = 299 (valid, most recent)
         assert_ne!(
             morph_blockhash_result(chain_id, current, 299),
-            U256::ZERO,
+            Word::ZERO,
             "block current-1 should be valid"
         );
     }
@@ -441,23 +423,49 @@ mod tests {
         // current block and future blocks must return zero
         assert_eq!(
             morph_blockhash_result(chain_id, current, current),
-            U256::ZERO
+            Word::ZERO
         );
         assert_eq!(
             morph_blockhash_result(chain_id, current, current + 1),
-            U256::ZERO
+            Word::ZERO
         );
 
         // more than 256 blocks in the past returns zero
         assert_eq!(
             morph_blockhash_result(chain_id, current, current - 257),
-            U256::ZERO
+            Word::ZERO
         );
 
         // lower bound is inclusive (current - 256 is valid)
         assert_ne!(
             morph_blockhash_result(chain_id, current, current - 256),
-            U256::ZERO
+            Word::ZERO
         );
+    }
+
+    #[test]
+    fn morph_version_turns_off_eip7623_and_the_eip7825_cap() {
+        let version = morph_version(MorphHardfork::Celadon, 2818, 30_000_000);
+        assert_eq!(version.chain_id, 2818);
+        assert!(!version.feature(EvmFeatures::EIP7623));
+        assert_eq!(version.tx_gas_limit_cap, 30_000_000);
+    }
+
+    #[test]
+    fn execution_config_maps_each_hardfork_to_its_base_spec() {
+        for (fork, spec) in [
+            (MorphHardfork::Bernoulli, SpecId::CANCUN),
+            (MorphHardfork::Curie, SpecId::CANCUN),
+            (MorphHardfork::Morph203, SpecId::CANCUN),
+            (MorphHardfork::Viridian, SpecId::PRAGUE),
+            (MorphHardfork::Emerald, SpecId::OSAKA),
+            (MorphHardfork::Jade, SpecId::OSAKA),
+            (MorphHardfork::Celadon, SpecId::OSAKA),
+        ] {
+            assert_eq!(
+                MorphConfigSelector::execution_config(fork).base_spec_id(),
+                spec
+            );
+        }
     }
 }

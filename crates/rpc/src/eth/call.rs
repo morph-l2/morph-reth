@@ -3,23 +3,22 @@
 //! [`Call::caller_gas_allowance`] is overridden so `eth_estimateGas` caps
 //! gas by `balance − value − l1_fee` (ETH path) or the fee token balance
 //! (MorphTx `fee_token_id > 0`). `eth_call` and `eth_createAccessList`
-//! are detected via `cfg_env.disable_block_gas_limit = true` and fall
-//! through to the upstream allowance without the L1-fee extension.
+//! are detected by the block gas limit check being disabled and keep the
+//! plain ETH allowance, without the L1-fee extension.
 
 use crate::MorphEthApiError;
 use crate::eth::{MorphEthApi, MorphNodeCore};
-use alloy_evm::call::{CallError, caller_gas_allowance as upstream_caller_gas_allowance};
 use alloy_primitives::U256;
+use evm2::EvmFeatures;
 use morph_chainspec::{MorphChainSpec, MorphHardforks};
 use morph_revm::{L1BlockInfo, MorphTxExt, TokenFeeInfo};
-use reth_evm::{EvmEnvFor, TxEnvFor};
+use reth_evm::{Database, EvmEnv, EvmEnvFor, TxEnvFor};
 use reth_provider::ChainSpecProvider;
 use reth_rpc_eth_api::{
     EthApiTypes, RpcNodeCore,
     helpers::{Call, EthCall, estimate::EstimateCall},
 };
 use reth_rpc_eth_types::EthApiError;
-use revm::{Database, context::Transaction as RevmTransaction};
 
 impl<N, Rpc> EthCall for MorphEthApi<N, Rpc>
 where
@@ -74,14 +73,22 @@ where
         // eth_call / eth_createAccessList: no L1-fee cap. Token-fee callers
         // can have zero ETH, so defer to the handler instead of the
         // upstream ETH allowance.
-        if evm_env.cfg_env.disable_block_gas_limit {
+        if !evm_env
+            .version()
+            .feature(EvmFeatures::BLOCK_GAS_LIMIT_CHECK)
+        {
             if tx_env.fee_token_id.is_some_and(|id| id > 0) {
                 return Ok(u64::MAX);
             }
-            return upstream_caller_gas_allowance(&mut db, tx_env).map_err(|e| match e {
-                CallError::Database(db_err) => MorphEthApiError::Eth(db_err.into()),
-                CallError::InsufficientFunds(_) => MorphEthApiError::InsufficientFundsForTransfer,
-            });
+            let balance = db
+                .get_account(&tx_env.signer())
+                .map_err(|e| MorphEthApiError::Eth(e.into()))?
+                .map(|account| account.balance)
+                .unwrap_or_default();
+            let available = balance
+                .checked_sub(tx_env.value)
+                .ok_or(MorphEthApiError::InsufficientFundsForTransfer)?;
+            return Ok(gas_allowance_from_balance(available, tx_env.gas_price));
         }
 
         // eth_estimateGas path.
@@ -90,12 +97,12 @@ where
         if let Some(fee_token_id) = tx_env.fee_token_id.filter(|id| *id > 0) {
             return self.caller_gas_allowance_with_token(
                 &mut db,
-                tx_env.caller(),
-                tx_env.value(),
+                tx_env.signer(),
+                tx_env.value,
                 l1_fee,
                 fee_token_id,
                 tx_env.fee_limit,
-                tx_env.gas_price(),
+                tx_env.gas_price,
             );
         }
 
@@ -103,12 +110,12 @@ where
         // precision so the remainder is not lost across the two
         // subtractions.
         let balance = db
-            .basic(tx_env.caller())
+            .get_account(&tx_env.signer())
             .map_err(|e| MorphEthApiError::Eth(e.into()))?
             .map(|acc| acc.balance)
             .unwrap_or_default();
         let available = balance
-            .checked_sub(tx_env.value())
+            .checked_sub(tx_env.value)
             .ok_or(MorphEthApiError::InsufficientFundsForTransfer)?;
         // Reject at `l1_fee >= available` so the RPC surfaces the real
         // reason rather than a downstream "gas required exceeds allowance 0".
@@ -117,7 +124,7 @@ where
         }
         Ok(gas_allowance_from_balance(
             available - l1_fee,
-            tx_env.gas_price(),
+            tx_env.gas_price,
         ))
     }
 }
@@ -144,9 +151,9 @@ where
             return Ok(U256::ZERO);
         }
 
-        let block_number = u64::try_from(evm_env.block_env.inner.number)
+        let block_number = u64::try_from(evm_env.block_env().number)
             .map_err(|_| EthApiError::InvalidParams("invalid block number".to_string()))?;
-        let timestamp = u64::try_from(evm_env.block_env.inner.timestamp)
+        let timestamp = u64::try_from(evm_env.block_env().timestamp)
             .map_err(|_| EthApiError::InvalidParams("invalid block timestamp".to_string()))?;
         let chain_spec = self.provider().chain_spec();
         let hardfork = chain_spec.morph_hardfork_at(block_number, timestamp);
@@ -176,7 +183,7 @@ where
         gas_price: u128,
     ) -> Result<u64, MorphEthApiError>
     where
-        DB: revm::Database,
+        DB: Database,
         DB::Error: Into<EthApiError>,
     {
         let token_fee_info = TokenFeeInfo::load_storage_only(db, fee_token_id, caller)
@@ -185,7 +192,7 @@ where
 
         // ETH only needs to cover `value`; gas + L1 fee are paid in tokens.
         let eth_balance = db
-            .basic(caller)
+            .get_account(&caller)
             .map_err(|e| MorphEthApiError::Eth(e.into()))?
             .map(|acc| acc.balance)
             .unwrap_or_default();
@@ -239,7 +246,7 @@ fn token_gas_allowance(
     // - EVM-call mode (`balance_slot.is_none()`): RPC cannot resolve the
     //   balance without spinning up an EVM (the handler does that at real
     //   execution via `load_for_caller`). On the estimateGas path
-    //   `disable_fee_charge=true` short-circuits the handler's check, so
+    //   fee charging is off, which short-circuits the handler's check, so
     //   there is no natural balance ceiling — we MUST enforce `gas_cap`
     //   here, matching `eth_call`'s effective ceiling. Trusting a
     //   user-supplied `fee_limit` alone would let `fee_limit = U256::MAX`

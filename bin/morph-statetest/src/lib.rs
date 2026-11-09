@@ -1,5 +1,6 @@
 pub mod runner;
 pub mod schema;
+mod trace;
 
 #[cfg(test)]
 mod tests {

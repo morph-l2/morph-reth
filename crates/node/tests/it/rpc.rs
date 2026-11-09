@@ -949,10 +949,10 @@ async fn debug_trace_replay_apis_work_for_standard_jade_block() -> eyre::Result<
 
 /// `eth_estimateGas` rejects a request whose sender cannot cover the L1 data fee.
 ///
-/// Exercises the `MorphEthApi::caller_gas_allowance` override. In reth v2.0.0
-/// the upstream `estimate_gas_with` sets `cfg_env.disable_fee_charge = true`,
-/// so the EVM handler short-circuits and never checks balance — the L1 fee
-/// cap must instead be enforced in the gas-allowance pre-check.
+/// Exercises the `MorphEthApi::caller_gas_allowance` override. The upstream
+/// `estimate_gas_with` removes `EvmFeatures::FEE_CHARGE`, so the EVM handler
+/// short-circuits and never checks balance — the L1 fee cap must instead be
+/// enforced in the gas-allowance pre-check.
 ///
 /// Setup:
 /// - An unfunded random sender (`balance = 0`).

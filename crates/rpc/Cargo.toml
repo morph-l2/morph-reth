@@ -14,7 +14,7 @@ workspace = true
 morph-primitives = { workspace = true, features = ["serde-bincode-compat", "reth-codec"] }
 morph-chainspec.workspace = true
 morph-reference-index.workspace = true
-morph-revm = { workspace = true, features = ["rpc"] }
+morph-revm.workspace = true
 morph-evm = { workspace = true, features = ["rpc"] }
 morph-proofs.workspace = true
 

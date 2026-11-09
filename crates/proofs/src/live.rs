@@ -4,12 +4,12 @@ use std::{sync::Arc, time::Instant};
 
 use alloy_eips::{BlockNumHash, NumHash, eip1898::BlockWithParent};
 use derive_more::Constructor;
-use reth_evm::{ConfigureEvm, execute::Executor};
+use reth_evm::{ConfigureEvm, database::StateProviderDatabase, execute::Executor};
 use reth_primitives_traits::{AlloyBlockHeader, BlockTy, NodePrimitives, RecoveredBlock};
 use reth_provider::{
-    DatabaseProviderFactory, HashedPostStateProvider, StateProviderFactory, StateRootProvider,
+    DatabaseProviderFactory, HashedPostStateProvider, StateProvider, StateProviderFactory,
+    StateRootProvider,
 };
-use reth_revm::database::StateProviderDatabase;
 use reth_trie_common::{HashedPostStateSorted, updates::TrieUpdatesSorted};
 use tracing::{info, warn};
 
@@ -89,7 +89,7 @@ where
             parent_block_number,
         );
 
-        let db = StateProviderDatabase::new(&state_provider);
+        let db = StateProviderDatabase::new((&state_provider).into_evm_state_provider());
         let block_executor = self.evm_config.batch_executor(db);
 
         let execution_result = block_executor.execute(block)?;
@@ -405,7 +405,7 @@ where
             parent_block_number,
         );
 
-        let db = StateProviderDatabase::new(&state_provider);
+        let db = StateProviderDatabase::new((&state_provider).into_evm_state_provider());
         let block_executor = self.evm_config.batch_executor(db);
 
         let execution_result = block_executor.execute(block)?;

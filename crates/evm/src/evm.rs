@@ -1,282 +1,185 @@
-use alloy_evm::{
-    Database, Evm, EvmEnv, EvmFactory,
-    precompiles::PrecompilesMap,
-    revm::{
-        Context, ExecuteEvm, InspectEvm, Inspector, SystemCallEvm,
-        context::{
-            CfgEnv, DBErrorMarker,
-            result::{EVMError, ResultAndState},
-        },
-        inspector::NoOpInspector,
-    },
+//! Morph EVM instance and factory.
+
+use alloy_consensus::transaction::Recovered;
+use alloy_primitives::Address;
+use evm2::{
+    ExecutedTx, Inspector, TxResult, TxResultWithState,
+    evm::{AccountInfo, Cache, DynDatabase, PendingState},
+    precompiles::{MovePrecompileError, PrecompileId},
 };
-use alloy_primitives::{Address, Bytes};
-use morph_chainspec::hardfork::MorphHardfork;
-use morph_revm::{MorphHaltReason, MorphInvalidTransaction, MorphTxEnv, evm::MorphContext};
+use morph_revm::{FeeFrameFilter, MorphEvmEnv, MorphEvmTypes, MorphTxEnv};
+use reth_evm::{BlockExecutionError, Evm};
 use std::ops::{Deref, DerefMut};
 
-use crate::MorphBlockEnv;
-
+/// Marker for the EVM a [`crate::MorphEvmConfig`] creates.
 #[derive(Debug, Default, Clone, Copy)]
 #[non_exhaustive]
 pub struct MorphEvmFactory;
 
-impl EvmFactory for MorphEvmFactory {
-    type Evm<DB: Database, I: Inspector<Self::Context<DB>>> = MorphEvm<DB, I>;
-    type Context<DB: Database> = MorphContext<DB>;
-    type Tx = MorphTxEnv;
-    type Error<DBError: DBErrorMarker> = EVMError<DBError, MorphInvalidTransaction>;
-    type HaltReason = MorphHaltReason;
-    type Spec = MorphHardfork;
-    type BlockEnv = MorphBlockEnv;
-    type Precompiles = PrecompilesMap;
-
-    fn create_evm<DB: Database>(
-        &self,
-        db: DB,
-        input: EvmEnv<Self::Spec, Self::BlockEnv>,
-    ) -> Self::Evm<DB, NoOpInspector> {
-        MorphEvm::new(db, input)
-    }
-
-    fn create_evm_with_inspector<DB: Database, I: Inspector<Self::Context<DB>>>(
-        &self,
-        db: DB,
-        input: EvmEnv<Self::Spec, Self::BlockEnv>,
-        inspector: I,
-    ) -> Self::Evm<DB, I> {
-        MorphEvm::new(db, input).with_inspector(inspector)
-    }
-}
-
-/// Morph EVM implementation.
+/// A configured Morph EVM.
 ///
-/// This is a wrapper type around the `revm` ethereum evm with optional [`Inspector`] (tracing)
-/// support. [`Inspector`] support is configurable at runtime because it's part of the underlying
-/// `RevmEvm` type.
+/// Wraps the evm2 instance so that every inspector installed on it goes through
+/// [`FeeFrameFilter`]: tracers must see a token-fee transaction without its fee frames.
 #[expect(missing_debug_implementations)]
-pub struct MorphEvm<DB: Database, I = NoOpInspector> {
-    inner: morph_revm::MorphEvm<DB, I>,
-    /// Precompiles wrapped as PrecompilesMap for reth compatibility
-    precompiles_map: PrecompilesMap,
-    inspect: bool,
+pub struct MorphEvm<'a> {
+    inner: morph_revm::MorphEvm<'a>,
 }
 
-impl<DB: Database> MorphEvm<DB> {
-    /// Create a new [`MorphEvm`] instance.
-    pub fn new(db: DB, input: EvmEnv<MorphHardfork, MorphBlockEnv>) -> Self {
-        let inner = morph_revm::MorphEvm::from_env(db, input, NoOpInspector {});
-        let precompiles_map = PrecompilesMap::from_static(inner.precompiles.precompiles());
-
+impl<'a> MorphEvm<'a> {
+    /// Creates a Morph EVM over `database`.
+    pub fn new(database: impl DynDatabase + 'a, env: MorphEvmEnv) -> Self {
         Self {
-            inner,
-            precompiles_map,
-            inspect: false,
+            inner: morph_revm::morph_evm(database, env),
         }
     }
 }
 
-impl<DB: Database, I> MorphEvm<DB, I> {
-    /// Provides a reference to the EVM context.
-    pub const fn ctx(&self) -> &MorphContext<DB> {
-        &self.inner.inner.ctx
-    }
-
-    /// Provides a mutable reference to the EVM context.
-    pub fn ctx_mut(&mut self) -> &mut MorphContext<DB> {
-        &mut self.inner.inner.ctx
-    }
-
-    /// Sets the inspector for the EVM.
-    pub fn with_inspector<OINSP>(self, inspector: OINSP) -> MorphEvm<DB, OINSP> {
-        MorphEvm {
-            inner: self.inner.with_inspector(inspector),
-            precompiles_map: self.precompiles_map,
-            inspect: true,
-        }
-    }
-
-    /// Returns the cached token fee info from the handler's validation phase.
-    ///
-    /// Avoids redundant DB reads when the block executor needs token fee
-    /// parameters (e.g., for receipt construction).
-    #[inline]
-    pub fn cached_token_fee_info(&self) -> Option<morph_revm::TokenFeeInfo> {
-        self.inner.cached_token_fee_info()
-    }
-
-    /// Returns the L1 data fee cached during handler validation.
-    ///
-    /// Avoids re-encoding the full transaction RLP in the block executor's
-    /// receipt-building path.
-    #[inline]
-    pub fn cached_l1_data_fee(&self) -> alloy_primitives::U256 {
-        self.inner.cached_l1_data_fee()
-    }
-
-    /// Takes the cached pre-execution fee logs (token fee deduction Transfer events).
-    #[inline]
-    pub fn take_pre_fee_logs(&mut self) -> Vec<alloy_primitives::Log> {
-        self.inner.take_pre_fee_logs()
-    }
-
-    /// Takes the cached post-execution fee logs (token fee reimbursement Transfer events).
-    #[inline]
-    pub fn take_post_fee_logs(&mut self) -> Vec<alloy_primitives::Log> {
-        self.inner.take_post_fee_logs()
-    }
-}
-
-impl<DB: Database, I> Deref for MorphEvm<DB, I>
-where
-    DB: Database,
-    I: Inspector<MorphContext<DB>>,
-{
-    type Target = MorphContext<DB>;
+impl<'a> Deref for MorphEvm<'a> {
+    type Target = morph_revm::MorphEvm<'a>;
 
     #[inline]
     fn deref(&self) -> &Self::Target {
-        self.ctx()
+        &self.inner
     }
 }
 
-impl<DB: Database, I> DerefMut for MorphEvm<DB, I>
-where
-    DB: Database,
-    I: Inspector<MorphContext<DB>>,
-{
+impl DerefMut for MorphEvm<'_> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.ctx_mut()
+        &mut self.inner
     }
 }
 
-impl<DB, I> Evm for MorphEvm<DB, I>
-where
-    DB: Database,
-    I: Inspector<MorphContext<DB>>,
-{
-    type DB = DB;
-    type Tx = MorphTxEnv;
-    type Error = EVMError<DB::Error, MorphInvalidTransaction>;
-    type HaltReason = MorphHaltReason;
-    type Spec = MorphHardfork;
-    type BlockEnv = MorphBlockEnv;
-    type Precompiles = PrecompilesMap;
-    type Inspector = I;
+impl<'a> Evm for MorphEvm<'a> {
+    type EvmTypes = MorphEvmTypes;
+    type Transaction = MorphTxEnv;
 
-    fn block(&self) -> &Self::BlockEnv {
-        &self.block
-    }
-
-    fn cfg_env(&self) -> &CfgEnv<Self::Spec> {
-        &self.inner.inner.ctx.cfg
-    }
-
-    fn chain_id(&self) -> u64 {
-        self.cfg.chain_id
-    }
-
-    fn transact_raw(
+    fn transact(
         &mut self,
-        tx: Self::Tx,
-    ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
-        if self.inspect {
-            self.inner.inspect_tx(tx)
-        } else {
-            self.inner.transact(tx)
-        }
+        transaction: &Recovered<MorphTxEnv>,
+    ) -> Result<TxResultWithState<MorphEvmTypes>, BlockExecutionError> {
+        Evm::transact(&mut self.inner, transaction)
     }
 
-    fn transact_system_call(
+    fn transact_commit(
         &mut self,
-        caller: Address,
-        contract: Address,
-        data: Bytes,
-    ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
-        self.inner.system_call_with_caller(caller, contract, data)
+        transaction: &Recovered<MorphTxEnv>,
+    ) -> Result<TxResult<MorphEvmTypes>, BlockExecutionError> {
+        Evm::transact_commit(&mut self.inner, transaction)
     }
 
-    fn finish(self) -> (Self::DB, EvmEnv<Self::Spec, Self::BlockEnv>) {
-        let Context {
-            block: block_env,
-            cfg: cfg_env,
-            journaled_state,
-            ..
-        } = self.inner.inner.ctx;
-
-        (journaled_state.database, EvmEnv { block_env, cfg_env })
+    fn transact_result(
+        &mut self,
+        transaction: &Recovered<MorphTxEnv>,
+    ) -> Result<TxResult<MorphEvmTypes>, BlockExecutionError> {
+        Evm::transact_result(&mut self.inner, transaction)
     }
 
-    fn set_inspector_enabled(&mut self, enabled: bool) {
-        self.inspect = enabled;
+    fn transact_with_inspector<I>(
+        &mut self,
+        transaction: &Recovered<MorphTxEnv>,
+        inspector: I,
+    ) -> Result<(I, TxResultWithState<MorphEvmTypes>), BlockExecutionError>
+    where
+        I: Inspector<MorphEvmTypes> + 'static,
+    {
+        let (filter, result) = Evm::transact_with_inspector(
+            &mut self.inner,
+            transaction,
+            FeeFrameFilter::new(inspector),
+        )?;
+        Ok((filter.into_inner(), result))
     }
 
-    fn components(&self) -> (&Self::DB, &Self::Inspector, &Self::Precompiles) {
-        (
-            &self.inner.inner.ctx.journaled_state.database,
-            &self.inner.inner.inspector,
-            &self.precompiles_map,
-        )
+    fn set_inspector<I>(&mut self, inspector: I)
+    where
+        I: Inspector<MorphEvmTypes> + 'static,
+    {
+        Evm::set_inspector(&mut self.inner, FeeFrameFilter::new(inspector));
     }
 
-    fn components_mut(&mut self) -> (&mut Self::DB, &mut Self::Inspector, &mut Self::Precompiles) {
-        (
-            &mut self.inner.inner.ctx.journaled_state.database,
-            &mut self.inner.inner.inspector,
-            &mut self.precompiles_map,
-        )
+    fn state_db_mut(&mut self) -> &mut dyn DynDatabase {
+        Evm::state_db_mut(&mut self.inner)
+    }
+
+    fn commit_state(&mut self, state: &PendingState) {
+        Evm::commit_state(&mut self.inner, state);
+    }
+
+    fn take_state_cache(&mut self) -> Cache {
+        Evm::take_state_cache(&mut self.inner)
+    }
+
+    fn precompile_ids(&self) -> Vec<(Address, PrecompileId)> {
+        Evm::precompile_ids(&self.inner)
+    }
+
+    fn has_precompile(&self, address: &Address) -> bool {
+        Evm::has_precompile(&self.inner, address)
+    }
+
+    fn account_info(
+        &mut self,
+        address: &Address,
+    ) -> Result<Option<AccountInfo>, BlockExecutionError> {
+        Evm::account_info(&mut self.inner, address)
+    }
+
+    fn move_precompiles(
+        &mut self,
+        moves: impl IntoIterator<Item = (Address, Address)>,
+    ) -> Result<(), MovePrecompileError> {
+        Evm::move_precompiles(&mut self.inner, moves)
+    }
+
+    fn transact_and_discard<R>(
+        &mut self,
+        transaction: &Recovered<MorphTxEnv>,
+        observe: impl FnOnce(&ExecutedTx<'_, '_, MorphEvmTypes>) -> R,
+    ) -> Result<R, BlockExecutionError> {
+        Evm::transact_and_discard(&mut self.inner, transaction, observe)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use alloy_primitives::U256;
-    use reth_revm::context::BlockEnv;
-    use revm::{
-        context::TxEnv,
-        database::{CacheDB, EmptyDB},
-        state::AccountInfo,
-    };
-
     use super::*;
+    use alloy_primitives::{TxKind, U256};
+    use evm2::evm::InMemoryDB;
+    use morph_chainspec::hardfork::MorphHardfork;
+    use morph_revm::{MorphBlockEnv, morph_evm_env};
 
     #[test]
     fn can_execute_tx() {
         // Create a database with the caller having sufficient balance
-        let mut db = CacheDB::new(EmptyDB::default());
+        let mut db = InMemoryDB::default();
         db.insert_account_info(
+            &Address::ZERO,
+            AccountInfo::default().with_balance(U256::from(1_000_000)),
+        );
+
+        let env = morph_evm_env(
+            MorphHardfork::default(),
+            1,
+            30_000_000,
+            MorphBlockEnv {
+                basefee: U256::from(1),
+                ..Default::default()
+            },
+        );
+        let mut evm = MorphEvm::new(db, env);
+        let tx = Recovered::new_unchecked(
+            MorphTxEnv {
+                gas_price: 1, // Must be >= basefee
+                gas_limit: 21000,
+                kind: TxKind::Call(Address::with_last_byte(0xff)),
+                ..Default::default()
+            },
             Address::ZERO,
-            AccountInfo {
-                balance: U256::from(1_000_000),
-                ..Default::default()
-            },
         );
 
-        let mut evm = MorphEvm::new(
-            db,
-            EvmEnv {
-                block_env: MorphBlockEnv {
-                    inner: BlockEnv {
-                        basefee: 1,
-                        ..Default::default()
-                    },
-                },
-                ..Default::default()
-            },
-        );
-        let result = evm
-            .transact(MorphTxEnv {
-                inner: TxEnv {
-                    caller: Address::ZERO,
-                    gas_price: 1, // Must be >= basefee
-                    gas_limit: 21000,
-                    ..Default::default()
-                },
-                ..Default::default()
-            })
-            .unwrap();
+        let result = Evm::transact(&mut evm, &tx).unwrap();
 
-        assert!(result.result.is_success());
+        assert!(result.result.status);
     }
 }

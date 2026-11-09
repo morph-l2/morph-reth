@@ -45,7 +45,7 @@ pub enum MorphPayloadBuilderError {
         block_gas_limit: u64,
     },
 
-    /// Generic storage error (e.g. from revm EvmDatabaseError, ProviderError).
+    /// Generic storage error (e.g. an EVM database error or a `ProviderError`).
     #[error("storage error: {0}")]
     Storage(String),
 }

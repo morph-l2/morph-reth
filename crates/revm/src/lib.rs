@@ -1,12 +1,12 @@
-//! Morph-specific revm implementations.
+//! Morph-specific EVM execution on top of evm2.
 //!
 //! This crate provides low-level EVM execution logic for Morph L2, including
 //! custom transaction validation, fee handling, and L1 data fee calculation.
 //!
 //! # Main Components
 //!
-//! - [`MorphEvm`]: The main EVM type with Morph-specific handler
-//! - [`handler::MorphEvmHandler`]: Custom handler implementing fee deduction and reimbursement
+//! - [`MorphEvm`]: An evm2 EVM with the Morph type family and transaction handler
+//! - [`handler`]: Transaction handler implementing fee deduction and reimbursement
 //! - [`L1BlockInfo`]: L1 gas price oracle data for L1 data fee calculation
 //! - [`TokenFeeInfo`]: Token registry data for Morph transaction fee support
 //!
@@ -27,27 +27,15 @@
 //!
 //! # Error Types
 //!
-//! - [`MorphHaltReason`]: EVM halt reasons (extends revm's `HaltReason`)
-//! - [`MorphInvalidTransaction`]: Invalid transaction errors
+//! - [`MorphInvalidTransaction`]: Invalid transaction errors, carried by
+//!   [`evm2::registry::HandlerError::External`]
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod block;
-// Suppress unused_crate_dependencies warnings
-#[cfg(not(test))]
-use alloy_consensus as _;
-use alloy_sol_types as _;
-#[cfg(not(test))]
-use reth_ethereum_primitives as _;
-#[cfg(not(test))]
-use tracing as _;
-
-mod common;
-pub use common::{MorphStateAccess, MorphTx};
 pub mod error;
 pub mod evm;
-pub mod exec;
 pub mod handler;
 pub mod l1block;
 pub mod precompiles;
@@ -55,8 +43,11 @@ pub mod token_fee;
 mod tx;
 
 pub use block::MorphBlockEnv;
-pub use error::{MorphHaltReason, MorphInvalidTransaction};
-pub use evm::MorphEvm;
+pub use error::MorphInvalidTransaction;
+pub use evm::{
+    FeeFrameFilter, MorphEvm, MorphEvmEnv, MorphEvmTypes, MorphMessageExt, MorphTxResultExt,
+    morph_evm, morph_evm_env, morph_version,
+};
 pub use l1block::{
     GPO_BLOB_SCALAR_SLOT,
     GPO_COMMIT_SCALAR_SLOT,
@@ -71,9 +62,9 @@ pub use l1block::{
     L1_GAS_PRICE_ORACLE_ADDRESS,
     L1BlockInfo,
 };
-pub use precompiles::MorphPrecompiles;
+pub use precompiles::morph_precompiles;
 pub use token_fee::{
-    L2_TOKEN_REGISTRY_ADDRESS, MorphEvmEnv, TokenFeeInfo, compute_mapping_slot,
+    L2_TOKEN_REGISTRY_ADDRESS, TokenFeeInfo, compute_mapping_slot,
     compute_mapping_slot_for_address, encode_balance_of_calldata,
 };
 pub use tx::{MorphTxEnv, MorphTxExt};

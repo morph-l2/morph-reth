@@ -277,7 +277,7 @@ where
                 .map_err(Eth::Error::from_eth_err)?
                 .proof(Default::default(), address, &storage_keys)
                 .map_err(Eth::Error::from_eth_err)?;
-            Ok(proof.into_eip1186_response(keys))
+            Ok(proof.into_eip1186_response_with(keys, true))
         })
         .await;
 
@@ -317,7 +317,7 @@ where
                         .map_err(EthApiError::Internal)
                         .map_err(Eth::Error::from)?;
                     let storage_keys = slots.into_iter().map(JsonStorageKey::from).collect();
-                    Ok(proof.into_eip1186_response(storage_keys))
+                    Ok(proof.into_eip1186_response_with(storage_keys, true))
                 })
                 .collect()
         })

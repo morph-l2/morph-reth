@@ -153,6 +153,7 @@ reth-payload-util = { git = "https://github.com/paradigmxyz/reth", tag = "v2.10.
 reth-primitives-traits = { version = "0.8.2", default-features = false }
 reth-prune-types = { git = "https://github.com/paradigmxyz/reth", tag = "v2.10.1" }
 reth-provider = { git = "https://github.com/paradigmxyz/reth", tag = "v2.10.1" }
+reth-stages-types = { git = "https://github.com/paradigmxyz/reth", tag = "v2.10.1" }
 reth-rpc = { git = "https://github.com/paradigmxyz/reth", tag = "v2.10.1" }
 reth-rpc-api = { git = "https://github.com/paradigmxyz/reth", tag = "v2.10.1" }
 reth-rpc-builder = { git = "https://github.com/paradigmxyz/reth", tag = "v2.10.1" }
@@ -177,6 +178,7 @@ reth-trie-sparse = { git = "https://github.com/paradigmxyz/reth", tag = "v2.10.1
 # `[patch]` below to the rev it actually builds against.
 evm2 = { git = "https://github.com/alloy-rs/evm2", rev = "592bf18c4e22fff54ac9b4db606c4ee276e345cb", default-features = false }
 evm2-inspectors = { git = "https://github.com/alloy-rs/evm2", rev = "592bf18c4e22fff54ac9b4db606c4ee276e345cb", default-features = false }
+evm2-macros = { git = "https://github.com/alloy-rs/evm2", rev = "592bf18c4e22fff54ac9b4db606c4ee276e345cb" }
 
 alloy = { version = "2.5.0", default-features = false }
 alloy-consensus = { version = "2.5.0", default-features = false }
@@ -261,6 +263,7 @@ pyroscope_pprofrs = "0.2.10"
 [patch."https://github.com/alloy-rs/evm2"]
 evm2 = { git = "https://www.github.com/alloy-rs/evm2", rev = "01df8f6a396d0250da286cb763faa6ec292d65b5" }
 evm2-inspectors = { git = "https://www.github.com/alloy-rs/evm2", rev = "01df8f6a396d0250da286cb763faa6ec292d65b5" }
+evm2-macros = { git = "https://www.github.com/alloy-rs/evm2", rev = "01df8f6a396d0250da286cb763faa6ec292d65b5" }
 
 [patch.crates-io]
 reth-codecs = { git = "https://github.com/paradigmxyz/reth-core", rev = "275ce4cf5befeb9f1e8acd935ff2882d2d25fc61" }

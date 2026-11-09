@@ -4,7 +4,6 @@
 //! that is used by both the validator (for new transactions) and the maintenance
 //! task (for revalidating existing transactions).
 
-use alloy_evm::Database;
 use alloy_primitives::{Address, U256};
 use morph_chainspec::hardfork::MorphHardfork;
 use morph_primitives::{
@@ -12,6 +11,7 @@ use morph_primitives::{
     transaction::morph_transaction::{MORPH_TX_VERSION_1, MORPH_TX_VERSION_2},
 };
 use morph_revm::{MorphEvmEnv, TokenFeeInfo};
+use reth_evm::Database;
 
 use crate::MorphTxError;
 
@@ -125,10 +125,7 @@ pub fn validate_morph_tx<DB: Database>(
     // is evaluated under the hardfork's defaults. That matches the pool's previous
     // behaviour; threading the real head environment through admission is txpool
     // work and does not belong in this change.
-    let env = MorphEvmEnv::new(
-        reth_revm::revm::context::CfgEnv::new_with_spec(input.hardfork),
-        morph_revm::MorphBlockEnv::default(),
-    );
+    let env = MorphEvmEnv::new(input.hardfork, morph_revm::MorphBlockEnv::default(), 1);
     let token_info = TokenFeeInfo::load_for_caller(db, fee_token_id, input.sender, &env)
         .map_err(|err| MorphTxError::TokenInfoFetchFailed {
             token_id: fee_token_id,
@@ -185,8 +182,8 @@ mod tests {
     use super::*;
     use alloy_consensus::Signed;
     use alloy_primitives::{B256, Signature, TxKind, address};
+    use evm2::evm::EmptyDB;
     use morph_primitives::{TxMorph, transaction::morph_transaction::MORPH_TX_VERSION_1};
-    use reth_revm::revm::database::EmptyDB;
 
     #[test]
     fn test_morph_tx_validation_input_construction() {
