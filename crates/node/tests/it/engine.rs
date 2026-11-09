@@ -573,6 +573,99 @@ async fn assemble_l2_block_v2_builds_on_explicit_parent() -> eyre::Result<()> {
     Ok(())
 }
 
+/// `engine_assembleL2BlockV2` raises a timestamp behind the parent's, so the block imports on
+/// every node.
+///
+/// The CL passes its wall-clock second, which falls behind the parent's timestamp when the
+/// sequencer's clock steps back or HA leadership moves to a node whose clock is behind.
+/// Unclamped, the sequencer would make such a block its head (it imports the payload it built
+/// without re-validating the header) while followers reject it as `TimestampIsInPast`. From
+/// Emerald on the block takes its parent's timestamp.
+#[tokio::test(flavor = "multi_thread")]
+async fn assemble_l2_block_v2_raises_timestamp_behind_parent() -> eyre::Result<()> {
+    assert_assembled_timestamp_raised(HardforkSchedule::AllActive, 0).await
+}
+
+/// Before Emerald a block must be strictly later than its parent, so the timestamp is raised
+/// to one second past the parent's.
+#[tokio::test(flavor = "multi_thread")]
+async fn assemble_l2_block_v2_raises_timestamp_past_parent_before_emerald() -> eyre::Result<()> {
+    assert_assembled_timestamp_raised(HardforkSchedule::PreViridian, 1).await
+}
+
+/// Assembles block 2 with a timestamp five seconds behind block 1, then checks that it comes
+/// back `min_gap` seconds after block 1 and becomes canonical on both the sequencer and a
+/// follower.
+async fn assert_assembled_timestamp_raised(
+    schedule: HardforkSchedule,
+    min_gap: u64,
+) -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, _wallet) = TestNodeBuilder::new()
+        .with_schedule(schedule)
+        .with_num_nodes(2)
+        .build()
+        .await?;
+    let follower = nodes.pop().expect("two nodes requested");
+    let sequencer = nodes.pop().expect("two nodes requested");
+    let client = sequencer.auth_server_handle().http_client();
+
+    let genesis_hash = sequencer
+        .inner
+        .provider
+        .sealed_header_by_number_or_tag(alloy_rpc_types_eth::BlockNumberOrTag::Latest)?
+        .expect("genesis header")
+        .hash();
+    let block1_ts = head_timestamp(&sequencer)? + 10;
+    let block1: ExecutableL2Data = client
+        .request(
+            "engine_assembleL2BlockV2",
+            (serde_json::json!({
+                "parentHash": genesis_hash,
+                "timestamp": format!("{block1_ts:#x}"),
+                "transactions": [],
+            }),),
+        )
+        .await?;
+    assert_eq!(
+        block1.timestamp, block1_ts,
+        "a timestamp after the parent's is kept"
+    );
+    import_l2_block(&sequencer, block1.clone()).await?;
+    import_l2_block(&follower, block1.clone()).await?;
+
+    // The sequencer's clock stepped back five seconds.
+    let block2: ExecutableL2Data = client
+        .request(
+            "engine_assembleL2BlockV2",
+            (serde_json::json!({
+                "parentHash": block1.hash,
+                "timestamp": format!("{:#x}", block1_ts - 5),
+                "transactions": [],
+            }),),
+        )
+        .await?;
+    assert_eq!(block2.timestamp, block1_ts + min_gap);
+
+    import_l2_block(&sequencer, block2.clone()).await?;
+    import_l2_block(&follower, block2.clone()).await?;
+    for node in [&sequencer, &follower] {
+        let head = node
+            .inner
+            .provider
+            .sealed_header_by_number_or_tag(alloy_rpc_types_eth::BlockNumberOrTag::Latest)?
+            .expect("head header");
+        assert_eq!(
+            head.hash(),
+            block2.hash,
+            "block 2 is canonical on every node"
+        );
+    }
+
+    Ok(())
+}
+
 /// `engine_validateL2Block` rejects a tampered block hash over authenticated RPC.
 #[tokio::test(flavor = "multi_thread")]
 async fn validate_l2_block_rejects_tampered_hash_over_rpc() -> eyre::Result<()> {
