@@ -39,10 +39,19 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
+      "description": "Build metadata, one row per node. Kept per node so that every value stays attributable when several services are selected.",
       "fieldConfig": {
         "defaults": {
           "color": {
             "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": false,
+            "inspect": false
           },
           "mappings": [],
           "thresholds": {
@@ -50,38 +59,116 @@
             "steps": [
               {
                 "color": "green",
-                "value": 0
+                "value": null
               }
             ]
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Service"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 180
+              },
+              {
+                "id": "custom.align",
+                "value": "left"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Version"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 95
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Git SHA"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 105
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Build Time"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 275
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Profile"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 105
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Target"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 205
+              }
+            ]
+          }
+        ]
       },
       "gridPos": {
-        "h": 5,
+        "h": 7,
         "w": 24,
         "x": 0,
         "y": 1
       },
       "id": 2,
       "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "center",
-        "orientation": "vertical",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
           "fields": "",
-          "values": false
+          "reducer": [
+            "sum"
+          ],
+          "show": false,
+          "enablePagination": true
         },
-        "showPercentChange": false,
-        "text": {
-          "valueSize": 14
-        },
-        "textMode": "name",
-        "wideLayout": false
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": false,
+            "displayName": "Service"
+          }
+        ],
+        "enablePagination": true
       },
       "pluginVersion": "12.2.1",
       "targets": [
@@ -90,77 +177,48 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
+          "editorMode": "code",
           "exemplar": false,
-          "expr": "max by (version) (reth_info{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
+          "expr": "max by (service, version, git_sha, build_timestamp, build_profile, target_triple, cargo_features) (reth_info{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
+          "format": "table",
           "instant": true,
-          "legendFormat": "Version: {{version}}",
+          "legendFormat": "__auto",
           "range": false,
           "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "exemplar": false,
-          "expr": "max by (build_timestamp) (reth_info{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
-          "instant": true,
-          "legendFormat": "Timestamp: {{build_timestamp}}",
-          "range": false,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "exemplar": false,
-          "expr": "max by (git_sha) (reth_info{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
-          "instant": true,
-          "legendFormat": "Git SHA: {{git_sha}}",
-          "range": false,
-          "refId": "C"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "exemplar": false,
-          "expr": "max by (build_profile) (reth_info{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
-          "instant": true,
-          "legendFormat": "Profile: {{build_profile}}",
-          "range": false,
-          "refId": "D"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "exemplar": false,
-          "expr": "max by (target_triple) (reth_info{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
-          "instant": true,
-          "legendFormat": "Target: {{target_triple}}",
-          "range": false,
-          "refId": "E"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "exemplar": false,
-          "expr": "max by (cargo_features) (reth_info{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
-          "instant": true,
-          "legendFormat": "Features: {{cargo_features}}",
-          "range": false,
-          "refId": "F"
         }
       ],
       "title": "Build Info",
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Value": true
+            },
+            "indexByName": {
+              "service": 0,
+              "version": 1,
+              "git_sha": 2,
+              "build_timestamp": 3,
+              "build_profile": 4,
+              "target_triple": 5,
+              "cargo_features": 6
+            },
+            "renameByName": {
+              "service": "Service",
+              "version": "Version",
+              "git_sha": "Git SHA",
+              "build_timestamp": "Build Time",
+              "build_profile": "Profile",
+              "target_triple": "Target",
+              "cargo_features": "Features"
+            }
+          }
+        }
+      ],
       "transparent": true,
-      "type": "stat"
+      "type": "table"
     },
     {
       "datasource": {
@@ -197,10 +255,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 6,
+        "h": 7,
         "w": 9,
         "x": 0,
-        "y": 6
+        "y": 8
       },
       "id": 3,
       "options": {
@@ -243,11 +301,19 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Latest canonical block/header height reported by reth's blockchain tree.",
+      "description": "Storage footprint and canonical height, one row per node. Replaces the previous four globally-summed stat panels and the narrow Header Height column.",
       "fieldConfig": {
         "defaults": {
           "color": {
             "mode": "thresholds"
+          },
+          "custom": {
+            "align": "right",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": false,
+            "inspect": false
           },
           "mappings": [],
           "thresholds": {
@@ -255,37 +321,121 @@
             "steps": [
               {
                 "color": "green",
-                "value": 0
+                "value": null
               }
             ]
           },
-          "unit": "locale"
+          "unit": "bytes"
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Service"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 175
+              },
+              {
+                "id": "custom.align",
+                "value": "left"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Height"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "locale"
+              },
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Database"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Freelist"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 105
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Static Files"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Total"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          }
+        ]
       },
       "gridPos": {
+        "h": 7,
+        "w": 15,
         "x": 9,
-        "y": 6,
-        "w": 3,
-        "h": 6
+        "y": 8
       },
-      "id": 140,
+      "id": 339,
       "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "center",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
           "fields": "",
-          "values": false
+          "reducer": [
+            "sum"
+          ],
+          "show": false,
+          "enablePagination": true
         },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": false
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": false,
+            "displayName": "Service"
+          }
+        ],
+        "enablePagination": true
       },
       "pluginVersion": "12.2.1",
       "targets": [
@@ -295,289 +445,113 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by (service) (reth_blockchain_tree_canonical_chain_height{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
-          "legendFormat": "{{service}}",
-          "range": true,
+          "exemplar": false,
+          "expr": "sum by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "__auto",
+          "range": false,
           "refId": "A"
-        }
-      ],
-      "title": "Header Height",
-      "transparent": true,
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "description": "",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          },
-          "unit": "bytes"
         },
-        "overrides": []
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 6,
-        "w": 3,
-        "h": 6
-      },
-      "id": 128,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "center",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": false
-      },
-      "pluginVersion": "12.2.1",
-      "targets": [
         {
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
-          "legendFormat": "Database",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "title": "Database",
-      "transparent": true,
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "description": "",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          },
-          "unit": "bytes"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "x": 15,
-        "y": 6,
-        "w": 3,
-        "h": 6
-      },
-      "id": 129,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "center",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": false
-      },
-      "pluginVersion": "12.2.1",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "sum(reth_db_freelist{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} * reth_db_page_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "Freelist",
-          "range": true,
+          "exemplar": false,
+          "expr": "sum by (service) (reth_db_freelist{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} * reth_db_page_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "__auto",
+          "range": false,
           "refId": "B"
-        }
-      ],
-      "title": "Freelist",
-      "transparent": true,
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "description": "",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          },
-          "unit": "bytes"
         },
-        "overrides": []
-      },
-      "gridPos": {
-        "x": 18,
-        "y": 6,
-        "w": 3,
-        "h": 6
-      },
-      "id": 130,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "center",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": false
-      },
-      "pluginVersion": "12.2.1",
-      "targets": [
         {
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "Static Files",
-          "range": true,
+          "exemplar": false,
+          "expr": "sum by (service) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "__auto",
+          "range": false,
           "refId": "C"
-        }
-      ],
-      "title": "Static Files",
-      "transparent": true,
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "description": "",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          },
-          "unit": "bytes"
         },
-        "overrides": []
-      },
-      "gridPos": {
-        "x": 21,
-        "y": 6,
-        "w": 3,
-        "h": 6
-      },
-      "id": 131,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "center",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": false
-      },
-      "pluginVersion": "12.2.1",
-      "targets": [
         {
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) + sum(reth_db_freelist{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} * reth_db_page_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) + sum(reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "Total",
-          "range": true,
+          "exemplar": false,
+          "expr": "sum by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) + sum by (service) (reth_db_freelist{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} * reth_db_page_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) + sum by (service) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "__auto",
+          "range": false,
           "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "max by (service) (reth_blockchain_tree_canonical_chain_height{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "__auto",
+          "range": false,
+          "refId": "E"
         }
       ],
-      "title": "Total",
+      "title": "Node Storage & Height",
+      "transformations": [
+        {
+          "id": "filterFieldsByName",
+          "options": {
+            "exclude": {
+              "pattern": "^Time$"
+            }
+          }
+        },
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "service",
+            "mode": "outer"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "indexByName": {
+              "service": 0,
+              "Value #E": 1,
+              "Value #A": 2,
+              "Value #B": 3,
+              "Value #C": 4,
+              "Value #D": 5
+            },
+            "renameByName": {
+              "service": "Service",
+              "Value #E": "Height",
+              "Value #A": "Database",
+              "Value #B": "Freelist",
+              "Value #C": "Static Files",
+              "Value #D": "Total"
+            }
+          }
+        }
+      ],
       "transparent": true,
-      "type": "stat"
+      "type": "table"
     },
     {
       "datasource": {
@@ -643,7 +617,7 @@
         "h": 9,
         "w": 12,
         "x": 0,
-        "y": 12
+        "y": 15
       },
       "id": 5,
       "options": {
@@ -668,7 +642,7 @@
           },
           "editorMode": "code",
           "expr": "reth_sync_execution_gas_per_second{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
-          "legendFormat": "{{service}} \u00b7 Gas/s",
+          "legendFormat": "{{service}} · Gas/s",
           "range": true,
           "refId": "A"
         },
@@ -683,7 +657,7 @@
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
-          "legendFormat": "{{service}} \u00b7 Avg Gas/s (1m)",
+          "legendFormat": "{{service}} · Avg Gas/s (1m)",
           "range": true,
           "refId": "B",
           "useBackend": false
@@ -699,7 +673,7 @@
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
-          "legendFormat": "{{service}} \u00b7 Avg Gas/s (5m)",
+          "legendFormat": "{{service}} · Avg Gas/s (5m)",
           "range": true,
           "refId": "C",
           "useBackend": false
@@ -715,7 +689,7 @@
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
-          "legendFormat": "{{service}} \u00b7 Avg Gas/s (10m)",
+          "legendFormat": "{{service}} · Avg Gas/s (10m)",
           "range": true,
           "refId": "D",
           "useBackend": false
@@ -731,7 +705,7 @@
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
-          "legendFormat": "{{service}} \u00b7 Avg Gas/s (30m)",
+          "legendFormat": "{{service}} · Avg Gas/s (30m)",
           "range": true,
           "refId": "E",
           "useBackend": false
@@ -747,7 +721,7 @@
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
-          "legendFormat": "{{service}} \u00b7 Avg Gas/s (1h)",
+          "legendFormat": "{{service}} · Avg Gas/s (1h)",
           "range": true,
           "refId": "F",
           "useBackend": false
@@ -763,7 +737,7 @@
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
-          "legendFormat": "{{service}} \u00b7 Avg Gas/s (24h)",
+          "legendFormat": "{{service}} · Avg Gas/s (24h)",
           "range": true,
           "refId": "G",
           "useBackend": false
@@ -800,7 +774,7 @@
         "h": 9,
         "w": 12,
         "x": 12,
-        "y": 12
+        "y": 15
       },
       "id": 6,
       "options": {
@@ -861,7 +835,7 @@
         "h": 9,
         "w": 12,
         "x": 0,
-        "y": 21
+        "y": 24
       },
       "id": 7,
       "options": {
@@ -912,7 +886,7 @@
         "h": 9,
         "w": 12,
         "x": 12,
-        "y": 21
+        "y": 24
       },
       "id": 8,
       "options": {
@@ -941,7 +915,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 33
+        "y": 36
       },
       "id": 9,
       "panels": [],
@@ -976,7 +950,7 @@
         "h": 9,
         "w": 12,
         "x": 0,
-        "y": 34
+        "y": 37
       },
       "id": 10,
       "options": {
@@ -1031,7 +1005,7 @@
         "h": 9,
         "w": 12,
         "x": 12,
-        "y": 34
+        "y": 37
       },
       "id": 11,
       "options": {
@@ -1086,7 +1060,7 @@
         "h": 9,
         "w": 12,
         "x": 0,
-        "y": 43
+        "y": 46
       },
       "id": 12,
       "options": {
@@ -1141,7 +1115,7 @@
         "h": 9,
         "w": 12,
         "x": 12,
-        "y": 43
+        "y": 46
       },
       "id": 13,
       "options": {
@@ -1196,7 +1170,7 @@
         "h": 9,
         "w": 12,
         "x": 0,
-        "y": 52
+        "y": 55
       },
       "id": 14,
       "options": {
@@ -1259,7 +1233,7 @@
         "h": 9,
         "w": 12,
         "x": 12,
-        "y": 52
+        "y": 55
       },
       "id": 15,
       "options": {
@@ -1310,7 +1284,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 61
+        "y": 64
       },
       "id": 300,
       "options": {
@@ -1333,7 +1307,7 @@
           "editorMode": "code",
           "expr": "rate(reth_consensus_engine_beacon_new_payload_messages{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 newPayload",
+          "legendFormat": "{{service}} · newPayload",
           "range": true,
           "refId": "A"
         },
@@ -1345,7 +1319,7 @@
           "editorMode": "code",
           "expr": "rate(reth_consensus_engine_beacon_forkchoice_updated_messages{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 forkchoiceUpdated",
+          "legendFormat": "{{service}} · forkchoiceUpdated",
           "range": true,
           "refId": "B"
         }
@@ -1382,7 +1356,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 61
+        "y": 64
       },
       "id": 301,
       "options": {
@@ -1405,7 +1379,7 @@
           "editorMode": "code",
           "expr": "rate(reth_consensus_engine_beacon_failed_new_payload_response_deliveries{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 newPayload",
+          "legendFormat": "{{service}} · newPayload",
           "range": true,
           "refId": "A"
         },
@@ -1417,7 +1391,7 @@
           "editorMode": "code",
           "expr": "rate(reth_consensus_engine_beacon_failed_forkchoice_updated_response_deliveries{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 forkchoiceUpdated",
+          "legendFormat": "{{service}} · forkchoiceUpdated",
           "range": true,
           "refId": "B"
         }
@@ -1454,7 +1428,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 69
+        "y": 72
       },
       "id": 302,
       "options": {
@@ -1477,7 +1451,7 @@
           "editorMode": "code",
           "expr": "reth_consensus_engine_beacon_new_payload_forkchoice_updated_time_diff{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 {{role}} \u00b7 p{{quantile}}",
+          "legendFormat": "{{service}} · {{role}} · p{{quantile}}",
           "range": true,
           "refId": "A"
         }
@@ -1514,7 +1488,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 69
+        "y": 72
       },
       "id": 303,
       "options": {
@@ -1537,7 +1511,7 @@
           "editorMode": "code",
           "expr": "reth_consensus_engine_beacon_new_payload_latency{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 {{role}} \u00b7 p{{quantile}}",
+          "legendFormat": "{{service}} · {{role}} · p{{quantile}}",
           "range": true,
           "refId": "A"
         }
@@ -1574,7 +1548,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 77
+        "y": 80
       },
       "id": 304,
       "options": {
@@ -1597,7 +1571,7 @@
           "editorMode": "code",
           "expr": "reth_consensus_engine_beacon_forkchoice_updated_latency{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 {{role}} \u00b7 p{{quantile}}",
+          "legendFormat": "{{service}} · {{role}} · p{{quantile}}",
           "range": true,
           "refId": "A"
         }
@@ -1612,7 +1586,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 85
+        "y": 88
       },
       "id": 16,
       "panels": [],
@@ -1647,7 +1621,7 @@
         "h": 9,
         "w": 12,
         "x": 0,
-        "y": 86
+        "y": 89
       },
       "id": 17,
       "options": {
@@ -1703,7 +1677,7 @@
         "h": 9,
         "w": 12,
         "x": 12,
-        "y": 86
+        "y": 89
       },
       "id": 18,
       "options": {
@@ -1759,7 +1733,7 @@
         "h": 9,
         "w": 12,
         "x": 0,
-        "y": 95
+        "y": 98
       },
       "id": 19,
       "options": {
@@ -1815,7 +1789,7 @@
         "h": 9,
         "w": 12,
         "x": 12,
-        "y": 95
+        "y": 98
       },
       "id": 20,
       "options": {
@@ -1866,7 +1840,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 104
+        "y": 107
       },
       "id": 305,
       "options": {
@@ -1926,7 +1900,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 104
+        "y": 107
       },
       "id": 306,
       "options": {
@@ -1986,7 +1960,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 112
+        "y": 115
       },
       "id": 307,
       "options": {
@@ -2024,7 +1998,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 120
+        "y": 123
       },
       "id": 23,
       "panels": [],
@@ -2098,7 +2072,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 121
+        "y": 124
       },
       "id": 24,
       "options": {
@@ -2127,7 +2101,7 @@
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 State Root Duration",
+          "legendFormat": "{{service}} · State Root Duration",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -2144,7 +2118,7 @@
           "hide": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 Execution Duration",
+          "legendFormat": "{{service}} · Execution Duration",
           "range": true,
           "refId": "B",
           "useBackend": false
@@ -2220,7 +2194,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 121
+        "y": 124
       },
       "id": 25,
       "options": {
@@ -2250,7 +2224,7 @@
           "hide": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 Account cache hits",
+          "legendFormat": "{{service}} · Account cache hits",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -2267,7 +2241,7 @@
           "hide": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 Storage cache hits",
+          "legendFormat": "{{service}} · Storage cache hits",
           "range": true,
           "refId": "B",
           "useBackend": false
@@ -2284,7 +2258,7 @@
           "hide": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 Code cache hits",
+          "legendFormat": "{{service}} · Code cache hits",
           "range": true,
           "refId": "C",
           "useBackend": false
@@ -2386,7 +2360,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 129
+        "y": 132
       },
       "id": 27,
       "options": {
@@ -2416,7 +2390,7 @@
           "hide": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 Precompile cache hits",
+          "legendFormat": "{{service}} · Precompile cache hits",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -2492,7 +2466,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 129
+        "y": 132
       },
       "id": 32,
       "options": {
@@ -2518,7 +2492,7 @@
           "editorMode": "code",
           "expr": "reth_sparse_state_trie_multiproof_total_account_nodes{chain=\"$chain\", role=~\"$role\", service=~\"$service\",quantile=~\"(0|0.5|0.9|0.95|1)\"}",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 Account {{quantile}} percentile",
+          "legendFormat": "{{service}} · Account {{quantile}} percentile",
           "range": true,
           "refId": "Branch Nodes"
         }
@@ -2593,7 +2567,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 137
+        "y": 140
       },
       "id": 33,
       "options": {
@@ -2619,7 +2593,7 @@
           "editorMode": "code",
           "expr": "reth_sparse_state_trie_multiproof_total_storage_nodes{chain=\"$chain\", role=~\"$role\", service=~\"$service\",quantile=~\"(0|0.5|0.9|0.95|1)\"}",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 Storage {{quantile}} percentile",
+          "legendFormat": "{{service}} · Storage {{quantile}} percentile",
           "range": true,
           "refId": "Branch Nodes"
         }
@@ -2695,7 +2669,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 137
+        "y": 140
       },
       "id": 37,
       "options": {
@@ -2724,7 +2698,7 @@
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 {{role}} \u00b7 p{{quantile}}",
+          "legendFormat": "{{service}} · {{role}} · p{{quantile}}",
           "range": true,
           "refId": "A",
           "useBackend": false
@@ -2761,7 +2735,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 145
+        "y": 148
       },
       "id": 308,
       "options": {
@@ -2784,7 +2758,7 @@
           "editorMode": "code",
           "expr": "reth_tree_root_sparse_trie_account_cache_hits_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} / (reth_tree_root_sparse_trie_account_cache_hits_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} + reth_tree_root_sparse_trie_account_cache_misses_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 {{role}} \u00b7 hit %",
+          "legendFormat": "{{service}} · {{role}} · hit %",
           "range": true,
           "refId": "A"
         }
@@ -2821,7 +2795,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 145
+        "y": 148
       },
       "id": 309,
       "options": {
@@ -2844,7 +2818,7 @@
           "editorMode": "code",
           "expr": "reth_tree_root_sparse_trie_storage_cache_hits_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} / (reth_tree_root_sparse_trie_storage_cache_hits_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} + reth_tree_root_sparse_trie_storage_cache_misses_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 {{role}} \u00b7 hit %",
+          "legendFormat": "{{service}} · {{role}} · hit %",
           "range": true,
           "refId": "A"
         }
@@ -2881,7 +2855,7 @@
         "h": 8,
         "w": 6,
         "x": 0,
-        "y": 153
+        "y": 156
       },
       "id": 310,
       "options": {
@@ -2904,7 +2878,7 @@
           "editorMode": "code",
           "expr": "reth_trie_proof_task_account_worker_idle_time_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 {{role}} \u00b7 p{{quantile}}",
+          "legendFormat": "{{service}} · {{role}} · p{{quantile}}",
           "range": true,
           "refId": "A"
         }
@@ -2941,7 +2915,7 @@
         "h": 8,
         "w": 6,
         "x": 6,
-        "y": 153
+        "y": 156
       },
       "id": 311,
       "options": {
@@ -2964,7 +2938,7 @@
           "editorMode": "code",
           "expr": "reth_trie_proof_task_storage_worker_idle_time_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 {{role}} \u00b7 p{{quantile}}",
+          "legendFormat": "{{service}} · {{role}} · p{{quantile}}",
           "range": true,
           "refId": "A"
         }
@@ -3001,7 +2975,7 @@
         "h": 8,
         "w": 6,
         "x": 12,
-        "y": 153
+        "y": 156
       },
       "id": 312,
       "options": {
@@ -3024,7 +2998,7 @@
           "editorMode": "code",
           "expr": "reth_tree_root_sparse_trie_idle_time_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 {{role}} \u00b7 p{{quantile}}",
+          "legendFormat": "{{service}} · {{role}} · p{{quantile}}",
           "range": true,
           "refId": "A"
         }
@@ -3061,7 +3035,7 @@
         "h": 8,
         "w": 6,
         "x": 18,
-        "y": 153
+        "y": 156
       },
       "id": 313,
       "options": {
@@ -3084,7 +3058,7 @@
           "editorMode": "code",
           "expr": "reth_tree_root_hashing_task_idle_time_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 {{role}} \u00b7 p{{quantile}}",
+          "legendFormat": "{{service}} · {{role}} · p{{quantile}}",
           "range": true,
           "refId": "A"
         }
@@ -3121,7 +3095,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 161
+        "y": 164
       },
       "id": 314,
       "options": {
@@ -3144,7 +3118,7 @@
           "editorMode": "code",
           "expr": "sum by (service) (rate(reth_sync_block_validation_state_root_task_timeout_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 timeout",
+          "legendFormat": "{{service}} · timeout",
           "range": true,
           "refId": "A"
         },
@@ -3156,7 +3130,7 @@
           "editorMode": "code",
           "expr": "sum by (service) (rate(reth_sync_block_validation_state_root_task_fallback_success_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 fallback success",
+          "legendFormat": "{{service}} · fallback success",
           "range": true,
           "refId": "B"
         }
@@ -3193,7 +3167,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 161
+        "y": 164
       },
       "id": 315,
       "options": {
@@ -3216,7 +3190,7 @@
           "editorMode": "code",
           "expr": "reth_sync_block_validation_deferred_trie_compute_duration{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 {{role}} \u00b7 p{{quantile}}",
+          "legendFormat": "{{service}} · {{role}} · p{{quantile}}",
           "range": true,
           "refId": "A"
         }
@@ -3231,7 +3205,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 169
+        "y": 172
       },
       "id": 316,
       "panels": [],
@@ -3266,7 +3240,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 170
+        "y": 173
       },
       "id": 317,
       "options": {
@@ -3289,7 +3263,7 @@
           "editorMode": "code",
           "expr": "reth_morph_proofs_earliest_block{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 earliest",
+          "legendFormat": "{{service}} · earliest",
           "range": true,
           "refId": "A"
         },
@@ -3301,7 +3275,7 @@
           "editorMode": "code",
           "expr": "reth_morph_proofs_latest_block{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 latest",
+          "legendFormat": "{{service}} · latest",
           "range": true,
           "refId": "B"
         },
@@ -3313,7 +3287,7 @@
           "editorMode": "code",
           "expr": "reth_morph_proofs_latest_block{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} - reth_morph_proofs_earliest_block{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} + 1",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 inclusive window",
+          "legendFormat": "{{service}} · inclusive window",
           "range": true,
           "refId": "C"
         },
@@ -3325,7 +3299,7 @@
           "editorMode": "code",
           "expr": "clamp_min(reth_blockchain_tree_canonical_chain_height{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} - reth_morph_proofs_latest_block{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}, 0)",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 canonical lag",
+          "legendFormat": "{{service}} · canonical lag",
           "range": true,
           "refId": "D"
         }
@@ -3362,7 +3336,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 178
+        "y": 181
       },
       "id": 318,
       "options": {
@@ -3385,7 +3359,7 @@
           "editorMode": "code",
           "expr": "reth_morph_proofs_block_total_duration_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 total p{{quantile}}",
+          "legendFormat": "{{service}} · total p{{quantile}}",
           "range": true,
           "refId": "A"
         },
@@ -3397,7 +3371,7 @@
           "editorMode": "code",
           "expr": "reth_morph_proofs_block_execution_duration_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 execution p{{quantile}}",
+          "legendFormat": "{{service}} · execution p{{quantile}}",
           "range": true,
           "refId": "B"
         },
@@ -3409,7 +3383,7 @@
           "editorMode": "code",
           "expr": "reth_morph_proofs_block_state_root_duration_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 state root p{{quantile}}",
+          "legendFormat": "{{service}} · state root p{{quantile}}",
           "range": true,
           "refId": "C"
         },
@@ -3421,7 +3395,7 @@
           "editorMode": "code",
           "expr": "reth_morph_proofs_block_write_duration_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 write p{{quantile}}",
+          "legendFormat": "{{service}} · write p{{quantile}}",
           "range": true,
           "refId": "D"
         }
@@ -3458,7 +3432,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 186
+        "y": 189
       },
       "id": 319,
       "options": {
@@ -3481,7 +3455,7 @@
           "editorMode": "code",
           "expr": "rate(reth_morph_proofs_account_trie_updates_written_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 account trie updates",
+          "legendFormat": "{{service}} · account trie updates",
           "range": true,
           "refId": "A"
         },
@@ -3493,7 +3467,7 @@
           "editorMode": "code",
           "expr": "rate(reth_morph_proofs_storage_trie_updates_written_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 storage trie updates",
+          "legendFormat": "{{service}} · storage trie updates",
           "range": true,
           "refId": "B"
         },
@@ -3505,7 +3479,7 @@
           "editorMode": "code",
           "expr": "rate(reth_morph_proofs_hashed_accounts_written_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 hashed accounts",
+          "legendFormat": "{{service}} · hashed accounts",
           "range": true,
           "refId": "C"
         },
@@ -3517,7 +3491,7 @@
           "editorMode": "code",
           "expr": "rate(reth_morph_proofs_hashed_storages_written_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 hashed storages",
+          "legendFormat": "{{service}} · hashed storages",
           "range": true,
           "refId": "D"
         }
@@ -3554,7 +3528,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 186
+        "y": 189
       },
       "id": 320,
       "options": {
@@ -3577,7 +3551,7 @@
           "editorMode": "code",
           "expr": "rate(reth_morph_proofs_prune_errors_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 prune",
+          "legendFormat": "{{service}} · prune",
           "range": true,
           "refId": "A"
         },
@@ -3589,7 +3563,7 @@
           "editorMode": "code",
           "expr": "rate(reth_morph_proofs_unwind_errors_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 unwind",
+          "legendFormat": "{{service}} · unwind",
           "range": true,
           "refId": "B"
         }
@@ -3626,7 +3600,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 194
+        "y": 197
       },
       "id": 321,
       "options": {
@@ -3649,7 +3623,7 @@
           "editorMode": "code",
           "expr": "sum by (service, method) (rate(reth_morph_rpc_proofs_requests_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 {{method}}",
+          "legendFormat": "{{service}} · {{method}}",
           "range": true,
           "refId": "A"
         }
@@ -3686,7 +3660,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 194
+        "y": 197
       },
       "id": 322,
       "options": {
@@ -3709,7 +3683,7 @@
           "editorMode": "code",
           "expr": "sum by (service, method) (rate(reth_morph_rpc_proofs_successful_responses_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 {{method}} success",
+          "legendFormat": "{{service}} · {{method}} success",
           "range": true,
           "refId": "A"
         },
@@ -3721,7 +3695,7 @@
           "editorMode": "code",
           "expr": "sum by (service, method) (rate(reth_morph_rpc_proofs_failures_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 {{method}} failure",
+          "legendFormat": "{{service}} · {{method}} failure",
           "range": true,
           "refId": "B"
         },
@@ -3733,7 +3707,7 @@
           "editorMode": "code",
           "expr": "sum by (service, method) (rate(reth_morph_rpc_proofs_rejected_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 {{method}} rejected",
+          "legendFormat": "{{service}} · {{method}} rejected",
           "range": true,
           "refId": "C"
         }
@@ -3770,7 +3744,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 202
+        "y": 205
       },
       "id": 323,
       "options": {
@@ -3793,7 +3767,7 @@
           "editorMode": "code",
           "expr": "reth_morph_rpc_proofs_latency_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 {{role}} \u00b7 {{method}} p{{quantile}}",
+          "legendFormat": "{{service}} · {{role}} · {{method}} p{{quantile}}",
           "range": true,
           "refId": "A"
         }
@@ -3830,7 +3804,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 202
+        "y": 205
       },
       "id": 324,
       "options": {
@@ -3853,7 +3827,7 @@
           "editorMode": "code",
           "expr": "reth_morph_proofs_pruner_total_duration_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 {{role}} \u00b7 p{{quantile}}",
+          "legendFormat": "{{service}} · {{role}} · p{{quantile}}",
           "range": true,
           "refId": "A"
         }
@@ -3890,7 +3864,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 210
+        "y": 213
       },
       "id": 325,
       "options": {
@@ -3913,7 +3887,7 @@
           "editorMode": "code",
           "expr": "reth_morph_proofs_pruner_pruned_blocks{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 pruned blocks",
+          "legendFormat": "{{service}} · pruned blocks",
           "range": true,
           "refId": "A"
         },
@@ -3925,7 +3899,7 @@
           "editorMode": "code",
           "expr": "reth_morph_proofs_pruner_account_trie_updates_written{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 account trie updates",
+          "legendFormat": "{{service}} · account trie updates",
           "range": true,
           "refId": "B"
         },
@@ -3937,7 +3911,7 @@
           "editorMode": "code",
           "expr": "reth_morph_proofs_pruner_storage_trie_updates_written{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 storage trie updates",
+          "legendFormat": "{{service}} · storage trie updates",
           "range": true,
           "refId": "C"
         },
@@ -3949,7 +3923,7 @@
           "editorMode": "code",
           "expr": "reth_morph_proofs_pruner_hashed_accounts_written{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 hashed accounts",
+          "legendFormat": "{{service}} · hashed accounts",
           "range": true,
           "refId": "D"
         },
@@ -3961,7 +3935,7 @@
           "editorMode": "code",
           "expr": "reth_morph_proofs_pruner_hashed_storages_written{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
           "instant": false,
-          "legendFormat": "{{service}} \u00b7 hashed storages",
+          "legendFormat": "{{service}} · hashed storages",
           "range": true,
           "refId": "E"
         }
@@ -3976,7 +3950,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 218
+        "y": 221
       },
       "id": 326,
       "panels": [
@@ -4008,7 +3982,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 219
+            "y": 222
           },
           "id": 327,
           "options": {
@@ -4031,7 +4005,7 @@
               "editorMode": "code",
               "expr": "reth_exex_notifications_sent_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 {{exex}}",
+              "legendFormat": "{{service}} · {{exex}}",
               "range": true,
               "refId": "A"
             }
@@ -4068,7 +4042,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 219
+            "y": 222
           },
           "id": 328,
           "options": {
@@ -4091,7 +4065,7 @@
               "editorMode": "code",
               "expr": "reth_exex_events_sent_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 {{exex}}",
+              "legendFormat": "{{service}} · {{exex}}",
               "range": true,
               "refId": "A"
             }
@@ -4128,7 +4102,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 227
+            "y": 230
           },
           "id": 329,
           "options": {
@@ -4151,7 +4125,7 @@
               "editorMode": "code",
               "expr": "reth_exex_manager_current_capacity{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 current",
+              "legendFormat": "{{service}} · current",
               "range": true,
               "refId": "A"
             },
@@ -4163,7 +4137,7 @@
               "editorMode": "code",
               "expr": "max_over_time(reth_exex_manager_max_capacity{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[1h])",
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 max",
+              "legendFormat": "{{service}} · max",
               "range": true,
               "refId": "B"
             }
@@ -4200,7 +4174,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 227
+            "y": 230
           },
           "id": 330,
           "options": {
@@ -4247,7 +4221,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 235
+            "y": 238
           },
           "id": 331,
           "options": {
@@ -4311,7 +4285,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 235
+            "y": 238
           },
           "id": 332,
           "options": {
@@ -4334,7 +4308,7 @@
               "editorMode": "code",
               "expr": "reth_exex_wal_lowest_committed_block_height{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} and on (chain, role, service, instance) (reth_exex_wal_committed_blocks_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0)",
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 lowest",
+              "legendFormat": "{{service}} · lowest",
               "range": true,
               "refId": "A"
             },
@@ -4346,7 +4320,7 @@
               "editorMode": "code",
               "expr": "reth_exex_wal_highest_committed_block_height{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} and on (chain, role, service, instance) (reth_exex_wal_committed_blocks_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0)",
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 highest",
+              "legendFormat": "{{service}} · highest",
               "range": true,
               "refId": "B"
             }
@@ -4383,7 +4357,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 243
+            "y": 246
           },
           "id": 333,
           "options": {
@@ -4406,7 +4380,7 @@
               "editorMode": "code",
               "expr": "reth_exex_wal_committed_blocks_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 committed blocks",
+              "legendFormat": "{{service}} · committed blocks",
               "range": true,
               "refId": "A"
             },
@@ -4418,7 +4392,7 @@
               "editorMode": "code",
               "expr": "reth_exex_wal_notifications_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 notifications",
+              "legendFormat": "{{service}} · notifications",
               "range": true,
               "refId": "B"
             }
@@ -4455,7 +4429,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 243
+            "y": 246
           },
           "id": 334,
           "options": {
@@ -4498,7 +4472,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 219
+        "y": 222
       },
       "id": 38,
       "panels": [
@@ -4567,7 +4541,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 252
+            "y": 255
           },
           "id": 39,
           "options": {
@@ -4595,7 +4569,7 @@
               "expr": "avg by (service) (rate(reth_database_transaction_close_duration_seconds_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\", outcome=\"commit\"}[$__rate_interval]) / clamp_min(rate(reth_database_transaction_close_duration_seconds_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\", outcome=\"commit\"}[$__rate_interval]), 1))",
               "format": "time_series",
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Commit time",
+              "legendFormat": "{{service}} · Commit time",
               "range": true,
               "refId": "A"
             }
@@ -4628,7 +4602,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 252
+            "y": 255
           },
           "id": 40,
           "maxDataPoints": 25,
@@ -4686,7 +4660,7 @@
               "expr": "avg by (service, quantile) (max_over_time(reth_database_transaction_close_duration_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", outcome=\"commit\"}[$__rate_interval]))",
               "format": "time_series",
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 {{quantile}}",
+              "legendFormat": "{{service}} · {{quantile}}",
               "range": true,
               "refId": "A"
             }
@@ -4759,7 +4733,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 260
+            "y": 263
           },
           "id": 41,
           "options": {
@@ -4787,7 +4761,7 @@
               "expr": "sum by (service, outcome, mode) (rate(reth_database_transaction_open_duration_seconds_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\", outcome!=\"\"}[$__rate_interval]) / rate(reth_database_transaction_open_duration_seconds_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\", outcome!=\"\"}[$__rate_interval])) > 0",
               "format": "time_series",
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 {{mode}}, {{outcome}}",
+              "legendFormat": "{{service}} · {{mode}}, {{outcome}}",
               "range": true,
               "refId": "A"
             }
@@ -4859,7 +4833,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 260
+            "y": 263
           },
           "id": 42,
           "options": {
@@ -4887,7 +4861,7 @@
               "expr": "max by (service, outcome, mode) (max_over_time(reth_database_transaction_open_duration_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", outcome!=\"\", quantile=\"1\"}[$__interval])) > 0",
               "format": "time_series",
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 {{mode}}, {{outcome}}",
+              "legendFormat": "{{service}} · {{mode}}, {{outcome}}",
               "range": true,
               "refId": "A"
             }
@@ -4987,7 +4961,7 @@
                   },
                   {
                     "id": "displayName",
-                    "value": "${__field.labels.service} \u00b7 Diff (opened \u2212 closed)"
+                    "value": "${__field.labels.service} · Diff (opened − closed)"
                   }
                 ]
               }
@@ -4997,7 +4971,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 268
+            "y": 271
           },
           "id": 43,
           "options": {
@@ -5028,7 +5002,7 @@
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Opened",
+              "legendFormat": "{{service}} · Opened",
               "range": true,
               "refId": "A",
               "useBackend": false
@@ -5043,7 +5017,7 @@
               "expr": "sum by (service) (reth_database_transaction_closed_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\", mode=\"read-write\"})",
               "format": "time_series",
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Closed",
+              "legendFormat": "{{service}} · Closed",
               "range": true,
               "refId": "B"
             },
@@ -5153,7 +5127,7 @@
                   },
                   {
                     "id": "displayName",
-                    "value": "${__field.labels.service} \u00b7 Diff (opened \u2212 closed)"
+                    "value": "${__field.labels.service} · Diff (opened − closed)"
                   }
                 ]
               }
@@ -5163,7 +5137,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 268
+            "y": 271
           },
           "id": 44,
           "options": {
@@ -5194,7 +5168,7 @@
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Opened",
+              "legendFormat": "{{service}} · Opened",
               "range": true,
               "refId": "A",
               "useBackend": false
@@ -5212,7 +5186,7 @@
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Closed",
+              "legendFormat": "{{service}} · Closed",
               "range": true,
               "refId": "B",
               "useBackend": false
@@ -5258,7 +5232,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 276
+            "y": 279
           },
           "id": 45,
           "options": {
@@ -5298,7 +5272,7 @@
               "editorMode": "builder",
               "expr": "reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
               "interval": "",
-              "legendFormat": "{{service}} \u00b7 {{table}}",
+              "legendFormat": "{{service}} · {{table}}",
               "range": true,
               "refId": "A"
             }
@@ -5374,7 +5348,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 276
+            "y": 279
           },
           "id": 46,
           "options": {
@@ -5402,7 +5376,7 @@
               "expr": "max(max_over_time(reth_database_operation_large_value_duration_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"1\"}[$__interval])) by (service, table) > 0",
               "format": "time_series",
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 {{table}}",
+              "legendFormat": "{{service}} · {{table}}",
               "range": true,
               "refId": "A"
             }
@@ -5437,7 +5411,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 284
+            "y": 287
           },
           "id": 47,
           "options": {
@@ -5473,7 +5447,7 @@
               },
               "editorMode": "builder",
               "expr": "sum by (service, type) ( reth_db_table_pages{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} )",
-              "legendFormat": "{{service}} \u00b7 {{type}}",
+              "legendFormat": "{{service}} · {{type}}",
               "range": true,
               "refId": "A"
             }
@@ -5550,7 +5524,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 284
+            "y": 287
           },
           "id": 48,
           "options": {
@@ -5651,7 +5625,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 292
+            "y": 295
           },
           "id": 49,
           "options": {
@@ -5676,7 +5650,7 @@
               },
               "editorMode": "code",
               "expr": "sum(reth_db_freelist{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) by (service, job)",
-              "legendFormat": "{{service}} \u00b7 Pages ({{job}})",
+              "legendFormat": "{{service}} · Pages ({{job}})",
               "range": true,
               "refId": "A"
             }
@@ -5814,7 +5788,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 292
+            "y": 295
           },
           "id": 50,
           "options": {
@@ -5888,7 +5862,7 @@
             "h": 8,
             "w": 8,
             "x": 0,
-            "y": 300
+            "y": 303
           },
           "id": 51,
           "options": {
@@ -5928,7 +5902,7 @@
               "editorMode": "code",
               "expr": "reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
               "interval": "",
-              "legendFormat": "{{service}} \u00b7 {{segment}}",
+              "legendFormat": "{{service}} · {{segment}}",
               "range": true,
               "refId": "A"
             }
@@ -6054,7 +6028,7 @@
             "h": 8,
             "w": 8,
             "x": 8,
-            "y": 300
+            "y": 303
           },
           "id": 52,
           "options": {
@@ -6219,7 +6193,7 @@
             "h": 8,
             "w": 8,
             "x": 16,
-            "y": 300
+            "y": 303
           },
           "id": 53,
           "options": {
@@ -6334,7 +6308,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 308
+            "y": 311
           },
           "id": 54,
           "options": {
@@ -6435,7 +6409,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 308
+            "y": 311
           },
           "id": 55,
           "options": {
@@ -6460,7 +6434,7 @@
               },
               "editorMode": "code",
               "expr": "max by (service, segment) (max_over_time(reth_static_files_jar_provider_write_duration_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", operation=\"commit-writer\", quantile=\"1\"}[$__interval])) or (0 * max by (service, segment) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}))",
-              "legendFormat": "{{service}} \u00b7 {{segment}}",
+              "legendFormat": "{{service}} · {{segment}}",
               "range": true,
               "refId": "A"
             }
@@ -6535,7 +6509,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 316
+            "y": 319
           },
           "id": 56,
           "options": {
@@ -6561,7 +6535,7 @@
               "editorMode": "builder",
               "expr": "reth_blockchain_tree_canonical_chain_height{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
               "hide": false,
-              "legendFormat": "{{service}} \u00b7 Canonical chain height",
+              "legendFormat": "{{service}} · Canonical chain height",
               "range": true,
               "refId": "B"
             }
@@ -6636,7 +6610,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 316
+            "y": 319
           },
           "id": 57,
           "options": {
@@ -6662,7 +6636,7 @@
               "editorMode": "builder",
               "expr": "reth_blockchain_tree_block_buffer_blocks{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
               "hide": false,
-              "legendFormat": "{{service}} \u00b7 Buffered blocks",
+              "legendFormat": "{{service}} · Buffered blocks",
               "range": true,
               "refId": "B"
             }
@@ -6737,7 +6711,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 324
+            "y": 327
           },
           "id": 58,
           "options": {
@@ -6839,7 +6813,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 324
+            "y": 327
           },
           "id": 59,
           "options": {
@@ -6884,7 +6858,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 252
+        "y": 255
       },
       "id": 60,
       "panels": [
@@ -6981,7 +6955,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 333
+            "y": 336
           },
           "id": 61,
           "options": {
@@ -7010,7 +6984,7 @@
               "format": "time_series",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
-              "legendFormat": "{{service}} \u00b7 {{transport}}",
+              "legendFormat": "{{service}} · {{transport}}",
               "range": true,
               "refId": "A",
               "useBackend": false
@@ -7044,7 +7018,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 333
+            "y": 336
           },
           "id": 62,
           "maxDataPoints": 25,
@@ -7177,7 +7151,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 341
+            "y": 344
           },
           "id": 63,
           "options": {
@@ -7203,7 +7177,7 @@
               "editorMode": "code",
               "expr": "max by (service, method) (max_over_time(reth_rpc_server_calls_time_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])) > 0",
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 {{method}}",
+              "legendFormat": "{{service}} · {{method}}",
               "range": true,
               "refId": "A"
             }
@@ -7236,7 +7210,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 341
+            "y": 344
           },
           "id": 64,
           "maxDataPoints": 25,
@@ -7405,7 +7379,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 349
+            "y": 352
           },
           "id": 65,
           "options": {
@@ -7434,7 +7408,7 @@
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Headers cache cached items",
+              "legendFormat": "{{service}} · Headers cache cached items",
               "range": true,
               "refId": "A",
               "useBackend": false
@@ -7451,7 +7425,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Receipts cache queued consumers",
+              "legendFormat": "{{service}} · Receipts cache queued consumers",
               "range": true,
               "refId": "B",
               "useBackend": false
@@ -7468,7 +7442,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Headers cache queued consumers",
+              "legendFormat": "{{service}} · Headers cache queued consumers",
               "range": true,
               "refId": "C",
               "useBackend": false
@@ -7485,7 +7459,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Block cache queued consumers",
+              "legendFormat": "{{service}} · Block cache queued consumers",
               "range": true,
               "refId": "D",
               "useBackend": false
@@ -7502,7 +7476,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Blocks cache memory usage",
+              "legendFormat": "{{service}} · Blocks cache memory usage",
               "range": true,
               "refId": "E",
               "useBackend": false
@@ -7519,7 +7493,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Receipts cache cached items",
+              "legendFormat": "{{service}} · Receipts cache cached items",
               "range": true,
               "refId": "F",
               "useBackend": false
@@ -7536,7 +7510,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Receipts cache memory usage",
+              "legendFormat": "{{service}} · Receipts cache memory usage",
               "range": true,
               "refId": "G",
               "useBackend": false
@@ -7553,7 +7527,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Block cache cached items",
+              "legendFormat": "{{service}} · Block cache cached items",
               "range": true,
               "refId": "H",
               "useBackend": false
@@ -7629,7 +7603,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 349
+            "y": 352
           },
           "id": 66,
           "options": {
@@ -7655,12 +7629,114 @@
               "editorMode": "code",
               "expr": "sum by (service, method) (rate(reth_rpc_server_calls_successful_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])) > 0",
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 {{method}}",
+              "legendFormat": "{{service}} · {{method}}",
               "range": true,
               "refId": "A"
             }
           ],
           "title": "RPC Throughput",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "description": "JSON-RPC calls per minute on each node across HTTP, WS and IPC, counting every entry of a batch. Includes morphnode's own eth_* calls over HTTP. Engine API calls on the authenticated port are not instrumented and therefore excluded.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic-by-name"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "smooth",
+                "lineWidth": 1,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "auto",
+                "showValues": false,
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": 0
+                  },
+                  {
+                    "color": "red",
+                    "value": 80
+                  }
+                ]
+              },
+              "unit": "reqpm",
+              "min": 0
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 360
+          },
+          "id": 338,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "12.2.1",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (service) (rate(reth_rpc_server_calls_started_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])) * 60",
+              "instant": false,
+              "legendFormat": "{{service}}",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "RPC Requests (Per Minute) By Role",
           "type": "timeseries"
         }
       ],
@@ -7673,7 +7749,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 253
+        "y": 256
       },
       "id": 117,
       "panels": [
@@ -7745,7 +7821,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 555
+            "y": 558
           },
           "id": 119,
           "options": {
@@ -7847,7 +7923,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 555
+            "y": 558
           },
           "id": 120,
           "options": {
@@ -7949,7 +8025,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 563
+            "y": 566
           },
           "id": 121,
           "options": {
@@ -7975,7 +8051,7 @@
               "editorMode": "builder",
               "expr": "reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Open",
+              "legendFormat": "{{service}} · Open",
               "range": true,
               "refId": "A"
             }
@@ -8051,7 +8127,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 563
+            "y": 566
           },
           "id": 122,
           "options": {
@@ -8078,7 +8154,7 @@
               "expr": "(reth_executor_spawn_critical_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} or (0 * reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})) - (reth_executor_spawn_finished_critical_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} or (0 * reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}))",
               "hide": false,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Tasks running",
+              "legendFormat": "{{service}} · Tasks running",
               "range": true,
               "refId": "C"
             }
@@ -8167,7 +8243,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 571
+            "y": 574
           },
           "id": 123,
           "options": {
@@ -8198,7 +8274,7 @@
               "hide": false,
               "includeNullMetadata": false,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Tasks started",
+              "legendFormat": "{{service}} · Tasks started",
               "range": true,
               "refId": "A",
               "useBackend": false
@@ -8212,7 +8288,7 @@
               "expr": "(reth_executor_spawn_regular_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} or (0 * reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})) - (reth_executor_spawn_finished_regular_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} or (0 * reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}))",
               "hide": false,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Tasks running",
+              "legendFormat": "{{service}} · Tasks running",
               "range": true,
               "refId": "C"
             }
@@ -8301,7 +8377,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 571
+            "y": 574
           },
           "id": 124,
           "options": {
@@ -8332,7 +8408,7 @@
               "hide": false,
               "includeNullMetadata": false,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Tasks started",
+              "legendFormat": "{{service}} · Tasks started",
               "range": true,
               "refId": "A",
               "useBackend": false
@@ -8346,7 +8422,7 @@
               "expr": "(reth_executor_spawn_regular_blocking_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} or (0 * reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})) - (reth_executor_spawn_finished_regular_blocking_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} or (0 * reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}))",
               "hide": false,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Tasks running",
+              "legendFormat": "{{service}} · Tasks running",
               "range": true,
               "refId": "C"
             }
@@ -8421,7 +8497,7 @@
             "h": 8,
             "w": 24,
             "x": 0,
-            "y": 579
+            "y": 582
           },
           "id": 125,
           "options": {
@@ -8483,7 +8559,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 587
+            "y": 590
           },
           "id": 335,
           "options": {
@@ -8506,7 +8582,7 @@
               "editorMode": "code",
               "expr": "reth_jemalloc_active{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 active",
+              "legendFormat": "{{service}} · active",
               "range": true,
               "refId": "A"
             },
@@ -8518,7 +8594,7 @@
               "editorMode": "code",
               "expr": "reth_jemalloc_allocated{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 allocated",
+              "legendFormat": "{{service}} · allocated",
               "range": true,
               "refId": "B"
             },
@@ -8530,7 +8606,7 @@
               "editorMode": "code",
               "expr": "reth_jemalloc_mapped{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 mapped",
+              "legendFormat": "{{service}} · mapped",
               "range": true,
               "refId": "C"
             },
@@ -8542,7 +8618,7 @@
               "editorMode": "code",
               "expr": "reth_jemalloc_metadata{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 metadata",
+              "legendFormat": "{{service}} · metadata",
               "range": true,
               "refId": "D"
             },
@@ -8554,7 +8630,7 @@
               "editorMode": "code",
               "expr": "reth_jemalloc_resident{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 resident",
+              "legendFormat": "{{service}} · resident",
               "range": true,
               "refId": "E"
             },
@@ -8566,7 +8642,7 @@
               "editorMode": "code",
               "expr": "reth_jemalloc_retained{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 retained",
+              "legendFormat": "{{service}} · retained",
               "range": true,
               "refId": "F"
             }
@@ -8603,7 +8679,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 587
+            "y": 590
           },
           "id": 336,
           "options": {
@@ -8626,7 +8702,7 @@
               "editorMode": "code",
               "expr": "rate(reth_pruner_segments_duration_seconds_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]) / rate(reth_pruner_segments_duration_seconds_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 {{segment}}",
+              "legendFormat": "{{service}} · {{segment}}",
               "range": true,
               "refId": "A"
             }
@@ -8663,7 +8739,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 595
+            "y": 598
           },
           "id": 337,
           "options": {
@@ -8686,7 +8762,7 @@
               "editorMode": "code",
               "expr": "reth_pruner_segments_highest_pruned_block{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 {{segment}}",
+              "legendFormat": "{{service}} · {{segment}}",
               "range": true,
               "refId": "A"
             }
@@ -8705,7 +8781,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 254
+        "y": 257
       },
       "id": 80,
       "panels": [
@@ -8776,7 +8852,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 407
+            "y": 410
           },
           "id": 82,
           "options": {
@@ -8799,7 +8875,7 @@
               },
               "editorMode": "builder",
               "expr": "reth_transaction_pool_basefee_pool_size_bytes{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
-              "legendFormat": "{{service}} \u00b7 Base Fee Pool Size",
+              "legendFormat": "{{service}} · Base Fee Pool Size",
               "range": true,
               "refId": "A"
             },
@@ -8811,7 +8887,7 @@
               "editorMode": "builder",
               "expr": "reth_transaction_pool_pending_pool_size_bytes{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
               "hide": false,
-              "legendFormat": "{{service}} \u00b7 Pending Pool Size",
+              "legendFormat": "{{service}} · Pending Pool Size",
               "range": true,
               "refId": "B"
             },
@@ -8823,7 +8899,7 @@
               "editorMode": "builder",
               "expr": "reth_transaction_pool_queued_pool_size_bytes{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
               "hide": false,
-              "legendFormat": "{{service}} \u00b7 Queued Pool Size",
+              "legendFormat": "{{service}} · Queued Pool Size",
               "range": true,
               "refId": "C"
             },
@@ -8834,7 +8910,7 @@
               },
               "editorMode": "builder",
               "expr": "reth_transaction_pool_blob_pool_size_bytes{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
-              "legendFormat": "{{service}} \u00b7 Blob Pool Size",
+              "legendFormat": "{{service}} · Blob Pool Size",
               "range": true,
               "refId": "D"
             }
@@ -8909,7 +8985,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 407
+            "y": 410
           },
           "id": 83,
           "options": {
@@ -8936,7 +9012,7 @@
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Dirty Accounts",
+              "legendFormat": "{{service}} · Dirty Accounts",
               "range": true,
               "refId": "A",
               "useBackend": false
@@ -8953,7 +9029,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Drift Count",
+              "legendFormat": "{{service}} · Drift Count",
               "range": true,
               "refId": "B",
               "useBackend": false
@@ -8970,7 +9046,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Reinserted Transactions",
+              "legendFormat": "{{service}} · Reinserted Transactions",
               "range": true,
               "refId": "C",
               "useBackend": false
@@ -8987,7 +9063,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Deleted Tracked Finalized Blobs",
+              "legendFormat": "{{service}} · Deleted Tracked Finalized Blobs",
               "range": true,
               "refId": "D",
               "useBackend": false
@@ -9062,7 +9138,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 415
+            "y": 418
           },
           "id": 84,
           "options": {
@@ -9085,7 +9161,7 @@
               },
               "editorMode": "builder",
               "expr": "reth_transaction_pool_basefee_pool_transactions{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
-              "legendFormat": "{{service}} \u00b7 Base Fee Pool Transactions",
+              "legendFormat": "{{service}} · Base Fee Pool Transactions",
               "range": true,
               "refId": "A"
             },
@@ -9097,7 +9173,7 @@
               "editorMode": "builder",
               "expr": "reth_transaction_pool_pending_pool_transactions{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
               "hide": false,
-              "legendFormat": "{{service}} \u00b7 Pending Pool Transactions",
+              "legendFormat": "{{service}} · Pending Pool Transactions",
               "range": true,
               "refId": "B"
             },
@@ -9109,7 +9185,7 @@
               "editorMode": "builder",
               "expr": "reth_transaction_pool_queued_pool_transactions{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
               "hide": false,
-              "legendFormat": "{{service}} \u00b7 Queued Pool Transactions",
+              "legendFormat": "{{service}} · Queued Pool Transactions",
               "range": true,
               "refId": "C"
             },
@@ -9120,7 +9196,7 @@
               },
               "editorMode": "builder",
               "expr": "reth_transaction_pool_blob_pool_transactions{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
-              "legendFormat": "{{service}} \u00b7 Blob Pool Transactions",
+              "legendFormat": "{{service}} · Blob Pool Transactions",
               "range": true,
               "refId": "D"
             }
@@ -9208,7 +9284,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 415
+            "y": 418
           },
           "id": 85,
           "options": {
@@ -9234,7 +9310,7 @@
               "expr": "rate(reth_transaction_pool_inserted_transactions{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
-              "legendFormat": "{{service}} \u00b7 Inserted Transactions",
+              "legendFormat": "{{service}} · Inserted Transactions",
               "range": true,
               "refId": "A",
               "useBackend": false
@@ -9250,7 +9326,7 @@
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
-              "legendFormat": "{{service}} \u00b7 Removed Transactions",
+              "legendFormat": "{{service}} · Removed Transactions",
               "range": true,
               "refId": "B",
               "useBackend": false
@@ -9266,7 +9342,7 @@
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
-              "legendFormat": "{{service}} \u00b7 Invalid Transactions",
+              "legendFormat": "{{service}} · Invalid Transactions",
               "range": true,
               "refId": "C",
               "useBackend": false
@@ -9283,7 +9359,7 @@
               "hide": false,
               "includeNullMetadata": false,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Bad Transactions",
+              "legendFormat": "{{service}} · Bad Transactions",
               "range": true,
               "refId": "D",
               "useBackend": false
@@ -9358,7 +9434,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 423
+            "y": 426
           },
           "id": 86,
           "options": {
@@ -9382,7 +9458,7 @@
               "editorMode": "builder",
               "expr": "reth_network_pending_pool_imports{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
               "hide": false,
-              "legendFormat": "{{service}} \u00b7 Transactions Pending Import",
+              "legendFormat": "{{service}} · Transactions Pending Import",
               "range": true,
               "refId": "C"
             }
@@ -9482,7 +9558,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 423
+            "y": 426
           },
           "id": 87,
           "options": {
@@ -9507,7 +9583,7 @@
               "expr": "rate(reth_network_pool_transactions_messages_sent_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
               "hide": false,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Tx",
+              "legendFormat": "{{service}} · Tx",
               "range": true,
               "refId": "A"
             },
@@ -9519,7 +9595,7 @@
               "editorMode": "builder",
               "expr": "rate(reth_network_pool_transactions_messages_received_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
               "hide": false,
-              "legendFormat": "{{service}} \u00b7 Rx",
+              "legendFormat": "{{service}} · Rx",
               "range": true,
               "refId": "B"
             },
@@ -9531,7 +9607,7 @@
               "editorMode": "code",
               "expr": "reth_network_pool_transactions_messages_sent_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} - reth_network_pool_transactions_messages_received_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
               "hide": false,
-              "legendFormat": "{{service}} \u00b7 Messages in Channel",
+              "legendFormat": "{{service}} · Messages in Channel",
               "range": true,
               "refId": "C"
             }
@@ -9606,7 +9682,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 431
+            "y": 434
           },
           "id": 88,
           "options": {
@@ -9633,7 +9709,7 @@
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Queued Messages per Second",
+              "legendFormat": "{{service}} · Queued Messages per Second",
               "range": true,
               "refId": "A",
               "useBackend": false
@@ -9708,7 +9784,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 431
+            "y": 434
           },
           "id": 89,
           "options": {
@@ -9735,7 +9811,7 @@
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 All transactions by hash",
+              "legendFormat": "{{service}} · All transactions by hash",
               "range": true,
               "refId": "A",
               "useBackend": false
@@ -9752,7 +9828,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 All transactions by id",
+              "legendFormat": "{{service}} · All transactions by id",
               "range": true,
               "refId": "B",
               "useBackend": false
@@ -9769,7 +9845,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 All transactions by all senders",
+              "legendFormat": "{{service}} · All transactions by all senders",
               "range": true,
               "refId": "C",
               "useBackend": false
@@ -9786,7 +9862,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Blob transactions nonce gaps",
+              "legendFormat": "{{service}} · Blob transactions nonce gaps",
               "range": true,
               "refId": "D",
               "useBackend": false
@@ -9862,7 +9938,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 439
+            "y": 442
           },
           "id": 90,
           "options": {
@@ -9889,7 +9965,7 @@
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Dropped",
+              "legendFormat": "{{service}} · Dropped",
               "range": true,
               "refId": "A",
               "useBackend": false
@@ -9965,7 +10041,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 439
+            "y": 442
           },
           "id": 91,
           "options": {
@@ -9993,7 +10069,7 @@
               "hide": false,
               "includeNullMetadata": false,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Freq Announced Transactions Already in Pool",
+              "legendFormat": "{{service}} · Freq Announced Transactions Already in Pool",
               "range": true,
               "refId": "A",
               "useBackend": false
@@ -10010,7 +10086,7 @@
               "hide": false,
               "includeNullMetadata": false,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Freq Received Transactions Already in Pool ",
+              "legendFormat": "{{service}} · Freq Received Transactions Already in Pool ",
               "range": true,
               "refId": "B",
               "useBackend": false
@@ -10085,7 +10161,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 447
+            "y": 450
           },
           "id": 92,
           "options": {
@@ -10109,7 +10185,7 @@
               "editorMode": "builder",
               "expr": "reth_network_inflight_transaction_requests{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
               "hide": false,
-              "legendFormat": "{{service}} \u00b7 Inflight Transaction Requests",
+              "legendFormat": "{{service}} · Inflight Transaction Requests",
               "range": true,
               "refId": "C"
             }
@@ -10184,7 +10260,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 447
+            "y": 450
           },
           "id": 93,
           "options": {
@@ -10212,7 +10288,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Network Events",
+              "legendFormat": "{{service}} · Network Events",
               "range": true,
               "refId": "B",
               "useBackend": false
@@ -10229,7 +10305,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Transaction Events",
+              "legendFormat": "{{service}} · Transaction Events",
               "range": true,
               "refId": "C",
               "useBackend": false
@@ -10247,7 +10323,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Pending Transactions",
+              "legendFormat": "{{service}} · Pending Transactions",
               "range": true,
               "refId": "D",
               "useBackend": false
@@ -10264,7 +10340,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Pending Pool Imports",
+              "legendFormat": "{{service}} · Pending Pool Imports",
               "range": true,
               "refId": "E",
               "useBackend": false
@@ -10281,7 +10357,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Fetch Events",
+              "legendFormat": "{{service}} · Fetch Events",
               "range": true,
               "refId": "F",
               "useBackend": false
@@ -10298,7 +10374,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Commands",
+              "legendFormat": "{{service}} · Commands",
               "range": true,
               "refId": "G",
               "useBackend": false
@@ -10315,7 +10391,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Fetch Pending Hashes",
+              "legendFormat": "{{service}} · Fetch Pending Hashes",
               "range": true,
               "refId": "A",
               "useBackend": false
@@ -10332,7 +10408,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Total Transactions Manager Future",
+              "legendFormat": "{{service}} · Total Transactions Manager Future",
               "range": true,
               "refId": "H",
               "useBackend": false
@@ -10407,7 +10483,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 455
+            "y": 458
           },
           "id": 94,
           "options": {
@@ -10434,7 +10510,7 @@
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Hashes in Pending Fetch Cache",
+              "legendFormat": "{{service}} · Hashes in Pending Fetch Cache",
               "range": true,
               "refId": "A",
               "useBackend": false
@@ -10451,7 +10527,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Hashes in Inflight Requests",
+              "legendFormat": "{{service}} · Hashes in Inflight Requests",
               "range": true,
               "refId": "B",
               "useBackend": false
@@ -10465,7 +10541,7 @@
               "expr": "sum by (service) (reth_network_hashes_inflight_transaction_requests{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) + sum by (service) (reth_network_hashes_pending_fetch{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "hide": false,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Total Hashes in Transaction Fetcher",
+              "legendFormat": "{{service}} · Total Hashes in Transaction Fetcher",
               "range": true,
               "refId": "C"
             }
@@ -10540,7 +10616,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 455
+            "y": 458
           },
           "id": 95,
           "options": {
@@ -10568,7 +10644,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Network Handle Messages",
+              "legendFormat": "{{service}} · Network Handle Messages",
               "range": true,
               "refId": "A",
               "useBackend": false
@@ -10585,7 +10661,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Swarm Events",
+              "legendFormat": "{{service}} · Swarm Events",
               "range": true,
               "refId": "B",
               "useBackend": false
@@ -10602,7 +10678,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Total Network Manager Future",
+              "legendFormat": "{{service}} · Total Network Manager Future",
               "range": true,
               "refId": "C",
               "useBackend": false
@@ -10678,7 +10754,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 463
+            "y": 466
           },
           "id": 96,
           "options": {
@@ -10706,7 +10782,7 @@
               "hide": false,
               "includeNullMetadata": false,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Freq Announced Transactions Already Seen by Peer",
+              "legendFormat": "{{service}} · Freq Announced Transactions Already Seen by Peer",
               "range": true,
               "refId": "A",
               "useBackend": false
@@ -10723,7 +10799,7 @@
               "hide": false,
               "includeNullMetadata": false,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Freq Received Transactions Already Seen by Peer",
+              "legendFormat": "{{service}} · Freq Received Transactions Already Seen by Peer",
               "range": true,
               "refId": "B",
               "useBackend": false
@@ -10799,7 +10875,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 463
+            "y": 466
           },
           "id": 97,
           "options": {
@@ -10827,7 +10903,7 @@
               "hide": false,
               "includeNullMetadata": false,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Legacy",
+              "legendFormat": "{{service}} · Legacy",
               "range": true,
               "refId": "A",
               "useBackend": false
@@ -10844,7 +10920,7 @@
               "hide": false,
               "includeNullMetadata": false,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 EIP-2930",
+              "legendFormat": "{{service}} · EIP-2930",
               "range": true,
               "refId": "B",
               "useBackend": false
@@ -10861,7 +10937,7 @@
               "hide": false,
               "includeNullMetadata": false,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 EIP-1559",
+              "legendFormat": "{{service}} · EIP-1559",
               "range": true,
               "refId": "C",
               "useBackend": false
@@ -10878,7 +10954,7 @@
               "hide": false,
               "includeNullMetadata": false,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 EIP-4844",
+              "legendFormat": "{{service}} · EIP-4844",
               "range": true,
               "refId": "D",
               "useBackend": false
@@ -10895,7 +10971,7 @@
               "hide": false,
               "includeNullMetadata": false,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 EIP-7702",
+              "legendFormat": "{{service}} · EIP-7702",
               "range": true,
               "refId": "E",
               "useBackend": false
@@ -10912,7 +10988,7 @@
               "hide": false,
               "includeNullMetadata": false,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Morph (0x7F/other)",
+              "legendFormat": "{{service}} · Morph (0x7F/other)",
               "range": true,
               "refId": "F",
               "useBackend": false
@@ -10988,7 +11064,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 471
+            "y": 474
           },
           "id": 98,
           "options": {
@@ -11016,7 +11092,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Find Idle Peer",
+              "legendFormat": "{{service}} · Find Idle Peer",
               "range": true,
               "refId": "C",
               "useBackend": false
@@ -11033,7 +11109,7 @@
               "hide": false,
               "includeNullMetadata": true,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Fill Request",
+              "legendFormat": "{{service}} · Fill Request",
               "range": true,
               "refId": "B",
               "useBackend": false
@@ -11109,7 +11185,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 471
+            "y": 474
           },
           "id": 99,
           "options": {
@@ -11137,7 +11213,7 @@
               "hide": false,
               "includeNullMetadata": false,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Legacy",
+              "legendFormat": "{{service}} · Legacy",
               "range": true,
               "refId": "A",
               "useBackend": false
@@ -11154,7 +11230,7 @@
               "hide": false,
               "includeNullMetadata": false,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Eip2930",
+              "legendFormat": "{{service}} · Eip2930",
               "range": true,
               "refId": "B",
               "useBackend": false
@@ -11171,7 +11247,7 @@
               "hide": false,
               "includeNullMetadata": false,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Eip1559",
+              "legendFormat": "{{service}} · Eip1559",
               "range": true,
               "refId": "C",
               "useBackend": false
@@ -11188,7 +11264,7 @@
               "hide": false,
               "includeNullMetadata": false,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Eip4844",
+              "legendFormat": "{{service}} · Eip4844",
               "range": true,
               "refId": "D",
               "useBackend": false
@@ -11205,7 +11281,7 @@
               "hide": false,
               "includeNullMetadata": false,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 Eip7702",
+              "legendFormat": "{{service}} · Eip7702",
               "range": true,
               "refId": "E",
               "useBackend": false
@@ -11281,7 +11357,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 479
+            "y": 482
           },
           "id": 100,
           "options": {
@@ -11303,7 +11379,7 @@
               "expr": "reth_transaction_pool_pending_transactions_evicted{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
-              "legendFormat": "{{service}} \u00b7 PendingPool",
+              "legendFormat": "{{service}} · PendingPool",
               "range": true,
               "refId": "A",
               "useBackend": false,
@@ -11321,7 +11397,7 @@
               "expr": "reth_transaction_pool_basefee_transactions_evicted{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
               "hide": false,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 BasefeePool",
+              "legendFormat": "{{service}} · BasefeePool",
               "range": true,
               "refId": "B"
             },
@@ -11334,7 +11410,7 @@
               "expr": "reth_transaction_pool_blob_transactions_evicted{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
               "hide": false,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 BlobPool",
+              "legendFormat": "{{service}} · BlobPool",
               "range": true,
               "refId": "C"
             },
@@ -11347,7 +11423,7 @@
               "expr": "reth_transaction_pool_queued_transactions_evicted{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
               "hide": false,
               "instant": false,
-              "legendFormat": "{{service}} \u00b7 QueuedPool",
+              "legendFormat": "{{service}} · QueuedPool",
               "range": true,
               "refId": "D"
             }
@@ -11365,7 +11441,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 255
+        "y": 258
       },
       "id": 132,
       "panels": [
@@ -11432,7 +11508,7 @@
             "overrides": []
           },
           "gridPos": {
-            "y": 407,
+            "y": 410,
             "x": 0,
             "w": 12,
             "h": 8
@@ -11458,7 +11534,7 @@
               },
               "editorMode": "builder",
               "expr": "reth_network_tracked_peers{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
-              "legendFormat": "{{service}} \u00b7 Tracked Peers",
+              "legendFormat": "{{service}} · Tracked Peers",
               "range": true,
               "refId": "A"
             }
@@ -11529,7 +11605,7 @@
             "overrides": []
           },
           "gridPos": {
-            "y": 407,
+            "y": 410,
             "x": 12,
             "w": 12,
             "h": 8
@@ -11555,7 +11631,7 @@
               },
               "editorMode": "builder",
               "expr": "reth_network_outgoing_connections{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
-              "legendFormat": "{{service}} \u00b7 Outgoing Connections",
+              "legendFormat": "{{service}} · Outgoing Connections",
               "range": true,
               "refId": "B"
             },
@@ -11567,7 +11643,7 @@
               "editorMode": "builder",
               "expr": "reth_network_incoming_connections{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
               "hide": false,
-              "legendFormat": "{{service}} \u00b7 Incoming Connections",
+              "legendFormat": "{{service}} · Incoming Connections",
               "range": true,
               "refId": "D"
             },
@@ -11579,7 +11655,7 @@
               "editorMode": "builder",
               "expr": "reth_network_connected_peers{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
               "hide": false,
-              "legendFormat": "{{service}} \u00b7 Connected Peers",
+              "legendFormat": "{{service}} · Connected Peers",
               "range": true,
               "refId": "E"
             }
@@ -11652,7 +11728,7 @@
             "overrides": []
           },
           "gridPos": {
-            "y": 415,
+            "y": 418,
             "x": 0,
             "w": 12,
             "h": 8
@@ -11681,7 +11757,7 @@
               },
               "editorMode": "builder",
               "expr": "rate(reth_p2pstream_disconnected_errors{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
-              "legendFormat": "{{service}} \u00b7 P2P Stream Disconnected",
+              "legendFormat": "{{service}} · P2P Stream Disconnected",
               "range": true,
               "refId": "A"
             },
@@ -11693,7 +11769,7 @@
               "editorMode": "builder",
               "expr": "rate(reth_network_pending_session_failures{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
               "hide": false,
-              "legendFormat": "{{service}} \u00b7 Failed Pending Sessions",
+              "legendFormat": "{{service}} · Failed Pending Sessions",
               "range": true,
               "refId": "B"
             }
@@ -11723,7 +11799,7 @@
             "overrides": []
           },
           "gridPos": {
-            "y": 415,
+            "y": 418,
             "x": 12,
             "w": 12,
             "h": 8
@@ -11756,7 +11832,7 @@
               },
               "editorMode": "builder",
               "expr": "reth_network_useless_peer{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
-              "legendFormat": "{{service}} \u00b7 UselessPeer",
+              "legendFormat": "{{service}} · UselessPeer",
               "range": true,
               "refId": "A"
             },
@@ -11768,7 +11844,7 @@
               "editorMode": "builder",
               "expr": "reth_network_subprotocol_specific{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
               "hide": false,
-              "legendFormat": "{{service}} \u00b7 SubprotocolSpecific",
+              "legendFormat": "{{service}} · SubprotocolSpecific",
               "range": true,
               "refId": "B"
             },
@@ -11780,7 +11856,7 @@
               "editorMode": "builder",
               "expr": "reth_network_already_connected{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
               "hide": false,
-              "legendFormat": "{{service}} \u00b7 AlreadyConnected",
+              "legendFormat": "{{service}} · AlreadyConnected",
               "range": true,
               "refId": "C"
             },
@@ -11792,7 +11868,7 @@
               "editorMode": "builder",
               "expr": "reth_network_client_quitting{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
               "hide": false,
-              "legendFormat": "{{service}} \u00b7 ClientQuitting",
+              "legendFormat": "{{service}} · ClientQuitting",
               "range": true,
               "refId": "D"
             },
@@ -11804,7 +11880,7 @@
               "editorMode": "builder",
               "expr": "reth_network_unexpected_identity{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
               "hide": false,
-              "legendFormat": "{{service}} \u00b7 UnexpectedHandshakeIdentity",
+              "legendFormat": "{{service}} · UnexpectedHandshakeIdentity",
               "range": true,
               "refId": "E"
             },
@@ -11816,7 +11892,7 @@
               "editorMode": "builder",
               "expr": "reth_network_disconnect_requested{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
               "hide": false,
-              "legendFormat": "{{service}} \u00b7 DisconnectRequested",
+              "legendFormat": "{{service}} · DisconnectRequested",
               "range": true,
               "refId": "F"
             },
@@ -11828,7 +11904,7 @@
               "editorMode": "builder",
               "expr": "reth_network_null_node_identity{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
               "hide": false,
-              "legendFormat": "{{service}} \u00b7 NullNodeIdentity",
+              "legendFormat": "{{service}} · NullNodeIdentity",
               "range": true,
               "refId": "G"
             },
@@ -11840,7 +11916,7 @@
               "editorMode": "builder",
               "expr": "reth_network_tcp_subsystem_error{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
               "hide": false,
-              "legendFormat": "{{service}} \u00b7 TCPSubsystemError",
+              "legendFormat": "{{service}} · TCPSubsystemError",
               "range": true,
               "refId": "H"
             },
@@ -11852,7 +11928,7 @@
               "editorMode": "builder",
               "expr": "reth_network_incompatible{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
               "hide": false,
-              "legendFormat": "{{service}} \u00b7 IncompatibleP2PVersion",
+              "legendFormat": "{{service}} · IncompatibleP2PVersion",
               "range": true,
               "refId": "I"
             },
@@ -11864,7 +11940,7 @@
               "editorMode": "builder",
               "expr": "reth_network_protocol_breach{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
               "hide": false,
-              "legendFormat": "{{service}} \u00b7 ProtocolBreach",
+              "legendFormat": "{{service}} · ProtocolBreach",
               "range": true,
               "refId": "J"
             },
@@ -11876,14 +11952,14 @@
               "editorMode": "builder",
               "expr": "reth_network_too_many_peers{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
               "hide": false,
-              "legendFormat": "{{service}} \u00b7 TooManyPeers",
+              "legendFormat": "{{service}} · TooManyPeers",
               "range": true,
               "refId": "K"
             }
           ],
           "title": "P2P Peer Disconnect Reasons",
           "type": "piechart",
-          "description": "\u6bcf\u79cd disconnect reason \u7684\u8ba1\u6570\u3002\u7a7a slice \u8868\u793a\u8be5\u7c7b\u65ad\u8fde\u6ca1\u53d1\u751f\u8fc7(\u5065\u5eb7)\u3002\u53ea\u8981\u8282\u70b9\u7a33\u5b9a\u8fd0\u884c,\u8fd9\u4e2a\u56fe\u5e94\u8be5\u4e3a\u7a7a\u3002"
+          "description": "每种 disconnect reason 的计数。空 slice 表示该类断连没发生过(健康)。只要节点稳定运行,这个图应该为空。"
         },
         {
           "datasource": {
@@ -11948,7 +12024,7 @@
             "overrides": []
           },
           "gridPos": {
-            "y": 423,
+            "y": 426,
             "x": 0,
             "w": 24,
             "h": 8
@@ -11974,7 +12050,7 @@
               },
               "editorMode": "builder",
               "expr": "reth_network_total_dial_successes{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
-              "legendFormat": "{{service}} \u00b7 Total Dial Successes",
+              "legendFormat": "{{service}} · Total Dial Successes",
               "range": true,
               "refId": "A"
             }
@@ -11992,7 +12068,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 256
+        "y": 259
       },
       "id": 106,
       "panels": [
@@ -12060,7 +12136,7 @@
             "h": 10,
             "w": 12,
             "x": 0,
-            "y": 504
+            "y": 507
           },
           "id": 107,
           "options": {
@@ -12087,7 +12163,7 @@
               "expr": "avg by (service) (delta(reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"PlainAccountState\"}[$interval]))",
               "instant": false,
               "interval": "$interval",
-              "legendFormat": "{{service}} \u00b7 Account",
+              "legendFormat": "{{service}} · Account",
               "range": true,
               "refId": "A"
             },
@@ -12101,7 +12177,7 @@
               "hide": false,
               "instant": false,
               "interval": "$interval",
-              "legendFormat": "{{service}} \u00b7 Storage",
+              "legendFormat": "{{service}} · Storage",
               "range": true,
               "refId": "B"
             },
@@ -12115,7 +12191,7 @@
               "hide": false,
               "instant": false,
               "interval": "$interval",
-              "legendFormat": "{{service}} \u00b7 Bytecodes",
+              "legendFormat": "{{service}} · Bytecodes",
               "range": true,
               "refId": "C"
             },
@@ -12129,7 +12205,7 @@
               "hide": false,
               "instant": false,
               "interval": "$interval",
-              "legendFormat": "{{service}} \u00b7 Total",
+              "legendFormat": "{{service}} · Total",
               "range": true,
               "refId": "D"
             }
@@ -12201,7 +12277,7 @@
             "h": 10,
             "w": 12,
             "x": 12,
-            "y": 504
+            "y": 507
           },
           "id": 108,
           "options": {
@@ -12228,7 +12304,7 @@
               "expr": "sum by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"PlainAccountState\"})",
               "instant": false,
               "interval": "10m",
-              "legendFormat": "{{service}} \u00b7 Account",
+              "legendFormat": "{{service}} · Account",
               "range": true,
               "refId": "A"
             },
@@ -12242,7 +12318,7 @@
               "hide": false,
               "instant": false,
               "interval": "10m",
-              "legendFormat": "{{service}} \u00b7 Storage",
+              "legendFormat": "{{service}} · Storage",
               "range": true,
               "refId": "B"
             },
@@ -12256,7 +12332,7 @@
               "hide": false,
               "instant": false,
               "interval": "10m",
-              "legendFormat": "{{service}} \u00b7 Bytecodes",
+              "legendFormat": "{{service}} · Bytecodes",
               "range": true,
               "refId": "C"
             },
@@ -12270,7 +12346,7 @@
               "hide": false,
               "instant": false,
               "interval": "10m",
-              "legendFormat": "{{service}} \u00b7 Total",
+              "legendFormat": "{{service}} · Total",
               "range": true,
               "refId": "D"
             }
@@ -12342,7 +12418,7 @@
             "h": 10,
             "w": 12,
             "x": 0,
-            "y": 514
+            "y": 517
           },
           "id": 109,
           "options": {
@@ -12439,7 +12515,7 @@
             "h": 10,
             "w": 12,
             "x": 12,
-            "y": 514
+            "y": 517
           },
           "id": 110,
           "options": {
@@ -12536,7 +12612,7 @@
             "h": 10,
             "w": 12,
             "x": 0,
-            "y": 524
+            "y": 527
           },
           "id": 111,
           "options": {
@@ -12633,7 +12709,7 @@
             "h": 10,
             "w": 12,
             "x": 12,
-            "y": 524
+            "y": 527
           },
           "id": 112,
           "options": {
@@ -12660,7 +12736,7 @@
               "expr": "avg by (service) (delta(reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Headers\"}[$interval])) + avg by (service) (delta(reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"headers\"}[$interval]))",
               "instant": false,
               "interval": "$interval",
-              "legendFormat": "{{service}} \u00b7 Headers",
+              "legendFormat": "{{service}} · Headers",
               "range": true,
               "refId": "A"
             },
@@ -12674,7 +12750,7 @@
               "hide": false,
               "instant": false,
               "interval": "$interval",
-              "legendFormat": "{{service}} \u00b7 Receipts",
+              "legendFormat": "{{service}} · Receipts",
               "range": true,
               "refId": "B"
             },
@@ -12688,7 +12764,7 @@
               "hide": false,
               "instant": false,
               "interval": "$interval",
-              "legendFormat": "{{service}} \u00b7 Transactions",
+              "legendFormat": "{{service}} · Transactions",
               "range": true,
               "refId": "C"
             }
@@ -12781,7 +12857,7 @@
             "h": 10,
             "w": 12,
             "x": 0,
-            "y": 534
+            "y": 537
           },
           "id": 113,
           "options": {
@@ -12808,7 +12884,7 @@
               "expr": "sum by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Headers\"}) + sum by (service) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"headers\"})",
               "instant": false,
               "interval": "10m",
-              "legendFormat": "{{service}} \u00b7 Headers",
+              "legendFormat": "{{service}} · Headers",
               "range": true,
               "refId": "A"
             },
@@ -12822,7 +12898,7 @@
               "hide": false,
               "instant": false,
               "interval": "10m",
-              "legendFormat": "{{service}} \u00b7 Receipts",
+              "legendFormat": "{{service}} · Receipts",
               "range": true,
               "refId": "B"
             },
@@ -12836,7 +12912,7 @@
               "hide": false,
               "instant": false,
               "interval": "10m",
-              "legendFormat": "{{service}} \u00b7 Transactions",
+              "legendFormat": "{{service}} · Transactions",
               "range": true,
               "refId": "C"
             }
@@ -12924,7 +13000,7 @@
             "h": 10,
             "w": 12,
             "x": 12,
-            "y": 534
+            "y": 537
           },
           "id": 114,
           "options": {
@@ -13021,7 +13097,7 @@
             "h": 10,
             "w": 12,
             "x": 0,
-            "y": 544
+            "y": 547
           },
           "id": 115,
           "options": {
@@ -13118,7 +13194,7 @@
             "h": 10,
             "w": 12,
             "x": 12,
-            "y": 544
+            "y": 547
           },
           "id": 116,
           "options": {
