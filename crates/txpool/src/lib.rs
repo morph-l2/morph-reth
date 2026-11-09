@@ -33,13 +33,13 @@
 #![cfg_attr(docsrs, feature(doc_cfg), allow(unexpected_cfgs))]
 
 mod error;
-pub use error::MorphTxError;
+pub use error::{MorphTxError, MorphTxValidationError};
 
 mod transaction;
 pub use transaction::MorphPooledTransaction;
 
 mod validator;
-pub use validator::{MorphL1BlockInfo, MorphTransactionValidator};
+pub use validator::{MorphL1BlockInfo, MorphTransactionValidator, MorphValidationState};
 
 mod maintain;
 pub use maintain::maintain_morph_pool;

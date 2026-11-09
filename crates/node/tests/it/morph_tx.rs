@@ -425,6 +425,74 @@ async fn morph_tx_v0_token_balance_decreases() -> eyre::Result<()> {
     Ok(())
 }
 
+/// A sender holding fee tokens but no ETH must reach `pending` and be mined.
+///
+/// The pool used to charge a token-fee MorphTx's `gas_limit * max_fee_per_gas` against
+/// the sender's ETH balance, which left every such transaction in `queued`: never built
+/// into a block, and never propagated, since reth only announces pending transactions.
+#[tokio::test(flavor = "multi_thread")]
+async fn morph_tx_token_fee_from_zero_eth_sender_is_pending_and_mined() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+    use reth_provider::{AccountReader, StateProviderFactory};
+    use reth_transaction_pool::TransactionPool;
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+    let token = morph_node::test_utils::TEST_TOKEN_ADDRESS;
+
+    // Hand a fresh account ten fee tokens and no ETH.
+    let payer = alloy_signer_local::PrivateKeySigner::random();
+    let payer_address = payer.address();
+    let token_grant = U256::from(10u128.pow(19));
+    let grant = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
+        .with_v0_token_fee(TEST_TOKEN_ID)
+        .with_to(token)
+        .with_data(erc20_transfer_calldata(payer_address, token_grant))
+        .build_signed()?;
+    node.rpc.inject_tx(grant).await?;
+    node.advance_block().await?;
+
+    let balance_slot = token_balance_slot(payer_address);
+    let state = node.inner.provider.latest()?;
+    let eth_balance = state
+        .basic_account(&payer_address)?
+        .map(|account| account.balance);
+    assert_eq!(eth_balance.unwrap_or_default(), U256::ZERO);
+    assert_eq!(state.storage(token, balance_slot)?, Some(token_grant));
+
+    // A v0 and a v2 MorphTx, both paying gas in the fee token.
+    let v0 = MorphTxBuilder::new(wallet.chain_id, payer.clone(), 0)
+        .with_v0_token_fee(TEST_TOKEN_ID)
+        .build_signed()?;
+    let v2 = MorphTxBuilder::new(wallet.chain_id, payer, 1)
+        .with_v2_token_fee(TEST_TOKEN_ID)
+        .build_signed()?;
+    node.rpc.inject_tx(v0).await?;
+    node.rpc.inject_tx(v2).await?;
+    assert_eq!(
+        node.inner.pool.pending_and_queued_txn_count(),
+        (2, 0),
+        "token-fee transactions from a sender without ETH must be pending"
+    );
+
+    let payload = node.advance_block().await?;
+    assert_eq!(payload.block().body().transactions.len(), 2);
+
+    let state = node.inner.provider.latest()?;
+    let account = state
+        .basic_account(&payer_address)?
+        .expect("the payer exists once its transactions are mined");
+    assert_eq!(account.nonce, 2);
+    assert_eq!(account.balance, U256::ZERO);
+    let tokens_left = state.storage(token, balance_slot)?.unwrap_or_default();
+    assert!(
+        tokens_left < token_grant,
+        "gas must be charged in the fee token"
+    );
+
+    Ok(())
+}
+
 /// Regression for the mainnet block 19720219 shape:
 ///
 /// - tx `0xc267450129e51457a280fa82c74364d312e47885c09d15c78f6a0895844913c9`
