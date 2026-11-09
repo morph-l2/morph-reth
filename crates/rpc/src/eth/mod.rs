@@ -49,7 +49,7 @@ impl RpcTypes for MorphRpcTypes {
     type TransactionRequest = MorphTransactionRequest;
 }
 
-/// Morph RPC converter with custom receipt and header conversion.
+/// Morph RPC converter with custom receipt conversion.
 pub type MorphRpcConverter<N, NetworkT> =
     RpcConverter<NetworkT, <N as FullNodeComponents>::Evm, MorphReceiptConverter>;
 
@@ -400,9 +400,9 @@ where
         _block: &RecoveredBlock<<Self::Provider as BlockReader>::Block>,
         _db: &mut StateCacheDb,
     ) -> Result<(), Self::Error> {
-        // Morph must skip Ethereum's 4788-style pre-block system calls during replay.
-        // Standard Morph headers omit parentBeaconBlockRoot, so the default Ethereum
-        // SystemCaller prelude would fail with "EIP-4788 beacon root missing".
+        // Morph has no Ethereum-style (EIP-4788) pre-block system calls to replay. The
+        // upstream default would only run the Morph executor's pre-execution step,
+        // which just pre-warms the L1 gas oracle account.
         Ok(())
     }
 }

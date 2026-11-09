@@ -53,7 +53,7 @@ impl EvmFactory for MorphEvmFactory {
 ///
 /// This is a wrapper type around the `revm` ethereum evm with optional [`Inspector`] (tracing)
 /// support. [`Inspector`] support is configurable at runtime because it's part of the underlying
-/// `RevmEvm` type.
+/// `morph_revm::MorphEvm` type.
 #[expect(missing_debug_implementations)]
 pub struct MorphEvm<DB: Database, I = NoOpInspector> {
     inner: morph_revm::MorphEvm<DB, I>,

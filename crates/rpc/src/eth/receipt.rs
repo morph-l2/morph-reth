@@ -321,10 +321,10 @@ mod tests {
 
     /// Regression test for the `transactionReceipts` subscription wiring.
     ///
-    /// reth v2.2.0 exposes a `transactionReceipts` pubsub topic that, in the
-    /// `SubscriptionKind::TransactionReceipts` arm of
-    /// `reth_rpc::eth::pubsub`, calls `converter.convert_receipts(inputs)`
-    /// against the same converter the RPC `eth_getBlockReceipts` /
+    /// reth v2.5.2 exposes a `transactionReceipts` pubsub topic whose stream
+    /// (`EthSubscriptions::transaction_receipts_stream`) calls
+    /// `converter.convert_receipts_with_block(..)`, which defaults to
+    /// `convert_receipts`, against the same converter the RPC `eth_getBlockReceipts` /
     /// `eth_getTransactionReceipt` endpoints use. For Morph that converter
     /// is [`MorphReceiptConverter`].
     ///
@@ -553,8 +553,8 @@ mod tests {
     }
 
     /// Companion test: L1 message receipts must come back from the
-    /// pubsub-style converter path with default Morph fields and the
-    /// L1Msg envelope variant, just like `eth_getBlockReceipts`.
+    /// pubsub-style converter path with default Morph fields, just like
+    /// `eth_getBlockReceipts`.
     #[test]
     fn transaction_receipts_subscription_l1_msg_carries_default_morph_fields() {
         use alloy_consensus::transaction::Recovered;

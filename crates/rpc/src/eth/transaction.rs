@@ -374,8 +374,7 @@ mod tests {
         );
     }
 
-    /// Test that eth_estimateGas (disable_fee_charge = false) generates RLP encoding for L1 fee
-    /// calculation.
+    /// Test that eth_estimateGas generates RLP encoding for L1 fee calculation.
     ///
     /// This ensures that eth_estimateGas correctly calculates L1 data fee, matching go-ethereum
     /// behavior where available balance is reduced by l1DataFee before checking sufficiency.
@@ -390,7 +389,7 @@ mod tests {
             memo: None,
         };
 
-        // eth_estimateGas scenario: disable_fee_charge = false (default)
+        // reth's eth_estimateGas sets disable_fee_charge = true; the conversion ignores it.
         let evm_env = create_evm_env(false);
 
         // Act: Convert to TxEnv
@@ -457,7 +456,7 @@ mod tests {
             memo: Some(memo.clone()),
         };
 
-        // eth_estimateGas scenario: should encode for L1 fee
+        // Should encode for L1 fee
         let evm_env = create_evm_env(false);
 
         // Act: Convert to TxEnv
@@ -725,7 +724,6 @@ mod tests {
             memo: None,
         };
 
-        // eth_estimateGas scenario
         let evm_env = create_evm_env(false);
 
         // Act: Convert to TxEnv

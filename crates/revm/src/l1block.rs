@@ -214,7 +214,7 @@ impl L1BlockInfo {
         } else {
             self.calculate_tx_l1_cost_curie(input, hardfork)
         };
-        // Cap to u64::MAX for circuit compatibility (go-ethereum: rollup_fee.go:248-249)
+        // Cap to u64::MAX for circuit compatibility (go-ethereum: `CalculateL1DataFee`)
         fee.min(L1_FEE_CAP)
     }
 }

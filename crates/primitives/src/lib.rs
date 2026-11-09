@@ -20,7 +20,7 @@
 //!
 //! - [`Block`]: Morph block type alias
 //! - [`BlockBody`]: Morph block body type alias
-//! - [`MorphHeader`]: Morph header type alias
+//! - [`MorphHeader`]: Morph block header (Ethereum header plus `next_l1_msg_index`)
 //!
 //! # Node Primitives
 //!

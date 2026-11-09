@@ -2,8 +2,6 @@
 //!
 //! This module defines the TxL1Msg type which represents L1 message
 //! transactions that are processed on Morph L2.
-//!
-//! Reference: <https://github.com/morph-l2/morph/blob/main/prover/crates/primitives/src/types/tx.rs>
 
 use alloy_consensus::{
     SignableTransaction, Transaction,
@@ -29,8 +27,6 @@ pub const L1_TX_TYPE_ID: u8 = 0x7E;
 /// a signature field. Gas for the transaction execution is already paid for on the L1.
 ///
 /// Note: Contract creation is NOT allowed via L1 message transactions.
-///
-/// Reference: <https://github.com/morph-l2/morph/blob/main/prover/crates/primitives/src/types/tx.rs#L32-L59>
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(
@@ -238,7 +234,7 @@ impl RlpEcdsaEncodableTx for TxL1Msg {
 impl RlpEcdsaDecodableTx for TxL1Msg {
     const DEFAULT_TX_TYPE: u8 = { Self::tx_type() };
 
-    /// Decodes the inner [TxEip1559] fields from RLP bytes.
+    /// Decodes the inner [`TxL1Msg`] fields from RLP bytes.
     fn rlp_decode_fields(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
         Self::decode_fields(buf)
     }
@@ -338,8 +334,8 @@ mod msg_serde {
     //! standard EVM JSON-RPC client (ethers v5/v6, viem, web3.js — including the
     //! `@morph-network/*` SDK adapters that wrap them) nevertheless expects those keys
     //! on every transaction object. Following morph-geth's RPC contract, we render all
-    //! five as `"0x0"` placeholders during serialization and silently drop them on the
-    //! way back in.
+    //! five, plus `gasPrice`, as `"0x0"` placeholders during serialization and silently
+    //! drop them on the way back in.
     //!
     //! Because [`alloy_consensus::Sealed`] flattens its inner `T` into the surrounding
     //! object, these top-level fields naturally appear at the envelope's RPC root —
@@ -651,9 +647,9 @@ mod tests {
     }
 
     /// JSON serialization must include the morph-geth RPC parity placeholders
-    /// `nonce`/`v`/`r`/`s`/`yParity` so downstream clients (ethers v5/v6, viem)
+    /// `nonce`/`gasPrice`/`v`/`r`/`s`/`yParity` so downstream clients (ethers v5/v6, viem)
     /// can parse L1 message tx objects returned by `eth_getBlockByNumber` etc.
-    /// All five live on the helper struct alongside the real fields, so they
+    /// All six live on the helper struct alongside the real fields, so they
     /// also appear when the type is serialized standalone (not just via the
     /// envelope).
     #[test]
@@ -701,7 +697,7 @@ mod tests {
 
     /// End-to-end check: serializing a [`MorphTxEnvelope::L1Msg`] (the type
     /// actually emitted by RPC) must include all the morph-geth parity fields
-    /// at the top level: type, queueIndex, sender, nonce, v, r, s, yParity, hash.
+    /// at the top level: type, queueIndex, sender, nonce, gasPrice, v, r, s, yParity, hash.
     #[test]
     fn test_l1_envelope_rpc_json_includes_geth_parity_fields() {
         use crate::MorphTxEnvelope;

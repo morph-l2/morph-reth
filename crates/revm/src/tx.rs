@@ -346,7 +346,7 @@ impl MorphTxEnv {
     }
 }
 
-/// Extracted MorphTx fields from RLP-encoded bytes.
+/// MorphTx fields extracted from the typed envelope.
 struct DecodedMorphTxFields {
     version: u8,
     fee_token_id: u16,

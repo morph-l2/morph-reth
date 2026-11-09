@@ -113,8 +113,9 @@ jobs:
       - name: Resolve build profile
         id: profile
         run: |
-          # Tag push -> profiling (matches Dockerfile + EC2 deploy defaults;
-          # see PR rationale: maxperf regresses ERC20 long tail).
+          # Tag push -> profiling (matches the Dockerfile default; maxperf
+          # regresses the ERC20 long tail, see #104). EC2 deploys build
+          # separately via MakefileEc2.mk with the `reproducible` profile.
           # workflow_dispatch -> user-selected profile (defaults to profiling,
           # `maxperf` available for eth-heavy reference builds).
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then

@@ -288,7 +288,7 @@ impl TestNodeBuilder {
         self
     }
 
-    /// Enable or disable dev mode (auto-sealing blocks every 100ms).
+    /// Enable or disable dev mode (reth's local miner auto-seals blocks from the pool).
     pub fn with_dev(mut self, is_dev: bool) -> Self {
         self.is_dev = is_dev;
         self
@@ -1040,7 +1040,7 @@ impl MorphTxBuilder {
     /// Configure as MorphTx **v0** with ERC20 fee payment.
     ///
     /// - `fee_token_id` must be > 0 (v0 requires ERC20 fee)
-    /// - Sets a generous `fee_limit` (1e20 tokens) to avoid rejection
+    /// - Sets a generous `fee_limit` (1e20 wei, i.e. 100 tokens) to avoid rejection
     pub fn with_v0_token_fee(mut self, fee_token_id: u16) -> Self {
         assert!(fee_token_id > 0, "v0 MorphTx requires fee_token_id > 0");
         self.version = 0;

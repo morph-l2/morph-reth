@@ -5,6 +5,8 @@
 //! - L1 messages must precede all L2 transactions (ordering constraint)
 //! - L1 messages within a block must have strictly sequential queue indices
 //! - Post-Jade blocks with a wrong state root are rejected
+//! - Header checks against the parent (number, parent hash, timestamp, gas used/limit)
+//! - `next_l1_msg_index` rules, including where the Jade exact-index rule starts
 
 use alloy_primitives::B256;
 use morph_node::test_utils::{

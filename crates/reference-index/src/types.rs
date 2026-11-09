@@ -14,8 +14,8 @@ pub struct CanonicalTip {
 
 /// Current reference index database schema version.
 ///
-/// Version 1 was used only by the pre-release ExEx prototype. There is no
-/// migration path: operators remove that derived database manually.
+/// Version 1 was written by the ExEx-based index shipped in v0.3.0 through v1.0.0.
+/// There is no migration path: operators remove that derived database manually.
 pub const SCHEMA_VERSION: u32 = 2;
 
 /// Validated query parameters for reference lookups.

@@ -9,14 +9,14 @@
 //! Berlin (base)
 //!   └── Bernoulli/Curie = Berlin with ripemd160/blake2f replaced by disabled stubs
 //!         └── Morph203/Viridian = Bernoulli with ripemd160/blake2f re-enabled (working)
-//!               └── Emerald = Morph203 + Osaka precompiles
+//!               └── Emerald/Jade = Morph203 + Osaka precompiles
 //! ```
 //!
 //! | Hardfork         | Base      | Changes                                                   | Notes                         |
 //! |------------------|-----------|----------------------------------------------------------|-------------------------------|
 //! | Bernoulli/Curie  | Berlin    | ripemd160/blake2f as disabled stubs; modexp 32B limit    | -                             |
 //! | Morph203/Viridian| Bernoulli | blake2f/ripemd160 re-enabled; BN256 pairing 4-pair limit | -                             |
-//! | Emerald          | Morph203  | BLS12-381, P256verify; modexp EIP-7823/7883 upgrade      | NO KZG (0x0a)                 |
+//! | Emerald/Jade     | Morph203  | BLS12-381, P256verify; modexp EIP-7823/7883 upgrade      | NO KZG (0x0a)                 |
 //!
 //! ## Why Disabled Stubs?
 //!
@@ -27,7 +27,7 @@
 //!    via `StateDB.Prepare` (EIP-2929). CALL costs 100 gas (warm) instead of 2600 (cold).
 //!
 //! 2. When called, go-eth's CALL handler sets `gas = 0` for any non-revert error, consuming
-//!    all forwarded gas. revm's `PrecompileError` result also causes all forwarded gas to
+//!    all forwarded gas. revm's `PrecompileHalt` status also causes all forwarded gas to
 //!    be consumed (parent does not reclaim gas when sub-call is not ok-or-revert).
 //!
 //! Omitting these stubs causes morph-reth to treat 0x03/0x09 as cold empty accounts (2600
@@ -196,7 +196,7 @@ fn modexp_len_exceeds_32(data: &[u8], offset: usize) -> bool {
 /// Without this limit, morph-reth would accept arbitrarily large modexp inputs
 /// that go-ethereum rejects, causing a consensus split.
 ///
-/// Ref: <https://github.com/morph-l2/go-ethereum/blob/main/core/vm/contracts.go#L643-L648>
+/// Ref: go-ethereum `bigModExp.Run` in `core/vm/contracts.go`
 fn modexp_with_32byte_limit(input: &[u8], gas_limit: u64, reservoir: u64) -> PrecompileResult {
     // The first 96 bytes of modexp input are three 32-byte big-endian length fields:
     // [0..32] = base_len, [32..64] = exp_len, [64..96] = mod_len
@@ -226,7 +226,7 @@ fn modexp_with_32byte_limit(input: &[u8], gas_limit: u64, reservoir: u64) -> Pre
 /// accounting differs (the underlying computation is the same, but block gas
 /// limits and metering become inconsistent).
 ///
-/// Ref: <https://github.com/morph-l2/go-ethereum/blob/main/core/vm/contracts.go#L860-L865>
+/// Ref: go-ethereum `bn256PairingIstanbul.Run` in `core/vm/contracts.go`
 fn bn256_pairing_with_4pair_limit(
     input: &[u8],
     gas_limit: u64,
@@ -251,7 +251,7 @@ fn bn256_pairing_with_4pair_limit(
 /// All 9 Berlin addresses are present (so they get warmed via EIP-2929), but 0x03/0x09
 /// consume all forwarded gas and return failure when called.
 ///
-/// Matches: <https://github.com/morph-l2/go-ethereum/blob/main/core/vm/contracts.go#L124-L134>
+/// Matches: go-ethereum `PrecompiledContractsBernoulli` in `core/vm/contracts.go`
 pub fn bernoulli() -> &'static Precompiles {
     static INSTANCE: OnceLock<Precompiles> = OnceLock::new();
     INSTANCE.get_or_init(|| {
@@ -328,7 +328,7 @@ pub fn morph203() -> &'static Precompiles {
 /// - Adds P256verify (0x100) from RIP-7212
 /// - Does **NOT** include KZG Point Evaluation (0x0a) — go-ethereum omits it
 ///
-/// Ref: <https://github.com/morph-l2/go-ethereum/blob/main/core/vm/contracts.go#L152-L171>
+/// Ref: go-ethereum `PrecompiledContractsEmerald` in `core/vm/contracts.go`
 pub fn emerald() -> &'static Precompiles {
     static INSTANCE: OnceLock<Precompiles> = OnceLock::new();
     INSTANCE.get_or_init(|| {
