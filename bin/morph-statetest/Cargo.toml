@@ -7,7 +7,6 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-alloy-evm.workspace = true
 alloy-primitives.workspace = true
 alloy-rlp.workspace = true
 alloy-trie.workspace = true
@@ -17,8 +16,7 @@ morph-chainspec.workspace = true
 morph-evm.workspace = true
 morph-revm.workspace = true
 morph-primitives.workspace = true
-revm = { workspace = true, features = ["tracer"] }
-revm-statetest-types.workspace = true
+evm2 = { workspace = true, features = ["std"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

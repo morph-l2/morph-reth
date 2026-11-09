@@ -19,19 +19,22 @@ morph-payload-types.workspace = true
 
 reth-chainspec.workspace = true
 reth-evm.workspace = true
+reth-evm-ethereum.workspace = true
 reth-ethereum-primitives = { workspace = true, features = ["serde"] }
-reth-revm.workspace = true
+reth-execution-types.workspace = true
 reth-primitives-traits.workspace = true
 reth-rpc-eth-api = { workspace = true, optional = true }
 
-alloy-evm.workspace = true
+evm2 = { workspace = true, features = ["std"] }
+
 alloy-consensus.workspace = true
+alloy-eips.workspace = true
+alloy-eip7928.workspace = true
 alloy-primitives.workspace = true
 alloy-rpc-types-eth.workspace = true
 
 derive_more.workspace = true
 thiserror.workspace = true
-revm.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

@@ -31,8 +31,8 @@
 //! Bernoulli and Curie use block-based activation, while Morph203, Viridian,
 //! Emerald, Jade, and Celadon use timestamp-based activation.
 
-use alloy_evm::revm::primitives::hardfork::SpecId;
 use alloy_hardforks::hardfork;
+use evm2::SpecId;
 use reth_chainspec::{EthereumHardforks, ForkCondition};
 
 hardfork!(
@@ -206,9 +206,9 @@ impl From<SpecId> for MorphHardfork {
     /// Bernoulli/Curie/Morph203 all map to CANCUN), this returns the
     /// latest hardfork for the given spec level.
     fn from(spec: SpecId) -> Self {
-        if spec.is_enabled_in(SpecId::OSAKA) {
+        if spec.enables(SpecId::OSAKA) {
             Self::Celadon
-        } else if spec.is_enabled_in(SpecId::PRAGUE) {
+        } else if spec.enables(SpecId::PRAGUE) {
             Self::Viridian
         } else {
             // CANCUN or below → Morph203 (latest CANCUN-level hardfork)
@@ -220,10 +220,10 @@ impl From<SpecId> for MorphHardfork {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_evm::revm::{
-        context::{Cfg, CfgEnv},
-        context_interface::cfg::gas_params::GasParams,
-        primitives::eip7702,
+    use evm2::{
+        EvmFeatures, Version,
+        interpreter::gas::{EIP7702_PER_AUTH_BASE_COST, EIP7702_PER_EMPTY_ACCOUNT_COST},
+        version::GasId,
     };
 
     #[test]
@@ -252,53 +252,46 @@ mod tests {
         for fork in forks {
             let spec = SpecId::from(fork);
             assert!(
-                spec < SpecId::AMSTERDAM,
+                !spec.enables(SpecId::AMSTERDAM),
                 "MorphHardfork {fork:?} maps to SpecId {spec:?}, which would enable Amsterdam-era gas semantics"
             );
 
-            let params = GasParams::new_spec(spec);
-            assert_eq!(
-                params.tx_eip7702_state_gas_bytecode(),
-                0,
+            // The Morph EVM version starts from the base version of the mapped spec, so
+            // neither Amsterdam gas model may be switched on there.
+            let version = Version::base(spec);
+            assert!(
+                !version.feature(EvmFeatures::EIP8037),
                 "MorphHardfork {fork:?} must not enable EIP-8037 state gas"
             );
-
-            // `MorphEvmHandler::validate_initial_tx_gas` derives its EIP-2780 intrinsic-gas
-            // info from this flag. It must stay disabled for every Morph hardfork.
-            let cfg = CfgEnv::<MorphHardfork>::default().with_spec_and_mainnet_gas_params(fork);
             assert!(
-                !cfg.is_amsterdam_eip2780_enabled(),
+                !version.feature(EvmFeatures::EIP2780),
                 "MorphHardfork {fork:?} must not enable EIP-2780 intrinsic gas"
             );
         }
 
-        // Positive control: the EIP-2780 flag really is derived from the spec, so the
-        // per-fork assertions above are not vacuously true.
+        // Positive control: both flags really are derived from the spec, so the per-fork
+        // assertions above are not vacuously true.
+        let amsterdam = Version::base(SpecId::AMSTERDAM);
         assert!(
-            CfgEnv::<MorphHardfork>::default()
-                .with_spec_and_mainnet_gas_params(SpecId::AMSTERDAM)
-                .is_amsterdam_eip2780_enabled(),
-            "EIP-2780 flag is no longer spec-derived; the guard above would be vacuous"
+            amsterdam.feature(EvmFeatures::EIP8037) && amsterdam.feature(EvmFeatures::EIP2780),
+            "Amsterdam gas flags are no longer spec-derived; the guard above would be vacuous"
         );
     }
 
-    /// The whole EIP-7702 per-authorization refund must be the *regular* refund, i.e.
-    /// `PER_EMPTY_ACCOUNT_COST - PER_AUTH_BASE_COST` with nothing diverted elsewhere.
-    ///
-    /// revm 42 removed `tx_eip7702_state_refund` / `tx_eip7702_auth_refund`, so the
-    /// invariant can no longer be written as "regular == total"; asserting the full
-    /// per-auth delta against revm's own constants is the equivalent that survives.
+    /// The whole EIP-7702 per-authorization refund must be the execution-gas refund, i.e.
+    /// `PER_EMPTY_ACCOUNT_COST - PER_AUTH_BASE_COST` with nothing diverted to state gas.
     #[test]
     fn test_eip7702_refund_stays_regular_for_morph_specs() {
         for spec in [SpecId::CANCUN, SpecId::PRAGUE, SpecId::OSAKA] {
-            let params = GasParams::new_spec(spec);
-            let expected_auth_refund = if spec.is_enabled_in(SpecId::PRAGUE) {
-                eip7702::PER_EMPTY_ACCOUNT_COST - eip7702::PER_AUTH_BASE_COST
+            let expected_auth_refund = if spec.enables(SpecId::PRAGUE) {
+                u64::from(EIP7702_PER_EMPTY_ACCOUNT_COST - EIP7702_PER_AUTH_BASE_COST)
             } else {
                 0
             };
             assert_eq!(
-                params.tx_eip7702_auth_refund_regular(),
+                Version::base(spec)
+                    .gas_params
+                    .get(GasId::TxEip7702AuthRefund),
                 expected_auth_refund,
                 "spec={spec:?}: the full EIP-7702 per-auth refund must stay in the regular refund"
             );
