@@ -5198,6 +5198,7 @@ dependencies = [
  "reth-errors",
  "reth-evm",
  "reth-execution-cache",
+ "reth-network",
  "reth-node-api",
  "reth-node-builder",
  "reth-node-core",
