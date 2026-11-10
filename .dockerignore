@@ -1,4 +1,7 @@
 target/
+# Docker builds fetch the git dependencies from GitHub; vendor/ only serves
+# MakefileBuild.mk builds on hosts without GitHub access.
+vendor/
 # NOTE: .git is intentionally NOT excluded. vergen-git2 (crates/node/build.rs)
 # discovers it at build time to embed the commit SHA / describe into the binary
 # version. Excluding it makes those VERGEN_GIT_* + readback env vars unset and the

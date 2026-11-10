@@ -1,0 +1,80 @@
+name: Vendor
+
+# vendor/ holds the Cargo git dependencies for internal builds that cannot reach
+# GitHub (MakefileBuild.mk). Nothing else builds from it, so check here that it
+# matches Cargo.lock and still builds on its own.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Cargo.lock
+      - vendor/**
+      - etc/vendor-git-deps.py
+      - MakefileBuild.mk
+      - .github/workflows/vendor.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - Cargo.lock
+      - vendor/**
+      - etc/vendor-git-deps.py
+      - MakefileBuild.mk
+      - .github/workflows/vendor.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  in-sync:
+    name: vendor/ matches Cargo.lock
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Check the pinned git sources
+        run: make -f MakefileBuild.mk check-vendor
+
+      # The output of `cargo vendor` depends on the cargo version, so regenerate
+      # with the toolchain that produced the committed copy.
+      - name: Install the toolchain recorded in vendor/TOOLCHAIN
+        run: rustup toolchain install "$(cat vendor/TOOLCHAIN)" --profile minimal
+
+      - name: Regenerate vendor/ and compare
+        run: |
+          RUSTUP_TOOLCHAIN="$(cat vendor/TOOLCHAIN)" python3 etc/vendor-git-deps.py "$RUNNER_TEMP/vendor"
+          diff -r vendor "$RUNNER_TEMP/vendor"
+
+  build:
+    name: Build from vendor/ without GitHub
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      # Like an internal build host: every git fetch from GitHub fails.
+      - name: Check the workspace with GitHub unreachable
+        env:
+          CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: url.https://github.invalid/.insteadOf
+          GIT_CONFIG_VALUE_0: https://github.com/
+        run: cargo check --workspace --locked --config vendor/cargo-config.toml

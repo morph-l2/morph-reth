@@ -2,6 +2,7 @@
 extend-exclude = [
     ".git",
     "target",
+    "vendor",
     "Cargo.toml",
     "Cargo.lock",
     "*.json",
