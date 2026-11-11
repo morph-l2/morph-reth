@@ -41,4 +41,4 @@ serde = [
     "alloy-hardforks/serde",
     "alloy-primitives/serde",
 ]
-cli = ["dep:reth-cli", "dep:eyre"]
+cli = ["dep:reth-cli", "dep:eyre", "morph-primitives/reth-codec"]
