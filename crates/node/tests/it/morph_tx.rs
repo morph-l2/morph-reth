@@ -14,7 +14,10 @@
 //!   with 1000 tokens pre-funded for test account 0 and 1
 
 use alloy_primitives::{Address, B256, Bytes, U256};
-use morph_node::test_utils::{HardforkSchedule, MorphTxBuilder, TEST_TOKEN_ID, TestNodeBuilder};
+use morph_node::test_utils::{
+    HardforkSchedule, MorphTxBuilder, TEST_TOKEN_ID, TestNodeBuilder, sign_authorization,
+    wallet_at_index,
+};
 use reth_payload_primitives::BuiltPayload;
 
 // =============================================================================
@@ -778,6 +781,777 @@ async fn morph_tx_v0_token_fee_still_charged_on_revert() -> eyre::Result<()> {
             other.tx_type()
         ),
     }
+
+    Ok(())
+}
+
+// =============================================================================
+// MorphTx v2 (EIP-7702 authorization list) — Celadon gating and delegation
+// =============================================================================
+
+/// Asserts that `authority` is delegated to `delegate` (`0xef0100 || delegate`)
+/// and returns its nonce.
+fn assert_delegated(
+    state: &dyn reth_provider::StateProvider,
+    authority: Address,
+    delegate: Address,
+) -> eyre::Result<u64> {
+    let account = state
+        .basic_account(&authority)?
+        .ok_or_else(|| eyre::eyre!("authority account {authority} must exist"))?;
+    let code = state
+        .account_code(&authority)?
+        .ok_or_else(|| eyre::eyre!("delegation designator must be written"))?;
+    let code_bytes = code.original_bytes();
+    assert_eq!(
+        &code_bytes[..3],
+        &[0xef, 0x01, 0x00],
+        "authority code must be an EIP-7702 delegation designator"
+    );
+    assert_eq!(
+        &code_bytes[3..],
+        delegate.as_slice(),
+        "delegation must point at the authorized address"
+    );
+    Ok(account.nonce)
+}
+
+/// MorphTx v2 with ETH fee applies its authorization list exactly like an
+/// EIP-7702 transaction: the authority is delegated, its nonce is consumed,
+/// and the receipt reports version 2.
+#[tokio::test(flavor = "multi_thread")]
+async fn morph_tx_v2_eth_fee_applies_delegation() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+    use alloy_consensus::TxReceipt;
+    use alloy_consensus::transaction::TxHashRef;
+    use reth_provider::{ReceiptProvider, StateProviderFactory};
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+    let chain_id = wallet.chain_id;
+
+    // Account 1 authorizes a delegation to 0x42; account 0 carries it in a MorphTx v2.
+    let authority_signer = wallet_at_index(1, chain_id);
+    let authority = authority_signer.address();
+    let delegate = Address::with_last_byte(0x42);
+    let authorization = sign_authorization(&authority_signer, chain_id, delegate, 0)?;
+
+    let raw_tx = MorphTxBuilder::new(chain_id, wallet.inner.clone(), 0)
+        .with_v2_eth_fee()
+        .with_authorization_list(vec![authorization])
+        .with_to(Address::with_last_byte(0x99))
+        .build_signed()?;
+
+    node.rpc.inject_tx(raw_tx).await?;
+    let payload = node.advance_block().await?;
+    let block = payload.block();
+    assert_eq!(
+        block.body().transactions.len(),
+        1,
+        "MorphTx v2 should be included in block"
+    );
+    let tx = block.body().transactions.first().unwrap();
+    assert!(tx.is_morph_tx());
+    assert_eq!(tx.version(), Some(2));
+
+    let receipt = node
+        .inner
+        .provider
+        .receipt_by_hash(*tx.tx_hash())?
+        .expect("receipt must exist");
+    assert!(receipt.status(), "MorphTx v2 call must succeed");
+    // Intrinsic gas: 21_000 base + 25_000 per authorization = 46_000. The
+    // authority already exists in genesis, so the EIP-7702 refund of 12_500
+    // applies, capped by EIP-3529 at gas_used / 5 = 9_200 → 36_800.
+    assert_eq!(
+        receipt.cumulative_gas_used(),
+        36_800,
+        "ETH-fee path must settle the EIP-7702 refund like 0x04"
+    );
+    let morph_primitives::MorphReceipt::Morph(morph_receipt) = &receipt else {
+        panic!("expected a Morph receipt");
+    };
+    assert_eq!(morph_receipt.version, Some(2));
+
+    let state = node.inner.provider.latest()?;
+    let nonce = assert_delegated(&*state, authority, delegate)?;
+    assert_eq!(nonce, 1, "delegation consumes the authority nonce");
+
+    Ok(())
+}
+
+/// Two tuples for two different authorities are both applied; the intrinsic
+/// gas and the refund scale with the list length (refund capped at gas/5).
+#[tokio::test(flavor = "multi_thread")]
+async fn morph_tx_v2_applies_multiple_authorities_in_one_tx() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+    use alloy_consensus::TxReceipt;
+    use alloy_consensus::transaction::TxHashRef;
+    use reth_provider::{ReceiptProvider, StateProviderFactory};
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+    let chain_id = wallet.chain_id;
+
+    let authority_1 = wallet_at_index(1, chain_id);
+    let authority_2 = wallet_at_index(2, chain_id);
+    let delegate_1 = Address::with_last_byte(0x42);
+    let delegate_2 = Address::with_last_byte(0x43);
+    let authorizations = vec![
+        sign_authorization(&authority_1, chain_id, delegate_1, 0)?,
+        sign_authorization(&authority_2, chain_id, delegate_2, 0)?,
+    ];
+
+    let raw_tx = MorphTxBuilder::new(chain_id, wallet.inner.clone(), 0)
+        .with_v2_eth_fee()
+        .with_authorization_list(authorizations)
+        .with_to(Address::with_last_byte(0x99))
+        .build_signed()?;
+
+    node.rpc.inject_tx(raw_tx).await?;
+    let payload = node.advance_block().await?;
+    let tx = payload.block().body().transactions.first().unwrap();
+    let receipt = node
+        .inner
+        .provider
+        .receipt_by_hash(*tx.tx_hash())?
+        .expect("receipt must exist");
+    assert!(receipt.status());
+    // 21_000 + 2 × 25_000 = 71_000; refund 2 × 12_500 = 25_000 capped at 71_000 / 5 = 14_200.
+    assert_eq!(receipt.cumulative_gas_used(), 56_800);
+
+    let state = node.inner.provider.latest()?;
+    assert_eq!(
+        assert_delegated(&*state, authority_1.address(), delegate_1)?,
+        1
+    );
+    assert_eq!(
+        assert_delegated(&*state, authority_2.address(), delegate_2)?,
+        1
+    );
+
+    Ok(())
+}
+
+/// A sender delegating itself must sign the tuple with `tx.nonce + 1`, since
+/// the transaction nonce is consumed before the list is applied.
+#[tokio::test(flavor = "multi_thread")]
+async fn morph_tx_v2_sender_self_delegation_uses_nonce_plus_one() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+    use reth_provider::StateProviderFactory;
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+    let chain_id = wallet.chain_id;
+    let sender = wallet.inner.address();
+    let delegate = Address::with_last_byte(0x42);
+
+    let authorization = sign_authorization(&wallet.inner, chain_id, delegate, 1)?;
+    let raw_tx = MorphTxBuilder::new(chain_id, wallet.inner.clone(), 0)
+        .with_v2_eth_fee()
+        .with_authorization_list(vec![authorization])
+        .with_to(Address::with_last_byte(0x99))
+        .build_signed()?;
+
+    node.rpc.inject_tx(raw_tx).await?;
+    let payload = node.advance_block().await?;
+    assert_eq!(payload.block().body().transactions.len(), 1);
+
+    let state = node.inner.provider.latest()?;
+    let nonce = assert_delegated(&*state, sender, delegate)?;
+    assert_eq!(nonce, 2, "tx nonce + authorization nonce both consumed");
+
+    Ok(())
+}
+
+/// MorphTx v2 with ERC20 fee: the delegation is applied and the fee (including
+/// the per-authorization intrinsic gas) is charged in tokens.
+#[tokio::test(flavor = "multi_thread")]
+async fn morph_tx_v2_token_fee_applies_delegation_and_charges_tokens() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+    use alloy_consensus::TxReceipt;
+    use alloy_consensus::transaction::TxHashRef;
+    use reth_provider::{ReceiptProvider, StateProviderFactory};
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+    let chain_id = wallet.chain_id;
+
+    let sender = wallet.inner.address();
+    let token_addr = morph_node::test_utils::TEST_TOKEN_ADDRESS;
+    let fee_vault = alloy_primitives::address!("530000000000000000000000000000000000000a");
+    let bal_slot = token_balance_slot(sender);
+    let fee_vault_slot = token_balance_slot(fee_vault);
+    let state_before = node.inner.provider.latest()?;
+    let bal_before = state_before
+        .storage(token_addr, bal_slot)?
+        .unwrap_or_default();
+    let fee_vault_before = state_before
+        .storage(token_addr, fee_vault_slot)?
+        .unwrap_or_default();
+
+    let authority_signer = wallet_at_index(1, chain_id);
+    let authority = authority_signer.address();
+    let delegate = Address::with_last_byte(0x42);
+    let authorization = sign_authorization(&authority_signer, chain_id, delegate, 0)?;
+
+    let raw_tx = MorphTxBuilder::new(chain_id, wallet.inner.clone(), 0)
+        .with_v2_token_fee(TEST_TOKEN_ID)
+        .with_authorization_list(vec![authorization])
+        .with_to(Address::with_last_byte(0x99))
+        .with_fees(20_000_000_000, 20_000_000_000)
+        .build_signed()?;
+
+    node.rpc.inject_tx(raw_tx).await?;
+    let payload = node.advance_block().await?;
+    let block = payload.block();
+    assert_eq!(block.body().transactions.len(), 1);
+    let tx = block.body().transactions.first().unwrap();
+    assert_eq!(tx.fee_token_id(), Some(TEST_TOKEN_ID));
+
+    let receipt = node
+        .inner
+        .provider
+        .receipt_by_hash(*tx.tx_hash())?
+        .expect("receipt must exist");
+    assert!(receipt.status());
+    // Intrinsic gas: 21_000 base + 25_000 per authorization = 46_000. The
+    // authority already exists in genesis, so the EIP-7702 refund of 12_500
+    // applies, capped by EIP-3529 at gas_used / 5 = 9_200 → 36_800.
+    assert_eq!(
+        receipt.cumulative_gas_used(),
+        36_800,
+        "gas used must include the per-authorization intrinsic cost minus the capped refund"
+    );
+    let morph_primitives::MorphReceipt::Morph(morph_receipt) = &receipt else {
+        panic!("expected a Morph receipt");
+    };
+    assert_eq!(morph_receipt.version, Some(2));
+    assert_eq!(morph_receipt.fee_token_id, Some(TEST_TOKEN_ID));
+
+    let state = node.inner.provider.latest()?;
+    assert_delegated(&*state, authority, delegate)?;
+    let bal_after = state.storage(token_addr, bal_slot)?.unwrap_or_default();
+    let fee_vault_after = state
+        .storage(token_addr, fee_vault_slot)?
+        .unwrap_or_default();
+    assert!(
+        bal_after < bal_before,
+        "token balance must decrease (fee paid in tokens)"
+    );
+
+    // The fixture token converts 1:1, so the net token fee must be exactly the
+    // post-refund gas used × gas price + L1 data fee: the EIP-7702 refund has
+    // to flow through the token reimbursement path, not only the ETH one.
+    let scale = U256::from(1_000_000_000_000_000_000u128);
+    assert_eq!(morph_receipt.fee_rate, Some(scale));
+    assert_eq!(morph_receipt.token_scale, Some(scale));
+    let fee_vault_delta = fee_vault_after - fee_vault_before;
+    assert_eq!(
+        fee_vault_delta,
+        U256::from(36_800u64) * U256::from(20_000_000_000u64) + morph_receipt.l1_fee,
+        "net token fee must equal post-refund gas used × price plus the L1 data fee"
+    );
+    assert_eq!(
+        bal_before - bal_after,
+        fee_vault_delta,
+        "sender loses exactly the net token fee"
+    );
+
+    Ok(())
+}
+
+/// A V2 call that reverts still applies the delegation (it is applied before
+/// the call frame, like 0x04) and still pays the token fee.
+#[tokio::test(flavor = "multi_thread")]
+async fn morph_tx_v2_reverting_call_still_applies_delegation_and_charges_tokens() -> eyre::Result<()>
+{
+    reth_tracing::init_test_tracing();
+    use alloy_consensus::TxReceipt;
+    use alloy_consensus::transaction::TxHashRef;
+    use morph_node::test_utils::make_deploy_tx;
+    use reth_provider::{ReceiptProvider, StateProviderFactory};
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+    let chain_id = wallet.chain_id;
+    let sender = wallet.inner.address();
+    let token_addr = morph_node::test_utils::TEST_TOKEN_ADDRESS;
+    let bal_slot = token_balance_slot(sender);
+
+    // Block 1: deploy a contract whose runtime always reverts.
+    let deploy_tx = make_deploy_tx(chain_id, wallet.inner.clone(), 0, RUNTIME_REVERT_INIT)?;
+    node.rpc.inject_tx(deploy_tx).await?;
+    node.advance_block().await?;
+    let revert_contract = Address::create(&sender, 0);
+
+    let bal_before = node
+        .inner
+        .provider
+        .latest()?
+        .storage(token_addr, bal_slot)?
+        .unwrap_or_default();
+
+    // Block 2: V2 token-fee call into the reverting contract, carrying a delegation.
+    let authority_signer = wallet_at_index(1, chain_id);
+    let authority = authority_signer.address();
+    let delegate = Address::with_last_byte(0x42);
+    let authorization = sign_authorization(&authority_signer, chain_id, delegate, 0)?;
+    let raw_tx = MorphTxBuilder::new(chain_id, wallet.inner.clone(), 1)
+        .with_v2_token_fee(TEST_TOKEN_ID)
+        .with_authorization_list(vec![authorization])
+        .with_to(revert_contract)
+        .with_gas_limit(100_000)
+        .build_signed()?;
+    node.rpc.inject_tx(raw_tx).await?;
+    let payload = node.advance_block().await?;
+
+    let tx = payload.block().body().transactions.first().unwrap();
+    let receipt = node
+        .inner
+        .provider
+        .receipt_by_hash(*tx.tx_hash())?
+        .expect("receipt must exist");
+    assert!(!receipt.status(), "call must revert");
+
+    let state = node.inner.provider.latest()?;
+    assert_eq!(
+        assert_delegated(&*state, authority, delegate)?,
+        1,
+        "delegation survives the reverted call"
+    );
+    let bal_after = state.storage(token_addr, bal_slot)?.unwrap_or_default();
+    assert!(
+        bal_after < bal_before,
+        "token fee is still charged when the call reverts"
+    );
+
+    Ok(())
+}
+
+/// After a self-delegation the sender's account carries code; both fee paths
+/// must keep accepting its MorphTxs (EIP-3607 exempts delegation designators).
+#[tokio::test(flavor = "multi_thread")]
+async fn delegated_sender_can_keep_sending_morph_txs() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+    use alloy_consensus::TxReceipt;
+    use alloy_consensus::transaction::TxHashRef;
+    use reth_provider::{ReceiptProvider, StateProviderFactory};
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+    let chain_id = wallet.chain_id;
+    let sender = wallet.inner.address();
+    let delegate = Address::with_last_byte(0x42);
+
+    // Block 1: self-delegate (tx nonce 0, authorization nonce 1).
+    let authorization = sign_authorization(&wallet.inner, chain_id, delegate, 1)?;
+    let raw_tx = MorphTxBuilder::new(chain_id, wallet.inner.clone(), 0)
+        .with_v2_eth_fee()
+        .with_authorization_list(vec![authorization])
+        .with_to(Address::with_last_byte(0x99))
+        .build_signed()?;
+    node.rpc.inject_tx(raw_tx).await?;
+    node.advance_block().await?;
+    let state = node.inner.provider.latest()?;
+    assert_eq!(assert_delegated(&*state, sender, delegate)?, 2);
+
+    // Block 2: ETH-fee MorphTx v1 from the delegated sender.
+    let raw_tx = MorphTxBuilder::new(chain_id, wallet.inner.clone(), 2)
+        .with_v1_eth_fee()
+        .with_to(Address::with_last_byte(0x99))
+        .build_signed()?;
+    node.rpc.inject_tx(raw_tx).await?;
+    let payload = node.advance_block().await?;
+    assert_eq!(payload.block().body().transactions.len(), 1);
+    let receipt = node
+        .inner
+        .provider
+        .receipt_by_hash(*payload.block().body().transactions[0].tx_hash())?
+        .expect("receipt must exist");
+    assert!(receipt.status());
+
+    // Block 3: token-fee MorphTx v0 from the delegated sender.
+    let raw_tx = MorphTxBuilder::new(chain_id, wallet.inner.clone(), 3)
+        .with_v0_token_fee(TEST_TOKEN_ID)
+        .with_to(Address::with_last_byte(0x99))
+        .build_signed()?;
+    node.rpc.inject_tx(raw_tx).await?;
+    let payload = node.advance_block().await?;
+    assert_eq!(payload.block().body().transactions.len(), 1);
+    let receipt = node
+        .inner
+        .provider
+        .receipt_by_hash(*payload.block().body().transactions[0].tx_hash())?
+        .expect("receipt must exist");
+    assert!(receipt.status());
+
+    let state = node.inner.provider.latest()?;
+    assert_eq!(
+        assert_delegated(&*state, sender, delegate)?,
+        4,
+        "delegation stays in place across later transactions"
+    );
+
+    Ok(())
+}
+
+/// The pool's EIP-7702 authority tracking applies to MorphTx v2: an authority
+/// that already has more in-flight transactions than the delegated slot limit
+/// cannot be referenced by a new authorization (`AuthorityReserved`).
+#[tokio::test(flavor = "multi_thread")]
+async fn morph_tx_v2_authorization_for_busy_authority_is_rejected_by_pool() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+    use morph_node::test_utils::make_transfer_tx;
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let node = nodes.pop().unwrap();
+    let chain_id = wallet.chain_id;
+
+    // Account 1 has two transactions in flight (above the default slot limit of 1).
+    let authority_signer = wallet_at_index(1, chain_id);
+    for nonce in 0..2 {
+        let raw_tx = make_transfer_tx(chain_id, authority_signer.clone(), nonce).await;
+        node.rpc.inject_tx(raw_tx).await?;
+    }
+
+    // Account 0 now tries to carry a delegation signed by account 1.
+    let authorization = sign_authorization(
+        &authority_signer,
+        chain_id,
+        Address::with_last_byte(0x42),
+        2,
+    )?;
+    let raw_tx = MorphTxBuilder::new(chain_id, wallet.inner.clone(), 0)
+        .with_v2_eth_fee()
+        .with_authorization_list(vec![authorization])
+        .build_signed()?;
+
+    let err = node
+        .rpc
+        .inject_tx(raw_tx)
+        .await
+        .expect_err("authorization for an authority with two in-flight txs must be rejected");
+    assert!(
+        err.to_string().contains("authority already reserved"),
+        "unexpected error: {err}"
+    );
+
+    Ok(())
+}
+
+/// A pending MorphTx v2 authorization reserves the authority: the authority may
+/// keep only the delegated in-flight slot limit (1) of its own transactions.
+#[tokio::test(flavor = "multi_thread")]
+async fn morph_tx_v2_pending_authorization_limits_authority_inflight_txs() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+    use morph_node::test_utils::make_transfer_tx;
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let node = nodes.pop().unwrap();
+    let chain_id = wallet.chain_id;
+
+    // Account 0's pending V2 carries a delegation signed by account 1.
+    let authority_signer = wallet_at_index(1, chain_id);
+    let authorization = sign_authorization(
+        &authority_signer,
+        chain_id,
+        Address::with_last_byte(0x42),
+        0,
+    )?;
+    let raw_tx = MorphTxBuilder::new(chain_id, wallet.inner.clone(), 0)
+        .with_v2_eth_fee()
+        .with_authorization_list(vec![authorization])
+        .build_signed()?;
+    node.rpc.inject_tx(raw_tx).await?;
+
+    // Account 1 may still use its single delegated slot ...
+    let first = make_transfer_tx(chain_id, authority_signer.clone(), 0).await;
+    node.rpc.inject_tx(first).await?;
+
+    // ... but not a second in-flight transaction.
+    let second = make_transfer_tx(chain_id, authority_signer.clone(), 1).await;
+    let err = node
+        .rpc
+        .inject_tx(second)
+        .await
+        .expect_err("second in-flight tx from a pending authority must be rejected");
+    assert!(
+        err.to_string()
+            .contains("in-flight transaction limit reached"),
+        "unexpected error: {err}"
+    );
+
+    Ok(())
+}
+
+/// MorphTx v2 is rejected by the pool while Celadon is not active.
+#[tokio::test(flavor = "multi_thread")]
+async fn morph_tx_v2_rejected_before_celadon() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, wallet) = TestNodeBuilder::new()
+        .with_schedule(HardforkSchedule::PreCeladon)
+        .build()
+        .await?;
+    let node = nodes.pop().unwrap();
+    let chain_id = wallet.chain_id;
+
+    let authority_signer = wallet_at_index(1, chain_id);
+    let authorization = sign_authorization(
+        &authority_signer,
+        chain_id,
+        Address::with_last_byte(0x42),
+        0,
+    )?;
+    let raw_tx = MorphTxBuilder::new(chain_id, wallet.inner.clone(), 0)
+        .with_v2_eth_fee()
+        .with_authorization_list(vec![authorization])
+        .build_signed()?;
+
+    let err = node
+        .rpc
+        .inject_tx(raw_tx)
+        .await
+        .expect_err("MorphTx v2 should be rejected by pool before Celadon");
+    assert!(
+        err.to_string().contains("not yet active"),
+        "unexpected error: {err}"
+    );
+
+    Ok(())
+}
+
+/// MorphTx v1 keeps working after Celadon (only v2 is new).
+#[tokio::test(flavor = "multi_thread")]
+async fn morph_tx_v1_still_accepted_after_celadon() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+
+    let raw_tx = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
+        .with_v1_eth_fee()
+        .build_signed()?;
+    node.rpc.inject_tx(raw_tx).await?;
+    let payload = node.advance_block().await?;
+    assert_eq!(payload.block().body().transactions.len(), 1);
+
+    Ok(())
+}
+
+/// MorphTx v2 without authorizations is accepted and executes exactly like a
+/// v1 transaction: plain call cost, no delegation, receipt `version` 0x2, and
+/// `authorizationList: []` in the RPC transaction object.
+#[tokio::test(flavor = "multi_thread")]
+async fn morph_tx_v2_without_authorizations_executes_like_v1() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+    use alloy_consensus::TxReceipt;
+    use alloy_consensus::transaction::TxHashRef;
+    use jsonrpsee::core::client::ClientT;
+    use reth_provider::{ReceiptProvider, StateProviderFactory};
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+    let sender = wallet.inner.address();
+
+    let raw_tx = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
+        .with_v2_eth_fee()
+        .with_to(Address::with_last_byte(0x99))
+        .build_signed()?;
+    node.rpc.inject_tx(raw_tx).await?;
+
+    let payload = node.advance_block().await?;
+    let block = payload.block();
+    assert_eq!(
+        block.body().transactions.len(),
+        1,
+        "MorphTx v2 without authorizations should be included in block"
+    );
+    let tx = block.body().transactions.first().unwrap();
+    assert!(tx.is_morph_tx());
+    assert_eq!(tx.version(), Some(2));
+
+    let receipt = node
+        .inner
+        .provider
+        .receipt_by_hash(*tx.tx_hash())?
+        .expect("receipt must exist");
+    assert!(receipt.status(), "plain v2 call must succeed");
+    assert_eq!(
+        receipt.cumulative_gas_used(),
+        21_000,
+        "no authorizations: plain call cost, no 7702 gas or refund"
+    );
+    let morph_primitives::MorphReceipt::Morph(morph_receipt) = &receipt else {
+        panic!("expected a Morph receipt");
+    };
+    assert_eq!(morph_receipt.version, Some(2));
+
+    // Nothing was delegated: the sender stays a plain EOA.
+    let state = node.inner.provider.latest()?;
+    assert!(
+        state
+            .account_code(&sender)?
+            .is_none_or(|code| code.is_empty()),
+        "sender must not carry any code"
+    );
+
+    // RPC transaction object: version 0x2 and an explicit empty list, the same
+    // shape go-ethereum returns.
+    let client = node
+        .rpc_client()
+        .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
+    let rpc_tx: serde_json::Value = client
+        .request("eth_getTransactionByHash", (*tx.tx_hash(),))
+        .await?;
+    assert_eq!(rpc_tx["type"].as_str(), Some("0x7f"));
+    assert_eq!(rpc_tx["version"].as_str(), Some("0x2"));
+    assert_eq!(
+        rpc_tx["authorizationList"],
+        serde_json::json!([]),
+        "an empty v2 list is emitted as [] in the RPC transaction object"
+    );
+
+    Ok(())
+}
+
+/// Without authorizations a v2 keeps v1's ability to create contracts: the
+/// no-CREATE rule only applies to a non-empty authorization list, and the same
+/// CREATE with an authorization attached is rejected by the pool.
+#[tokio::test(flavor = "multi_thread")]
+async fn morph_tx_v2_without_authorizations_can_create_contract() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+    use super::helpers::{RETURN_WORD_42_RUNTIME, init_code_for};
+    use alloy_consensus::TxReceipt;
+    use alloy_consensus::transaction::TxHashRef;
+    use reth_provider::{ReceiptProvider, StateProviderFactory};
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+    let chain_id = wallet.chain_id;
+    let sender = wallet.inner.address();
+
+    let raw_tx = MorphTxBuilder::new(chain_id, wallet.inner.clone(), 0)
+        .with_v2_eth_fee()
+        .with_create(init_code_for(RETURN_WORD_42_RUNTIME))
+        .with_gas_limit(200_000)
+        .build_signed()?;
+    node.rpc.inject_tx(raw_tx).await?;
+
+    let payload = node.advance_block().await?;
+    let tx = payload
+        .block()
+        .body()
+        .transactions
+        .first()
+        .expect("v2 CREATE without authorizations should be included");
+    assert_eq!(tx.version(), Some(2));
+    let receipt = node
+        .inner
+        .provider
+        .receipt_by_hash(*tx.tx_hash())?
+        .expect("receipt must exist");
+    assert!(receipt.status(), "v2 CREATE must succeed");
+
+    let contract = sender.create(0);
+    let state = node.inner.provider.latest()?;
+    let code = state
+        .account_code(&contract)?
+        .expect("contract code must be deployed");
+    assert_eq!(code.original_bytes().as_ref(), RETURN_WORD_42_RUNTIME);
+
+    // The same CREATE carrying an authorization is rejected up front.
+    let authority_signer = wallet_at_index(1, chain_id);
+    let authorization = sign_authorization(
+        &authority_signer,
+        chain_id,
+        Address::with_last_byte(0x42),
+        0,
+    )?;
+    let raw_tx = MorphTxBuilder::new(chain_id, wallet.inner.clone(), 1)
+        .with_v2_eth_fee()
+        .with_create(init_code_for(RETURN_WORD_42_RUNTIME))
+        .with_gas_limit(200_000)
+        .with_authorization_list(vec![authorization])
+        .build_signed()?;
+    let err = node
+        .rpc
+        .inject_tx(raw_tx)
+        .await
+        .expect_err("v2 CREATE with authorizations must be rejected");
+    assert!(
+        err.to_string().contains("cannot create a contract"),
+        "unexpected error: {err}"
+    );
+
+    Ok(())
+}
+
+/// A self-delegating V2 whose call targets the sender itself runs the delegate's
+/// code in the same transaction: the list is applied (after the tx nonce bump)
+/// before the call frame, so the sender already carries `0xef0100 || delegate`
+/// when it is called, and the delegate's log is emitted from the sender's address.
+#[tokio::test(flavor = "multi_thread")]
+async fn morph_tx_v2_self_delegation_executes_delegate_code_in_same_tx() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+    use super::helpers::{LOG_WORD_42_RUNTIME, init_code_for};
+    use alloy_consensus::TxReceipt;
+    use alloy_consensus::transaction::TxHashRef;
+    use morph_node::test_utils::make_deploy_tx;
+    use reth_provider::{ReceiptProvider, StateProviderFactory};
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+    let chain_id = wallet.chain_id;
+    let sender = wallet.inner.address();
+
+    // Block 1: deploy the logging delegate.
+    let deploy_tx = make_deploy_tx(
+        chain_id,
+        wallet.inner.clone(),
+        0,
+        init_code_for(LOG_WORD_42_RUNTIME),
+    )?;
+    node.rpc.inject_tx(deploy_tx).await?;
+    node.advance_block().await?;
+    let delegate = Address::create(&sender, 0);
+
+    // Block 2: tx nonce 1, authorization nonce 2, call the sender itself.
+    let authorization = sign_authorization(&wallet.inner, chain_id, delegate, 2)?;
+    let raw_tx = MorphTxBuilder::new(chain_id, wallet.inner.clone(), 1)
+        .with_v2_eth_fee()
+        .with_authorization_list(vec![authorization])
+        .with_to(sender)
+        .build_signed()?;
+    node.rpc.inject_tx(raw_tx).await?;
+    let payload = node.advance_block().await?;
+    assert_eq!(payload.block().body().transactions.len(), 1);
+
+    let receipt = node
+        .inner
+        .provider
+        .receipt_by_hash(*payload.block().body().transactions[0].tx_hash())?
+        .expect("receipt must exist");
+    assert!(receipt.status(), "delegated code must run successfully");
+    let logs = receipt.logs();
+    assert_eq!(
+        logs.len(),
+        1,
+        "delegate code must have run inside the same tx"
+    );
+    assert_eq!(
+        logs[0].address, sender,
+        "delegated code executes in the sender's own context"
+    );
+    assert_eq!(
+        logs[0].data.data.as_ref(),
+        U256::from(0x42u64).to_be_bytes::<32>()
+    );
+
+    // deploy (0 → 1), V2 tx nonce (1 → 2), self-authorization (2 → 3)
+    let state = node.inner.provider.latest()?;
+    assert_eq!(assert_delegated(&*state, sender, delegate)?, 3);
 
     Ok(())
 }

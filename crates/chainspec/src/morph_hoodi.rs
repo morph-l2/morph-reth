@@ -21,7 +21,9 @@ pub static MORPH_HOODI: LazyLock<Arc<MorphChainSpec>> = LazyLock::new(|| {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{MORPH_HOODI_CHAIN_ID, hardfork::MorphHardforks};
+    use crate::{
+        MORPH_HOODI_CHAIN_ID, MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK, hardfork::MorphHardforks,
+    };
     use alloy_primitives::address;
     use reth_chainspec::EthChainSpec;
 
@@ -46,6 +48,21 @@ mod tests {
     }
 
     #[test]
+    fn test_morph_hoodi_payload_limit_matches_genesis() {
+        // The bundled genesis JSON is the single source of the consensus limit:
+        // it carries the same 720 KiB value as morph-geth's built-in config and
+        // the preset uses it unchanged.
+        let genesis: Genesis = serde_json::from_str(include_str!("../res/genesis/hoodi.json"))
+            .expect("hoodi genesis should parse");
+        let genesis_limit = crate::MorphGenesisInfo::extract_from(&genesis.config.extra_fields)
+            .expect("hoodi morph config should parse")
+            .morph_chain_info
+            .max_tx_payload_bytes_per_block;
+        assert_eq!(genesis_limit, MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK);
+        assert_eq!(MORPH_HOODI.max_tx_payload_bytes_per_block(), genesis_limit);
+    }
+
+    #[test]
     fn test_morph_hoodi_hardforks() {
         // Block-based hardforks should be active at block 0
         assert!(MORPH_HOODI.is_bernoulli_active_at_block(0));
@@ -63,5 +80,8 @@ mod tests {
 
         assert!(!MORPH_HOODI.is_jade_active_at_timestamp(1774418399));
         assert!(MORPH_HOODI.is_jade_active_at_timestamp(1774418400));
+
+        assert!(!MORPH_HOODI.is_celadon_active_at_timestamp(1793167199));
+        assert!(MORPH_HOODI.is_celadon_active_at_timestamp(1793167200));
     }
 }

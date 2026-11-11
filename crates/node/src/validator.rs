@@ -8,6 +8,7 @@ use morph_chainspec::{
     L2_MESSAGE_QUEUE_ADDRESS, L2_MESSAGE_QUEUE_WITHDRAW_TRIE_ROOT_SLOT, MorphChainSpec,
     MorphHardforks,
 };
+use morph_consensus::MorphConsensusError;
 use morph_payload_types::{MorphExecutionData, MorphPayloadTypes};
 use morph_primitives::{MorphHeader, MorphPrimitives, MorphTxEnvelope};
 use parking_lot::Mutex;
@@ -292,20 +293,25 @@ where
                 ConsensusError::msg("L1 message transaction is missing queue index")
             })?;
             expected = queue_index.checked_add(1).ok_or_else(|| {
-                ConsensusError::msg(format!(
-                    "invalid block.NextL1MsgIndex: expected {}, got {}",
-                    u64::MAX,
-                    block.header().next_l1_msg_index
-                ))
+                ConsensusError::other(MorphConsensusError::InvalidNextL1MessageIndex {
+                    expected: u64::MAX,
+                    actual: block.header().next_l1_msg_index,
+                })
             })?;
         }
 
+        // Typed so that `MorphConsensus::is_transient_error` keeps this rejection out of
+        // reth's invalid-header cache: the field is not covered by the block hash, so
+        // the cache entry would also match the honest block.
         let actual = block.header().next_l1_msg_index;
         if actual != expected {
-            return Err(ConsensusError::msg(format!(
-                "invalid block.NextL1MsgIndex: expected {expected}, got {actual}"
-            ))
-            .into());
+            return Err(
+                ConsensusError::other(MorphConsensusError::InvalidNextL1MessageIndex {
+                    expected,
+                    actual,
+                })
+                .into(),
+            );
         }
         Ok(())
     }
@@ -660,10 +666,12 @@ impl MorphEngineValidator {
             // The slot was not touched, so its value is unchanged from the parent.
             return Ok(());
         };
+        // Typed for the same reason as the `NextL1MsgIndex` check: the payload's withdraw
+        // trie root is not covered by the block hash.
         if actual != expected {
-            return Err(ConsensusError::msg(format!(
-                "withdraw trie root mismatch: expected {expected}, got {actual}"
-            )));
+            return Err(ConsensusError::other(
+                MorphConsensusError::WithdrawTrieRootMismatch { expected, actual },
+            ));
         }
         Ok(())
     }
