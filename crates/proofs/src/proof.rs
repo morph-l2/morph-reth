@@ -488,7 +488,10 @@ mod tests {
     use alloy_eips::{BlockNumHash, NumHash, eip1898::BlockWithParent};
     use alloy_primitives::{Address, B256, U256, keccak256};
     use reth_primitives_traits::Account;
-    use reth_trie::EMPTY_ROOT_HASH;
+    use reth_trie::{
+        EMPTY_ROOT_HASH, hashed_cursor::noop::NoopHashedCursorFactory,
+        trie_cursor::noop::NoopTrieCursorFactory,
+    };
 
     use super::*;
     use crate::{
@@ -670,5 +673,70 @@ mod tests {
         assert_eq!(proof.storage_proofs.len(), 1);
         assert_eq!(proof.storage_proofs[0].value, U256::ZERO);
         proof.verify(state_root).unwrap();
+    }
+
+    #[test]
+    fn incremental_root_includes_leaf_before_deeper_stored_branch() {
+        fn slot(prefix: &[u8]) -> B256 {
+            let mut bytes = [0; 32];
+            bytes[..prefix.len()].copy_from_slice(prefix);
+            B256::from(bytes)
+        }
+
+        fn storage_state(hashed_address: B256, slots: &[B256]) -> HashedPostState {
+            let account = Account {
+                nonce: 1,
+                balance: U256::ZERO,
+                bytecode_hash: None,
+            };
+            HashedPostState::default()
+                .with_accounts([(hashed_address, Some(account))])
+                .with_storages([(
+                    hashed_address,
+                    HashedStorage::from_iter(slots.iter().map(|&slot| (slot, U256::from(1)))),
+                )])
+        }
+
+        fn full_root(state: &HashedPostState) -> (B256, TrieUpdates) {
+            let sorted = state.clone().into_sorted();
+            StateRoot::new(
+                NoopTrieCursorFactory::default(),
+                HashedPostStateCursorFactory::new(NoopHashedCursorFactory::default(), &sorted),
+            )
+            .with_prefix_sets(state.construct_prefix_sets().freeze())
+            .root_with_updates()
+            .unwrap()
+        }
+
+        let hashed_address = B256::repeat_byte(0xaa);
+        let old_slots = [
+            slot(&[0x00]),
+            slot(&[0x0f, 0x00]),
+            slot(&[0x0f, 0x10]),
+            slot(&[0x10, 0xa0, 0x00]),
+            slot(&[0x10, 0xa0, 0x01]),
+            slot(&[0x10, 0xa0, 0x10]),
+            slot(&[0x10, 0xa1]),
+        ];
+        let inserted = slot(&[0x10, 0x00]);
+        let new_slots: Vec<B256> = old_slots.iter().copied().chain([inserted]).collect();
+
+        let (old_root, old_updates) = full_root(&storage_state(hashed_address, &old_slots));
+        let new_state = storage_state(hashed_address, &new_slots);
+        let (rebuilt_root, _) = full_root(&new_state);
+
+        let delta = storage_state(hashed_address, &[inserted]);
+        let new_sorted = new_state.into_sorted();
+        let old_trie = old_updates.into_sorted();
+        let incremental_root = StateRoot::new(
+            InMemoryTrieCursorFactory::new(NoopTrieCursorFactory::default(), &old_trie),
+            HashedPostStateCursorFactory::new(NoopHashedCursorFactory::default(), &new_sorted),
+        )
+        .with_prefix_sets(delta.construct_prefix_sets().freeze())
+        .root()
+        .unwrap();
+
+        assert_ne!(old_root, rebuilt_root);
+        assert_eq!(incremental_root, rebuilt_root);
     }
 }
