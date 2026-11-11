@@ -344,6 +344,7 @@ mod tests {
             fee_limit: U256::from(1000u64),
             reference: None,
             memo: None,
+            authorization_list: Vec::new(),
             input: alloy_primitives::Bytes::new(),
         };
         MorphTxEnvelope::Morph(Signed::new_unhashed(tx, Signature::test_signature()))
