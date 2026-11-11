@@ -74,6 +74,6 @@ impl BlockExecutorFactory for MorphBlockExecutorFactory {
         DB: StateDB,
         I: Inspector<MorphContext<DB>>,
     {
-        MorphBlockExecutor::new(evm, self.spec.clone(), self.receipt_builder)
+        MorphBlockExecutor::new(evm, self.receipt_builder)
     }
 }

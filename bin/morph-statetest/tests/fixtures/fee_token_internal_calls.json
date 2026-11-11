@@ -1,0 +1,1324 @@
+{
+  "balance_writes": {
+    "env": {
+      "currentCoinbase": "0x530000000000000000000000000000000000000a",
+      "currentDifficulty": "0x0",
+      "currentGasLimit": "0x1c9c380",
+      "currentNumber": "0x1",
+      "currentTimestamp": "0x1",
+      "currentBaseFee": "0x1",
+      "currentChainID": "0x1"
+    },
+    "pre": {
+      "0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b": {
+        "balance": "0xde0b6b3a7640000",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {}
+      },
+      "0x3000000000000000000000000000000000000003": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x60015f55620f42405f5260205ff3",
+        "storage": {
+          "0x000000000000000000000000a94f5374fce5edbc8e2a8697c15331677e6ebf0b": "0x00000000000000000000000000000000000000000000000000000000000f4240"
+        }
+      },
+      "0x4200000000000000000000000000000000000042": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {}
+      },
+      "0x5300000000000000000000000000000000000021": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706d": "0x0000000000000000000000003000000000000000000000000000000000000003",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706e": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706f": "0x0000000000000000000000000000000000000000000000000000000000001201",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e6377070": "0x0000000000000000000000000000000000000000000000000000000000000001",
+          "0xbb86fbc034f4e382929974bcd8419ed626b0ea647f962d89ba2fb6bd28785ab9": "0x0000000000000000000000000000000000000000000000000000000000000001"
+        }
+      }
+    },
+    "transaction": {
+      "type": "0x7f",
+      "version": "0x0",
+      "feeTokenID": "0x1",
+      "feeLimit": "0x0",
+      "nonce": "0x0",
+      "gasPrice": "0xa",
+      "gasLimit": [
+        "0x186a0"
+      ],
+      "to": "0x4200000000000000000000000000000000000042",
+      "value": [
+        "0x0"
+      ],
+      "data": [
+        "0x"
+      ],
+      "secretKey": "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8"
+    },
+    "post": {
+      "Emerald": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x7c1c360fabaec3c980927e916a02d97a6ef79b93d601e0a1616e4a8014ce5669",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+          "expectException": "TokenBalanceQueryFailed"
+        }
+      ],
+      "Jade": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x7c1c360fabaec3c980927e916a02d97a6ef79b93d601e0a1616e4a8014ce5669",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+          "expectException": "TokenBalanceQueryFailed"
+        }
+      ]
+    }
+  },
+  "deduct_clear": {
+    "env": {
+      "currentCoinbase": "0x530000000000000000000000000000000000000a",
+      "currentDifficulty": "0x0",
+      "currentGasLimit": "0x1c9c380",
+      "currentNumber": "0x1",
+      "currentTimestamp": "0x1",
+      "currentBaseFee": "0x1",
+      "currentChainID": "0x1"
+    },
+    "pre": {
+      "0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b": {
+        "balance": "0xde0b6b3a7640000",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {}
+      },
+      "0x3000000000000000000000000000000000000003": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x366044146013576004355460005260206000f35b60243580335403335560043580548201905550600160005260206000f3",
+        "storage": {
+          "0x000000000000000000000000a94f5374fce5edbc8e2a8697c15331677e6ebf0b": "0x00000000000000000000000000000000000000000000000000000000000f4240"
+        }
+      },
+      "0x4200000000000000000000000000000000000042": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {}
+      },
+      "0x5300000000000000000000000000000000000021": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706d": "0x0000000000000000000000003000000000000000000000000000000000000003",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706e": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706f": "0x0000000000000000000000000000000000000000000000000000000000001201",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e6377070": "0x0000000000000000000000000000000000000000000000000000000000000001",
+          "0xbb86fbc034f4e382929974bcd8419ed626b0ea647f962d89ba2fb6bd28785ab9": "0x0000000000000000000000000000000000000000000000000000000000000001"
+        }
+      }
+    },
+    "transaction": {
+      "type": "0x7f",
+      "version": "0x0",
+      "feeTokenID": "0x1",
+      "feeLimit": "0x0",
+      "nonce": "0x0",
+      "gasPrice": "0xa",
+      "gasLimit": [
+        "0x186a0"
+      ],
+      "to": "0x4200000000000000000000000000000000000042",
+      "value": [
+        "0x0"
+      ],
+      "data": [
+        "0x"
+      ],
+      "secretKey": "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8"
+    },
+    "post": {
+      "Emerald": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0xfb0ac627f1b92b10d0f1c60ef87667dc42cd3eb7a919ceb84e9427c63f9b6125",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"
+        }
+      ],
+      "Jade": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0xfb0ac627f1b92b10d0f1c60ef87667dc42cd3eb7a919ceb84e9427c63f9b6125",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"
+        }
+      ]
+    }
+  },
+  "deduct_keep": {
+    "env": {
+      "currentCoinbase": "0x530000000000000000000000000000000000000a",
+      "currentDifficulty": "0x0",
+      "currentGasLimit": "0x1c9c380",
+      "currentNumber": "0x1",
+      "currentTimestamp": "0x1",
+      "currentBaseFee": "0x1",
+      "currentChainID": "0x1"
+    },
+    "pre": {
+      "0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b": {
+        "balance": "0xde0b6b3a7640000",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {}
+      },
+      "0x3000000000000000000000000000000000000003": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x366044146013576004355460005260206000f35b60243580335403335560043580548201905550600160005260206000f3",
+        "storage": {
+          "0x000000000000000000000000a94f5374fce5edbc8e2a8697c15331677e6ebf0b": "0x00000000000000000000000000000000000000000000000000000000000f4241"
+        }
+      },
+      "0x4200000000000000000000000000000000000042": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {}
+      },
+      "0x5300000000000000000000000000000000000021": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706d": "0x0000000000000000000000003000000000000000000000000000000000000003",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706e": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706f": "0x0000000000000000000000000000000000000000000000000000000000001201",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e6377070": "0x0000000000000000000000000000000000000000000000000000000000000001",
+          "0xbb86fbc034f4e382929974bcd8419ed626b0ea647f962d89ba2fb6bd28785ab9": "0x0000000000000000000000000000000000000000000000000000000000000001"
+        }
+      }
+    },
+    "transaction": {
+      "type": "0x7f",
+      "version": "0x0",
+      "feeTokenID": "0x1",
+      "feeLimit": "0x0",
+      "nonce": "0x0",
+      "gasPrice": "0xa",
+      "gasLimit": [
+        "0x186a0"
+      ],
+      "to": "0x4200000000000000000000000000000000000042",
+      "value": [
+        "0x0"
+      ],
+      "data": [
+        "0x"
+      ],
+      "secretKey": "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8"
+    },
+    "post": {
+      "Emerald": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0xe1a1a7e57eaf4aee439d65814e0a688a2775ee81fbdc2c4d77f06534d7088eac",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"
+        }
+      ],
+      "Jade": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0xe1a1a7e57eaf4aee439d65814e0a688a2775ee81fbdc2c4d77f06534d7088eac",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"
+        }
+      ]
+    }
+  },
+  "gasprice_guard": {
+    "env": {
+      "currentCoinbase": "0x530000000000000000000000000000000000000a",
+      "currentDifficulty": "0x0",
+      "currentGasLimit": "0x1c9c380",
+      "currentNumber": "0x1",
+      "currentTimestamp": "0x1",
+      "currentBaseFee": "0x1",
+      "currentChainID": "0x1"
+    },
+    "pre": {
+      "0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b": {
+        "balance": "0xde0b6b3a7640000",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {}
+      },
+      "0x3000000000000000000000000000000000000003": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x3a600a14600a575f5ffd5b36604414601e576004355460005260206000f35b60243580335403335560043580548201905550600160005260206000f3",
+        "storage": {
+          "0x000000000000000000000000a94f5374fce5edbc8e2a8697c15331677e6ebf0b": "0x00000000000000000000000000000000000000000000000000000000000f4241"
+        }
+      },
+      "0x4200000000000000000000000000000000000042": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {}
+      },
+      "0x5300000000000000000000000000000000000021": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706d": "0x0000000000000000000000003000000000000000000000000000000000000003",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706e": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706f": "0x0000000000000000000000000000000000000000000000000000000000001201",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e6377070": "0x0000000000000000000000000000000000000000000000000000000000000001",
+          "0xbb86fbc034f4e382929974bcd8419ed626b0ea647f962d89ba2fb6bd28785ab9": "0x0000000000000000000000000000000000000000000000000000000000000001"
+        }
+      }
+    },
+    "transaction": {
+      "type": "0x7f",
+      "version": "0x0",
+      "feeTokenID": "0x1",
+      "feeLimit": "0x0",
+      "nonce": "0x0",
+      "gasPrice": "0xa",
+      "gasLimit": [
+        "0x186a0"
+      ],
+      "to": "0x4200000000000000000000000000000000000042",
+      "value": [
+        "0x0"
+      ],
+      "data": [
+        "0x"
+      ],
+      "secretKey": "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8"
+    },
+    "post": {
+      "Emerald": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0d1c7d12041d949d73f15b8d08dbdcacecdf844675d40d41632a0bfb463ef36d",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"
+        }
+      ],
+      "Jade": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0d1c7d12041d949d73f15b8d08dbdcacecdf844675d40d41632a0bfb463ef36d",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"
+        }
+      ]
+    }
+  },
+  "main_oog": {
+    "env": {
+      "currentCoinbase": "0x530000000000000000000000000000000000000a",
+      "currentDifficulty": "0x0",
+      "currentGasLimit": "0x1c9c380",
+      "currentNumber": "0x1",
+      "currentTimestamp": "0x1",
+      "currentBaseFee": "0x1",
+      "currentChainID": "0x1"
+    },
+    "pre": {
+      "0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b": {
+        "balance": "0xde0b6b3a7640000",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {}
+      },
+      "0x3000000000000000000000000000000000000003": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x366044146013576004355460005260206000f35b60243580335403335560043580548201905550600160005260206000f3",
+        "storage": {
+          "0x000000000000000000000000a94f5374fce5edbc8e2a8697c15331677e6ebf0b": "0x00000000000000000000000000000000000000000000000000000000000f4240"
+        }
+      },
+      "0x4200000000000000000000000000000000000042": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0xfe",
+        "storage": {}
+      },
+      "0x5300000000000000000000000000000000000021": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706d": "0x0000000000000000000000003000000000000000000000000000000000000003",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706e": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706f": "0x0000000000000000000000000000000000000000000000000000000000001201",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e6377070": "0x0000000000000000000000000000000000000000000000000000000000000001",
+          "0xbb86fbc034f4e382929974bcd8419ed626b0ea647f962d89ba2fb6bd28785ab9": "0x0000000000000000000000000000000000000000000000000000000000000001"
+        }
+      }
+    },
+    "transaction": {
+      "type": "0x7f",
+      "version": "0x0",
+      "feeTokenID": "0x1",
+      "feeLimit": "0x0",
+      "nonce": "0x0",
+      "gasPrice": "0xa",
+      "gasLimit": [
+        "0x186a0"
+      ],
+      "to": "0x4200000000000000000000000000000000000042",
+      "value": [
+        "0x0"
+      ],
+      "data": [
+        "0x"
+      ],
+      "secretKey": "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8"
+    },
+    "post": {
+      "Emerald": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x1b9c3313759258951e68ab4e7754f0859f0b049431eb3d1e7a2ff460ceafe82b",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"
+        }
+      ],
+      "Jade": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x1b9c3313759258951e68ab4e7754f0859f0b049431eb3d1e7a2ff460ceafe82b",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"
+        }
+      ]
+    }
+  },
+  "main_reads_uninitialized_memory": {
+    "env": {
+      "currentCoinbase": "0x530000000000000000000000000000000000000a",
+      "currentDifficulty": "0x0",
+      "currentGasLimit": "0x1c9c380",
+      "currentNumber": "0x1",
+      "currentTimestamp": "0x1",
+      "currentBaseFee": "0x1",
+      "currentChainID": "0x1"
+    },
+    "pre": {
+      "0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b": {
+        "balance": "0xde0b6b3a7640000",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {}
+      },
+      "0x3000000000000000000000000000000000000003": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x366044146013576004355460005260206000f35b60243580335403335560043580548201905550600160005260206000f3",
+        "storage": {
+          "0x000000000000000000000000a94f5374fce5edbc8e2a8697c15331677e6ebf0b": "0x00000000000000000000000000000000000000000000000000000000000f4241"
+        }
+      },
+      "0x4200000000000000000000000000000000000042": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x5960005560005160015500",
+        "storage": {}
+      },
+      "0x5300000000000000000000000000000000000021": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706d": "0x0000000000000000000000003000000000000000000000000000000000000003",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706e": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706f": "0x0000000000000000000000000000000000000000000000000000000000001201",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e6377070": "0x0000000000000000000000000000000000000000000000000000000000000001",
+          "0xbb86fbc034f4e382929974bcd8419ed626b0ea647f962d89ba2fb6bd28785ab9": "0x0000000000000000000000000000000000000000000000000000000000000001"
+        }
+      }
+    },
+    "transaction": {
+      "type": "0x7f",
+      "version": "0x0",
+      "feeTokenID": "0x1",
+      "feeLimit": "0x0",
+      "nonce": "0x0",
+      "gasPrice": "0xa",
+      "gasLimit": [
+        "0x186a0"
+      ],
+      "to": "0x4200000000000000000000000000000000000042",
+      "value": [
+        "0x0"
+      ],
+      "data": [
+        "0x"
+      ],
+      "secretKey": "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8"
+    },
+    "post": {
+      "Emerald": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0xb05c0ccb41d7ad9b13f5e8ac1b93f42dc8c8b8bbd312e0af5f91fa5525f47a49",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"
+        }
+      ],
+      "Jade": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0xb05c0ccb41d7ad9b13f5e8ac1b93f42dc8c8b8bbd312e0af5f91fa5525f47a49",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"
+        }
+      ]
+    }
+  },
+  "main_restores_cleared_slot": {
+    "env": {
+      "currentCoinbase": "0x530000000000000000000000000000000000000a",
+      "currentDifficulty": "0x0",
+      "currentGasLimit": "0x1c9c380",
+      "currentNumber": "0x1",
+      "currentTimestamp": "0x1",
+      "currentBaseFee": "0x1",
+      "currentChainID": "0x1"
+    },
+    "pre": {
+      "0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b": {
+        "balance": "0xde0b6b3a7640000",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {}
+      },
+      "0x3000000000000000000000000000000000000003": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x3660041460385736604414601a576004355460005260206000f35b60243580335403335560043580548201905550600160005260206000f35b6001325500",
+        "storage": {
+          "0x000000000000000000000000a94f5374fce5edbc8e2a8697c15331677e6ebf0b": "0x00000000000000000000000000000000000000000000000000000000000f4240"
+        }
+      },
+      "0x4200000000000000000000000000000000000042": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {}
+      },
+      "0x5300000000000000000000000000000000000021": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706d": "0x0000000000000000000000003000000000000000000000000000000000000003",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706e": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706f": "0x0000000000000000000000000000000000000000000000000000000000001201",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e6377070": "0x0000000000000000000000000000000000000000000000000000000000000001",
+          "0xbb86fbc034f4e382929974bcd8419ed626b0ea647f962d89ba2fb6bd28785ab9": "0x0000000000000000000000000000000000000000000000000000000000000001"
+        }
+      }
+    },
+    "transaction": {
+      "type": "0x7f",
+      "version": "0x0",
+      "feeTokenID": "0x1",
+      "feeLimit": "0x0",
+      "nonce": "0x0",
+      "gasPrice": "0xa",
+      "gasLimit": [
+        "0x186a0"
+      ],
+      "to": "0x3000000000000000000000000000000000000003",
+      "value": [
+        "0x0"
+      ],
+      "data": [
+        "0xdeadbeef"
+      ],
+      "secretKey": "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8"
+    },
+    "post": {
+      "Emerald": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0xdda0e3d5c58b32c62b9168cf468233be793eb5d1d0ab886dacdaf490b84a72e2",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"
+        }
+      ],
+      "Jade": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0xdda0e3d5c58b32c62b9168cf468233be793eb5d1d0ab886dacdaf490b84a72e2",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"
+        }
+      ]
+    }
+  },
+  "main_revert": {
+    "env": {
+      "currentCoinbase": "0x530000000000000000000000000000000000000a",
+      "currentDifficulty": "0x0",
+      "currentGasLimit": "0x1c9c380",
+      "currentNumber": "0x1",
+      "currentTimestamp": "0x1",
+      "currentBaseFee": "0x1",
+      "currentChainID": "0x1"
+    },
+    "pre": {
+      "0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b": {
+        "balance": "0xde0b6b3a7640000",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {}
+      },
+      "0x3000000000000000000000000000000000000003": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x366044146013576004355460005260206000f35b60243580335403335560043580548201905550600160005260206000f3",
+        "storage": {
+          "0x000000000000000000000000a94f5374fce5edbc8e2a8697c15331677e6ebf0b": "0x00000000000000000000000000000000000000000000000000000000000f4240"
+        }
+      },
+      "0x4200000000000000000000000000000000000042": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x5f5ffd",
+        "storage": {}
+      },
+      "0x5300000000000000000000000000000000000021": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706d": "0x0000000000000000000000003000000000000000000000000000000000000003",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706e": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706f": "0x0000000000000000000000000000000000000000000000000000000000001201",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e6377070": "0x0000000000000000000000000000000000000000000000000000000000000001",
+          "0xbb86fbc034f4e382929974bcd8419ed626b0ea647f962d89ba2fb6bd28785ab9": "0x0000000000000000000000000000000000000000000000000000000000000001"
+        }
+      }
+    },
+    "transaction": {
+      "type": "0x7f",
+      "version": "0x0",
+      "feeTokenID": "0x1",
+      "feeLimit": "0x0",
+      "nonce": "0x0",
+      "gasPrice": "0xa",
+      "gasLimit": [
+        "0x186a0"
+      ],
+      "to": "0x4200000000000000000000000000000000000042",
+      "value": [
+        "0x0"
+      ],
+      "data": [
+        "0x"
+      ],
+      "secretKey": "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8"
+    },
+    "post": {
+      "Emerald": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x4bfefc48ad519124f544514a1d413329e38fce98ee522a763a79fdd96b68fdc2",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"
+        }
+      ],
+      "Jade": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x4bfefc48ad519124f544514a1d413329e38fce98ee522a763a79fdd96b68fdc2",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"
+        }
+      ]
+    }
+  },
+  "origin_guard": {
+    "env": {
+      "currentCoinbase": "0x530000000000000000000000000000000000000a",
+      "currentDifficulty": "0x0",
+      "currentGasLimit": "0x1c9c380",
+      "currentNumber": "0x1",
+      "currentTimestamp": "0x1",
+      "currentBaseFee": "0x1",
+      "currentChainID": "0x1"
+    },
+    "pre": {
+      "0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b": {
+        "balance": "0xde0b6b3a7640000",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {}
+      },
+      "0x3000000000000000000000000000000000000003": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x3273a94f5374fce5edbc8e2a8697c15331677e6ebf0b14601d575f5ffd5b366044146031576004355460005260206000f35b60243580335403335560043580548201905550600160005260206000f3",
+        "storage": {
+          "0x000000000000000000000000a94f5374fce5edbc8e2a8697c15331677e6ebf0b": "0x00000000000000000000000000000000000000000000000000000000000f4241"
+        }
+      },
+      "0x4200000000000000000000000000000000000042": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {}
+      },
+      "0x5300000000000000000000000000000000000021": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706d": "0x0000000000000000000000003000000000000000000000000000000000000003",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706e": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706f": "0x0000000000000000000000000000000000000000000000000000000000001201",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e6377070": "0x0000000000000000000000000000000000000000000000000000000000000001",
+          "0xbb86fbc034f4e382929974bcd8419ed626b0ea647f962d89ba2fb6bd28785ab9": "0x0000000000000000000000000000000000000000000000000000000000000001"
+        }
+      }
+    },
+    "transaction": {
+      "type": "0x7f",
+      "version": "0x0",
+      "feeTokenID": "0x1",
+      "feeLimit": "0x0",
+      "nonce": "0x0",
+      "gasPrice": "0xa",
+      "gasLimit": [
+        "0x186a0"
+      ],
+      "to": "0x4200000000000000000000000000000000000042",
+      "value": [
+        "0x0"
+      ],
+      "data": [
+        "0x"
+      ],
+      "secretKey": "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8"
+    },
+    "post": {
+      "Emerald": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x3ed6676fa11fc0e4294ed8a446546a0c3c43f5b664bfa28f4104489d6390102a",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"
+        }
+      ],
+      "Jade": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x3ed6676fa11fc0e4294ed8a446546a0c3c43f5b664bfa28f4104489d6390102a",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"
+        }
+      ]
+    }
+  },
+  "refund_false_keeps_transfer": {
+    "env": {
+      "currentCoinbase": "0x530000000000000000000000000000000000000a",
+      "currentDifficulty": "0x0",
+      "currentGasLimit": "0x1c9c380",
+      "currentNumber": "0x1",
+      "currentTimestamp": "0x1",
+      "currentBaseFee": "0x1",
+      "currentChainID": "0x1"
+    },
+    "pre": {
+      "0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b": {
+        "balance": "0xde0b6b3a7640000",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {}
+      },
+      "0x3000000000000000000000000000000000000003": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x366044146013576004355460005260206000f35b602435803354033355600435805482019055505f5fa03373a94f5374fce5edbc8e2a8697c15331677e6ebf0b145f5260205ff3",
+        "storage": {
+          "0x000000000000000000000000a94f5374fce5edbc8e2a8697c15331677e6ebf0b": "0x00000000000000000000000000000000000000000000000000000000000f4241"
+        }
+      },
+      "0x4200000000000000000000000000000000000042": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {}
+      },
+      "0x5300000000000000000000000000000000000021": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706d": "0x0000000000000000000000003000000000000000000000000000000000000003",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706e": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706f": "0x0000000000000000000000000000000000000000000000000000000000001201",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e6377070": "0x0000000000000000000000000000000000000000000000000000000000000001",
+          "0xbb86fbc034f4e382929974bcd8419ed626b0ea647f962d89ba2fb6bd28785ab9": "0x0000000000000000000000000000000000000000000000000000000000000001"
+        }
+      }
+    },
+    "transaction": {
+      "type": "0x7f",
+      "version": "0x0",
+      "feeTokenID": "0x1",
+      "feeLimit": "0x0",
+      "nonce": "0x0",
+      "gasPrice": "0xa",
+      "gasLimit": [
+        "0x186a0"
+      ],
+      "to": "0x4200000000000000000000000000000000000042",
+      "value": [
+        "0x0"
+      ],
+      "data": [
+        "0x"
+      ],
+      "secretKey": "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8"
+    },
+    "post": {
+      "Emerald": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x02e23c9ed829c4eb474097e4babff09ad0214f7d1f4affe7f661f4927ecba46c",
+          "logs": "0x773911b8633886efdf9360b2936f4f0ee4ae34b8cd1c0ffd0c06861d1c751aeb"
+        }
+      ],
+      "Jade": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x02e23c9ed829c4eb474097e4babff09ad0214f7d1f4affe7f661f4927ecba46c",
+          "logs": "0x773911b8633886efdf9360b2936f4f0ee4ae34b8cd1c0ffd0c06861d1c751aeb"
+        }
+      ]
+    }
+  },
+  "refund_revert_rolls_back_transfer": {
+    "env": {
+      "currentCoinbase": "0x530000000000000000000000000000000000000a",
+      "currentDifficulty": "0x0",
+      "currentGasLimit": "0x1c9c380",
+      "currentNumber": "0x1",
+      "currentTimestamp": "0x1",
+      "currentBaseFee": "0x1",
+      "currentChainID": "0x1"
+    },
+    "pre": {
+      "0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b": {
+        "balance": "0xde0b6b3a7640000",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {}
+      },
+      "0x3000000000000000000000000000000000000003": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x366044146013576004355460005260206000f35b602435803354033355600435805482019055505f5fa03373a94f5374fce5edbc8e2a8697c15331677e6ebf0b146047575f5ffd5b600160005260206000f3",
+        "storage": {
+          "0x000000000000000000000000a94f5374fce5edbc8e2a8697c15331677e6ebf0b": "0x00000000000000000000000000000000000000000000000000000000000f4241"
+        }
+      },
+      "0x4200000000000000000000000000000000000042": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {}
+      },
+      "0x5300000000000000000000000000000000000021": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706d": "0x0000000000000000000000003000000000000000000000000000000000000003",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706e": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706f": "0x0000000000000000000000000000000000000000000000000000000000001201",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e6377070": "0x0000000000000000000000000000000000000000000000000000000000000001",
+          "0xbb86fbc034f4e382929974bcd8419ed626b0ea647f962d89ba2fb6bd28785ab9": "0x0000000000000000000000000000000000000000000000000000000000000001"
+        }
+      }
+    },
+    "transaction": {
+      "type": "0x7f",
+      "version": "0x0",
+      "feeTokenID": "0x1",
+      "feeLimit": "0x0",
+      "nonce": "0x0",
+      "gasPrice": "0xa",
+      "gasLimit": [
+        "0x186a0"
+      ],
+      "to": "0x4200000000000000000000000000000000000042",
+      "value": [
+        "0x0"
+      ],
+      "data": [
+        "0x"
+      ],
+      "secretKey": "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8"
+    },
+    "post": {
+      "Emerald": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0b438cf7a8bddc48e5097828159eed83ccdf052406ad296ec69cb8e194de0737",
+          "logs": "0x16ecc5d734ad798966d0ece89ce9fc365a53ed550661fb7607afee69c831daab"
+        }
+      ],
+      "Jade": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0b438cf7a8bddc48e5097828159eed83ccdf052406ad296ec69cb8e194de0737",
+          "logs": "0x16ecc5d734ad798966d0ece89ce9fc365a53ed550661fb7607afee69c831daab"
+        }
+      ]
+    }
+  },
+  "slot_deduct_clear": {
+    "env": {
+      "currentCoinbase": "0x530000000000000000000000000000000000000a",
+      "currentDifficulty": "0x0",
+      "currentGasLimit": "0x1c9c380",
+      "currentNumber": "0x1",
+      "currentTimestamp": "0x1",
+      "currentBaseFee": "0x1",
+      "currentChainID": "0x1"
+    },
+    "pre": {
+      "0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b": {
+        "balance": "0xde0b6b3a7640000",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {}
+      },
+      "0x3000000000000000000000000000000000000003": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x366044146013576004355460005260206000f35b60243580335403335560043580548201905550600160005260206000f3",
+        "storage": {
+          "0x9734b052146069605dcf2a05300c1dd5cd5852a2844e5491b2eb25d6daa909bc": "0x00000000000000000000000000000000000000000000000000000000000f4240"
+        }
+      },
+      "0x4200000000000000000000000000000000000042": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {}
+      },
+      "0x5300000000000000000000000000000000000021": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706d": "0x0000000000000000000000003000000000000000000000000000000000000003",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706e": "0x0000000000000000000000000000000000000000000000000000000000000002",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706f": "0x0000000000000000000000000000000000000000000000000000000000001201",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e6377070": "0x0000000000000000000000000000000000000000000000000000000000000001",
+          "0xbb86fbc034f4e382929974bcd8419ed626b0ea647f962d89ba2fb6bd28785ab9": "0x0000000000000000000000000000000000000000000000000000000000000001"
+        }
+      }
+    },
+    "transaction": {
+      "type": "0x7f",
+      "version": "0x0",
+      "feeTokenID": "0x1",
+      "feeLimit": "0x0",
+      "nonce": "0x0",
+      "gasPrice": "0xa",
+      "gasLimit": [
+        "0x186a0"
+      ],
+      "to": "0x4200000000000000000000000000000000000042",
+      "value": [
+        "0x0"
+      ],
+      "data": [
+        "0x"
+      ],
+      "secretKey": "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8"
+    },
+    "post": {
+      "Emerald": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x84e1019fa81970b8488a94f2651174f4b8d901e6d71c51a3f2d43bc1b2d2736f",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"
+        }
+      ],
+      "Jade": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x84e1019fa81970b8488a94f2651174f4b8d901e6d71c51a3f2d43bc1b2d2736f",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"
+        }
+      ]
+    }
+  },
+  "slot_deduct_keep": {
+    "env": {
+      "currentCoinbase": "0x530000000000000000000000000000000000000a",
+      "currentDifficulty": "0x0",
+      "currentGasLimit": "0x1c9c380",
+      "currentNumber": "0x1",
+      "currentTimestamp": "0x1",
+      "currentBaseFee": "0x1",
+      "currentChainID": "0x1"
+    },
+    "pre": {
+      "0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b": {
+        "balance": "0xde0b6b3a7640000",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {}
+      },
+      "0x3000000000000000000000000000000000000003": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x366044146013576004355460005260206000f35b60243580335403335560043580548201905550600160005260206000f3",
+        "storage": {
+          "0x9734b052146069605dcf2a05300c1dd5cd5852a2844e5491b2eb25d6daa909bc": "0x00000000000000000000000000000000000000000000000000000000000f4241"
+        }
+      },
+      "0x4200000000000000000000000000000000000042": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {}
+      },
+      "0x5300000000000000000000000000000000000021": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706d": "0x0000000000000000000000003000000000000000000000000000000000000003",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706e": "0x0000000000000000000000000000000000000000000000000000000000000002",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706f": "0x0000000000000000000000000000000000000000000000000000000000001201",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e6377070": "0x0000000000000000000000000000000000000000000000000000000000000001",
+          "0xbb86fbc034f4e382929974bcd8419ed626b0ea647f962d89ba2fb6bd28785ab9": "0x0000000000000000000000000000000000000000000000000000000000000001"
+        }
+      }
+    },
+    "transaction": {
+      "type": "0x7f",
+      "version": "0x0",
+      "feeTokenID": "0x1",
+      "feeLimit": "0x0",
+      "nonce": "0x0",
+      "gasPrice": "0xa",
+      "gasLimit": [
+        "0x186a0"
+      ],
+      "to": "0x4200000000000000000000000000000000000042",
+      "value": [
+        "0x0"
+      ],
+      "data": [
+        "0x"
+      ],
+      "secretKey": "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8"
+    },
+    "post": {
+      "Emerald": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0xd4d266ff3372ea95e9fd510e2e3be04679fdb72b83671acf29222402bdb4e0e8",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"
+        }
+      ],
+      "Jade": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0xd4d266ff3372ea95e9fd510e2e3be04679fdb72b83671acf29222402bdb4e0e8",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"
+        }
+      ]
+    }
+  },
+  "zero_fee": {
+    "env": {
+      "currentCoinbase": "0x530000000000000000000000000000000000000a",
+      "currentDifficulty": "0x0",
+      "currentGasLimit": "0x1c9c380",
+      "currentNumber": "0x1",
+      "currentTimestamp": "0x1",
+      "currentBaseFee": "0x0",
+      "currentChainID": "0x1"
+    },
+    "pre": {
+      "0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b": {
+        "balance": "0xde0b6b3a7640000",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {}
+      },
+      "0x3000000000000000000000000000000000000003": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x366044146013576004355460005260206000f35b602435803354033355600435805482019055505f5fa0600160005260206000f3",
+        "storage": {
+          "0x000000000000000000000000a94f5374fce5edbc8e2a8697c15331677e6ebf0b": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      },
+      "0x4200000000000000000000000000000000000042": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {}
+      },
+      "0x5300000000000000000000000000000000000021": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706d": "0x0000000000000000000000003000000000000000000000000000000000000003",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706e": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706f": "0x0000000000000000000000000000000000000000000000000000000000001201",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e6377070": "0x0000000000000000000000000000000000000000000000000000000000000001",
+          "0xbb86fbc034f4e382929974bcd8419ed626b0ea647f962d89ba2fb6bd28785ab9": "0x0000000000000000000000000000000000000000000000000000000000000001"
+        }
+      }
+    },
+    "transaction": {
+      "type": "0x7f",
+      "version": "0x0",
+      "feeTokenID": "0x1",
+      "feeLimit": "0x0",
+      "nonce": "0x0",
+      "gasPrice": "0x0",
+      "gasLimit": [
+        "0x186a0"
+      ],
+      "to": "0x4200000000000000000000000000000000000042",
+      "value": [
+        "0x0"
+      ],
+      "data": [
+        "0x"
+      ],
+      "secretKey": "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8"
+    },
+    "post": {
+      "Emerald": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x316b400ab83009d30ab6a987f74a061de29c2f3116918ca244b7267a69b75be2",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"
+        }
+      ],
+      "Jade": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x316b400ab83009d30ab6a987f74a061de29c2f3116918ca244b7267a69b75be2",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"
+        }
+      ]
+    }
+  },
+  "zero_fee_reads_balance": {
+    "env": {
+      "currentCoinbase": "0x530000000000000000000000000000000000000a",
+      "currentDifficulty": "0x0",
+      "currentGasLimit": "0x1c9c380",
+      "currentNumber": "0x1",
+      "currentTimestamp": "0x1",
+      "currentBaseFee": "0x0",
+      "currentChainID": "0x1"
+    },
+    "pre": {
+      "0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b": {
+        "balance": "0xde0b6b3a7640000",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {}
+      },
+      "0x3000000000000000000000000000000000000003": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x366044146013576004355460005260206000f35b60243580335403335560043580548201905550600160005260206000f3",
+        "storage": {
+          "0x000000000000000000000000a94f5374fce5edbc8e2a8697c15331677e6ebf0b": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      },
+      "0x4200000000000000000000000000000000000042": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {}
+      },
+      "0x5300000000000000000000000000000000000021": {
+        "balance": "0x0",
+        "nonce": "0x0",
+        "code": "0x",
+        "storage": {
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706d": "0x0000000000000000000000003000000000000000000000000000000000000003",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706e": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706f": "0x0000000000000000000000000000000000000000000000000000000000001201",
+          "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e6377070": "0x0000000000000000000000000000000000000000000000000000000000000001",
+          "0xbb86fbc034f4e382929974bcd8419ed626b0ea647f962d89ba2fb6bd28785ab9": "0x0000000000000000000000000000000000000000000000000000000000000001"
+        }
+      }
+    },
+    "transaction": {
+      "type": "0x7f",
+      "version": "0x0",
+      "feeTokenID": "0x1",
+      "feeLimit": "0x0",
+      "nonce": "0x0",
+      "gasPrice": "0x0",
+      "gasLimit": [
+        "0x186a0"
+      ],
+      "to": "0x3000000000000000000000000000000000000003",
+      "value": [
+        "0x0"
+      ],
+      "data": [
+        "0x70a08231000000000000000000000000a94f5374fce5edbc8e2a8697c15331677e6ebf0b"
+      ],
+      "secretKey": "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8"
+    },
+    "post": {
+      "Emerald": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0xeb101e868f55079346e3fc2d78473e1ebf0b446070185d3a266f8f0f81f534a0",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"
+        }
+      ],
+      "Jade": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0xeb101e868f55079346e3fc2d78473e1ebf0b446070185d3a266f8f0f81f534a0",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"
+        }
+      ]
+    }
+  }
+}
