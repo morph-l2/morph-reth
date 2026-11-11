@@ -12,9 +12,12 @@
 //! standard Ethereum Engine API:
 //!
 //! - `engine_assembleL2Block`: Build a new block with given transactions
+//! - `engine_assembleL2BlockV2`: Build a new block on an explicitly given parent hash
 //! - `engine_validateL2Block`: Validate a block without importing
 //! - `engine_newL2Block`: Import and finalize a block
+//! - `engine_newL2BlockV2`: Import a block onto the parent selected by hash (may reorg)
 //! - `engine_newSafeL2Block`: Import a safe block from derivation
+//! - `engine_setBlockTags`: Update safe/finalized block tags without importing a block
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]

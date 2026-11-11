@@ -9,7 +9,8 @@ pub const MORPH_MAINNET_CHAIN_ID: u64 = 2818;
 pub const MORPH_HOODI_CHAIN_ID: u64 = 2910;
 
 /// The default L2 sequencer fee (0.001 Gwei = 1_000_000 wei).
-/// The sequencer has the right to set any base fee below `MORPH_MAX_BASE_FEE`.
+/// The sequencer has the right to set any base fee up to `MORPH_MAXIMUM_BASE_FEE`
+/// (enforced by `morph-consensus` header validation).
 pub const MORPH_BASE_FEE: u64 = 1_000_000;
 
 /// Maximum L2 transaction payload bytes per block (L1 messages excluded).

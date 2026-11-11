@@ -14,9 +14,10 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU8, Ordering},
 };
 
-/// Runtime phase, exported purely for metrics and logs.
+/// Runtime phase, exported for metrics and logs, and read by the RPC layer only
+/// to skip its bounded catch-up wait while `Deferred` or `PreJade`.
 ///
-/// The read path no longer branches on this. Read correctness comes from the
+/// Read correctness never depends on this. It comes from the
 /// MDBX read-transaction snapshot plus the `(indexed_to, indexed_hash) == tip`
 /// comparison in [`ReferenceIndexHandle::query_at`], and from the before/after
 /// `chain_info()` bracketing in the RPC layer. The only read-gate bit derived
@@ -36,7 +37,8 @@ pub enum ReferenceIndexPhase {
     Live = 4,
     /// A non-canonical indexed suffix is being removed.
     Repairing = 5,
-    /// Queries cannot be served until retry or a manual rebuild succeeds.
+    /// Queries cannot be served: the runtime stopped on an error that needs a manual
+    /// rebuild (or its blocking task died), so only a node restart recovers.
     Unavailable = 6,
 }
 
@@ -58,8 +60,7 @@ impl ReferenceIndexPhase {
 #[derive(Debug)]
 struct ReferenceIndexShared {
     db: RwLock<Option<ReferenceIndexDb>>,
-    /// Latest runtime phase. Kept for metrics/logs only; not read on the query
-    /// path (see [`ReferenceIndexPhase`]).
+    /// Latest runtime phase. Not read by `query_at` (see [`ReferenceIndexPhase`]).
     phase: AtomicU8,
     /// Set while the runtime is in [`ReferenceIndexPhase::Unavailable`] (manual
     /// rebuild required / persistent failure). The read path returns

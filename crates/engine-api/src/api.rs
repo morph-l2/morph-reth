@@ -20,8 +20,10 @@ use morph_primitives::MorphHeader;
 /// and provides the following methods:
 ///
 /// - `assemble_l2_block`: Build a new L2 block with the given transactions
+/// - `assemble_l2_block_v2`: Build a new L2 block on an explicitly given parent hash
 /// - `validate_l2_block`: Validate an L2 block without importing it
 /// - `new_l2_block`: Import and finalize a new L2 block
+/// - `new_l2_block_v2`: Import a new L2 block onto the parent selected by hash (may reorg)
 /// - `new_safe_l2_block`: Import a safe L2 block from derivation
 /// - `set_block_tags`: Update safe/finalized block tags without importing a block
 #[async_trait::async_trait]
@@ -29,9 +31,9 @@ use morph_primitives::MorphHeader;
 pub trait MorphL2EngineApi: Send + Sync {
     /// Build a new L2 block with the given transactions.
     ///
-    /// This method is called by the sequencer to assemble a new block containing
-    /// the provided transactions. The transactions should include L1 messages
-    /// at the beginning, followed by L2 transactions.
+    /// This method is called by the sequencer to assemble a new block. The provided
+    /// transactions are the L1 messages to execute first; L2 transactions are then
+    /// packed from the local txpool.
     ///
     /// # Arguments
     ///

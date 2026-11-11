@@ -52,7 +52,7 @@ pub use safe_l2_data::SafeL2Data;
 #[non_exhaustive]
 pub struct MorphPayloadTypes;
 
-/// Execution data for Morph node. Simply wraps a sealed block.
+/// Execution data for Morph node: a sealed block plus an optional expected withdraw trie root.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MorphExecutionData {
     /// The built block.

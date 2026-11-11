@@ -1,10 +1,11 @@
 //! Morph `eth_call` / `eth_estimateGas` overrides.
 //!
 //! [`Call::caller_gas_allowance`] is overridden so `eth_estimateGas` caps
-//! gas by `balance − value − l1_fee` (ETH path) or the fee token balance
-//! (MorphTx `fee_token_id > 0`). `eth_call` and `eth_createAccessList`
-//! are detected via `cfg_env.disable_block_gas_limit = true` and fall
-//! through to the upstream allowance without the L1-fee extension.
+//! gas by `balance − value − l1_fee` (ETH path) or a token-denominated limit
+//! (MorphTx `fee_token_id > 0`, see `token_gas_allowance`). `eth_call` and
+//! `eth_createAccessList` are detected via `cfg_env.disable_block_gas_limit = true` and fall
+//! through to the upstream allowance without the L1-fee extension, except
+//! that fee-token callers are left uncapped for the handler.
 
 use crate::MorphEthApiError;
 use crate::eth::{MorphEthApi, MorphNodeCore};
@@ -209,8 +210,9 @@ where
 /// logic can be unit-tested without an EVM/DB stack.
 ///
 /// The `gas_cap` argument is the per-call RPC ceiling (`EthApiNodeBackend::gas_cap()`),
-/// only consumed by the EVM-call-mode + no-`fee_limit` fallback to avoid
-/// returning `u64::MAX`. See the in-body comment for the security rationale.
+/// only consumed in EVM-call mode: as the no-`fee_limit` fallback (instead of `u64::MAX`)
+/// and as the clamp on a user-supplied `fee_limit`. See the in-body comment for the security
+/// rationale.
 fn token_gas_allowance(
     eth_balance: U256,
     value: U256,
@@ -238,7 +240,7 @@ fn token_gas_allowance(
     //   trusted balance is the natural ceiling.
     // - EVM-call mode (`balance_slot.is_none()`): RPC cannot resolve the
     //   balance without spinning up an EVM (the handler does that at real
-    //   execution via `load_for_caller`). On the estimateGas path
+    //   execution via `load_token_fee_info`). On the estimateGas path
     //   `disable_fee_charge=true` short-circuits the handler's check, so
     //   there is no natural balance ceiling — we MUST enforce `gas_cap`
     //   here, matching `eth_call`'s effective ceiling. Trusting a

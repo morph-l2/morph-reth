@@ -551,9 +551,9 @@ impl MdbxProofsStorage {
         v
     }
 
-    /// Delete history versions for `items` that are strictly older than the provided block number.
-    /// `items` is a list of (Key, `SurvivorBlock`). Everything strictly older than `SurvivorBlock`
-    /// is deleted. Returns the number of entries deleted.
+    /// Delete history versions for `cutoff_items` that are strictly older than the provided block
+    /// number. `cutoff_items` is a list of (Key, `SurvivorBlock`). Everything strictly older than
+    /// `SurvivorBlock` is deleted. Returns the number of entries deleted.
     fn prune_history_preceding<T, V>(
         &self,
         tx: &(impl DbTxMut + DbTx),
@@ -1194,14 +1194,15 @@ impl MorphProofsStore for MdbxProofsStorage {
         })?
     }
 
-    /// Update the initial state with the provided diff.
-    /// Prune all historical trie data till `new_earliest_block_number` (inclusive) using
-    /// the [`BlockChangeSet`] index.
+    /// Prune trie and hashed-state history up to `new_earliest_block_ref`, using the
+    /// [`BlockChangeSet`] index to find the keys changed in the pruned range. Each such key keeps
+    /// only its latest version at or below the new earliest block (none if that version is a
+    /// deletion), so state at that block stays readable. The pruned blocks' change sets are
+    /// deleted and the earliest pointer moves to the new block.
     ///
     /// Arguments:
-    /// - `new_earliest_block_ref`: The new earliest block reference (with parent hash).
-    /// - `diff`: The state diff to apply to the initial state (block 0). This diff represents all
-    ///   the changes from the old earliest block to the new earliest block (inclusive).
+    /// - `new_earliest_block_ref`: The new earliest block reference; only its block number and
+    ///   hash are read.
     fn prune_earliest_state(
         &self,
         new_earliest_block_ref: BlockWithParent,
@@ -1257,9 +1258,9 @@ impl MorphProofsStore for MdbxProofsStorage {
         })
     }
 
-    /// Unwind the historical state to `unwind_upto_block` (inclusive), deleting all history
+    /// Unwind the historical state to `to` (inclusive), deleting all history
     /// starting from provided block. Also updates the `ProofWindow::LatestBlock` to parent of
-    /// `unwind_upto_block`.
+    /// `to`.
     fn unwind_history(&self, to: BlockWithParent) -> MorphProofsStorageResult<()> {
         self.commit_update(|tx| {
             let proof_window = match self.inner_get_proof_window(tx)? {
@@ -3198,7 +3199,7 @@ mod tests {
             .unwrap();
 
         // Now prune to the stored tip, with the new initial state:
-        // - path1 should be in removed_nodes (it was deleted in block 3)
+        // - path1 should be removed entirely (it was deleted in block 3)
         // - path2 should be included with its value (it still exists from block 2)
         store.prune_earliest_state(block_3).unwrap();
 
@@ -3783,9 +3784,9 @@ mod tests {
         }
     }
 
-    /// Mirror of `tests/lib.rs::test_store_trie_updates_with_wiped_storage_and_new_slots` for
-    /// the storage *trie* path. When `StorageTrieUpdates::is_deleted` is true AND
-    /// `storage_nodes` is non-empty (the shape revm/reth produce when a contract is destroyed
+    /// Wiped-storage-with-new-slots case for the storage *trie* path. When
+    /// `StorageTrieUpdates::is_deleted` is true AND `storage_nodes` is non-empty (the shape
+    /// revm/reth produce when a contract is destroyed
     /// and recreated with a fresh trie in the same block), the wipe branch must tombstone every
     /// pre-existing path for the address AND persist the new post-recreation nodes — with new
     /// nodes winning on path collision.
@@ -4299,7 +4300,7 @@ mod tests {
         // Unwind to block 2
         store.unwind_history(b2).expect("unwind");
 
-        // Verify: blocks 1 and 2 remain, blocks 3 and 4 are removed
+        // Verify: block 1 remains, blocks 2, 3 and 4 are removed
         let tx = store.env.tx().expect("tx");
         let mut cur = tx.new_cursor::<HashedAccountHistory>().expect("cursor");
 
@@ -4812,7 +4813,7 @@ mod tests {
             .store_trie_updates(b3, make_diff(30))
             .expect("store b3");
 
-        // Unwind to block 1
+        // Unwind to block 5, beyond the latest stored block (no-op)
         store.unwind_history(b5).expect("first unwind");
 
         // Verify state is still correct

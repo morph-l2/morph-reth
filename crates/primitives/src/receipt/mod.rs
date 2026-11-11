@@ -123,8 +123,6 @@ impl MorphReceipt {
     }
 
     /// Returns RLP header for inner encoding without bloom.
-    ///
-    /// Used for DA (data availability) layer compression where bloom is omitted to save space.
     pub fn rlp_header_inner_without_bloom(&self) -> Header {
         Header {
             list: true,
@@ -135,7 +133,6 @@ impl MorphReceipt {
     /// Returns length of RLP-encoded receipt fields without bloom and without an RLP header.
     ///
     /// The fields are: `[status, cumulative_gas_used, logs]` (no bloom).
-    /// Used for DA layer compression.
     pub fn rlp_encoded_fields_length_without_bloom(&self) -> usize {
         match self {
             Self::Legacy(r)
@@ -154,7 +151,6 @@ impl MorphReceipt {
     /// RLP-encodes receipt fields without bloom and without an RLP header.
     ///
     /// Encodes: `[status, cumulative_gas_used, logs]` (no bloom).
-    /// Used for DA layer compression.
     pub fn rlp_encode_fields_without_bloom(&self, out: &mut dyn BufMut) {
         match self {
             Self::Legacy(r)
@@ -177,7 +173,6 @@ impl MorphReceipt {
     /// RLP-decodes the receipt from the provided buffer without bloom.
     ///
     /// Expects format: `[status, cumulative_gas_used, logs]` (no bloom).
-    /// Used for DA layer decompression.
     pub fn rlp_decode_inner_without_bloom(
         buf: &mut &[u8],
         tx_type: MorphTxType,
@@ -342,7 +337,7 @@ impl Encodable2718 for MorphReceipt {
     ///
     /// Format: `[type_byte] + RLP([status, cumulative_gas_used, logs])`
     ///
-    /// Bloom is omitted for DA layer compression - it can be recalculated from logs.
+    /// Bloom is omitted - it can be recalculated from logs.
     fn encode_2718_len(&self) -> usize {
         !self.tx_type().is_legacy() as usize
             + self.rlp_header_inner_without_bloom().length_with_payload()
@@ -352,7 +347,7 @@ impl Encodable2718 for MorphReceipt {
     ///
     /// Format: `[type_byte] + RLP([status, cumulative_gas_used, logs])`
     ///
-    /// Bloom is omitted for DA layer compression - it can be recalculated from logs.
+    /// Bloom is omitted - it can be recalculated from logs.
     fn encode_2718(&self, out: &mut dyn BufMut) {
         if !self.tx_type().is_legacy() {
             out.put_u8(self.tx_type().into());
@@ -388,8 +383,9 @@ impl Decodable2718 for MorphReceipt {
 impl alloy_rlp::Encodable for MorphReceipt {
     /// Encodes the receipt for P2P network transmission.
     ///
-    /// Uses `network_encode` which wraps typed receipts in an additional RLP string header,
-    /// as required by the eth wire protocol (eth/66, eth/67).
+    /// Uses `network_encode` which wraps typed receipts in an additional RLP string header.
+    /// This bloom-less encoding is what reth's eth/69+ `Receipts69`/`Receipts70` messages
+    /// carry; eth/66-68 `Receipts` encode `ReceiptWithBloom` instead.
     fn encode(&self, out: &mut dyn BufMut) {
         self.network_encode(out);
     }
@@ -450,7 +446,8 @@ mod compact {
     /// for the CompactZstd derive macro.
     ///
     /// Note: `fee_token_id` and `version` are stored as `u64` instead of `u16`/`u8` because
-    /// they don't implement `Compact` in reth_codecs. The conversion is lossless.
+    /// `u16` has no `Compact` impl in reth_codecs and the `u64` width is part of the stored
+    /// encoding. The conversion is lossless.
     #[derive(reth_codecs::CompactZstd)]
     #[reth_zstd(
         compressor = reth_zstd_compressors::with_receipt_compressor,
@@ -462,7 +459,7 @@ mod compact {
         #[allow(clippy::owned_cow)]
         logs: Cow<'a, Vec<Log>>,
         l1_fee: Option<U256>,
-        /// Stored as u64 for Compact compatibility (u8 doesn't implement Compact)
+        /// Stored as u64 (part of the stored encoding; lossless for the u8 version)
         version: Option<u64>,
         /// Stored as u64 for Compact compatibility (u16 doesn't implement Compact)
         fee_token_id: Option<u64>,
@@ -726,7 +723,7 @@ mod tests {
 
     /// Tests that EIP-2718 encoding and decoding roundtrips correctly for EIP-1559 receipt.
     ///
-    /// This tests the without-bloom encoding used for DA compression:
+    /// This tests the without-bloom encoding:
     /// - encode_2718: encodes [status, gas, logs] without bloom
     /// - decode_2718: decodes the same format
     #[test]
@@ -900,7 +897,7 @@ mod tests {
 
     /// Tests that without-bloom encoding is smaller than with-bloom encoding.
     ///
-    /// This verifies the DA compression benefit.
+    /// The difference must be at least the 256-byte bloom.
     #[test]
     fn test_without_bloom_is_smaller() {
         let receipt = create_test_receipt();

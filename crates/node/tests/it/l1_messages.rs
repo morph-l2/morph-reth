@@ -44,7 +44,7 @@ async fn l1_messages_across_blocks_continuous() -> eyre::Result<()> {
 }
 
 /// When a block has no L1 messages, queue index tracking is unchanged.
-/// L1 messages in a later block can continue from any higher index.
+/// L1 messages in a later block continue from the parent's `next_l1_msg_index`.
 #[tokio::test(flavor = "multi_thread")]
 async fn l1_messages_resume_after_empty_block() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();

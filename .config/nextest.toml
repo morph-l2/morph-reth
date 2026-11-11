@@ -13,8 +13,9 @@ fail-fast = false
 slow-timeout = { period = "30s", terminate-after = 4 }
 
 # E2E integration tests spawn full nodes — each needs exclusive MDBX resources.
-# threads-required = 2 means nextest counts each as needing 2 of the test-threads
-# slots, so only 1 runs at a time on CI (2 slots / 2 required = 1 concurrent).
+# threads-required = 2 means nextest counts each as needing 2 of the `num-cpus`
+# test-thread slots, halving e2e concurrency (2 at a time on the 4-vCPU
+# `ubuntu-latest` runner).
 [[profile.ci.overrides]]
 filter = "package(morph-node) & binary(it)"
 threads-required = 2

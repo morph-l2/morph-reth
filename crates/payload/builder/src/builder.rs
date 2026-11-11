@@ -431,9 +431,9 @@ impl MorphPayloadBuilderCtx {
 
             // Execute the transaction and record EVM execution time.
             let apply_started = Instant::now();
-            // `BlockBuilder::execute_transaction` returns `GasOutput` from
-            // alloy-evm 0.34; pre-Amsterdam morph treats regular and state gas
-            // as a single number, so collapse to `tx_gas_used()` immediately.
+            // `BlockBuilder::execute_transaction` returns alloy-evm's `GasOutput`;
+            // pre-Amsterdam morph treats regular and state gas as a single number,
+            // so collapse to `tx_gas_used()` immediately.
             let gas_used = match builder.execute_transaction(recovered_tx.clone()) {
                 Ok(gas_output) => gas_output.tx_gas_used(),
                 Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
@@ -600,7 +600,7 @@ impl MorphPayloadBuilderCtx {
             }
 
             let apply_started = Instant::now();
-            // Same reasoning as the L1-message branch above: collapse `GasOutput`
+            // Same reasoning as the supplied-transaction branch above: collapse `GasOutput`
             // into a single u64 since we are still pre-Amsterdam.
             let gas_used = match builder.execute_transaction(tx.clone()) {
                 Ok(gas_output) => gas_output.tx_gas_used(),
@@ -886,8 +886,8 @@ where
 
     // 6. Finish building the block.
     //
-    // When `trie_handle` is provided, drop the state hook to signal FinishedStateUpdates
-    // to the background sparse trie task (via StateHookSender's Drop impl), then wait for
+    // When `state_root_handle` is provided, drop the state hook to signal FinishedStateUpdates
+    // to the background sparse trie task (via `StateRootUpdateHook`'s Drop impl), then wait for
     // the final root. Fall back to synchronous state root if the task fails.
     let BlockBuilderOutcome {
         execution_result,

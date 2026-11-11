@@ -253,7 +253,7 @@ mod tests {
     fn test_breaker_should_break_on_gas_limit() {
         // Set gas_limit = 2 * MIN_TRANSACTION_GAS = 42000
         // Threshold = 42000 - 21000 = 21000
-        // should_break returns true when cumulative_gas_used > threshold
+        // should_break returns true when gas_pool_used > threshold
         let gas_limit = 2 * MIN_TRANSACTION_GAS;
         let breaker = PayloadBuildingBreaker::new(Duration::from_secs(10), gas_limit, None);
 

@@ -5,7 +5,7 @@
 //! - [`MorphChainSpec`]: The main chain specification type that wraps reth's `ChainSpec`
 //!   with Morph-specific configuration.
 //! - [`hardfork::MorphHardfork`]: Morph-specific hardfork definitions (Bernoulli, Curie, Morph203, etc.)
-//! - [`MorphChainConfig`]: Morph L2-specific chain configuration (fee vault, max tx size, etc.)
+//! - [`MorphChainConfig`]: Morph L2-specific chain configuration (fee vault address)
 //!
 //! # Supported Networks
 //!
@@ -16,7 +16,7 @@
 //!
 //! Morph hardforks use two activation mechanisms:
 //! - **Block-based**: Bernoulli, Curie (activated at specific block numbers)
-//! - **Timestamp-based**: Morph203, Viridian, Emerald (activated at specific timestamps)
+//! - **Timestamp-based**: Morph203, Viridian, Emerald, Jade (activated at specific timestamps)
 //!
 //! # Example
 //!
