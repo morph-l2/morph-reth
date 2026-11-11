@@ -1,12 +1,11 @@
 use crate::MorphEvmConfig;
 use alloy_consensus::{BlockBody, EMPTY_OMMER_ROOT_HASH, Header, TxReceipt, proofs};
-use alloy_evm::block::{BlockExecutionError, BlockExecutionResult};
 use alloy_primitives::{Address, B64, logs_bloom};
 use morph_chainspec::MorphChainSpec;
 use morph_primitives::{MorphHeader, receipt::calculate_receipt_root_no_memo};
 use reth_chainspec::EthereumHardforks;
-use reth_evm::execute::{BlockAssembler, BlockAssemblerInput};
-use revm::context::Block;
+use reth_evm::{BlockAssembler, BlockAssemblerInput, BlockExecutionError, EvmEnv as _};
+use reth_execution_types::BlockExecutionResult;
 use std::sync::Arc;
 
 /// Assembler for Morph blocks.
@@ -78,8 +77,9 @@ impl BlockAssembler<MorphEvmConfig> for MorphBlockAssembler {
             ..
         } = input;
 
-        let timestamp = evm_env.block_env.timestamp();
-        let block_number: u64 = evm_env.block_env.number().to();
+        let block = evm_env.block_env();
+        let timestamp = block.timestamp.to::<u64>();
+        let block_number = block.number.to::<u64>();
 
         // Calculate roots and bloom
         let transactions_root = proofs::calculate_transaction_root(&transactions);
@@ -99,15 +99,15 @@ impl BlockAssembler<MorphEvmConfig> for MorphBlockAssembler {
             receipts_root,
             withdrawals_root: None,
             logs_bloom,
-            timestamp: timestamp.to(),
+            timestamp,
             // Morph L2 keeps mix_hash fixed to zero, matching geth's L2 header shape.
             mix_hash: Default::default(),
             nonce: B64::ZERO,
             // Only include base_fee_per_gas after London (EIP-1559)
-            base_fee_per_gas: is_london_active.then_some(evm_env.block_env.basefee()),
+            base_fee_per_gas: is_london_active.then(|| block.basefee.to::<u64>()),
             number: block_number,
-            gas_limit: evm_env.block_env.gas_limit(),
-            difficulty: evm_env.block_env.difficulty(),
+            gas_limit: block.gas_limit.to(),
+            difficulty: block.difficulty,
             gas_used: *gas_used,
             extra_data: execution_ctx.extra_data,
             parent_beacon_block_root: None,

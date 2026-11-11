@@ -1,4 +1,4 @@
-FROM lukemathwalker/cargo-chef:latest-rust-1.95-trixie AS chef
+FROM lukemathwalker/cargo-chef:latest-rust-1.96-trixie AS chef
 WORKDIR /app
 
 # reth-mdbx-sys requires libclang for bindgen

@@ -15,8 +15,10 @@ use reth_cli_commands::common::{AccessRights, Environment, EnvironmentArgs};
 use reth_cli_runner::CliRunner;
 use reth_ethereum_cli::ExtendedCommand;
 use reth_provider::{
-    BlockNumReader, BlockReader, DBProvider, DatabaseProviderFactory, TransactionVariant,
+    BlockNumReader, BlockReader, DBProvider, DatabaseProviderFactory, StageCheckpointReader,
+    TransactionVariant,
 };
+use reth_stages_types::StageId;
 use tracing::info;
 
 /// Morph-specific top-level CLI commands.
@@ -95,6 +97,23 @@ impl InitCommand {
         let provider = provider_factory
             .database_provider_ro()?
             .disable_long_read_transaction_safety();
+
+        // The job reads the hashed state tables directly and records them as the state of the
+        // canonical tip. After a crash those tables can lag behind `Finish`, so proceeding would
+        // anchor the history on the wrong state. The node repairs this on its next start.
+        if let Some(finish) = provider.get_stage_checkpoint(StageId::Finish)?
+            && let Some(partial_state_trie) = finish
+                .finish_stage_checkpoint()
+                .and_then(|checkpoint| checkpoint.partial_state_trie())
+            && partial_state_trie < finish.block_number
+        {
+            eyre::bail!(
+                "state trie is at block {partial_state_trie}, behind the canonical tip {}; \
+                 start the node once to repair the database before initializing proof history",
+                finish.block_number
+            );
+        }
+
         let chain_info = provider.chain_info()?;
         info!(
             target: "morph::proofs",

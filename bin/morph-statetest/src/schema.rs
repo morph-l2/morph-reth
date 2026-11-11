@@ -1,22 +1,23 @@
+use alloy_eips::{eip2930::AccessList, eip7702::SignedAuthorization};
+use alloy_primitives::{Address, B256, Bytes, TxKind, U256};
+use alloy_signer_local::PrivateKeySigner;
+use evm2::{
+    bytecode::Bytecode,
+    ethereum::LazyAuthorization,
+    evm::{AccountInfo, InMemoryDB},
+};
 use morph_chainspec::hardfork::MorphHardfork;
 use morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_2;
-use morph_revm::{MorphTxEnv, MorphTxExt};
-use revm::{
-    context::{BlockEnv, CfgEnv, TransactionType, TxEnv},
-    context_interface::{
-        block::BlobExcessGasAndPrice,
-        transaction::{AccessList, SignedAuthorization},
-    },
-    database::CacheState,
-    primitives::{Address, AddressMap, B256, Bytes, TxKind, U256, keccak256},
-    state::Bytecode,
-};
-use revm_statetest_types::{
-    AccountInfo, Env, Test, TestAuthorization, deserialize_maybe_empty, recover_address,
-};
+use morph_revm::{MorphBlockEnv, MorphTxEnv, MorphTxExt};
 use serde::{Deserialize, Deserializer, de};
 use std::collections::BTreeMap;
 use thiserror::Error;
+
+const LEGACY_TX_TYPE: u8 = 0;
+const EIP2930_TX_TYPE: u8 = 1;
+const EIP1559_TX_TYPE: u8 = 2;
+const EIP4844_TX_TYPE: u8 = 3;
+const EIP7702_TX_TYPE: u8 = 4;
 
 #[derive(Debug, Deserialize)]
 pub struct MorphTestSuite(pub BTreeMap<String, MorphTestUnit>);
@@ -26,11 +27,116 @@ pub struct MorphTestUnit {
     #[serde(default, rename = "_info")]
     pub info: Option<serde_json::Value>,
     pub env: Env,
-    pub pre: AddressMap<AccountInfo>,
+    pub pre: BTreeMap<Address, TestAccount>,
     pub post: BTreeMap<String, Vec<Test>>,
     pub transaction: MorphTransactionParts,
     #[serde(default)]
     pub out: Option<Bytes>,
+}
+
+/// The block a fixture runs in.
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Env {
+    #[serde(rename = "currentChainID")]
+    pub current_chain_id: Option<U256>,
+    pub current_coinbase: Address,
+    #[serde(default)]
+    pub current_difficulty: U256,
+    pub current_gas_limit: U256,
+    pub current_number: U256,
+    pub current_timestamp: U256,
+    pub current_base_fee: Option<U256>,
+    pub previous_hash: Option<B256>,
+    pub current_random: Option<B256>,
+    pub current_beacon_root: Option<B256>,
+    pub current_withdrawals_root: Option<B256>,
+    pub current_excess_blob_gas: Option<U256>,
+    pub slot_number: Option<U256>,
+}
+
+/// A prestate account.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TestAccount {
+    pub balance: U256,
+    pub code: Bytes,
+    #[serde(deserialize_with = "deserialize_str_as_u64")]
+    pub nonce: u64,
+    pub storage: BTreeMap<U256, U256>,
+}
+
+/// Selects one data/gas/value combination of a fixture transaction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+pub struct TxPartIndices {
+    pub data: usize,
+    pub gas: usize,
+    pub value: usize,
+}
+
+/// The expected result of one fixture case.
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Test {
+    pub expect_exception: Option<String>,
+    pub indexes: TxPartIndices,
+    pub hash: B256,
+    pub logs: B256,
+    pub txbytes: Option<Bytes>,
+}
+
+/// An EIP-7702 authorization as written in fixtures, which may repeat `yParity` as `v`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestAuthorization(SignedAuthorization);
+
+impl<'de> Deserialize<'de> for TestAuthorization {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let mut value = serde_json::Value::deserialize(deserializer)?;
+        if let Some(object) = value.as_object_mut()
+            && object.contains_key("v")
+            && object.contains_key("yParity")
+        {
+            object.remove("v");
+        }
+        serde_json::from_value(value)
+            .map(Self)
+            .map_err(de::Error::custom)
+    }
+}
+
+/// A fixture transaction environment and the account sending it.
+#[derive(Debug)]
+pub struct FixtureTx {
+    pub env: MorphTxEnv,
+    pub caller: Address,
+}
+
+fn deserialize_str_as_u64<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let string = String::deserialize(deserializer)?;
+    if let Some(stripped) = string.strip_prefix("0x") {
+        u64::from_str_radix(stripped, 16)
+    } else {
+        string.parse()
+    }
+    .map_err(de::Error::custom)
+}
+
+fn deserialize_maybe_empty<'de, D>(deserializer: D) -> Result<Option<Address>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let string = String::deserialize(deserializer)?;
+    if string.is_empty() {
+        Ok(None)
+    } else {
+        string.parse().map_err(de::Error::custom).map(Some)
+    }
 }
 
 #[derive(Debug, Error)]
@@ -97,71 +203,58 @@ pub struct MorphTransactionParts {
 }
 
 impl MorphTestUnit {
-    pub fn state(&self) -> CacheState {
-        let mut cache_state = CacheState::new();
-        for (address, info) in &self.pre {
-            let code_hash = keccak256(&info.code);
-            let bytecode = Bytecode::new_raw_checked(info.code.clone())
-                .unwrap_or_else(|_| Bytecode::new_legacy(info.code.clone()));
-            let account_info = revm::state::AccountInfo {
-                balance: info.balance,
-                code_hash,
-                code: Some(bytecode),
-                nonce: info.nonce,
-                account_id: None,
-            };
-            cache_state.insert_account_with_storage(*address, account_info, info.storage.clone());
+    /// Builds the database holding the prestate.
+    pub fn state(&self) -> InMemoryDB {
+        let mut db = InMemoryDB::default();
+        for (address, account) in &self.pre {
+            let bytecode = Bytecode::new_raw_checked(account.code.clone())
+                .unwrap_or_else(|_| Bytecode::new_legacy(account.code.clone()));
+            db.insert_account_info(
+                address,
+                AccountInfo::default()
+                    .with_balance(account.balance)
+                    .with_nonce(account.nonce)
+                    .with_code(bytecode),
+            );
+            for (key, value) in &account.storage {
+                db.insert_account_storage(address, key, value);
+            }
         }
-        cache_state
+        db
     }
 
-    pub fn block_env(&self, cfg: &mut CfgEnv<MorphHardfork>) -> BlockEnv {
-        let mut block = BlockEnv {
+    /// Builds the block the fixture runs in.
+    ///
+    /// The blob base fee keeps its placeholder: BLOBBASEFEE is disabled on Morph and blob
+    /// transactions do not exist there, so nothing can observe it.
+    pub fn block_env(&self) -> MorphBlockEnv {
+        MorphBlockEnv {
             number: self.env.current_number,
             beneficiary: self.env.current_coinbase,
             timestamp: self.env.current_timestamp,
-            gas_limit: self.env.current_gas_limit.try_into().unwrap_or(u64::MAX),
-            basefee: self
-                .env
-                .current_base_fee
-                .unwrap_or_default()
-                .try_into()
-                .unwrap_or(u64::MAX),
+            gas_limit: U256::from(self.env.current_gas_limit.saturating_to::<u64>()),
+            basefee: U256::from(
+                self.env
+                    .current_base_fee
+                    .unwrap_or_default()
+                    .saturating_to::<u64>(),
+            ),
             difficulty: self.env.current_difficulty,
-            prevrandao: self.env.current_random,
-            slot_num: self
+            prevrandao: self
                 .env
-                .slot_number
-                .unwrap_or_default()
-                .try_into()
-                .unwrap_or(u64::MAX),
-            ..BlockEnv::default()
-        };
-
-        if let Some(excess_blob_gas) = self.env.current_excess_blob_gas {
-            block.set_blob_excess_gas_and_price(
-                excess_blob_gas.to(),
-                cfg.blob_base_fee_update_fraction(),
-            );
-        } else {
-            block.blob_excess_gas_and_price = Some(BlobExcessGasAndPrice {
-                excess_blob_gas: 0,
-                blob_gasprice: 1,
-            });
+                .current_random
+                .map(|random| U256::from_be_bytes(random.0))
+                .unwrap_or_default(),
+            slot_num: self.env.slot_number.unwrap_or_default(),
+            ..Default::default()
         }
-
-        if block.prevrandao.is_none() {
-            block.prevrandao = Some(B256::ZERO);
-        }
-
-        block
     }
 
     pub fn morph_tx_env(
         &self,
         test: &Test,
         _fork: MorphHardfork,
-    ) -> Result<MorphTxEnv, SchemaError> {
+    ) -> Result<FixtureTx, SchemaError> {
         self.transaction.morph_tx_env(
             test.indexes.data,
             test.indexes.gas,
@@ -182,28 +275,16 @@ impl MorphTransactionParts {
         chain_id: Option<U256>,
         txbytes: Option<Bytes>,
         has_base_fee: bool,
-    ) -> Result<MorphTxEnv, SchemaError> {
+    ) -> Result<FixtureTx, SchemaError> {
         let caller = match self.sender {
             Some(address) => address,
-            None => recover_address(self.secret_key.as_slice())
-                .ok_or(SchemaError::UnknownPrivateKey(self.secret_key))?,
+            None => PrivateKeySigner::from_slice(self.secret_key.as_slice())
+                .map_err(|_| SchemaError::UnknownPrivateKey(self.secret_key))?
+                .address(),
         };
-        // Preserve the raw tx-type byte when the JSON explicitly specifies
-        // it. Routing it through `revm::context::TransactionType` first
-        // would lossily map any non-standard byte (Morph's 0x7f, L1Msg's
-        // 0x7e, future fork types) to `Custom = 0xFF`, since revm's enum
-        // only knows the 5 vanilla Ethereum tx types. The cast-to-u8 of
-        // `Custom` then yields 0xFF, so `MorphTxExt::is_morph_tx` and
-        // `is_l1_msg` both return false and the morph fee handler /
-        // L1Message short-circuit never activate. Only fall through to
-        // the enum-based inference for txs that didn't carry a `type`
-        // field at all.
-        let tx_type = match self.tx_type {
-            Some(t) => t,
-            None => self
-                .tx_type(data_index)
-                .ok_or(SchemaError::InvalidTransactionType)? as u8,
-        };
+        let tx_type = self
+            .tx_type(data_index)
+            .ok_or(SchemaError::InvalidTransactionType)?;
         let gas_limit = self
             .gas_limit
             .get(gas_index)
@@ -239,9 +320,7 @@ impl MorphTransactionParts {
             .map(|auth_list| {
                 auth_list
                     .into_iter()
-                    .map(|auth| {
-                        revm::context::either::Either::<SignedAuthorization, _>::Left(auth.into())
-                    })
+                    .map(|auth| LazyAuthorization::Signed(auth.0))
                     .collect()
             })
             .unwrap_or_default();
@@ -257,16 +336,10 @@ impl MorphTransactionParts {
             .map(|fee| fee.try_into().unwrap_or(u128::MAX))
             .or_else(|| has_base_fee.then_some(gas_price));
 
-        let inner = TxEnv {
-            caller,
+        let mut tx = MorphTxEnv {
+            tx_type,
             gas_price,
             gas_priority_fee,
-            blob_hashes: self.blob_versioned_hashes.clone(),
-            max_fee_per_blob_gas: self
-                .max_fee_per_blob_gas
-                .map(|fee| fee.try_into().unwrap_or(u128::MAX))
-                .unwrap_or(u128::MAX),
-            tx_type,
             gas_limit,
             data,
             nonce: u64::try_from(self.nonce).unwrap_or(u64::MAX),
@@ -278,9 +351,9 @@ impl MorphTransactionParts {
                 Some(address) => TxKind::Call(address),
                 None => TxKind::Create,
             },
+            ..Default::default()
         };
 
-        let mut tx = MorphTxEnv::new(inner);
         if let Some(version) = self.version {
             tx = tx.with_version(version);
         } else if tx.is_morph_tx() && self.authorization_list.is_some() {
@@ -306,7 +379,7 @@ impl MorphTransactionParts {
         }
         if let Some(txbytes) = txbytes {
             tx = tx.with_rlp_bytes(txbytes);
-        } else if !tx.blob_hashes.is_empty() {
+        } else if !self.blob_versioned_hashes.is_empty() {
             // morph-reth has no Eip4844 envelope variant — see
             // crates/primitives/src/transaction/envelope.rs. A blob tx
             // arriving here without post.txbytes cannot be encoded for
@@ -327,32 +400,33 @@ impl MorphTransactionParts {
             tx = tx.with_rlp_bytes(rlp_bytes);
         }
 
-        Ok(tx)
+        Ok(FixtureTx { env: tx, caller })
     }
 
-    fn tx_type(&self, access_list_index: usize) -> Option<TransactionType> {
+    /// Returns the raw type byte the JSON specifies, or infers it from the fields present.
+    fn tx_type(&self, access_list_index: usize) -> Option<u8> {
         if let Some(tx_type) = self.tx_type {
-            return Some(TransactionType::from(tx_type));
+            return Some(tx_type);
         }
 
-        let mut tx_type = TransactionType::Legacy;
+        let mut tx_type = LEGACY_TX_TYPE;
         if self
             .access_lists
             .get(access_list_index)
             .is_some_and(Option::is_some)
         {
-            tx_type = TransactionType::Eip2930;
+            tx_type = EIP2930_TX_TYPE;
         }
         if self.max_fee_per_gas.is_some() {
-            tx_type = TransactionType::Eip1559;
+            tx_type = EIP1559_TX_TYPE;
         }
         if self.max_fee_per_blob_gas.is_some() {
             self.to?;
-            return Some(TransactionType::Eip4844);
+            return Some(EIP4844_TX_TYPE);
         }
         if self.authorization_list.is_some() {
             self.to?;
-            return Some(TransactionType::Eip7702);
+            return Some(EIP7702_TX_TYPE);
         }
         Some(tx_type)
     }
@@ -484,7 +558,8 @@ mod tests {
         let post = &unit.post["Jade"][0];
         let tx = unit
             .morph_tx_env(post, MorphHardfork::Jade)
-            .expect("tx env should build");
+            .expect("tx env should build")
+            .env;
 
         assert!(
             tx.rlp_bytes.as_ref().is_some_and(|bytes| !bytes.is_empty()),
@@ -551,7 +626,8 @@ mod tests {
         let post = &unit.post["Celadon"][0];
         let tx = unit
             .morph_tx_env(post, MorphHardfork::Celadon)
-            .expect("tx env should build");
+            .expect("tx env should build")
+            .env;
 
         assert!(tx.is_morph_tx());
         assert_eq!(tx.version, Some(MORPH_TX_VERSION_2));

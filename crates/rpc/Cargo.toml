@@ -14,7 +14,7 @@ workspace = true
 morph-primitives = { workspace = true, features = ["serde-bincode-compat", "reth-codec"] }
 morph-chainspec.workspace = true
 morph-reference-index.workspace = true
-morph-revm = { workspace = true, features = ["rpc"] }
+morph-revm.workspace = true
 morph-evm = { workspace = true, features = ["rpc"] }
 morph-proofs.workspace = true
 
@@ -31,9 +31,8 @@ reth-rpc-eth-types.workspace = true
 reth-rpc-server-types.workspace = true
 reth-metrics.workspace = true
 metrics.workspace = true
-reth-evm.workspace = true
+reth-evm = { workspace = true, features = ["witness"] }
 reth-provider.workspace = true
-reth-revm = { workspace = true, features = ["witness"] }
 reth-storage-api.workspace = true
 reth-tasks.workspace = true
 reth-errors.workspace = true
@@ -42,7 +41,6 @@ reth-transaction-pool.workspace = true
 
 # Alloy
 alloy-consensus.workspace = true
-alloy-evm.workspace = true
 alloy-primitives.workspace = true
 alloy-rpc-types-debug.workspace = true
 alloy-rpc-types-eth.workspace = true
@@ -58,7 +56,7 @@ async-trait.workspace = true
 serde.workspace = true
 derive_more.workspace = true
 tokio.workspace = true
-revm.workspace = true
+evm2 = { workspace = true, features = ["std"] }
 
 # Error handling
 thiserror.workspace = true

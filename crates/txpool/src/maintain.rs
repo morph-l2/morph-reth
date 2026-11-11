@@ -29,11 +29,10 @@ use futures::StreamExt;
 use morph_chainspec::hardfork::MorphHardforks;
 use morph_revm::L1BlockInfo;
 use reth_chainspec::ChainSpecProvider;
+use reth_evm::{Database, database::StateProviderDatabase};
 use reth_primitives_traits::AlloyBlockHeader;
 use reth_provider::CanonStateSubscriptions;
-use reth_revm::Database;
-use reth_revm::database::StateProviderDatabase;
-use reth_storage_api::StateProviderFactory;
+use reth_storage_api::{StateProvider as _, StateProviderFactory};
 use reth_transaction_pool::{PoolTransaction, TransactionPool};
 use std::collections::HashMap;
 
@@ -177,7 +176,7 @@ where
             }
         };
 
-        let mut db = StateProviderDatabase::new(state_provider);
+        let mut db = StateProviderDatabase::new((&state_provider).into_evm_state_provider());
 
         // Fetch L1 block info for fee calculation
         let l1_block_info = match L1BlockInfo::try_fetch(&mut db, hardfork) {
@@ -212,7 +211,7 @@ where
             sender_txs.sort_by_key(|pooled_tx| pooled_tx.transaction.nonce());
 
             // Initialize sender ETH budget once.
-            let eth_balance = match db.basic(sender) {
+            let eth_balance = match db.get_account(&sender) {
                 Ok(Some(account)) => account.balance,
                 Ok(None) => U256::ZERO,
                 Err(err) => {

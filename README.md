@@ -46,7 +46,7 @@ morph-reth/
     ├── proofs/           # Versioned MPT history and proof state provider
     ├── proofs-exex/      # Forward accumulation, reorg, unwind, and pruning
     ├── reference-index/  # Independent transaction reference index
-    ├── revm/             # L1 fee calculation, token fee logic
+    ├── revm/             # Morph EVM on evm2: L1 fee and token fee handler
     ├── rpc/              # RPC implementation and type conversions
     └── txpool/           # Transaction pool with L1 fee validation
 ```
@@ -67,7 +67,7 @@ morph-reth/
 | `morph-proofs` | Bounded, versioned MPT history in MDBX |
 | `morph-proofs-exex` | Forward-only proof-history execution extension |
 | `morph-reference-index` | Independent Morph transaction reference index |
-| `morph-revm` | L1 fee and token fee calculations |
+| `morph-revm` | Morph EVM on evm2: L1 fee and token fee transaction handler |
 | `morph-rpc` | RPC implementation and type conversions |
 | `morph-txpool` | Transaction pool with L1 fee and MorphTx validation |
 
@@ -75,7 +75,7 @@ morph-reth/
 
 ### Prerequisites
 
-- Rust 1.95 or later
+- Rust 1.96 or later
 - Cargo
 
 ### Building from Source

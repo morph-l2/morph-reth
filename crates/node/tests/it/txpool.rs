@@ -13,6 +13,7 @@ use morph_node::test_utils::{
     L1MessageBuilder, TestNodeBuilder, advance_chain, make_eip4844_tx, make_transfer_tx,
 };
 use morph_primitives::MorphTxEnvelope;
+use reth_e2e_test_utils::wallet::Wallet;
 use reth_payload_primitives::BuiltPayload;
 
 use super::helpers::wallet_to_arc;
@@ -267,6 +268,74 @@ async fn tx_gas_limit_exceeds_block_limit_rejected() -> eyre::Result<()> {
         result.is_err(),
         "tx with gas_limit > block gas limit must be rejected"
     );
+    Ok(())
+}
+
+/// Signs an EIP-1559 call to an account without code.
+fn signed_call(wallet: &Wallet, gas_limit: u64, input: Bytes) -> eyre::Result<Bytes> {
+    use alloy_consensus::{SignableTransaction, TxEip1559};
+    use alloy_signer::SignerSync;
+
+    let tx = TxEip1559 {
+        chain_id: wallet.chain_id,
+        nonce: 0,
+        gas_limit,
+        max_fee_per_gas: 20_000_000_000u128,
+        max_priority_fee_per_gas: 20_000_000_000u128,
+        to: TxKind::Call(Address::with_last_byte(0x42)),
+        value: U256::ZERO,
+        access_list: Default::default(),
+        input,
+    };
+    let sig = wallet
+        .inner
+        .sign_hash_sync(&tx.signature_hash())
+        .map_err(|e| eyre::eyre!("{e}"))?;
+    Ok(MorphTxEnvelope::Eip1559(tx.into_signed(sig))
+        .encoded_2718()
+        .into())
+}
+
+/// A transaction above the EIP-7825 gas cap is admitted and mined.
+///
+/// Morph caps a transaction at the block gas limit only, while the upstream default for a recent
+/// spec is 2^24. Historical transactions exceed that, so losing the override would reject blocks
+/// as well as pool transactions.
+#[tokio::test(flavor = "multi_thread")]
+async fn tx_gas_limit_above_eip7825_cap_is_mined() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+
+    node.rpc
+        .inject_tx(signed_call(&wallet, (1 << 24) + 1, Bytes::new())?)
+        .await?;
+    let payload = node.advance_block().await?;
+
+    assert_eq!(payload.block().body().transactions.len(), 1);
+    Ok(())
+}
+
+/// A transaction with a gas limit below the EIP-7623 calldata floor is admitted and mined.
+///
+/// Morph does not adopt EIP-7623, so regular intrinsic gas is the only lower bound.
+#[tokio::test(flavor = "multi_thread")]
+async fn tx_gas_limit_below_eip7623_floor_is_mined() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+
+    // 1000 non-zero bytes: intrinsic gas is 37_000, the EIP-7623 floor would be 61_000.
+    node.rpc
+        .inject_tx(signed_call(
+            &wallet,
+            40_000,
+            Bytes::from(vec![0xff; 1_000]),
+        )?)
+        .await?;
+    let payload = node.advance_block().await?;
+
+    assert_eq!(payload.block().body().transactions.len(), 1);
     Ok(())
 }
 

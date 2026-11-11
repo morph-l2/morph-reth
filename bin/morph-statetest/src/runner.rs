@@ -1,22 +1,22 @@
-use crate::schema::{MorphTestSuite, MorphTestUnit, SchemaError, parse_fork};
-use alloy_evm::{Evm, EvmEnv};
-use alloy_primitives::{B256, Bytes};
-use alloy_trie::{HashBuilder, Nibbles, TrieAccount, root::storage_root_unhashed};
-use morph_chainspec::hardfork::MorphHardfork;
-use morph_evm::{MorphBlockEnv, evm::MorphEvm};
-use revm::{
-    context::{CfgEnv, result::ExecutionResult},
-    database::{EmptyDB, PlainAccount, State},
-    inspector::inspectors::TracerEip3155,
-    primitives::{Address, Log, U256, address, keccak256},
+use crate::{
+    schema::{MorphTestSuite, MorphTestUnit, SchemaError, Test, parse_fork},
+    trace::Eip3155Tracer,
 };
-use revm_statetest_types::Test;
+use alloy_consensus::transaction::Recovered;
+use alloy_primitives::{Address, B256, Bytes, Log, U256, address, keccak256};
+use alloy_trie::{HashBuilder, Nibbles, TrieAccount, root::storage_root_unhashed};
+use evm2::TxResult;
+use morph_chainspec::hardfork::MorphHardfork;
+use morph_revm::{FeeFrameFilter, MorphEvm, MorphEvmTypes, morph_evm, morph_evm_env};
 use serde::Serialize;
-use std::{fs, io::stderr, path::Path};
+use std::{collections::BTreeSet, fs, io::stderr, path::Path};
 use thiserror::Error;
 
 const MORPH_STATE_TEST_FEE_VAULT_ADDRESS: Address =
     address!("48442aa154897eef141df231cc1517fc8c1d170f");
+
+/// A transaction's outcome, or why it was rejected.
+type ExecResult = Result<TxResult<MorphEvmTypes>, String>;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RunnerOptions {
@@ -102,105 +102,84 @@ fn execute_case(
     test: &Test,
     options: RunnerOptions,
 ) -> Result<Outcome, RunnerError> {
-    let cache = unit.state();
-    let mut state = State::builder()
-        .with_cached_prestate(cache)
-        .with_bundle_update()
-        .build();
-    let mut cfg = CfgEnv::<MorphHardfork>::default()
-        .with_chain_id(
-            unit.env
-                .current_chain_id
-                .unwrap_or(U256::ONE)
-                .try_into()
-                .unwrap_or(1),
-        )
-        .with_spec_and_mainnet_gas_params(fork);
-    cfg.disable_eip7623 = true;
+    let chain_id = unit
+        .env
+        .current_chain_id
+        .unwrap_or(U256::ONE)
+        .try_into()
+        .unwrap_or(1);
 
-    let mut block = unit.block_env(&mut cfg);
+    let mut block = unit.block_env();
     if fork.is_curie() {
         block.beneficiary = MORPH_STATE_TEST_FEE_VAULT_ADDRESS;
     }
-    cfg.tx_gas_limit_cap = Some(block.gas_limit);
+    let block_gas_limit = block.gas_limit.saturating_to::<u64>();
+
+    let mut evm = morph_evm(
+        unit.state(),
+        morph_evm_env(fork, chain_id, block_gas_limit, block),
+    );
 
     let tx = match unit.morph_tx_env(test, fork) {
         Ok(tx) => tx,
         Err(error) if test.expect_exception.is_some() => {
-            let exec_result: Result<ExecutionResult<morph_revm::MorphHaltReason>, String> =
-                Err(error.to_string());
             return Ok(build_outcome(
                 name,
                 fork_name,
+                unit,
                 test,
-                &exec_result,
-                &state,
-                unit.out.as_ref(),
-                &[],
+                &Err(error.to_string()),
+                &mut evm,
             ));
         }
         Err(error) => return Err(error.into()),
     };
-    let env = EvmEnv {
-        cfg_env: cfg,
-        block_env: MorphBlockEnv { inner: block },
+    let tx = Recovered::new_unchecked(tx.env, tx.caller);
+
+    let exec_result: ExecResult = if options.trace {
+        let mut tracer = FeeFrameFilter::new(Eip3155Tracer::new(stderr()));
+        evm.transact_with_inspector(&tx, &mut tracer)
+            .map(|executed| executed.commit())
+            .map_err(|error| error.to_string())
+    } else {
+        evm.transact(&tx)
+            .map(|executed| executed.commit())
+            .map_err(|error| error.to_string())
     };
 
-    if options.trace {
-        let mut evm = MorphEvm::new(&mut state, env)
-            .with_inspector(TracerEip3155::buffered(stderr()).without_summary());
-        evm.enable_inspector();
-        let exec_result = evm.transact_commit(tx);
-        let receipt_logs = collect_receipt_logs(&mut evm, &exec_result);
-        return Ok(build_outcome(
-            name,
-            fork_name,
-            test,
-            &exec_result,
-            &state,
-            unit.out.as_ref(),
-            &receipt_logs,
-        ));
-    }
-
-    let mut evm = MorphEvm::new(&mut state, env);
-    let exec_result = evm.transact_commit(tx);
-    let receipt_logs = collect_receipt_logs(&mut evm, &exec_result);
     Ok(build_outcome(
         name,
         fork_name,
+        unit,
         test,
         &exec_result,
-        &state,
-        unit.out.as_ref(),
-        &receipt_logs,
+        &mut evm,
     ))
 }
 
-fn build_outcome<E>(
+fn build_outcome(
     name: &str,
     fork_name: &str,
+    unit: &MorphTestUnit,
     test: &Test,
-    exec_result: &Result<ExecutionResult<morph_revm::MorphHaltReason>, E>,
-    db: &State<EmptyDB>,
-    expected_output: Option<&Bytes>,
-    receipt_logs: &[Log],
-) -> Outcome
-where
-    E: std::fmt::Display,
-{
-    let logs_root = log_rlp_hash(receipt_logs);
-    let state_root = state_merkle_trie_root(db.cache.trie_account());
-    let error_msg = validation_error(test, exec_result, expected_output, state_root, logs_root);
+    exec_result: &ExecResult,
+    evm: &mut MorphEvm<'_>,
+) -> Outcome {
+    let no_logs = Vec::new();
+    let logs = exec_result.as_ref().map_or(&no_logs, |result| &result.logs);
+    let logs_root = log_rlp_hash(logs);
+    let state_root = state_merkle_trie_root(unit, evm);
+    let error_msg = validation_error(test, exec_result, unit.out.as_ref(), state_root, logs_root);
     let output = exec_result
         .as_ref()
         .ok()
-        .and_then(|result| result.output().cloned())
+        .and_then(result_output)
+        .cloned()
         .unwrap_or_default();
     let gas_used = exec_result
         .as_ref()
         .ok()
-        .map(ExecutionResult::tx_gas_used)
+        .map(|result| result.tx_gas_used())
         .unwrap_or_default();
 
     Outcome {
@@ -220,32 +199,18 @@ where
     }
 }
 
-fn collect_receipt_logs<DB, I, E>(
-    evm: &mut MorphEvm<DB, I>,
-    exec_result: &Result<ExecutionResult<morph_revm::MorphHaltReason>, E>,
-) -> Vec<Log>
-where
-    DB: alloy_evm::Database,
-    I: revm::Inspector<morph_revm::evm::MorphContext<DB>>,
-{
-    let mut logs = evm.take_pre_fee_logs();
-    if let Ok(result) = exec_result {
-        logs.extend(result.logs().iter().cloned());
-    }
-    logs.extend(evm.take_post_fee_logs());
-    logs
+/// The output of a transaction that ran to a result; a halt has none.
+fn result_output(result: &TxResult<MorphEvmTypes>) -> Option<&Bytes> {
+    (!result.is_halt()).then_some(&result.output)
 }
 
-fn validation_error<E>(
+fn validation_error(
     test: &Test,
-    exec_result: &Result<ExecutionResult<morph_revm::MorphHaltReason>, E>,
+    exec_result: &ExecResult,
     expected_output: Option<&Bytes>,
     state_root: B256,
     logs_root: B256,
-) -> Option<String>
-where
-    E: std::fmt::Display,
-{
+) -> Option<String> {
     // `expectException` is checked for presence, deliberately not for its text.
     // go-ethereum's own statetest harness does the same -- `tests/state_test.go`
     // returns early on `len(ExpectException) > 0` under a standing
@@ -267,11 +232,11 @@ where
     }
 
     if let (Some(expected), Ok(result)) = (expected_output, exec_result)
-        && result.output() != Some(expected)
+        && result_output(result) != Some(expected)
     {
         return Some(format!(
             "unexpected output: got {:?}, expected {expected:?}",
-            result.output()
+            result_output(result)
         ));
     }
     if logs_root != test.logs {
@@ -289,17 +254,12 @@ where
     None
 }
 
-fn format_evm_result<E>(
-    exec_result: &Result<ExecutionResult<morph_revm::MorphHaltReason>, E>,
-) -> String
-where
-    E: std::fmt::Display,
-{
+fn format_evm_result(exec_result: &ExecResult) -> String {
     match exec_result {
-        Ok(ExecutionResult::Success { reason, .. }) => format!("Success: {reason:?}"),
-        Ok(ExecutionResult::Revert { .. }) => "Revert".to_string(),
-        Ok(ExecutionResult::Halt { reason, .. }) => format!("Halt: {reason:?}"),
-        Err(error) => error.to_string(),
+        Ok(result) if result.is_success() => format!("Success: {:?}", result.stop),
+        Ok(result) if result.is_revert() => "Revert".to_string(),
+        Ok(result) => format!("Halt: {:?}", result.stop),
+        Err(error) => error.clone(),
     }
 }
 
@@ -309,30 +269,63 @@ fn log_rlp_hash(logs: &[Log]) -> B256 {
     keccak256(&out)
 }
 
-fn state_merkle_trie_root<'a>(
-    accounts: impl IntoIterator<Item = (Address, &'a PlainAccount)>,
-) -> B256 {
-    let mut accounts: Vec<_> = accounts
-        .into_iter()
-        .map(|(address, account)| {
-            let storage_root = storage_root_unhashed(
-                account
-                    .storage
-                    .iter()
-                    .filter(|&(_, &value)| !value.is_zero())
-                    .map(|(key, value)| (B256::from(*key), *value)),
-            );
-            (
-                keccak256(address),
-                TrieAccount {
-                    nonce: account.info.nonce,
-                    balance: account.info.balance,
-                    storage_root,
-                    code_hash: account.info.code_hash,
-                },
-            )
-        })
+/// Computes the state root over the prestate accounts and everything execution accepted.
+fn state_merkle_trie_root(unit: &MorphTestUnit, evm: &mut MorphEvm<'_>) -> B256 {
+    let cache = &evm.overlay_db().cache;
+    let addresses: BTreeSet<Address> = unit
+        .pre
+        .keys()
+        .chain(cache.accounts.keys())
+        .copied()
         .collect();
+    let written_slots: Vec<(Address, Vec<U256>)> = cache
+        .storage
+        .iter()
+        .map(|(address, storage)| (*address, storage.slots.keys().copied().collect()))
+        .collect();
+
+    let state = evm.state_mut();
+    let mut accounts = Vec::with_capacity(addresses.len());
+    for address in addresses {
+        let info = state
+            .account_info_untracked(&address)
+            .expect("the in-memory database cannot fail");
+        let Some(info) = info else {
+            continue;
+        };
+
+        let mut slots: BTreeSet<U256> = unit
+            .pre
+            .get(&address)
+            .map(|account| account.storage.keys().copied().collect())
+            .unwrap_or_default();
+        slots.extend(
+            written_slots
+                .iter()
+                .filter(|(written, _)| *written == address)
+                .flat_map(|(_, keys)| keys.iter().copied()),
+        );
+        let storage: Vec<(B256, U256)> = slots
+            .into_iter()
+            .map(|key| {
+                let value = state
+                    .storage_slot_untracked(&address, &key)
+                    .expect("the in-memory database cannot fail");
+                (B256::from(key), value)
+            })
+            .filter(|(_, value)| !value.is_zero())
+            .collect();
+
+        accounts.push((
+            keccak256(address),
+            TrieAccount {
+                nonce: info.nonce,
+                balance: info.balance,
+                storage_root: storage_root_unhashed(storage),
+                code_hash: info.code_hash,
+            },
+        ));
+    }
     accounts.sort_unstable_by_key(|(key, _)| *key);
 
     let mut trie = HashBuilder::default();

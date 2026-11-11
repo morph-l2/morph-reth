@@ -74,22 +74,19 @@ pub use error::MorphEvmError;
 pub mod evm;
 use std::sync::Arc;
 
-use alloy_evm::{
-    block::{BlockExecutorFactory, StateDB},
-    eth::EthBlockExecutionCtx,
-    revm::Inspector,
-};
-pub use evm::MorphEvmFactory;
+pub use evm::{MorphEvm, MorphEvmFactory};
+use evm2::evm::DynDatabase;
 use morph_primitives::{MorphReceipt, MorphTxEnvelope};
+use reth_evm::BlockExecutorFactory;
+use reth_evm_ethereum::EthBlockExecutionCtx;
 
 // Re-export types that surface in `BlockExecutorFactory` associated types so
 // downstream crates can name them. They are constructed via the factory.
-pub use crate::block::{MorphBlockExecutor, MorphTxResult};
-use crate::{block::MorphBlockExecutorFactory, evm::MorphEvm};
+use crate::block::DefaultMorphReceiptBuilder;
+pub use crate::block::{MorphBlockExecutor, MorphTxResult, morph_invalid_tx_error};
 use morph_chainspec::MorphChainSpec;
-use morph_revm::evm::MorphContext;
 
-pub use morph_revm::{MorphBlockEnv, MorphHaltReason};
+pub use morph_revm::{MorphBlockEnv, MorphEvmEnv, MorphEvmTypes};
 
 /// Morph EVM configuration and block executor factory.
 ///
@@ -114,8 +111,10 @@ pub use morph_revm::{MorphBlockEnv, MorphHaltReason};
 /// The internal executor factory is lightweight and stateless.
 #[derive(Debug, Clone)]
 pub struct MorphEvmConfig {
-    /// Internal block executor factory that creates `MorphBlockExecutor` instances.
-    executor_factory: MorphBlockExecutorFactory,
+    /// Chain specification.
+    chain_spec: Arc<MorphChainSpec>,
+    /// EVM factory.
+    evm_factory: MorphEvmFactory,
 
     /// Block assembler for building `MorphHeader` blocks from execution results.
     pub block_assembler: MorphBlockAssembler,
@@ -127,10 +126,10 @@ impl MorphEvmConfig {
     /// This is the primary constructor that allows specifying a custom EVM factory
     /// for advanced use cases (e.g., custom inspector or precompile configuration).
     pub fn new(chain_spec: Arc<MorphChainSpec>, evm_factory: MorphEvmFactory) -> Self {
-        let executor_factory = MorphBlockExecutorFactory::new(chain_spec.clone(), evm_factory);
         Self {
-            executor_factory,
-            block_assembler: MorphBlockAssembler::new(chain_spec),
+            block_assembler: MorphBlockAssembler::new(chain_spec.clone()),
+            chain_spec,
+            evm_factory,
         }
     }
 
@@ -139,46 +138,56 @@ impl MorphEvmConfig {
     /// This is the recommended constructor for most use cases. It uses the default
     /// Morph EVM factory with standard configuration.
     pub fn new_with_default_factory(chain_spec: Arc<MorphChainSpec>) -> Self {
-        Self::new(chain_spec, MorphEvmFactory::default())
+        Self::new(chain_spec, MorphEvmFactory)
     }
 
     /// Returns a reference to the Morph chain specification.
     ///
     /// The chain spec contains hardfork configuration and network parameters.
     pub const fn chain_spec(&self) -> &Arc<MorphChainSpec> {
-        self.executor_factory.spec()
+        &self.chain_spec
     }
 
     /// Returns a reference to the Morph EVM factory.
     ///
     /// The factory is used to create EVM instances for block execution.
     pub const fn evm_factory(&self) -> &MorphEvmFactory {
-        self.executor_factory.evm_factory()
+        &self.evm_factory
     }
 }
 
 impl BlockExecutorFactory for MorphEvmConfig {
     type EvmFactory = MorphEvmFactory;
-    type ExecutionCtx<'a> = EthBlockExecutionCtx<'a>;
+    type EvmTypes = MorphEvmTypes;
     type Transaction = MorphTxEnvelope;
     type Receipt = MorphReceipt;
-    type TxExecutionResult = MorphTxResult;
-    type Executor<'a, DB: StateDB, I: Inspector<MorphContext<DB>>> = MorphBlockExecutor<DB, I>;
+    type Evm<'a> = MorphEvm<'a>;
+    type EvmEnv = MorphEvmEnv;
+    type ExecutionCtx<'a> = EthBlockExecutionCtx<'a>;
+    // The Morph executor owns its EVM and receipt builder by value rather than
+    // borrowing them from the factory.
+    type Executor<'a> = MorphBlockExecutor<'a>;
 
-    fn evm_factory(&self) -> &Self::EvmFactory {
-        self.executor_factory.evm_factory()
+    fn create_executor<'a>(
+        &'a self,
+        evm: Self::Evm<'a>,
+        ctx: Self::ExecutionCtx<'a>,
+    ) -> Self::Executor<'a>
+    where
+        Self: 'a,
+    {
+        MorphBlockExecutor::new(evm, DefaultMorphReceiptBuilder, ctx.tx_count_hint)
     }
 
-    fn create_executor<'a, DB, I>(
-        &'a self,
-        evm: MorphEvm<DB, I>,
-        ctx: Self::ExecutionCtx<'a>,
-    ) -> Self::Executor<'a, DB, I>
+    fn evm_factory(&self) -> &Self::EvmFactory {
+        &self.evm_factory
+    }
+
+    fn evm_with_env<'a, DB>(&self, db: DB, evm_env: Self::EvmEnv) -> Self::Evm<'a>
     where
-        DB: StateDB,
-        I: Inspector<MorphContext<DB>>,
+        DB: DynDatabase + 'a,
     {
-        self.executor_factory.create_executor(evm, ctx)
+        MorphEvm::new(db, evm_env)
     }
 }
 

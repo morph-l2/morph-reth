@@ -336,7 +336,7 @@ impl TestNodeBuilder {
         // can carry `--builder.gaslimit`, which `setup_engine` gives no way to set.
         let is_dev = self.is_dev;
         let desired_gas_limit = self.desired_gas_limit;
-        reth_e2e_test_utils::E2ETestSetupBuilder::<MorphNode, _>::new(
+        reth_e2e_test_utils::E2ETestSetupBuilder::<MorphNode>::new_with_attributes_generator(
             self.num_nodes,
             Arc::new(chain_spec),
             morph_payload_attributes,

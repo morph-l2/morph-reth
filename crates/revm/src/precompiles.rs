@@ -27,30 +27,31 @@
 //!    via `StateDB.Prepare` (EIP-2929). CALL costs 100 gas (warm) instead of 2600 (cold).
 //!
 //! 2. When called, go-eth's CALL handler sets `gas = 0` for any non-revert error, consuming
-//!    all forwarded gas. revm's `PrecompileError` result also causes all forwarded gas to
-//!    be consumed (parent does not reclaim gas when sub-call is not ok-or-revert).
+//!    all forwarded gas. A `PrecompileHalt` also consumes all forwarded gas (the parent does
+//!    not reclaim gas when the sub-call neither succeeds nor reverts).
 //!
 //! Omitting these stubs causes morph-reth to treat 0x03/0x09 as cold empty accounts (2600
 //! base cost, forwarded gas returned), creating a gas mismatch vs go-ethereum.
 
+use crate::evm::{MorphEvm, MorphEvmTypes};
 use alloy_primitives::Address;
-use morph_chainspec::hardfork::MorphHardfork;
-use revm::{
-    context::Cfg,
-    context_interface::ContextTr,
-    handler::{EthPrecompiles, PrecompileProvider},
-    interpreter::{CallInputs, InterpreterResult},
-    precompile::{
-        Precompile, PrecompileHalt, PrecompileId, PrecompileOutput, PrecompileResult, Precompiles,
+use evm2::{
+    SpecId,
+    interpreter::{GasTracker, Message},
+    precompiles::{
+        BLS12_381_G1_ADD, BLS12_381_G1_MSM, BLS12_381_G2_ADD, BLS12_381_G2_MSM,
+        BLS12_381_MAP_FP_TO_G1, BLS12_381_MAP_FP2_TO_G2, BLS12_381_PAIRING, MODEXP_OSAKA,
+        P256VERIFY_OSAKA, Precompile, PrecompileError, PrecompileHalt, PrecompileId, PrecompileMap,
+        PrecompileResult, Precompiles, bn254, modexp,
     },
-    primitives::{AddressSet, OnceLock, hardfork::SpecId},
+    utils::u64_to_address,
 };
-use std::string::String;
+use morph_chainspec::hardfork::MorphHardfork;
+use std::{borrow::Cow, sync::OnceLock};
 
 /// Standard precompile addresses
 pub mod addresses {
-    use super::Address;
-    use revm::precompile::u64_to_address;
+    use super::{Address, u64_to_address};
 
     /// ecrecover precompile address (1)
     pub const ECRECOVER: Address = u64_to_address(1);
@@ -90,62 +91,42 @@ pub mod addresses {
     pub const P256_VERIFY: Address = u64_to_address(256);
 }
 
-/// Morph precompile provider.
+/// Precompile table of a Morph hardfork.
+type MorphPrecompileMap = PrecompileMap<MorphEvmTypes>;
+
+/// Returns the precompile provider of a Morph hardfork.
 ///
-/// Implements Morph-specific precompile sets that match the Go implementation.
-/// Each hardfork has specific precompiles enabled/disabled.
-#[derive(Debug, Clone)]
-pub struct MorphPrecompiles {
-    /// Inner Ethereum precompile provider.
-    inner: EthPrecompiles,
-    /// Current Morph hardfork.
-    spec: MorphHardfork,
+/// Maps hardforks to their precompile sets based on the Go implementation:
+/// <https://github.com/morph-l2/go-ethereum/blob/main/core/vm/contracts.go>
+pub fn morph_precompiles(spec: MorphHardfork) -> Precompiles<MorphEvmTypes> {
+    Precompiles::new(Cow::Borrowed(precompiles_for(spec)))
 }
 
-impl MorphPrecompiles {
-    /// Create a new precompile provider with the given Morph hardfork.
-    ///
-    /// Maps hardforks to their precompile sets based on the Go implementation:
-    /// <https://github.com/morph-l2/go-ethereum/blob/main/core/vm/contracts.go>
-    #[inline]
-    pub fn new_with_spec(spec: MorphHardfork) -> Self {
-        let precompiles = match spec {
-            // Bernoulli and Curie share the same precompile set
-            // Go implementation has no PrecompiledContractsCurie
-            MorphHardfork::Bernoulli | MorphHardfork::Curie => bernoulli(),
-            // Morph203 and Viridian share the same precompile set
-            MorphHardfork::Morph203 | MorphHardfork::Viridian => morph203(),
-            // Emerald and Jade share the same precompile set.
-            MorphHardfork::Emerald | MorphHardfork::Jade | MorphHardfork::Celadon => emerald(),
-            hardfork => unreachable!("unsupported Morph hardfork: {hardfork:?}"),
-        };
-
-        Self {
-            inner: EthPrecompiles {
-                precompiles,
-                spec: SpecId::default(),
-            },
-            spec,
-        }
-    }
-
-    /// Returns the underlying precompiles.
-    #[inline]
-    pub fn precompiles(&self) -> &'static Precompiles {
-        self.inner.precompiles
-    }
-
-    /// Returns whether the address is a precompile.
-    #[inline]
-    pub fn contains(&self, address: &Address) -> bool {
-        self.inner.contains(address)
+/// Returns the precompile table of a Morph hardfork.
+fn precompiles_for(spec: MorphHardfork) -> &'static MorphPrecompileMap {
+    match spec {
+        // Bernoulli and Curie share the same precompile set
+        // Go implementation has no PrecompiledContractsCurie
+        MorphHardfork::Bernoulli | MorphHardfork::Curie => bernoulli(),
+        // Morph203 and Viridian share the same precompile set
+        MorphHardfork::Morph203 | MorphHardfork::Viridian => morph203(),
+        // Emerald and Jade share the same precompile set.
+        MorphHardfork::Emerald | MorphHardfork::Jade | MorphHardfork::Celadon => emerald(),
+        hardfork => unreachable!("unsupported Morph hardfork: {hardfork:?}"),
     }
 }
 
-impl Default for MorphPrecompiles {
-    fn default() -> Self {
-        Self::new_with_spec(MorphHardfork::default())
-    }
+/// The Berlin precompiles Morph's sets derive from.
+fn berlin() -> Precompiles<MorphEvmTypes> {
+    Precompiles::base(SpecId::BERLIN)
+}
+
+/// A non-fatal failure: the CALL fails and burns its forwarded gas, as go-ethereum's CALL
+/// handler does for any non-revert precompile error.
+fn halt(reason: &'static str) -> PrecompileResult {
+    Err(PrecompileError::Halt(PrecompileHalt::Other(Cow::Borrowed(
+        reason,
+    ))))
 }
 
 /// Disabled stub for ripemd160 (0x03) in Bernoulli/Curie hardfork.
@@ -153,11 +134,12 @@ impl Default for MorphPrecompiles {
 /// Returns a `PrecompileHalt` so the CALL handler treats the call as failure and
 /// burns all forwarded gas, matching go-ethereum's behavior where a disabled
 /// precompile error causes the CALL handler to consume all remaining gas.
-fn ripemd160_disabled(_input: &[u8], _gas_limit: u64, reservoir: u64) -> PrecompileResult {
-    Ok(PrecompileOutput::halt(
-        PrecompileHalt::other("ripemd160 precompile disabled in Bernoulli/Curie hardfork"),
-        reservoir,
-    ))
+fn ripemd160_disabled(
+    _evm: &mut MorphEvm<'_>,
+    _message: &Message<MorphEvmTypes>,
+    _gas: &mut GasTracker,
+) -> PrecompileResult {
+    halt("ripemd160 precompile disabled in Bernoulli/Curie hardfork")
 }
 
 /// Disabled stub for blake2f (0x09) in Bernoulli/Curie hardfork.
@@ -165,11 +147,12 @@ fn ripemd160_disabled(_input: &[u8], _gas_limit: u64, reservoir: u64) -> Precomp
 /// Returns a `PrecompileHalt` so the CALL handler treats the call as failure and
 /// burns all forwarded gas, matching go-ethereum's behavior where a disabled
 /// precompile error causes the CALL handler to consume all remaining gas.
-fn blake2f_disabled(_input: &[u8], _gas_limit: u64, reservoir: u64) -> PrecompileResult {
-    Ok(PrecompileOutput::halt(
-        PrecompileHalt::other("blake2f precompile disabled in Bernoulli/Curie hardfork"),
-        reservoir,
-    ))
+fn blake2f_disabled(
+    _evm: &mut MorphEvm<'_>,
+    _message: &Message<MorphEvmTypes>,
+    _gas: &mut GasTracker,
+) -> PrecompileResult {
+    halt("blake2f precompile disabled in Bernoulli/Curie hardfork")
 }
 
 /// Checks if a 32-byte big-endian length field at `offset` in `data` exceeds 32.
@@ -197,25 +180,22 @@ fn modexp_len_exceeds_32(data: &[u8], offset: usize) -> bool {
 /// that go-ethereum rejects, causing a consensus split.
 ///
 /// Ref: <https://github.com/morph-l2/go-ethereum/blob/main/core/vm/contracts.go#L643-L648>
-fn modexp_with_32byte_limit(input: &[u8], gas_limit: u64, reservoir: u64) -> PrecompileResult {
+fn modexp_with_32byte_limit(
+    _evm: &mut MorphEvm<'_>,
+    message: &Message<MorphEvmTypes>,
+    gas: &mut GasTracker,
+) -> PrecompileResult {
+    let input = message.input.as_ref();
     // The first 96 bytes of modexp input are three 32-byte big-endian length fields:
     // [0..32] = base_len, [32..64] = exp_len, [64..96] = mod_len
     if modexp_len_exceeds_32(input, 0)
         || modexp_len_exceeds_32(input, 32)
         || modexp_len_exceeds_32(input, 64)
     {
-        return Ok(PrecompileOutput::halt(
-            PrecompileHalt::other(
-                "modexp temporarily only accepts inputs of 32 bytes (256 bits) or less",
-            ),
-            reservoir,
-        ));
+        return halt("modexp temporarily only accepts inputs of 32 bytes (256 bits) or less");
     }
 
-    Precompiles::berlin()
-        .get(&addresses::MODEXP)
-        .expect("Berlin precompiles must include modexp")
-        .execute(input, gas_limit, reservoir)
+    modexp::run_berlin(input, gas)
 }
 
 /// Wraps BN256 pairing with go-ethereum's 4-pair input length limit.
@@ -228,21 +208,16 @@ fn modexp_with_32byte_limit(input: &[u8], gas_limit: u64, reservoir: u64) -> Pre
 ///
 /// Ref: <https://github.com/morph-l2/go-ethereum/blob/main/core/vm/contracts.go#L860-L865>
 fn bn256_pairing_with_4pair_limit(
-    input: &[u8],
-    gas_limit: u64,
-    reservoir: u64,
+    _evm: &mut MorphEvm<'_>,
+    message: &Message<MorphEvmTypes>,
+    gas: &mut GasTracker,
 ) -> PrecompileResult {
+    let input = message.input.as_ref();
     if input.len() > 4 * 192 {
-        return Ok(PrecompileOutput::halt(
-            PrecompileHalt::other("bad elliptic curve pairing size"),
-            reservoir,
-        ));
+        return halt("bad elliptic curve pairing size");
     }
 
-    Precompiles::berlin()
-        .get(&addresses::BN256_PAIRING)
-        .expect("Berlin precompiles must include BN256 pairing")
-        .execute(input, gas_limit, reservoir)
+    bn254::pair::run_istanbul(input, gas)
 }
 
 /// Returns precompiles for Bernoulli hardfork.
@@ -252,30 +227,30 @@ fn bn256_pairing_with_4pair_limit(
 /// consume all forwarded gas and return failure when called.
 ///
 /// Matches: <https://github.com/morph-l2/go-ethereum/blob/main/core/vm/contracts.go#L124-L134>
-pub fn bernoulli() -> &'static Precompiles {
-    static INSTANCE: OnceLock<Precompiles> = OnceLock::new();
+pub fn bernoulli() -> &'static MorphPrecompileMap {
+    static INSTANCE: OnceLock<MorphPrecompileMap> = OnceLock::new();
     INSTANCE.get_or_init(|| {
         // Start from Berlin (9 precompiles including 0x03 and 0x09).
-        let mut precompiles = Precompiles::berlin().clone();
+        let mut precompiles = berlin().as_map().clone();
 
         // Replace ripemd160 (0x03) and blake2f (0x09) with disabled stubs.
-        // This keeps them in warm_addresses() so EIP-2929 warms them (100 gas instead of
-        // 2600 cold), matching go-ethereum's PrecompiledContractsBernoulli behavior.
+        // This keeps them warmed by EIP-2929 (100 gas instead of 2600 cold),
+        // matching go-ethereum's PrecompiledContractsBernoulli behavior.
         precompiles.extend([
             Precompile::new(
-                PrecompileId::Ripemd160,
                 addresses::RIPEMD160,
+                PrecompileId::Ripemd160,
                 ripemd160_disabled,
             ),
-            Precompile::new(PrecompileId::Blake2F, addresses::BLAKE2F, blake2f_disabled),
+            Precompile::new(addresses::BLAKE2F, PrecompileId::Blake2F, blake2f_disabled),
         ]);
 
         // Replace modexp (0x05) with 32-byte input limit wrapper.
         // go-ethereum's Bernoulli modexp has eip2565=true but neither eip7823 nor eip7883,
-        // which enforces base/exp/mod <= 32 bytes. Berlin modexp in revm has no such limit.
+        // which enforces base/exp/mod <= 32 bytes. Berlin modexp has no such limit.
         precompiles.extend([Precompile::new(
-            PrecompileId::ModExp,
             addresses::MODEXP,
+            PrecompileId::ModExp,
             modexp_with_32byte_limit,
         )]);
 
@@ -289,28 +264,28 @@ pub fn bernoulli() -> &'static Precompiles {
 /// Enabled: ecrecover, sha256, ripemd160, identity, modexp, bn256 ops, blake2f
 ///
 /// Matches: PrecompiledContractsMorph203 in Go
-pub fn morph203() -> &'static Precompiles {
-    static INSTANCE: OnceLock<Precompiles> = OnceLock::new();
+pub fn morph203() -> &'static MorphPrecompileMap {
+    static INSTANCE: OnceLock<MorphPrecompileMap> = OnceLock::new();
     INSTANCE.get_or_init(|| {
         // Start from Bernoulli and re-enable blake2f + ripemd160
         let mut precompiles = bernoulli().clone();
 
-        let berlin = Precompiles::berlin();
+        let berlin = berlin();
         // Re-enable blake2f (0x09) — was disabled stub in Bernoulli
-        if let Some(blake2f) = berlin.get(&addresses::BLAKE2F) {
-            precompiles.extend([blake2f.clone()]);
+        if let Some(blake2f) = berlin.as_map().get(&addresses::BLAKE2F) {
+            precompiles.extend([blake2f]);
         }
         // Re-enable ripemd160 (0x03) — was disabled stub in Bernoulli
-        if let Some(ripemd) = berlin.get(&addresses::RIPEMD160) {
-            precompiles.extend([ripemd.clone()]);
+        if let Some(ripemd) = berlin.as_map().get(&addresses::RIPEMD160) {
+            precompiles.extend([ripemd]);
         }
 
         // Replace BN256 pairing (0x08) with 4-pair limited version.
         // go-ethereum's Morph203 uses `limitInputLength: true` which caps
         // pairing input to 4 pairs (768 bytes).
         precompiles.extend([Precompile::new(
-            PrecompileId::Bn254Pairing,
             addresses::BN256_PAIRING,
+            PrecompileId::Bn254Pairing,
             bn256_pairing_with_4pair_limit,
         )]);
 
@@ -329,38 +304,27 @@ pub fn morph203() -> &'static Precompiles {
 /// - Does **NOT** include KZG Point Evaluation (0x0a) — go-ethereum omits it
 ///
 /// Ref: <https://github.com/morph-l2/go-ethereum/blob/main/core/vm/contracts.go#L152-L171>
-pub fn emerald() -> &'static Precompiles {
-    static INSTANCE: OnceLock<Precompiles> = OnceLock::new();
+pub fn emerald() -> &'static MorphPrecompileMap {
+    static INSTANCE: OnceLock<MorphPrecompileMap> = OnceLock::new();
     INSTANCE.get_or_init(|| {
         let mut precompiles = morph203().clone();
-        let osaka = Precompiles::osaka();
 
-        // Upgrade modexp (0x05) from 32-byte-limited wrapper to osaka version.
-        // Emerald uses eip7823=true (1024-byte input cap) + eip7883=true (new gas formula),
-        // which replaces the Bernoulli~Viridian 32-byte restriction.
-        if let Some(modexp) = osaka.get(&addresses::MODEXP) {
-            precompiles.extend([modexp.clone()]);
-        }
-
-        // Add BLS12-381 precompiles (EIP-2537): 0x0b through 0x11
-        for addr in [
-            addresses::BLS12_G1ADD,
-            addresses::BLS12_G1MULTIEXP,
-            addresses::BLS12_G2ADD,
-            addresses::BLS12_G2MULTIEXP,
-            addresses::BLS12_PAIRING,
-            addresses::BLS12_MAP_FP_TO_G1,
-            addresses::BLS12_MAP_FP2_TO_G2,
-        ] {
-            if let Some(precompile) = osaka.get(&addr) {
-                precompiles.extend([precompile.clone()]);
-            }
-        }
-
-        // Add P256verify (RIP-7212) at 0x100
-        if let Some(p256) = osaka.get(&addresses::P256_VERIFY) {
-            precompiles.extend([p256.clone()]);
-        }
+        precompiles.extend([
+            // Upgrade modexp (0x05) from the 32-byte-limited wrapper to the Osaka version.
+            // Emerald uses eip7823=true (1024-byte input cap) + eip7883=true (new gas formula),
+            // which replaces the Bernoulli~Viridian 32-byte restriction.
+            MODEXP_OSAKA::<MorphEvmTypes>(),
+            // Add BLS12-381 precompiles (EIP-2537): 0x0b through 0x11
+            BLS12_381_G1_ADD::<MorphEvmTypes>(),
+            BLS12_381_G1_MSM::<MorphEvmTypes>(),
+            BLS12_381_G2_ADD::<MorphEvmTypes>(),
+            BLS12_381_G2_MSM::<MorphEvmTypes>(),
+            BLS12_381_PAIRING::<MorphEvmTypes>(),
+            BLS12_381_MAP_FP_TO_G1::<MorphEvmTypes>(),
+            BLS12_381_MAP_FP2_TO_G2::<MorphEvmTypes>(),
+            // Add P256verify (RIP-7212) at 0x100
+            P256VERIFY_OSAKA::<MorphEvmTypes>(),
+        ]);
 
         // NOTE: KZG Point Evaluation (0x0a) is intentionally NOT included.
         // go-ethereum's PrecompiledContractsEmerald skips 0x0a entirely.
@@ -369,64 +333,44 @@ pub fn emerald() -> &'static Precompiles {
     })
 }
 
-impl<CTX> PrecompileProvider<CTX> for MorphPrecompiles
-where
-    CTX: ContextTr<Cfg: Cfg<Spec = MorphHardfork>>,
-{
-    type Output = InterpreterResult;
-
-    #[inline]
-    fn set_spec(&mut self, spec: <CTX::Cfg as Cfg>::Spec) -> bool {
-        if spec == self.spec {
-            return false;
-        }
-        *self = Self::new_with_spec(spec);
-        true
-    }
-
-    #[inline]
-    fn run(
-        &mut self,
-        context: &mut CTX,
-        inputs: &CallInputs,
-    ) -> Result<Option<Self::Output>, String> {
-        self.inner.run(context, inputs)
-    }
-
-    #[inline]
-    fn warm_addresses(&self) -> &AddressSet {
-        self.inner.warm_addresses()
-    }
-
-    #[inline]
-    fn contains(&self, address: &Address) -> bool {
-        Self::contains(self, address)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use revm::precompile::PrecompileStatus;
+    use crate::{MorphBlockEnv, evm::morph_evm_env};
+    use alloy_primitives::Bytes;
+    use evm2::evm::InMemoryDB;
 
-    /// Returns true if the precompile execution result should be considered a failed
-    /// CALL (halt status or fatal error). Mirrors the old `result.is_err()` semantics
-    /// from revm 36 where rejection variants like `PrecompileError::Other` were errors.
-    fn is_call_failure(result: &PrecompileResult) -> bool {
-        match result {
-            Ok(output) => matches!(output.status, PrecompileStatus::Halt(_)),
-            Err(_) => true,
-        }
+    /// Runs `precompile` on `input` with `gas_limit` gas.
+    fn execute(
+        precompile: &Precompile<MorphEvmTypes>,
+        input: &[u8],
+        gas_limit: u64,
+    ) -> PrecompileResult {
+        let env = morph_evm_env(
+            MorphHardfork::Celadon,
+            1,
+            u64::MAX,
+            MorphBlockEnv::default(),
+        );
+        let mut evm = crate::evm::morph_evm(InMemoryDB::default(), env);
+        let message = Message::<MorphEvmTypes> {
+            input: Bytes::copy_from_slice(input).into(),
+            gas_limit,
+            ..Default::default()
+        };
+        precompile.run()(&mut evm, &message, &mut GasTracker::new(gas_limit))
     }
 
-    /// Extracts a `PrecompileHalt` from a result that is expected to be a halt-on-Ok.
+    /// Returns true if the precompile execution result should be considered a failed CALL.
+    fn is_call_failure(result: &PrecompileResult) -> bool {
+        result.is_err()
+    }
+
+    /// Extracts the halt reason from a result that is expected to be a halt.
     fn halt_reason(result: PrecompileResult) -> PrecompileHalt {
         match result {
-            Ok(output) => match output.status {
-                PrecompileStatus::Halt(reason) => reason,
-                other => panic!("expected halt status, got: {other:?}"),
-            },
-            Err(err) => panic!("expected halt-on-Ok, got fatal error: {err:?}"),
+            Err(PrecompileError::Halt(reason)) => reason,
+            other => panic!("expected a halt, got: {other:?}"),
         }
     }
 
@@ -462,7 +406,7 @@ mod tests {
         input[31] = 33; // base_len = 33
         input[63] = 32; // exp_len = 32
         input[95] = 32; // mod_len = 32
-        let result = modexp.execute(&input, 100_000, 0);
+        let result = execute(&modexp, &input, 100_000);
         assert!(
             is_call_failure(&result),
             "modexp with base_len=33 should be rejected"
@@ -470,7 +414,7 @@ mod tests {
 
         // base_len=32, exp_len=32, mod_len=32 — should succeed
         input[31] = 32;
-        let result = modexp.execute(&input, 100_000, 0);
+        let result = execute(&modexp, &input, 100_000);
         assert!(
             !is_call_failure(&result),
             "modexp with all lens=32 should succeed"
@@ -479,10 +423,10 @@ mod tests {
 
     #[test]
     fn test_curie_uses_bernoulli_precompiles() {
-        let bernoulli_p = MorphPrecompiles::new_with_spec(MorphHardfork::Bernoulli);
-        let curie_p = MorphPrecompiles::new_with_spec(MorphHardfork::Curie);
+        let bernoulli_p = precompiles_for(MorphHardfork::Bernoulli);
+        let curie_p = precompiles_for(MorphHardfork::Curie);
 
-        assert_eq!(bernoulli_p.precompiles().len(), curie_p.precompiles().len());
+        assert_eq!(bernoulli_p.len(), curie_p.len());
         assert!(curie_p.contains(&addresses::SHA256));
         assert!(curie_p.contains(&addresses::RIPEMD160));
         assert!(curie_p.contains(&addresses::BLAKE2F));
@@ -513,7 +457,7 @@ mod tests {
 
         // 5 pairs (960 bytes) — exceeds 4-pair limit, should be rejected
         let input = vec![0u8; 5 * 192];
-        let result = pairing.execute(&input, 1_000_000, 0);
+        let result = execute(&pairing, &input, 1_000_000);
         assert!(
             is_call_failure(&result),
             "pairing with 5 pairs should be rejected"
@@ -522,7 +466,7 @@ mod tests {
         // 4 pairs (768 bytes) — within limit, should not be rejected for size
         // (may still fail due to invalid curve points, but not for size)
         let input = vec![0u8; 4 * 192];
-        let result = pairing.execute(&input, 1_000_000, 0);
+        let result = execute(&pairing, &input, 1_000_000);
         // Zero-input pairing is valid and returns true
         assert!(
             !is_call_failure(&result),
@@ -578,7 +522,7 @@ mod tests {
         input[31] = 64; // base_len = 64
         input[63] = 32; // exp_len = 32
         input[95] = 64; // mod_len = 64
-        let result = modexp.execute(&input, 1_000_000, 0);
+        let result = execute(&modexp, &input, 1_000_000);
         assert!(
             !is_call_failure(&result),
             "Emerald modexp should accept base_len=64"
@@ -594,25 +538,22 @@ mod tests {
 
     #[test]
     fn test_hardfork_specific_precompiles() {
-        let bernoulli_p = MorphPrecompiles::new_with_spec(MorphHardfork::Bernoulli);
-        let curie_p = MorphPrecompiles::new_with_spec(MorphHardfork::Curie);
-        let morph203_p = MorphPrecompiles::new_with_spec(MorphHardfork::Morph203);
-        let viridian_p = MorphPrecompiles::new_with_spec(MorphHardfork::Viridian);
-        let emerald_p = MorphPrecompiles::new_with_spec(MorphHardfork::Emerald);
+        let bernoulli_p = precompiles_for(MorphHardfork::Bernoulli);
+        let curie_p = precompiles_for(MorphHardfork::Curie);
+        let morph203_p = precompiles_for(MorphHardfork::Morph203);
+        let viridian_p = precompiles_for(MorphHardfork::Viridian);
+        let emerald_p = precompiles_for(MorphHardfork::Emerald);
 
         // Bernoulli/Curie: disabled stubs present, same set
         assert!(bernoulli_p.contains(&addresses::RIPEMD160));
         assert!(bernoulli_p.contains(&addresses::BLAKE2F));
-        assert_eq!(bernoulli_p.precompiles().len(), curie_p.precompiles().len());
+        assert_eq!(bernoulli_p.len(), curie_p.len());
 
         // Morph203/Viridian: re-enabled, no P256verify, same set
         assert!(morph203_p.contains(&addresses::RIPEMD160));
         assert!(morph203_p.contains(&addresses::BLAKE2F));
         assert!(!morph203_p.contains(&addresses::P256_VERIFY));
-        assert_eq!(
-            morph203_p.precompiles().len(),
-            viridian_p.precompiles().len()
-        );
+        assert_eq!(morph203_p.len(), viridian_p.len());
 
         // Emerald: full set with BLS12-381 + P256verify, no KZG
         assert!(emerald_p.contains(&addresses::P256_VERIFY));
@@ -627,7 +568,7 @@ mod tests {
 
         // Calling the disabled stub should halt (consuming all forwarded gas at the
         // caller, since the CALL frame treats `Halt` as failure).
-        let result = ripemd.execute(b"hello", 100_000, 0);
+        let result = execute(&ripemd, b"hello", 100_000);
         assert!(
             is_call_failure(&result),
             "disabled ripemd160 should halt the call"
@@ -650,7 +591,7 @@ mod tests {
 
         // Calling the disabled stub should halt (consuming all forwarded gas at the
         // caller, since the CALL frame treats `Halt` as failure).
-        let result = blake2f.execute(b"hello", 100_000, 0);
+        let result = execute(&blake2f, b"hello", 100_000);
         assert!(
             is_call_failure(&result),
             "disabled blake2f should halt the call"
@@ -672,7 +613,7 @@ mod tests {
         let ripemd = precompiles.get(&addresses::RIPEMD160).unwrap();
 
         // In Morph203, ripemd160 is re-enabled and should work (not return disabled halt)
-        let result = ripemd.execute(b"hello", 100_000, 0);
+        let result = execute(&ripemd, b"hello", 100_000);
         assert!(
             !is_call_failure(&result),
             "morph203 ripemd160 should be functional: {result:?}"
@@ -686,10 +627,8 @@ mod tests {
 
         // blake2f requires specific input format (213 bytes), but the point is it should
         // NOT return the "disabled" halt. An invalid-input halt is acceptable.
-        let result = blake2f.execute(b"hello", 100_000, 0);
-        if let Ok(output) = &result
-            && let PrecompileStatus::Halt(PrecompileHalt::Other(msg)) = &output.status
-        {
+        let result = execute(&blake2f, b"hello", 100_000);
+        if let Err(PrecompileError::Halt(PrecompileHalt::Other(msg))) = &result {
             assert!(
                 !msg.contains("disabled"),
                 "morph203 blake2f should NOT be disabled: {msg}"
@@ -704,7 +643,7 @@ mod tests {
 
         // 5 pairs (960 bytes) — Bernoulli uses Berlin pairing with no 4-pair limit
         let input = vec![0u8; 5 * 192];
-        let result = pairing.execute(&input, 1_000_000, 0);
+        let result = execute(&pairing, &input, 1_000_000);
         // Should succeed (zero-padded valid points), NOT rejected for size
         assert!(
             !is_call_failure(&result),
@@ -719,7 +658,7 @@ mod tests {
 
         // Exactly 4 pairs (768 bytes) — should succeed
         let input = vec![0u8; 4 * 192];
-        let result = pairing.execute(&input, 1_000_000, 0);
+        let result = execute(&pairing, &input, 1_000_000);
         assert!(
             !is_call_failure(&result),
             "pairing with exactly 4 pairs should succeed"
@@ -727,7 +666,7 @@ mod tests {
 
         // 4 pairs + 1 byte (769 bytes) — should be rejected
         let input = vec![0u8; 4 * 192 + 1];
-        let result = pairing.execute(&input, 1_000_000, 0);
+        let result = execute(&pairing, &input, 1_000_000);
         assert!(
             is_call_failure(&result),
             "pairing with 769 bytes should be rejected"
@@ -736,12 +675,12 @@ mod tests {
 
     #[test]
     fn test_jade_uses_emerald_precompiles() {
-        let emerald_p = MorphPrecompiles::new_with_spec(MorphHardfork::Emerald);
-        let jade_p = MorphPrecompiles::new_with_spec(MorphHardfork::Jade);
+        let emerald_p = precompiles_for(MorphHardfork::Emerald);
+        let jade_p = precompiles_for(MorphHardfork::Jade);
 
         assert_eq!(
-            emerald_p.precompiles().len(),
-            jade_p.precompiles().len(),
+            emerald_p.len(),
+            jade_p.len(),
             "Jade should use same precompile set as Emerald"
         );
         assert!(jade_p.contains(&addresses::P256_VERIFY));
@@ -751,12 +690,12 @@ mod tests {
 
     #[test]
     fn test_default_precompiles_use_jade() {
-        let default_p = MorphPrecompiles::default();
-        let jade_p = MorphPrecompiles::new_with_spec(MorphHardfork::Jade);
+        let default_p = precompiles_for(MorphHardfork::default());
+        let jade_p = precompiles_for(MorphHardfork::Jade);
 
         assert_eq!(
-            default_p.precompiles().len(),
-            jade_p.precompiles().len(),
+            default_p.len(),
+            jade_p.len(),
             "Default precompiles should match Jade"
         );
     }
@@ -793,13 +732,13 @@ mod tests {
             0x5a, 0x9c, 0x45, 0x49,
         ]);
 
-        let result = ecrecover.execute(&input, 10_000, 0);
+        let result = execute(&ecrecover, &input, 10_000);
         assert!(
             !is_call_failure(&result),
             "valid ecrecover should succeed: {result:?}"
         );
 
-        let output = result.unwrap().bytes;
+        let output = result.unwrap().into_bytes();
         assert_eq!(output.len(), 32, "ecrecover output must be 32 bytes");
 
         // First 12 bytes must be zero (address is right-aligned in 32 bytes)
@@ -821,7 +760,7 @@ mod tests {
         let precompiles = bernoulli();
         let sha256 = precompiles.get(&addresses::SHA256).unwrap();
 
-        let result = sha256.execute(&[], 100_000, 0);
+        let result = execute(&sha256, &[], 100_000);
         assert!(
             !is_call_failure(&result),
             "sha256 of empty input should succeed"
@@ -833,11 +772,7 @@ mod tests {
             0xb9, 0x24, 0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b,
             0x78, 0x52, 0xb8, 0x55,
         ];
-        assert_eq!(
-            &result.unwrap().bytes[..],
-            &expected,
-            "sha256(\"\") mismatch"
-        );
+        assert_eq!(result.unwrap().bytes(), &expected, "sha256(\"\") mismatch");
     }
 
     /// Identity (0x04) passes through its input unchanged.
@@ -847,10 +782,10 @@ mod tests {
         let identity = precompiles.get(&addresses::IDENTITY).unwrap();
 
         let input: &[u8] = &[0x12, 0x34, 0xab, 0xcd];
-        let result = identity.execute(input, 100_000, 0);
+        let result = execute(&identity, input, 100_000);
         assert!(!is_call_failure(&result), "identity should succeed");
         assert_eq!(
-            &result.unwrap().bytes[..],
+            result.unwrap().bytes(),
             input,
             "identity must return input unchanged"
         );

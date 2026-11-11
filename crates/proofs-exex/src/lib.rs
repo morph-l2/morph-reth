@@ -798,7 +798,7 @@ mod tests {
     use reth_execution_types::{Chain, ExecutionOutcome};
     use reth_primitives_traits::RecoveredBlock;
     use reth_trie::{
-        ComputedTrieData, HashedPostStateSorted, LazyTrieData, updates::TrieUpdatesSorted,
+        HashedPostStateSorted, LazyTrieData, SortedTrieData, updates::TrieUpdatesSorted,
     };
 
     use super::*;
@@ -839,7 +839,7 @@ mod tests {
             }
             blocks.push(b);
 
-            let data = LazyTrieData::ready(ComputedTrieData::new(
+            let data = LazyTrieData::ready(SortedTrieData::new(
                 Arc::new(HashedPostStateSorted::default()),
                 Arc::new(TrieUpdatesSorted::default()),
             ));
@@ -1376,7 +1376,7 @@ mod tests {
                 hash_for_num(num.saturating_sub(1)),
                 NumHash::new(num, hash_for_num(num)),
             ),
-            trie_data: LazyTrieData::ready(ComputedTrieData::new(
+            trie_data: LazyTrieData::ready(SortedTrieData::new(
                 Arc::new(HashedPostStateSorted::default()),
                 Arc::new(TrieUpdatesSorted::default()),
             )),

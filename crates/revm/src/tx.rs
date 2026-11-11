@@ -1,41 +1,66 @@
 //! Morph transaction environment.
 //!
-//! This module defines the Morph-specific transaction environment with token fee support.
+//! This module defines the flat, execution-facing view of a Morph transaction: one shape for
+//! every transaction type, with token-fee fields where they apply.
 
 use alloy_consensus::{
-    EthereumTxEnvelope, SignableTransaction, Transaction as AlloyTransaction, TxEip4844,
+    SignableTransaction, Transaction as AlloyTransaction, transaction::Recovered,
 };
-use alloy_eips::eip2718::Encodable2718;
-use alloy_eips::eip2930::AccessList;
-use alloy_eips::eip7702::RecoveredAuthority;
-use alloy_primitives::{Address, B256, Bytes, Signature, TxKind, U256};
+use alloy_eips::{
+    Typed2718,
+    eip2718::{Encodable2718, WithEncoded},
+    eip2930::AccessList,
+    eip7702::{RecoveredAuthorization, SignedAuthorization},
+};
+use alloy_primitives::{B256, Bytes, ChainId, Signature, TxKind, U256};
+use evm2::ethereum::LazyAuthorization;
 use morph_primitives::{
     L1_TX_TYPE_ID, MORPH_TX_TYPE_ID, MorphTxEnvelope, TxMorph,
     transaction::morph_transaction::{MORPH_TX_VERSION_1, MORPH_TX_VERSION_2},
 };
-use reth_evm::{FromRecoveredTx, FromTxWithEncoded, ToTxEnv, TransactionEnvMut};
-use revm::context::{Transaction, TxEnv};
-use revm::context_interface::transaction::{
-    AccessListItem, RecoveredAuthorization, SignedAuthorization,
-};
-use std::ops::{Deref, DerefMut};
+use reth_evm::{FromRecoveredTx, FromTxWithEncoded, TransactionEnvMut};
 
-/// Re-export Either for authorization list
-use alloy_consensus::transaction::Either;
+/// EIP-2718 type byte of a legacy transaction.
+const LEGACY_TX_TYPE: u8 = 0x00;
+/// EIP-2718 type byte of an EIP-2930 transaction.
+const EIP2930_TX_TYPE: u8 = 0x01;
 
 /// Morph transaction environment with token fee support.
 ///
-/// This wraps the standard [`TxEnv`] and adds Morph-specific fields for:
-/// - L1 message detection (tx_type 0x7E)
-/// - TxMorph with token-based gas payment (tx_type 0x7F)
-/// - RLP encoded transaction bytes for L1 data fee calculation
-/// - Version, reference, and memo fields for extended MorphTx functionality
+/// The fields follow the semantics of the consensus transaction they were built from:
+/// - [`Self::tx_type`] selects the handler (0x7E L1 message, 0x7F MorphTx, or a standard type)
+/// - [`Self::rlp_bytes`] holds the encoded transaction for the L1 data fee calculation
+/// - [`Self::version`], [`Self::fee_token_id`], [`Self::fee_limit`], [`Self::reference`] and
+///   [`Self::memo`] carry the extended MorphTx fields
+///
+/// The sender is not part of this type: execution receives it as
+/// `Recovered<MorphTxEnv>`, alongside the signature-recovery result.
 ///
 /// Reference: <https://github.com/morph-l2/go-ethereum/pull/282>
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MorphTxEnv {
-    /// Inner transaction environment.
-    pub inner: TxEnv,
+    /// EIP-2718 transaction type byte.
+    pub tx_type: u8,
+    /// Gas limit.
+    pub gas_limit: u64,
+    /// Legacy gas price, or the maximum fee per gas for dynamic-fee transactions.
+    pub gas_price: u128,
+    /// Maximum priority fee per gas, when the transaction type has one.
+    pub gas_priority_fee: Option<u128>,
+    /// Call target or contract creation.
+    pub kind: TxKind,
+    /// Transferred value.
+    pub value: U256,
+    /// Call data or initcode.
+    pub data: Bytes,
+    /// Sender nonce.
+    pub nonce: u64,
+    /// Chain id, when the transaction commits to one.
+    pub chain_id: Option<ChainId>,
+    /// EIP-2930 access list.
+    pub access_list: AccessList,
+    /// EIP-7702 authorizations, with their authorities recovered where possible.
+    pub authorization_list: Vec<LazyAuthorization>,
     /// RLP encoded transaction bytes.
     /// Used only for L1 data fee calculation.
     pub rlp_bytes: Option<Bytes>,
@@ -48,25 +73,12 @@ pub struct MorphTxEnv {
     pub fee_limit: Option<U256>,
     /// Reference key for the transaction.
     /// Used for indexing and looking up transactions by external systems.
-    pub reference: Option<alloy_primitives::B256>,
+    pub reference: Option<B256>,
     /// Memo field for arbitrary data.
     pub memo: Option<Bytes>,
 }
 
 impl MorphTxEnv {
-    /// Create a new Morph transaction environment from a standard TxEnv.
-    pub fn new(inner: TxEnv) -> Self {
-        Self {
-            inner,
-            rlp_bytes: None,
-            version: None,
-            fee_token_id: None,
-            fee_limit: None,
-            reference: None,
-            memo: None,
-        }
-    }
-
     /// Create a new Morph transaction environment with RLP bytes.
     pub fn with_rlp_bytes(mut self, rlp_bytes: Bytes) -> Self {
         self.rlp_bytes = Some(rlp_bytes);
@@ -92,7 +104,7 @@ impl MorphTxEnv {
     }
 
     /// Set the reference.
-    pub fn with_reference(mut self, reference: alloy_primitives::B256) -> Self {
+    pub fn with_reference(mut self, reference: B256) -> Self {
         self.reference = Some(reference);
         self
     }
@@ -101,6 +113,21 @@ impl MorphTxEnv {
     pub fn with_memo(mut self, memo: Bytes) -> Self {
         self.memo = Some(memo);
         self
+    }
+
+    /// Effective gas price paid per unit of gas at `base_fee`.
+    ///
+    /// Legacy and EIP-2930 transactions pay their gas price; the rest pay
+    /// `min(max_fee, base_fee + priority_fee)`.
+    #[inline]
+    pub fn effective_gas_price_at(&self, base_fee: u128) -> u128 {
+        if matches!(self.tx_type, LEGACY_TX_TYPE | EIP2930_TX_TYPE) {
+            return self.gas_price;
+        }
+        match self.gas_priority_fee {
+            Some(tip) => self.gas_price.min(base_fee.saturating_add(tip)),
+            None => self.gas_price,
+        }
     }
 
     /// Encodes this tx env into EIP-2718 bytes for L1 fee accounting.
@@ -142,7 +169,7 @@ impl MorphTxEnv {
             // If version is missing (e.g. from an older transaction type), fall back to
             // the smallest version that can represent the request so the L1 fee is not
             // underpriced: V2 when an authorization list is present, otherwise V1.
-            let fallback = if self.inner.authorization_list.is_empty() {
+            let fallback = if self.authorization_list.is_empty() {
                 MORPH_TX_VERSION_1
             } else {
                 MORPH_TX_VERSION_2
@@ -167,15 +194,15 @@ impl MorphTxEnv {
         };
 
         Some(TxMorph {
-            chain_id: self.chain_id().unwrap_or(fallback_chain_id),
-            nonce: self.inner.nonce,
-            gas_limit: self.gas_limit(),
-            max_fee_per_gas: self.max_fee_per_gas(),
-            max_priority_fee_per_gas: self.max_priority_fee_per_gas().unwrap_or_default(),
-            to: self.kind(),
-            value: self.value(),
+            chain_id: self.chain_id.unwrap_or(fallback_chain_id),
+            nonce: self.nonce,
+            gas_limit: self.gas_limit,
+            max_fee_per_gas: self.gas_price,
+            max_priority_fee_per_gas: self.gas_priority_fee.unwrap_or_default(),
+            to: self.kind,
+            value: self.value,
             access_list: self.access_list.clone(),
-            input: self.input().clone(),
+            input: self.data.clone(),
             fee_token_id: self.fee_token_id.unwrap_or_default(),
             fee_limit: self.fee_limit.unwrap_or_default(),
             version,
@@ -198,31 +225,31 @@ impl MorphTxEnv {
         signature: Signature,
     ) -> MorphTxEnvelope {
         debug_assert!(
-            !self.is_l1_msg() && self.inner.blob_hashes.is_empty(),
-            "L1 messages and blob transactions should not use fallback L1 fee calculation"
+            !self.is_l1_msg(),
+            "L1 messages should not use fallback L1 fee calculation"
         );
 
-        let chain_id = self.chain_id().unwrap_or(fallback_chain_id);
+        let chain_id = self.chain_id.unwrap_or(fallback_chain_id);
         // geth maps a legacy `gasPrice` onto both EIP-1559 caps (`ToMessage`).
-        let max_priority_fee_per_gas = self.max_priority_fee_per_gas().unwrap_or(self.gas_price());
+        let max_priority_fee_per_gas = self.gas_priority_fee.unwrap_or(self.gas_price);
 
         // SetCodeTx cannot be a create (`ErrSetCodeTxCreate`); geth falls
         // through to DynamicFeeTx when `to` is missing or the auth list is empty.
-        if !self.inner.authorization_list.is_empty()
-            && let Some(to) = self.kind().to().copied()
+        if !self.authorization_list.is_empty()
+            && let TxKind::Call(to) = self.kind
         {
             return MorphTxEnvelope::Eip7702(
                 alloy_consensus::TxEip7702 {
                     chain_id,
-                    nonce: self.inner.nonce,
-                    gas_limit: self.gas_limit(),
-                    max_fee_per_gas: self.max_fee_per_gas(),
+                    nonce: self.nonce,
+                    gas_limit: self.gas_limit,
+                    max_fee_per_gas: self.gas_price,
                     max_priority_fee_per_gas,
                     to,
-                    value: self.value(),
+                    value: self.value,
                     access_list: self.access_list.clone(),
                     authorization_list: self.signed_authorizations_for_l1_fee(signature),
-                    input: self.input().clone(),
+                    input: self.data.clone(),
                 }
                 .into_signed(signature),
             );
@@ -231,299 +258,210 @@ impl MorphTxEnv {
         MorphTxEnvelope::Eip1559(
             alloy_consensus::TxEip1559 {
                 chain_id,
-                nonce: self.inner.nonce,
-                gas_limit: self.gas_limit(),
-                max_fee_per_gas: self.max_fee_per_gas(),
+                nonce: self.nonce,
+                gas_limit: self.gas_limit,
+                max_fee_per_gas: self.gas_price,
                 max_priority_fee_per_gas,
-                to: self.kind(),
-                value: self.value(),
+                to: self.kind,
+                value: self.value,
                 access_list: self.access_list.clone(),
-                input: self.input().clone(),
+                input: self.data.clone(),
             }
             .into_signed(signature),
         )
     }
 
     fn signed_authorizations_for_l1_fee(&self, placeholder: Signature) -> Vec<SignedAuthorization> {
-        self.inner
-            .authorization_list
+        self.authorization_list
             .iter()
             .map(|auth| match auth {
-                Either::Left(signed) => signed.clone(),
+                LazyAuthorization::Signed(signed) => signed.clone(),
                 // Recovered authorizations no longer carry their original
                 // signature, so reuse the fee-sizing placeholder.
-                Either::Right(recovered) => {
+                LazyAuthorization::Recovered(recovered) => {
                     recovered.clone().into_parts().0.into_signed(placeholder)
                 }
             })
             .collect()
     }
 
-    /// Create a new Morph transaction environment from a recovered transaction.
-    ///
-    /// This method:
-    /// - Converts the transaction to `TxEnv`
-    /// - Extracts the RLP-encoded transaction bytes for L1 data fee calculation
-    /// - Extracts fee_token_id for TxMorph (type 0x7F)
-    pub fn from_recovered_tx(tx: &MorphTxEnvelope, signer: Address) -> Self {
-        // Encode the transaction to RLP bytes for L1 data fee calculation
-        let rlp_bytes = tx.encoded_2718();
-        Self::from_tx_with_rlp_bytes(tx, signer, Bytes::from(rlp_bytes))
+    /// Builds the environment for `tx`, encoding it for the L1 data fee calculation.
+    pub fn from_envelope(tx: &MorphTxEnvelope) -> Self {
+        Self::from_envelope_with_rlp(tx, Bytes::from(tx.encoded_2718()))
     }
 
-    /// Create a new Morph transaction environment from a transaction with pre-encoded RLP bytes.
+    /// Builds the environment for `tx` from already encoded EIP-2718 bytes.
     ///
-    /// This is the core implementation used by both `from_recovered_tx` and `FromTxWithEncoded`.
-    fn from_tx_with_rlp_bytes(tx: &MorphTxEnvelope, signer: Address, rlp_bytes: Bytes) -> Self {
-        let tx_type: u8 = tx.tx_type().into();
-
-        // Extract MorphTx fields directly from the typed envelope — avoids an
-        // unnecessary encode→decode RLP roundtrip that the old helper performed.
-        let morph_tx_info = match tx {
-            MorphTxEnvelope::Morph(signed) => {
-                let morph = signed.tx();
-                Some(DecodedMorphTxFields {
-                    version: morph.version,
-                    fee_token_id: morph.fee_token_id,
-                    fee_limit: morph.fee_limit,
-                    reference: morph.reference,
-                    memo: morph.memo.clone(),
-                })
-            }
-            _ => None,
-        };
-
-        // Build TxEnv from the transaction
-        let inner = TxEnv {
-            tx_type,
-            caller: signer,
+    /// This is the core implementation used by both the `FromRecoveredTx` and
+    /// `FromTxWithEncoded` conversions.
+    fn from_envelope_with_rlp(tx: &MorphTxEnvelope, rlp_bytes: Bytes) -> Self {
+        let mut env = Self {
+            tx_type: tx.tx_type().into(),
             gas_limit: AlloyTransaction::gas_limit(tx),
             gas_price: tx.effective_gas_price(None),
+            gas_priority_fee: AlloyTransaction::max_priority_fee_per_gas(tx),
             kind: AlloyTransaction::kind(tx),
             value: AlloyTransaction::value(tx),
             data: AlloyTransaction::input(tx).clone(),
             nonce: AlloyTransaction::nonce(tx),
             chain_id: AlloyTransaction::chain_id(tx),
             access_list: tx.access_list().cloned().unwrap_or_default(),
-            gas_priority_fee: AlloyTransaction::max_priority_fee_per_gas(tx),
-            blob_hashes: tx
-                .blob_versioned_hashes()
-                .map(|h| h.to_vec())
-                .unwrap_or_default(),
-            max_fee_per_blob_gas: AlloyTransaction::max_fee_per_blob_gas(tx).unwrap_or(0),
             authorization_list: tx
                 .authorization_list()
                 .unwrap_or_default()
                 .iter()
                 .map(|auth| {
-                    let authority = auth
-                        .recover_authority()
-                        .map_or(RecoveredAuthority::Invalid, RecoveredAuthority::Valid);
-                    Either::Right(RecoveredAuthorization::new_unchecked(
+                    LazyAuthorization::Recovered(RecoveredAuthorization::new_unchecked(
                         auth.inner().clone(),
-                        authority,
+                        auth.recover_authority().map_or(
+                            alloy_eips::eip7702::RecoveredAuthority::Invalid,
+                            alloy_eips::eip7702::RecoveredAuthority::Valid,
+                        ),
                     ))
                 })
                 .collect(),
+            rlp_bytes: Some(rlp_bytes),
+            ..Default::default()
         };
 
-        // Use builder pattern to set Morph-specific fields
-        let mut env = Self::new(inner).with_rlp_bytes(rlp_bytes);
-        if let Some(info) = morph_tx_info {
-            env = env.with_version(info.version);
-            env = env.with_fee_token_id(info.fee_token_id);
-            env = env.with_fee_limit(info.fee_limit);
-            if let Some(reference) = info.reference {
-                env = env.with_reference(reference);
-            }
-            if let Some(memo) = info.memo
-                && !memo.is_empty()
-            {
-                env = env.with_memo(memo);
-            }
+        if let MorphTxEnvelope::Morph(signed) = tx {
+            let morph = signed.tx();
+            env.version = Some(morph.version);
+            env.fee_token_id = Some(morph.fee_token_id);
+            env.fee_limit = Some(morph.fee_limit);
+            env.reference = morph.reference;
+            env.memo = morph.memo.clone().filter(|memo| !memo.is_empty());
         }
         env
     }
 }
 
-/// Extracted MorphTx fields from RLP-encoded bytes.
-struct DecodedMorphTxFields {
-    version: u8,
-    fee_token_id: u16,
-    fee_limit: U256,
-    reference: Option<alloy_primitives::B256>,
-    memo: Option<Bytes>,
-}
-
-impl Deref for MorphTxEnv {
-    type Target = TxEnv;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
+impl Typed2718 for MorphTxEnv {
+    #[inline]
+    fn ty(&self) -> u8 {
+        self.tx_type
     }
 }
 
-impl DerefMut for MorphTxEnv {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
+impl AlloyTransaction for MorphTxEnv {
+    #[inline]
+    fn chain_id(&self) -> Option<ChainId> {
+        self.chain_id
+    }
+
+    #[inline]
+    fn nonce(&self) -> u64 {
+        self.nonce
+    }
+
+    #[inline]
+    fn gas_limit(&self) -> u64 {
+        self.gas_limit
+    }
+
+    #[inline]
+    fn gas_price(&self) -> Option<u128> {
+        (!self.is_dynamic_fee()).then_some(self.gas_price)
+    }
+
+    #[inline]
+    fn max_fee_per_gas(&self) -> u128 {
+        self.gas_price
+    }
+
+    #[inline]
+    fn max_priority_fee_per_gas(&self) -> Option<u128> {
+        self.gas_priority_fee
+    }
+
+    #[inline]
+    fn max_fee_per_blob_gas(&self) -> Option<u128> {
+        None
+    }
+
+    #[inline]
+    fn priority_fee_or_price(&self) -> u128 {
+        self.gas_priority_fee.unwrap_or(self.gas_price)
+    }
+
+    #[inline]
+    fn effective_gas_price(&self, base_fee: Option<u64>) -> u128 {
+        match base_fee {
+            Some(base_fee) => self.effective_gas_price_at(base_fee as u128),
+            None => self.gas_price,
+        }
+    }
+
+    #[inline]
+    fn is_dynamic_fee(&self) -> bool {
+        !matches!(self.tx_type, LEGACY_TX_TYPE | EIP2930_TX_TYPE)
+    }
+
+    #[inline]
+    fn kind(&self) -> TxKind {
+        self.kind
+    }
+
+    #[inline]
+    fn is_create(&self) -> bool {
+        self.kind.is_create()
+    }
+
+    #[inline]
+    fn value(&self) -> U256 {
+        self.value
+    }
+
+    #[inline]
+    fn input(&self) -> &Bytes {
+        &self.data
+    }
+
+    #[inline]
+    fn access_list(&self) -> Option<&AccessList> {
+        Some(&self.access_list)
+    }
+
+    #[inline]
+    fn blob_versioned_hashes(&self) -> Option<&[B256]> {
+        None
+    }
+
+    /// Always `None`: the environment stores authorizations in their execution form
+    /// ([`MorphTxEnv::authorization_list`]), which keeps recovered authorities rather than the
+    /// signed tuples this accessor would have to return.
+    #[inline]
+    fn authorization_list(&self) -> Option<&[SignedAuthorization]> {
+        None
     }
 }
 
-impl From<TxEnv> for MorphTxEnv {
-    fn from(inner: TxEnv) -> Self {
-        Self::new(inner)
-    }
-}
-
-impl From<MorphTxEnv> for TxEnv {
-    fn from(morph_tx: MorphTxEnv) -> Self {
-        morph_tx.inner
-    }
-}
-
-// Implement ToTxEnv for MorphTxEnv (identity conversion)
-impl ToTxEnv<Self> for MorphTxEnv {
-    fn to_tx_env(&self) -> Self {
-        self.clone()
-    }
-}
-
-// Implement FromRecoveredTx for MorphTxEnv
 impl FromRecoveredTx<MorphTxEnvelope> for MorphTxEnv {
-    fn from_recovered_tx(tx: &MorphTxEnvelope, sender: Address) -> Self {
-        Self::from_recovered_tx(tx, sender)
+    fn from_recovered_tx(tx: Recovered<MorphTxEnvelope>) -> Self {
+        Self::from_envelope(tx.inner())
     }
 }
 
-impl FromRecoveredTx<EthereumTxEnvelope<TxEip4844>> for MorphTxEnv {
-    fn from_recovered_tx(tx: &EthereumTxEnvelope<TxEip4844>, sender: Address) -> Self {
-        TxEnv::from_recovered_tx(tx, sender).into()
-    }
-}
-
-impl FromTxWithEncoded<EthereumTxEnvelope<TxEip4844>> for MorphTxEnv {
-    fn from_encoded_tx(
-        tx: &EthereumTxEnvelope<TxEip4844>,
-        sender: Address,
-        _encoded: Bytes,
-    ) -> Self {
-        <Self as FromRecoveredTx<EthereumTxEnvelope<TxEip4844>>>::from_recovered_tx(tx, sender)
-    }
-}
-
-// Implement FromTxWithEncoded for MorphTxEnv
 impl FromTxWithEncoded<MorphTxEnvelope> for MorphTxEnv {
-    fn from_encoded_tx(tx: &MorphTxEnvelope, sender: Address, encoded: Bytes) -> Self {
-        Self::from_tx_with_rlp_bytes(tx, sender, encoded)
+    fn from_tx_with_encoded(tx: WithEncoded<Recovered<MorphTxEnvelope>>) -> Self {
+        let (encoded, recovered) = tx.split();
+        Self::from_envelope_with_rlp(recovered.inner(), encoded)
     }
 }
 
 impl TransactionEnvMut for MorphTxEnv {
     fn set_gas_limit(&mut self, gas_limit: u64) {
-        self.inner.gas_limit = gas_limit;
-    }
-
-    fn set_nonce(&mut self, nonce: u64) {
-        self.inner.nonce = nonce;
+        self.gas_limit = gas_limit;
     }
 
     fn set_access_list(&mut self, access_list: AccessList) {
-        // Delegate so the upstream Legacy → Eip2930 tx_type upgrade applies.
-        // L1 fee encoding does not read that type byte; the access list still
-        // lands on the EIP-1559 envelope used for simulation fee sizing.
-        self.inner.set_access_list(access_list);
-    }
-}
-
-// Implement the Transaction trait for MorphTxEnv by delegating to inner TxEnv
-impl Transaction for MorphTxEnv {
-    type AccessListItem<'a>
-        = &'a AccessListItem
-    where
-        Self: 'a;
-    type Authorization<'a>
-        = &'a Either<SignedAuthorization, RecoveredAuthorization>
-    where
-        Self: 'a;
-
-    #[inline]
-    fn tx_type(&self) -> u8 {
-        self.inner.tx_type
-    }
-
-    #[inline]
-    fn kind(&self) -> TxKind {
-        self.inner.kind
-    }
-
-    #[inline]
-    fn caller(&self) -> Address {
-        self.inner.caller
-    }
-
-    #[inline]
-    fn gas_limit(&self) -> u64 {
-        self.inner.gas_limit
-    }
-
-    #[inline]
-    fn gas_price(&self) -> u128 {
-        self.inner.gas_price
-    }
-
-    #[inline]
-    fn value(&self) -> U256 {
-        self.inner.value
-    }
-
-    #[inline]
-    fn nonce(&self) -> u64 {
-        self.inner.nonce
-    }
-
-    #[inline]
-    fn chain_id(&self) -> Option<u64> {
-        self.inner.chain_id
-    }
-
-    #[inline]
-    fn access_list(&self) -> Option<impl Iterator<Item = Self::AccessListItem<'_>>> {
-        Some(self.inner.access_list.0.iter())
-    }
-
-    #[inline]
-    fn max_fee_per_gas(&self) -> u128 {
-        self.inner.gas_price
-    }
-
-    #[inline]
-    fn max_fee_per_blob_gas(&self) -> u128 {
-        self.inner.max_fee_per_blob_gas
-    }
-
-    #[inline]
-    fn authorization_list_len(&self) -> usize {
-        self.inner.authorization_list.len()
-    }
-
-    #[inline]
-    fn authorization_list(&self) -> impl Iterator<Item = Self::Authorization<'_>> {
-        self.inner.authorization_list.iter()
-    }
-
-    #[inline]
-    fn input(&self) -> &Bytes {
-        &self.inner.data
-    }
-
-    #[inline]
-    fn blob_versioned_hashes(&self) -> &[B256] {
-        &self.inner.blob_hashes
-    }
-
-    #[inline]
-    fn max_priority_fee_per_gas(&self) -> Option<u128> {
-        self.inner.gas_priority_fee
+        // An access list on a legacy request makes it EIP-2930. L1 fee encoding does not
+        // read that type byte; the access list still lands on the EIP-1559 envelope used
+        // for simulation fee sizing.
+        self.access_list = access_list;
+        if self.tx_type == LEGACY_TX_TYPE {
+            self.tx_type = EIP2930_TX_TYPE;
+        }
     }
 }
 
@@ -550,12 +488,12 @@ pub trait MorphTxExt {
 impl MorphTxExt for MorphTxEnv {
     #[inline]
     fn is_l1_msg(&self) -> bool {
-        self.inner.tx_type == L1_TX_TYPE_ID
+        self.tx_type == L1_TX_TYPE_ID
     }
 
     #[inline]
     fn is_morph_tx(&self) -> bool {
-        self.inner.tx_type == MORPH_TX_TYPE_ID
+        self.tx_type == MORPH_TX_TYPE_ID
     }
 
     #[inline]
@@ -569,28 +507,24 @@ impl MorphTxExt for MorphTxEnv {
     }
 }
 
-impl MorphTxExt for TxEnv {
-    #[inline]
-    fn is_l1_msg(&self) -> bool {
-        self.tx_type == L1_TX_TYPE_ID
-    }
-
-    #[inline]
-    fn is_morph_tx(&self) -> bool {
-        self.tx_type == MORPH_TX_TYPE_ID
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_eips::eip2718::Decodable2718;
-    use revm::context_interface::transaction::TransactionType;
+    use alloy_eips::{
+        eip2718::Decodable2718,
+        eip7702::{Authorization, RecoveredAuthority},
+    };
+    use alloy_primitives::Address;
+
+    const EIP1559_TX_TYPE: u8 = 0x02;
+    const EIP7702_TX_TYPE: u8 = 0x04;
 
     #[test]
     fn test_l1_msg_detection() {
-        let mut tx = MorphTxEnv::default();
-        tx.inner.tx_type = L1_TX_TYPE_ID;
+        let tx = MorphTxEnv {
+            tx_type: L1_TX_TYPE_ID,
+            ..Default::default()
+        };
         assert!(tx.is_l1_msg());
         assert!(!tx.is_morph_tx());
 
@@ -600,44 +534,43 @@ mod tests {
 
     #[test]
     fn test_morph_tx_detection() {
-        let mut tx = MorphTxEnv::default();
-        tx.inner.tx_type = MORPH_TX_TYPE_ID;
+        let tx = MorphTxEnv {
+            tx_type: MORPH_TX_TYPE_ID,
+            ..Default::default()
+        };
         assert!(tx.is_morph_tx());
         assert!(!tx.is_l1_msg());
     }
 
     #[test]
-    fn test_txenv_morph_tx_detection() {
-        let tx = TxEnv {
+    fn typed_2718_reports_the_type_byte() {
+        let tx = MorphTxEnv {
             tx_type: MORPH_TX_TYPE_ID,
             ..Default::default()
         };
-        assert!(tx.is_morph_tx());
-
-        let regular_tx = TxEnv::default();
-        assert!(!regular_tx.is_morph_tx());
+        assert_eq!(tx.ty(), MORPH_TX_TYPE_ID);
     }
 
     #[test]
-    fn test_deref() {
-        let tx = MorphTxEnv {
-            inner: TxEnv {
-                gas_limit: 21000,
-                ..Default::default()
-            },
+    fn effective_gas_price_uses_the_transaction_fee_model() {
+        let legacy = MorphTxEnv {
+            gas_price: 10,
             ..Default::default()
         };
-        assert_eq!(tx.gas_limit, 21000);
-        assert_eq!(tx.inner.gas_limit, 21000);
-    }
+        assert_eq!(legacy.effective_gas_price_at(1), 10);
 
-    #[test]
-    fn test_transaction_trait() {
-        let tx = MorphTxEnv::default();
-        // Test that Transaction trait methods work
-        assert_eq!(Transaction::gas_limit(&tx), tx.inner.gas_limit);
-        assert_eq!(Transaction::caller(&tx), tx.inner.caller);
-        assert_eq!(Transaction::value(&tx), tx.inner.value);
+        let dynamic = MorphTxEnv {
+            tx_type: EIP1559_TX_TYPE,
+            gas_price: 10,
+            gas_priority_fee: Some(2),
+            ..Default::default()
+        };
+        assert_eq!(dynamic.effective_gas_price_at(1), 3);
+        assert_eq!(
+            dynamic.effective_gas_price_at(100),
+            10,
+            "capped by the max fee"
+        );
     }
 
     #[test]
@@ -652,14 +585,11 @@ mod tests {
     #[test]
     fn test_encode_for_l1_fee_legacy() {
         let tx = MorphTxEnv {
-            inner: TxEnv {
-                chain_id: Some(53077),
-                gas_limit: 21_000,
-                gas_price: 1,
-                nonce: 1,
-                kind: TxKind::Call(Address::ZERO),
-                ..Default::default()
-            },
+            chain_id: Some(53077),
+            gas_limit: 21_000,
+            gas_price: 1,
+            nonce: 1,
+            kind: TxKind::Call(Address::ZERO),
             ..Default::default()
         };
         let encoded = tx.encode_for_l1_fee(53077);
@@ -673,14 +603,11 @@ mod tests {
     #[test]
     fn encode_for_l1_fee_uses_go_ethereum_placeholder_signature_shape() {
         let tx = MorphTxEnv {
-            inner: TxEnv {
-                chain_id: Some(53077),
-                gas_limit: 21_000,
-                gas_price: 1,
-                nonce: 1,
-                kind: TxKind::Call(Address::ZERO),
-                ..Default::default()
-            },
+            chain_id: Some(53077),
+            gas_limit: 21_000,
+            gas_price: 1,
+            nonce: 1,
+            kind: TxKind::Call(Address::ZERO),
             ..Default::default()
         };
         let encoded = tx.encode_for_l1_fee(53077);
@@ -698,22 +625,19 @@ mod tests {
     #[test]
     fn encode_for_l1_fee_dynamic_matches_go_ethereum_bytes() {
         let tx = MorphTxEnv {
-            inner: TxEnv {
-                tx_type: TransactionType::Eip1559.into(),
-                chain_id: Some(1),
-                gas_limit: 8_000_000,
-                gas_price: 16,
-                gas_priority_fee: Some(16),
-                nonce: 0,
-                kind: TxKind::Call(Address::with_last_byte(0xf1)),
-                data: Bytes::from_static(&[
-                    0x22, 0xcf, 0xae, 0xfc, 0x92, 0xe4, 0xed, 0xb9, 0xb0, 0xae, 0x01, 0xa6, 0x3a,
-                    0x95, 0xdf, 0x11, 0xf1, 0x27, 0x9b, 0x7b, 0x6b, 0xdd, 0xe4, 0xe0, 0x48, 0xf6,
-                    0xec, 0xe8, 0xf8, 0xc8, 0xf2, 0xc2, 0xde, 0x97, 0x54, 0x4a, 0x16, 0x3f, 0x7d,
-                    0x30, 0x23, 0x15, 0xee, 0x0f, 0x78, 0x69, 0xfb, 0xdc, 0xfd, 0x86,
-                ]),
-                ..Default::default()
-            },
+            tx_type: EIP1559_TX_TYPE,
+            chain_id: Some(1),
+            gas_limit: 8_000_000,
+            gas_price: 16,
+            gas_priority_fee: Some(16),
+            nonce: 0,
+            kind: TxKind::Call(Address::with_last_byte(0xf1)),
+            data: Bytes::from_static(&[
+                0x22, 0xcf, 0xae, 0xfc, 0x92, 0xe4, 0xed, 0xb9, 0xb0, 0xae, 0x01, 0xa6, 0x3a, 0x95,
+                0xdf, 0x11, 0xf1, 0x27, 0x9b, 0x7b, 0x6b, 0xdd, 0xe4, 0xe0, 0x48, 0xf6, 0xec, 0xe8,
+                0xf8, 0xc8, 0xf2, 0xc2, 0xde, 0x97, 0x54, 0x4a, 0x16, 0x3f, 0x7d, 0x30, 0x23, 0x15,
+                0xee, 0x0f, 0x78, 0x69, 0xfb, 0xdc, 0xfd, 0x86,
+            ]),
             ..Default::default()
         };
 
@@ -726,15 +650,12 @@ mod tests {
     #[test]
     fn encode_for_l1_fee_sizes_eip2930_request_as_eip1559_like_geth() {
         let tx = MorphTxEnv {
-            inner: TxEnv {
-                tx_type: TransactionType::Eip2930.into(),
-                chain_id: Some(53077),
-                gas_limit: 21_000,
-                gas_price: 1,
-                nonce: 1,
-                kind: TxKind::Call(Address::ZERO),
-                ..Default::default()
-            },
+            tx_type: EIP2930_TX_TYPE,
+            chain_id: Some(53077),
+            gas_limit: 21_000,
+            gas_price: 1,
+            nonce: 1,
+            kind: TxKind::Call(Address::ZERO),
             ..Default::default()
         };
 
@@ -756,12 +677,9 @@ mod tests {
             (
                 "no fee fields",
                 MorphTxEnv {
-                    inner: TxEnv {
-                        chain_id: Some(2818),
-                        gas_limit: 21_000,
-                        kind: TxKind::Call(Address::ZERO),
-                        ..Default::default()
-                    },
+                    chain_id: Some(2818),
+                    gas_limit: 21_000,
+                    kind: TxKind::Call(Address::ZERO),
                     ..Default::default()
                 },
                 103,
@@ -769,13 +687,10 @@ mod tests {
             (
                 "gasPrice only",
                 MorphTxEnv {
-                    inner: TxEnv {
-                        chain_id: Some(2818),
-                        gas_limit: 21_000,
-                        gas_price: 1_000_000_000,
-                        kind: TxKind::Call(Address::ZERO),
-                        ..Default::default()
-                    },
+                    chain_id: Some(2818),
+                    gas_limit: 21_000,
+                    gas_price: 1_000_000_000,
+                    kind: TxKind::Call(Address::ZERO),
                     ..Default::default()
                 },
                 111,
@@ -783,14 +698,11 @@ mod tests {
             (
                 "gasPrice + empty access list",
                 MorphTxEnv {
-                    inner: TxEnv {
-                        tx_type: TransactionType::Eip2930.into(),
-                        chain_id: Some(2818),
-                        gas_limit: 21_000,
-                        gas_price: 1_000_000_000,
-                        kind: TxKind::Call(Address::ZERO),
-                        ..Default::default()
-                    },
+                    tx_type: EIP2930_TX_TYPE,
+                    chain_id: Some(2818),
+                    gas_limit: 21_000,
+                    gas_price: 1_000_000_000,
+                    kind: TxKind::Call(Address::ZERO),
                     ..Default::default()
                 },
                 111,
@@ -815,17 +727,14 @@ mod tests {
     #[test]
     fn encode_for_l1_fee_empty_authorization_list_stays_eip1559() {
         let tx = MorphTxEnv {
-            inner: TxEnv {
-                tx_type: TransactionType::Eip7702.into(),
-                chain_id: Some(53077),
-                gas_limit: 100_000,
-                gas_price: 20_000_000_000,
-                gas_priority_fee: Some(1_000_000_000),
-                nonce: 1,
-                kind: TxKind::Call(Address::with_last_byte(0xf1)),
-                authorization_list: vec![],
-                ..Default::default()
-            },
+            tx_type: EIP7702_TX_TYPE,
+            chain_id: Some(53077),
+            gas_limit: 100_000,
+            gas_price: 20_000_000_000,
+            gas_priority_fee: Some(1_000_000_000),
+            nonce: 1,
+            kind: TxKind::Call(Address::with_last_byte(0xf1)),
+            authorization_list: vec![],
             ..Default::default()
         };
 
@@ -839,25 +748,15 @@ mod tests {
 
     #[test]
     fn encode_for_l1_fee_authorization_list_without_to_stays_eip1559() {
-        let authorization = alloy_eips::eip7702::Authorization {
-            chain_id: U256::from(53077),
-            address: Address::with_last_byte(0x42),
-            nonce: 7,
-        };
-        let signed_authorization =
-            authorization.into_signed(Signature::new(U256::from(1), U256::from(2), true));
         let tx = MorphTxEnv {
-            inner: TxEnv {
-                tx_type: TransactionType::Eip7702.into(),
-                chain_id: Some(53077),
-                gas_limit: 100_000,
-                gas_price: 20_000_000_000,
-                gas_priority_fee: Some(1_000_000_000),
-                nonce: 1,
-                kind: TxKind::Create,
-                authorization_list: vec![Either::Left(signed_authorization)],
-                ..Default::default()
-            },
+            tx_type: EIP7702_TX_TYPE,
+            chain_id: Some(53077),
+            gas_limit: 100_000,
+            gas_price: 20_000_000_000,
+            gas_priority_fee: Some(1_000_000_000),
+            nonce: 1,
+            kind: TxKind::Create,
+            authorization_list: vec![LazyAuthorization::Signed(sample_signed_authorization())],
             ..Default::default()
         };
 
@@ -871,25 +770,16 @@ mod tests {
 
     #[test]
     fn encode_for_l1_fee_preserves_eip7702_authorization_list() {
-        let authorization = alloy_eips::eip7702::Authorization {
-            chain_id: U256::from(53077),
-            address: Address::with_last_byte(0x42),
-            nonce: 7,
-        };
-        let signed_authorization =
-            authorization.into_signed(Signature::new(U256::from(1), U256::from(2), true));
+        let signed_authorization = sample_signed_authorization();
         let tx = MorphTxEnv {
-            inner: TxEnv {
-                tx_type: TransactionType::Eip7702.into(),
-                chain_id: Some(53077),
-                gas_limit: 100_000,
-                gas_price: 20_000_000_000,
-                gas_priority_fee: Some(1_000_000_000),
-                nonce: 1,
-                kind: TxKind::Call(Address::with_last_byte(0xf1)),
-                authorization_list: vec![Either::Left(signed_authorization.clone())],
-                ..Default::default()
-            },
+            tx_type: EIP7702_TX_TYPE,
+            chain_id: Some(53077),
+            gas_limit: 100_000,
+            gas_price: 20_000_000_000,
+            gas_priority_fee: Some(1_000_000_000),
+            nonce: 1,
+            kind: TxKind::Call(Address::with_last_byte(0xf1)),
+            authorization_list: vec![LazyAuthorization::Signed(signed_authorization.clone())],
             ..Default::default()
         };
 
@@ -907,21 +797,18 @@ mod tests {
     fn set_access_list_upgrades_legacy_tx_type_like_upstream() {
         let mut tx = MorphTxEnv::default();
         tx.set_access_list(AccessList::default());
-        assert_eq!(tx.inner.tx_type, u8::from(TransactionType::Eip2930));
+        assert_eq!(tx.tx_type, EIP2930_TX_TYPE);
     }
 
     #[test]
     fn test_encode_for_l1_fee_morph_tx() {
         let tx = MorphTxEnv {
-            inner: TxEnv {
-                tx_type: MORPH_TX_TYPE_ID,
-                chain_id: Some(53077),
-                gas_limit: 21_000,
-                gas_price: 1,
-                nonce: 1,
-                kind: TxKind::Call(Address::ZERO),
-                ..Default::default()
-            },
+            tx_type: MORPH_TX_TYPE_ID,
+            chain_id: Some(53077),
+            gas_limit: 21_000,
+            gas_price: 1,
+            nonce: 1,
+            kind: TxKind::Call(Address::ZERO),
             fee_token_id: Some(1),
             fee_limit: Some(U256::from(1000)),
             ..Default::default()
@@ -930,7 +817,7 @@ mod tests {
     }
 
     fn sample_signed_authorization() -> SignedAuthorization {
-        alloy_eips::eip7702::Authorization {
+        Authorization {
             chain_id: U256::from(53077),
             address: Address::with_last_byte(0x42),
             nonce: 7,
@@ -938,22 +825,16 @@ mod tests {
         .into_signed(Signature::new(U256::from(1), U256::from(2), true))
     }
 
-    fn morph_v2_tx_env(
-        version: Option<u8>,
-        authorization: Either<SignedAuthorization, RecoveredAuthorization>,
-    ) -> MorphTxEnv {
+    fn morph_v2_tx_env(version: Option<u8>, authorization: LazyAuthorization) -> MorphTxEnv {
         MorphTxEnv {
-            inner: TxEnv {
-                tx_type: MORPH_TX_TYPE_ID,
-                chain_id: Some(53077),
-                gas_limit: 100_000,
-                gas_price: 20_000_000_000,
-                gas_priority_fee: Some(1_000_000_000),
-                nonce: 1,
-                kind: TxKind::Call(Address::with_last_byte(0xf1)),
-                authorization_list: vec![authorization],
-                ..Default::default()
-            },
+            tx_type: MORPH_TX_TYPE_ID,
+            chain_id: Some(53077),
+            gas_limit: 100_000,
+            gas_price: 20_000_000_000,
+            gas_priority_fee: Some(1_000_000_000),
+            nonce: 1,
+            kind: TxKind::Call(Address::with_last_byte(0xf1)),
+            authorization_list: vec![authorization],
             version,
             fee_token_id: Some(1),
             fee_limit: Some(U256::from(1000)),
@@ -969,7 +850,7 @@ mod tests {
         let signed_authorization = sample_signed_authorization();
         let tx = morph_v2_tx_env(
             Some(MORPH_TX_VERSION_2),
-            Either::Left(signed_authorization.clone()),
+            LazyAuthorization::Signed(signed_authorization.clone()),
         );
 
         let encoded = tx.encode_for_l1_fee(53077);
@@ -987,10 +868,7 @@ mod tests {
         // Sanity: the list actually contributes bytes versus the V1 shape.
         let v1 = MorphTxEnv {
             version: Some(MORPH_TX_VERSION_1),
-            inner: TxEnv {
-                authorization_list: vec![],
-                ..tx.inner.clone()
-            },
+            authorization_list: vec![],
             ..tx
         };
         assert!(encoded.len() > v1.encode_for_l1_fee(53077).len());
@@ -998,7 +876,10 @@ mod tests {
 
     #[test]
     fn encode_for_l1_fee_morph_tx_version_fallback_picks_v2_with_authorizations() {
-        let tx = morph_v2_tx_env(None, Either::Left(sample_signed_authorization()));
+        let tx = morph_v2_tx_env(
+            None,
+            LazyAuthorization::Signed(sample_signed_authorization()),
+        );
 
         let encoded = tx.encode_for_l1_fee(53077);
         let decoded = MorphTxEnvelope::decode_2718(&mut encoded.as_ref()).unwrap();
@@ -1010,10 +891,7 @@ mod tests {
 
         // Without a list the fallback stays V1.
         let no_list = MorphTxEnv {
-            inner: TxEnv {
-                authorization_list: vec![],
-                ..tx.inner.clone()
-            },
+            authorization_list: vec![],
             ..tx
         };
         let encoded = no_list.encode_for_l1_fee(53077);
@@ -1023,14 +901,17 @@ mod tests {
     #[test]
     fn encode_for_l1_fee_morph_tx_v2_recovered_authorization_uses_placeholder_signature() {
         let recovered = RecoveredAuthorization::new_unchecked(
-            alloy_eips::eip7702::Authorization {
+            Authorization {
                 chain_id: U256::from(53077),
                 address: Address::with_last_byte(0x42),
                 nonce: 7,
             },
             RecoveredAuthority::Valid(Address::with_last_byte(0x99)),
         );
-        let tx = morph_v2_tx_env(Some(MORPH_TX_VERSION_2), Either::Right(recovered));
+        let tx = morph_v2_tx_env(
+            Some(MORPH_TX_VERSION_2),
+            LazyAuthorization::Recovered(recovered),
+        );
 
         let encoded = tx.encode_for_l1_fee(53077);
         let decoded = MorphTxEnvelope::decode_2718(&mut encoded.as_ref()).unwrap();
@@ -1073,12 +954,12 @@ mod tests {
             B256::ZERO,
         ));
 
-        let env = MorphTxEnv::from_recovered_tx(&envelope, Address::with_last_byte(0x01));
+        let env = MorphTxEnv::from_envelope(&envelope);
         assert_eq!(env.version, Some(MORPH_TX_VERSION_2));
-        assert_eq!(env.inner.tx_type, MORPH_TX_TYPE_ID);
-        assert_eq!(env.inner.authorization_list.len(), 1);
-        match &env.inner.authorization_list[0] {
-            Either::Right(recovered) => {
+        assert_eq!(env.tx_type, MORPH_TX_TYPE_ID);
+        assert_eq!(env.authorization_list.len(), 1);
+        match &env.authorization_list[0] {
+            LazyAuthorization::Recovered(recovered) => {
                 let (authorization, _authority) = recovered.clone().into_parts();
                 assert_eq!(&authorization, signed_authorization.inner());
             }

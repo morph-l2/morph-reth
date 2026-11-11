@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, ops::RangeBounds, path::Path, time::Duration};
+use std::{ops::RangeBounds, path::Path, time::Duration};
 
 use alloy_eips::{BlockNumHash, NumHash, eip1898::BlockWithParent};
 use alloy_primitives::{B256, U256, map::HashMap};
@@ -10,7 +10,6 @@ use reth_db::{
     transaction::{DbTx, DbTxMut},
 };
 use reth_primitives_traits::Account;
-use reth_trie::{hashed_cursor::HashedCursor, trie_cursor::TrieCursor};
 use reth_trie_common::{
     BranchNodeCompact, HashedPostState, Nibbles, StoredNibbles,
     updates::{StorageTrieUpdates, TrieUpdates},
@@ -33,8 +32,8 @@ use crate::{
         cursor::Dup,
         models::{
             AccountTrieHistory, BlockChangeSet, ChangeSet, HashedAccountHistory,
-            HashedStorageHistory, HashedStorageKey, IntoKV, MaybeDeleted, StorageTrieHistory,
-            StorageTrieKey, StorageValue, VersionedValue,
+            HashedStorageHistory, HashedStorageKey, IntoKV, StorageTrieHistory, StorageTrieKey,
+            StorageValue, VersionedValue,
         },
     },
 };
@@ -603,50 +602,6 @@ impl MdbxProofsStorage {
         Ok(deleted_count)
     }
 
-    /// Tombstone every key returned by `next`, then overlay `new_entries` so collisions
-    /// resolve in favor of `new_entries`, and `append_dup` the merged set in sorted-key order at
-    /// `block_number`. Used by the wipe branches of `store_trie_updates_for_block` to keep new
-    /// slots / nodes that arrive in the same block as a `wiped`/`is_deleted` entry —
-    /// `HashedStorage::from_plain_storage` sets `wiped = was_destroyed()` (true for
-    /// `DestroyedChanged`), so a SELFDESTRUCT + same-block recreate produces both at once.
-    fn wipe_and_overlay<T, Next, I, K, VV, V>(
-        &self,
-        tx: &(impl DbTxMut + DbTx),
-        block_number: u64,
-        hashed_address: B256,
-        mut next: Next,
-        new_entries: I,
-    ) -> MorphProofsStorageResult<Vec<T::Key>>
-    where
-        T: Table<Value = VersionedValue<V>> + DupSort,
-        Next: FnMut() -> MorphProofsStorageResult<Option<(K, VV)>>,
-        I: IntoIterator<Item = (K, Option<V>)>,
-        (B256, K, Option<V>): IntoKV<T>,
-        T::Key: Clone,
-        K: Ord,
-    {
-        let mut merged: BTreeMap<K, Option<V>> = BTreeMap::new();
-        while let Some((k, _vv)) = next()? {
-            merged.insert(k, None);
-        }
-        for (k, v) in new_entries {
-            merged.insert(k, v);
-        }
-
-        let mut cur = tx.cursor_dup_write::<T>()?;
-        let mut keys: Vec<T::Key> = Vec::with_capacity(merged.len());
-        for (k, value) in merged {
-            let key: T::Key = (hashed_address, k, Option::<V>::None).into_key();
-            let vv: T::Value = VersionedValue {
-                block_number,
-                value: MaybeDeleted(value),
-            };
-            cur.append_dup(key.clone(), vv)?;
-            keys.push(key);
-        }
-        Ok(keys)
-    }
-
     /// Collect versioned history over `block_range` using `BlockChangeSet`.
     fn collect_history_ranged(
         &self,
@@ -765,27 +720,6 @@ impl MdbxProofsStorage {
 
         let mut storage_trie_keys = Vec::<StorageTrieKey>::with_capacity(storage_trie_len);
         for (hashed_address, nodes) in sorted_trie_updates.storage_tries_ref() {
-            if nodes.is_deleted && append_mode {
-                // Lookback must use the active tx so it sees uncommitted writes from earlier
-                // blocks in the same batch session. Opening a fresh RO tx here would read the
-                // pre-batch committed snapshot and emit wrong tombstones for wipe blocks whose
-                // parent is staged in the same batch.
-                let mut ro = MdbxTrieCursor::<StorageTrieHistory, _>::new(
-                    tx.cursor_dup_read::<StorageTrieHistory>()?,
-                    block_number - 1,
-                    Some(*hashed_address),
-                );
-                let keys = self.wipe_and_overlay(
-                    tx,
-                    block_number,
-                    *hashed_address,
-                    || Ok(ro.next()?),
-                    nodes.storage_nodes_ref().iter().cloned(),
-                )?;
-                storage_trie_keys.extend(keys);
-                continue;
-            }
-
             let keys = self.persist_history_batch(
                 tx,
                 block_number,
@@ -801,26 +735,6 @@ impl MdbxProofsStorage {
 
         let mut hashed_storage_keys = Vec::<HashedStorageKey>::with_capacity(hashed_storage_len);
         for (hashed_address, storage) in sorted_post_state.storages {
-            if append_mode && storage.is_wiped() {
-                // See lookback note above: must use the active tx, not a fresh RO tx.
-                let mut ro = MdbxStorageCursor::new(
-                    tx.cursor_dup_read::<HashedStorageHistory>()?,
-                    block_number - 1,
-                    hashed_address,
-                );
-                let keys = self.wipe_and_overlay(
-                    tx,
-                    block_number,
-                    hashed_address,
-                    || Ok(ro.next()?),
-                    storage
-                        .storage_slots_ref()
-                        .iter()
-                        .map(|(slot, val)| (*slot, Some(StorageValue(*val)))),
-                )?;
-                hashed_storage_keys.extend(keys);
-                continue;
-            }
             let keys = self.persist_history_batch(
                 tx,
                 block_number,
@@ -1138,8 +1052,6 @@ impl MorphProofsStore for MdbxProofsStorage {
                     .entry(key.hashed_address)
                     .or_insert_with(StorageTrieUpdates::default);
 
-                // handle is_deleted scenario
-                // Issue: https://github.com/op-rs/op-reth/issues/323
                 if let Some(value) = entry {
                     stu.storage_nodes.insert(key.path.0, value);
                 } else {
@@ -1178,8 +1090,6 @@ impl MorphProofsStore for MdbxProofsStorage {
 
                 let hs = post_state.storages.entry(key.hashed_address).or_default();
 
-                // handle wiped storage scenario
-                // Issue: https://github.com/op-rs/op-reth/issues/323
                 if let Some(value) = entry {
                     hs.storage.insert(key.hashed_storage_key, value.0);
                 } else {
@@ -1533,6 +1443,7 @@ mod tests {
     };
     use reth_trie::{
         BranchNodeCompact, HashedPostStateSorted, HashedStorage, Nibbles, StoredNibbles,
+        hashed_cursor::HashedCursor,
         updates::{StorageTrieUpdates, TrieUpdatesSorted},
     };
     use tempfile::TempDir;
@@ -1540,7 +1451,7 @@ mod tests {
     use super::*;
     use crate::db::{
         StorageTrieKey,
-        models::{AccountTrieHistory, StorageTrieHistory},
+        models::{AccountTrieHistory, MaybeDeleted, StorageTrieHistory},
     };
 
     const B0: u64 = 0;
@@ -3698,301 +3609,69 @@ mod tests {
         assert!(vv.value.0.is_none(), "expected storage trie deletion");
     }
 
+    /// A destroyed account's storage reaches the store as one zero-valued update per slot, so
+    /// a block must hide those slots from its own version onwards while leaving earlier versions
+    /// and unrelated accounts readable.
     #[test]
-    fn store_trie_updates_wiped_storage_trie_nodes() {
+    fn store_trie_updates_zero_valued_slots_hide_destroyed_storage() {
         let dir = TempDir::new().unwrap();
         let store = MdbxProofsStorage::new(dir.path()).expect("env");
 
-        let addr_wiped = B256::from([0x10; 32]);
+        let addr_destroyed = B256::from([0x01; 32]);
         let addr_live = B256::from([0xF0; 32]);
 
-        // Seed some storage-trie nodes at block 0 for the address that will be wiped.
-        let p1 = Nibbles::from_nibbles_unchecked([0x01, 0x02]);
-        let p2 = Nibbles::from_nibbles_unchecked([0x0A, 0x0B, 0x0C]);
-        let n1 = BranchNodeCompact::default();
-        let n2 = BranchNodeCompact::default();
+        let slot_a = B256::from([0xA1; 32]);
+        let slot_b = B256::from([0xA2; 32]);
+        let value_a = U256::from(111u64);
+        let value_b = U256::from(222u64);
+
+        let live_slot = B256::from([0xB1; 32]);
+        let live_value_old = U256::from(333u64);
+        let live_value_new = U256::from(999u64);
 
         store
-            .store_storage_branches(addr_wiped, vec![(p1, Some(n1)), (p2, Some(n2))])
-            .expect("seed wiped addr trie nodes");
-
-        // Build a BlockStateDiff that wipes addr_wiped's storage trie, and
-        // also adds a normal storage-trie node for addr_live.
-        const BLOCK: BlockWithParent =
-            BlockWithParent::new(B256::ZERO, NumHash::new(123, B256::ZERO));
-        let mut diff_trie_updates = TrieUpdates::default();
-
-        // Wipe for addr_wiped
-        let mut wiped_updates = StorageTrieUpdates::default();
-        wiped_updates.set_deleted(true);
-        diff_trie_updates
-            .storage_tries
-            .insert(addr_wiped, wiped_updates);
-
-        // Normal update for addr_live
-        let live_path = Nibbles::from_nibbles_unchecked([0xEE, 0xFF]);
-        let live_node = BranchNodeCompact::default();
-        let mut live_updates = StorageTrieUpdates::default();
-        live_updates.storage_nodes.insert(live_path, live_node);
-        diff_trie_updates
-            .storage_tries
-            .insert(addr_live, live_updates);
-
-        // Execute the store
-        let diff = BlockStateDiff {
-            sorted_trie_updates: diff_trie_updates.into_sorted(),
-            sorted_post_state: HashedPostStateSorted::default(),
-        };
-        store.store_trie_updates(BLOCK, diff).expect("store");
-
-        // Verify: for addr_wiped, each previously existing path now has a deletion tombstone at
-        // BLOCK.
-        {
-            let tx = store.env.tx().expect("tx");
-            let mut cur = tx.new_cursor::<StorageTrieHistory>().expect("cursor");
-
-            for path in [p1, p2] {
-                let key = StorageTrieKey::new(addr_wiped, StoredNibbles::from(path));
-                let vv = cur
-                    .seek_by_key_subkey(key, BLOCK.block.number)
-                    .expect("seek")
-                    .expect("exists");
-                assert_eq!(vv.block_number, BLOCK.block.number);
-                assert!(
-                    vv.value.0.is_none(),
-                    "expected tombstone at wipe block for path {path:?}"
-                );
-            }
-        }
-
-        // Verify: addr_live got its normal node written at BLOCK (not a deletion).
-        {
-            let tx = store.env.tx().expect("tx");
-            let mut cur = tx.new_cursor::<StorageTrieHistory>().expect("cursor");
-
-            let key = StorageTrieKey::new(addr_live, StoredNibbles::from(live_path));
-            let vv = cur
-                .seek_by_key_subkey(key, BLOCK.block.number)
-                .expect("seek")
-                .expect("exists");
-            assert_eq!(vv.block_number, BLOCK.block.number);
-            assert!(
-                vv.value.0.is_some(),
-                "expected normal node for non-wiped address at BLOCK"
-            );
-        }
-    }
-
-    /// Mirror of `tests/lib.rs::test_store_trie_updates_with_wiped_storage_and_new_slots` for
-    /// the storage *trie* path. When `StorageTrieUpdates::is_deleted` is true AND
-    /// `storage_nodes` is non-empty (the shape revm/reth produce when a contract is destroyed
-    /// and recreated with a fresh trie in the same block), the wipe branch must tombstone every
-    /// pre-existing path for the address AND persist the new post-recreation nodes — with new
-    /// nodes winning on path collision.
-    #[test]
-    fn store_trie_updates_wiped_storage_trie_with_new_nodes() {
-        let dir = TempDir::new().unwrap();
-        let store = MdbxProofsStorage::new(dir.path()).expect("env");
-
-        let addr = B256::from([0x77; 32]);
-        let pre_path_dropped = Nibbles::from_nibbles_unchecked([0x01, 0x02]);
-        let pre_path_overwritten = Nibbles::from_nibbles_unchecked([0x0A, 0x0B]);
-        let new_path_kept = Nibbles::from_nibbles_unchecked([0xCC, 0xDD]);
-
+            .store_hashed_storages(addr_destroyed, vec![(slot_a, value_a), (slot_b, value_b)])
+            .expect("seed destroyed addr");
         store
-            .store_storage_branches(
-                addr,
-                vec![
-                    (pre_path_dropped, Some(BranchNodeCompact::default())),
-                    (pre_path_overwritten, Some(BranchNodeCompact::default())),
-                ],
-            )
-            .expect("seed");
-
-        const BLOCK: BlockWithParent =
-            BlockWithParent::new(B256::ZERO, NumHash::new(123, B256::ZERO));
-        let mut diff_trie_updates = TrieUpdates::default();
-        let mut wiped_with_new = StorageTrieUpdates::default();
-        wiped_with_new.set_deleted(true);
-        wiped_with_new
-            .storage_nodes
-            .insert(new_path_kept, BranchNodeCompact::default());
-        wiped_with_new
-            .storage_nodes
-            .insert(pre_path_overwritten, BranchNodeCompact::default());
-        diff_trie_updates.storage_tries.insert(addr, wiped_with_new);
-
-        let diff = BlockStateDiff {
-            sorted_trie_updates: diff_trie_updates.into_sorted(),
-            sorted_post_state: HashedPostStateSorted::default(),
-        };
-        store.store_trie_updates(BLOCK, diff).expect("store");
-
-        let tx = store.env.tx().expect("tx");
-        let mut cur = tx.new_cursor::<StorageTrieHistory>().expect("cursor");
-
-        let dropped_key = StorageTrieKey::new(addr, StoredNibbles::from(pre_path_dropped));
-        let dropped_vv = cur
-            .seek_by_key_subkey(dropped_key, BLOCK.block.number)
-            .expect("seek")
-            .expect("tombstone exists");
-        assert_eq!(dropped_vv.block_number, BLOCK.block.number);
-        assert!(
-            dropped_vv.value.0.is_none(),
-            "pre-existing path with no new node must tombstone"
-        );
-
-        let overwritten_key = StorageTrieKey::new(addr, StoredNibbles::from(pre_path_overwritten));
-        let overwritten_vv = cur
-            .seek_by_key_subkey(overwritten_key, BLOCK.block.number)
-            .expect("seek")
-            .expect("overlay exists");
-        assert_eq!(overwritten_vv.block_number, BLOCK.block.number);
-        assert!(
-            overwritten_vv.value.0.is_some(),
-            "collision path must reflect the new node, not the wipe tombstone",
-        );
-
-        let new_key = StorageTrieKey::new(addr, StoredNibbles::from(new_path_kept));
-        let new_vv = cur
-            .seek_by_key_subkey(new_key, BLOCK.block.number)
-            .expect("seek")
-            .expect("new node exists");
-        assert_eq!(new_vv.block_number, BLOCK.block.number);
-        assert!(
-            new_vv.value.0.is_some(),
-            "new path must be persisted, not dropped by the wipe"
-        );
-    }
-
-    #[test]
-    fn store_trie_updates_wiped_storage() {
-        let dir = TempDir::new().unwrap();
-        let store = MdbxProofsStorage::new(dir.path()).expect("env");
-
-        // We'll pre-seed storage at block 0, then issue a wipe at BLOCK.
-        const BLOCK: BlockWithParent =
-            BlockWithParent::new(B256::ZERO, NumHash::new(42, B256::ZERO));
-
-        let addr = B256::from([0x55; 32]);
-        let s1 = B256::from([0x01; 32]);
-        let s2 = B256::from([0x02; 32]);
-        let v1 = U256::from(111u64);
-        let v2 = U256::from(222u64);
-
-        // Seed prior storage (block_number = 0 in store_hashed_storages)
-        store
-            .store_hashed_storages(addr, vec![(s1, v1), (s2, v2)])
-            .expect("seed");
-
-        // Build BlockStateDiff that marks this address as wiped at BLOCK
-        let mut diff_post_state = HashedPostState::default();
-
-        let wiped = reth_trie::HashedStorage::new(true);
-
-        diff_post_state.storages.insert(addr, wiped);
-
-        // Execute
-        let diff = BlockStateDiff {
-            sorted_trie_updates: TrieUpdatesSorted::default(),
-            sorted_post_state: diff_post_state.into_sorted(),
-        };
-        store.store_trie_updates(BLOCK, diff).expect("store");
-
-        // Verify: for each pre-existing slot, there should be a tombstone (MaybeDeleted(None)) at
-        // BLOCK.
-        let tx = store.env.tx().expect("tx");
-        let mut cur = tx.new_cursor::<HashedStorageHistory>().expect("cursor");
-
-        for slot in [s1, s2] {
-            let key = HashedStorageKey::new(addr, slot);
-            let vv = cur
-                .seek_by_key_subkey(key, BLOCK.block.number)
-                .expect("seek")
-                .expect("exists");
-            assert_eq!(vv.block_number, BLOCK.block.number);
-            assert!(
-                vv.value.0.is_none(),
-                "expected deletion tombstone for slot {:?} at block {}",
-                slot,
-                BLOCK.block.number,
-            );
-        }
-    }
-
-    #[test]
-    fn store_trie_updates_wiped_and_non_wiped_mixed_order() {
-        let dir = TempDir::new().unwrap();
-        let store = MdbxProofsStorage::new(dir.path()).expect("env");
-
-        // Choose addresses so that wiped < non_wiped in sort order (your impl sorts by address)
-        let addr_wiped = B256::from([0x01; 32]); // will sort first
-        let addr_live = B256::from([0xF0; 32]); // will sort later
-
-        // Slots & values
-        let ws1 = B256::from([0xA1; 32]);
-        let ws2 = B256::from([0xA2; 32]);
-        let wv1 = U256::from(111u64);
-        let wv2 = U256::from(222u64);
-
-        let ls1 = B256::from([0xB1; 32]);
-        let lv1_old = U256::from(333u64);
-        let lv1_new = U256::from(999u64); // will be written at BLOCK
-
-        // Seed prior storage at block 0 for BOTH addresses
-        store
-            .store_hashed_storages(addr_wiped, vec![(ws1, wv1), (ws2, wv2)])
-            .expect("seed wiped addr");
-        store
-            .store_hashed_storages(addr_live, vec![(ls1, lv1_old)])
+            .store_hashed_storages(addr_live, vec![(live_slot, live_value_old)])
             .expect("seed live addr");
 
-        // Build diff: wiped first (by address sort), then non-wiped with a write
         const BLOCK: BlockWithParent =
             BlockWithParent::new(B256::ZERO, NumHash::new(77, B256::ZERO));
         let mut diff_post_state = HashedPostState::default();
+        diff_post_state.storages.insert(
+            addr_destroyed,
+            reth_trie::HashedStorage::from_iter([(slot_a, U256::ZERO), (slot_b, U256::ZERO)]),
+        );
+        diff_post_state.storages.insert(
+            addr_live,
+            reth_trie::HashedStorage::from_iter([(live_slot, live_value_new)]),
+        );
 
-        // Wiped storage for addr_wiped
-        let wiped = reth_trie::HashedStorage::new(true);
-        diff_post_state.storages.insert(addr_wiped, wiped);
-
-        // Non-wiped storage for addr_live (append new value)
-        let mut live = reth_trie::HashedStorage::default();
-        live.storage.insert(ls1, lv1_new);
-        diff_post_state.storages.insert(addr_live, live);
-
-        // Execute
         let diff = BlockStateDiff {
             sorted_trie_updates: TrieUpdatesSorted::default(),
             sorted_post_state: diff_post_state.into_sorted(),
         };
         store.store_trie_updates(BLOCK, diff).expect("store");
 
-        // Verify: wiped address got tombstones at BLOCK for each pre-existing slot
         {
             let tx = store.env.tx().expect("tx");
             let mut cur = tx.new_cursor::<HashedStorageHistory>().expect("cursor");
-            for slot in [ws1, ws2] {
-                let key = HashedStorageKey::new(addr_wiped, slot);
+            for slot in [slot_a, slot_b] {
+                let key = HashedStorageKey::new(addr_destroyed, slot);
                 let vv = cur
                     .seek_by_key_subkey(key, BLOCK.block.number)
                     .expect("seek")
                     .expect("exists");
                 assert_eq!(vv.block_number, BLOCK.block.number);
-                assert!(
-                    vv.value.0.is_none(),
-                    "expected deletion tombstone for wiped slot {:?} at block {}",
-                    slot,
-                    BLOCK.block.number,
+                assert_eq!(
+                    vv.value.0.map(|value| value.0),
+                    Some(U256::ZERO),
+                    "expected zero-valued version for destroyed slot {slot:?}"
                 );
             }
-        }
 
-        // Verify: non-wiped address got the new value at BLOCK (not a deletion)
-        {
-            let tx = store.env.tx().expect("tx");
-            let mut cur = tx.new_cursor::<HashedStorageHistory>().expect("cursor");
-            let key = HashedStorageKey::new(addr_live, ls1);
+            let key = HashedStorageKey::new(addr_live, live_slot);
             let vv = cur
                 .seek_by_key_subkey(key, BLOCK.block.number)
                 .expect("seek")
@@ -4000,10 +3679,33 @@ mod tests {
             assert_eq!(vv.block_number, BLOCK.block.number);
             let inner = vv.value.0.as_ref().expect("Some(StorageValue)");
             assert_eq!(
-                inner.0, lv1_new,
-                "expected updated value for non-wiped address"
+                inner.0, live_value_new,
+                "expected updated value for live address"
             );
         }
+
+        let mut at_block = store
+            .storage_hashed_cursor(addr_destroyed, BLOCK.block.number)
+            .expect("cursor at block");
+        assert_eq!(
+            at_block.seek(B256::ZERO).expect("seek"),
+            None,
+            "zero-valued slots must read as deleted at the destroying block"
+        );
+
+        let mut before_block = store
+            .storage_hashed_cursor(addr_destroyed, BLOCK.block.number - 1)
+            .expect("cursor before block");
+        assert_eq!(
+            before_block.seek(B256::ZERO).expect("seek"),
+            Some((slot_a, value_a)),
+            "earlier versions must stay readable"
+        );
+        assert_eq!(
+            before_block.next().expect("next"),
+            Some((slot_b, value_b)),
+            "earlier versions must stay readable"
+        );
     }
 
     #[test]

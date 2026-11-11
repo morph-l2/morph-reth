@@ -28,19 +28,18 @@ reth-payload-builder.workspace = true
 reth-payload-primitives.workspace = true
 reth-payload-util.workspace = true
 reth-primitives-traits.workspace = true
-reth-revm.workspace = true
 reth-storage-api.workspace = true
+reth-tasks.workspace = true
 reth-trie-parallel.workspace = true
 reth-transaction-pool.workspace = true
+
+evm2 = { workspace = true, features = ["std"] }
 
 # Alloy
 alloy-consensus.workspace = true
 alloy-eips.workspace = true
 alloy-primitives.workspace = true
 alloy-rlp.workspace = true
-
-# Revm
-revm.workspace = true
 
 # Metrics
 metrics.workspace = true

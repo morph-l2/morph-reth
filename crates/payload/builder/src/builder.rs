@@ -5,6 +5,7 @@ use crate::{MorphBuilderConfig, MorphPayloadBuilderError, config::PayloadBuildin
 use alloy_consensus::{BlockHeader, Transaction, Typed2718};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{B256, Bytes, U256};
+use evm2::{DatabaseError, evm::State};
 use morph_chainspec::MorphChainSpec;
 use morph_chainspec::{L2_MESSAGE_QUEUE_ADDRESS, L2_MESSAGE_QUEUE_WITHDRAW_TRIE_ROOT_SLOT};
 use morph_evm::{MorphEvmConfig, MorphNextBlockEnvAttributes};
@@ -18,9 +19,8 @@ use reth_basic_payload_builder::{
 };
 use reth_chainspec::ChainSpecProvider;
 use reth_evm::{
-    ConfigureEvm, Database, Evm, NextBlockEnvAttributes,
-    block::{BlockExecutionError, BlockValidationError},
-    execute::{BlockBuilder, BlockBuilderOutcome},
+    BlockBuilder, BlockBuilderOutcome, BlockExecutionError, BlockValidationError, ConfigureEvm,
+    Database, EvmEnv as _, NextBlockEnvAttributes, OnStateHook, database::StateProviderDatabase,
 };
 use reth_execution_cache::{CachedStateMetrics, CachedStateMetricsSource, CachedStateProvider};
 use reth_execution_types::BlockExecutionOutput;
@@ -28,17 +28,16 @@ use reth_payload_builder::PayloadId;
 use reth_payload_primitives::{BuiltPayloadExecutedBlock, PayloadBuilderError};
 use reth_payload_util::{BestPayloadTransactions, NoopPayloadTransactions, PayloadTransactions};
 use reth_primitives_traits::{FastInstant as Instant, RecoveredBlock, SealedHeader};
-use reth_revm::{database::StateProviderDatabase, db::State};
-use reth_storage_api::{StateProvider, StateProviderFactory};
+use reth_storage_api::{EvmStateProvider, StateProvider, StateProviderFactory};
+use reth_tasks::CancelOnDrop;
 use reth_transaction_pool::{BestTransactionsAttributes, PoolTransaction, TransactionPool};
-use revm::context_interface::Block as RevmBlock;
 use std::sync::Arc;
 
 /// Reads the withdraw trie root from the L2MessageQueue contract storage.
-fn read_withdraw_trie_root<DB: revm::Database>(db: &mut DB) -> Result<B256, DB::Error> {
-    let value = db.storage(
-        L2_MESSAGE_QUEUE_ADDRESS,
-        L2_MESSAGE_QUEUE_WITHDRAW_TRIE_ROOT_SLOT,
+fn read_withdraw_trie_root(state: &mut State<'_>) -> Result<B256, DatabaseError> {
+    let value = state.storage_slot_untracked(
+        &L2_MESSAGE_QUEUE_ADDRESS,
+        &L2_MESSAGE_QUEUE_WITHDRAW_TRIE_ROOT_SLOT,
     )?;
     Ok(B256::from(value))
 }
@@ -208,22 +207,27 @@ where
         // block. Wrap the state provider so account/storage/code reads consult
         // the cache before hitting the DB — amortizes cross-block cost when the
         // payload builder and engine both touch overlapping state.
-        let mut state_provider: Box<dyn StateProvider> =
-            self.client.state_by_block_hash(ctx.parent().hash())?;
-        if let Some(execution_cache) = execution_cache {
-            // reth v2.2.0 dropped `SavedCache::metrics`; the canonical pattern
-            // (see `reth-ethereum-payload`) is to materialize a fresh zeroed
-            // metrics handle on every payload build — cheap because morph-reth
-            // builds payloads on demand rather than every 12s like upstream.
-            state_provider = Box::new(CachedStateProvider::new(
-                state_provider,
+        let state_provider = self.client.state_by_block_hash(ctx.parent().hash())?;
+        let evm_state_provider = (&state_provider).into_evm_state_provider();
+        // reth v2.2.0 dropped `SavedCache::metrics`; the canonical pattern
+        // (see `reth-ethereum-payload`) is to materialize a fresh zeroed
+        // metrics handle on every payload build — cheap because morph-reth
+        // builds payloads on demand rather than every 12s like upstream.
+        let cached_state_provider = execution_cache.map(|execution_cache| {
+            CachedStateProvider::new(
+                &evm_state_provider,
                 execution_cache.cache().clone(),
                 Some(CachedStateMetrics::zeroed(
                     CachedStateMetricsSource::Builder,
                 )),
-            ));
-        }
-        let state = StateProviderDatabase::new(state_provider.as_ref());
+            )
+        });
+        let state = StateProviderDatabase::new(
+            cached_state_provider
+                .as_ref()
+                .map(|provider| provider as &dyn EvmStateProvider)
+                .unwrap_or(&evm_state_provider),
+        );
 
         // Reuse cached reads from previous runs for incremental payload building
         build_payload_inner(
@@ -293,7 +297,7 @@ struct MorphPayloadBuilderCtx {
     /// Payload configuration.
     config: PayloadConfig<MorphPayloadBuilderAttributes, MorphHeader>,
     /// Marker to check whether the job has been cancelled.
-    cancel: reth_revm::cancelled::CancelOnDrop,
+    cancel: CancelOnDrop,
     /// The currently best payload.
     best_payload: Option<MorphBuiltPayload>,
     /// Builder configuration with limits.
@@ -349,8 +353,12 @@ impl MorphPayloadBuilderCtx {
         builder: &mut impl BlockBuilder<Primitives = morph_primitives::MorphPrimitives>,
         info: &mut ExecutionInfo,
     ) -> Result<Vec<Bytes>, PayloadBuilderError> {
-        let block_gas_limit = builder.evm().block().gas_limit();
-        let base_fee = builder.evm().block().basefee();
+        let block_gas_limit = builder
+            .evm_env()
+            .block_env()
+            .gas_limit
+            .saturating_to::<u64>();
+        let base_fee = builder.evm_env().block_base_fee();
         let supplied_tx_count = self.attributes().transactions.len();
         let mut executed_txs: Vec<Bytes> = Vec::with_capacity(supplied_tx_count);
         let mut saw_l2_transaction = false;
@@ -431,9 +439,9 @@ impl MorphPayloadBuilderCtx {
 
             // Execute the transaction and record EVM execution time.
             let apply_started = Instant::now();
-            // `BlockBuilder::execute_transaction` returns `GasOutput` from
-            // alloy-evm 0.34; pre-Amsterdam morph treats regular and state gas
-            // as a single number, so collapse to `tx_gas_used()` immediately.
+            // `BlockBuilder::execute_transaction` returns a `GasOutput`; pre-Amsterdam morph
+            // treats regular and state gas as a single number, so collapse to
+            // `tx_gas_used()` immediately.
             let gas_used = match builder.execute_transaction(recovered_tx.clone()) {
                 Ok(gas_output) => gas_output.tx_gas_used(),
                 Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
@@ -539,11 +547,17 @@ impl MorphPayloadBuilderCtx {
     where
         BestTxs: PayloadTransactions<Transaction: PoolTransaction<Consensus = MorphTxEnvelope>>,
     {
-        let block_gas_limit = builder.evm().block().gas_limit();
-        let base_fee = builder.evm().block().basefee();
+        let block_gas_limit = builder
+            .evm_env()
+            .block_env()
+            .gas_limit
+            .saturating_to::<u64>();
+        let base_fee = builder.evm_env().block_base_fee();
 
         while let Some(tx) = best_txs.next(()) {
-            // Check if the job was cancelled
+            // Check if the job was cancelled. This must stay `is_cancelled`: `is_interrupted`
+            // also reports a requested finalization, which every `engine_assembleL2Block`
+            // issues right after the job starts and would truncate the block.
             if self.cancel.is_cancelled() {
                 return Ok(Some(()));
             }
@@ -750,7 +764,7 @@ fn build_payload_inner<'a, DB, BestTxs>(
     mut state_root_handle: Option<reth_trie_parallel::state_root_task::PayloadStateRootHandle>,
 ) -> Result<BuildOutcomeKind<MorphBuiltPayload>, PayloadBuilderError>
 where
-    DB: Database<Error = reth_evm::execute::ProviderError>,
+    DB: Database + 'a,
     BestTxs: PayloadTransactions<Transaction: PoolTransaction<Consensus = MorphTxEnvelope>> + 'a,
 {
     let build_started = Instant::now();
@@ -763,11 +777,6 @@ where
         parent_number = ctx.parent().number(),
         "building new payload"
     );
-
-    let mut db = State::builder()
-        .with_database(db)
-        .with_bundle_update()
-        .build();
 
     // Build next block env attributes
     let next_block_attrs = MorphNextBlockEnvAttributes {
@@ -790,7 +799,7 @@ where
     // Create block builder
     let mut builder = ctx
         .evm_config
-        .builder_for_next_block(&mut db, ctx.parent(), next_block_attrs)
+        .builder_for_next_block(db, ctx.parent(), next_block_attrs)
         .map_err(PayloadBuilderError::other)?;
 
     // If the engine tree provided a sparse-trie state root handle, wire the
@@ -798,10 +807,8 @@ where
     // during execution. The final `state_root()` recv() at finish time will
     // return quickly since most work is done concurrently.
     if let Some(handle) = state_root_handle.as_mut() {
-        builder
-            .evm_mut()
-            .db_mut()
-            .set_state_hook(Some(Box::new(handle.take_state_hook())));
+        let mut hook = handle.take_state_hook();
+        builder.set_state_hook(move |state| hook.on_state(state));
     }
 
     // 1. Apply pre-execution changes (system contracts, etc.)
@@ -815,8 +822,12 @@ where
         ctx.parent().next_l1_msg_index,
         ctx.builder_config.max_da_block_size,
     );
-    let base_fee = builder.evm().block().basefee();
-    let block_gas_limit = builder.evm().block().gas_limit();
+    let base_fee = builder.evm_env().block_base_fee();
+    let block_gas_limit = builder
+        .evm_env()
+        .block_env()
+        .gas_limit
+        .saturating_to::<u64>();
 
     // Create breaker for early exit from pool transaction execution
     let breaker = ctx.builder_config.breaker(block_gas_limit);
@@ -880,31 +891,28 @@ where
     // Read withdraw_trie_root from L2MessageQueue contract storage
     // This must be done before finish() consumes the builder
     let withdraw_trie_root =
-        read_withdraw_trie_root(builder.evm_mut().db_mut()).map_err(|err| {
+        read_withdraw_trie_root(builder.evm_mut().state_mut()).map_err(|err| {
             PayloadBuilderError::other(MorphPayloadBuilderError::Storage(err.to_string()))
         })?;
 
     // 6. Finish building the block.
     //
-    // When `trie_handle` is provided, drop the state hook to signal FinishedStateUpdates
-    // to the background sparse trie task (via StateHookSender's Drop impl), then wait for
-    // the final root. Fall back to synchronous state root if the task fails.
+    // Finishing consumes the executor, which drops the state hook and so signals
+    // FinishedStateUpdates to the background sparse trie task before the closure waits
+    // for the final root. Fall back to a synchronous state root if the task fails.
     let BlockBuilderOutcome {
         execution_result,
+        execution_state,
         hashed_state,
         trie_updates,
         mut block,
         block_access_list: _,
     } = if let Some(mut handle) = state_root_handle {
-        builder.evm_mut().db_mut().set_state_hook(None);
-        match handle.state_root() {
-            Ok(outcome) => builder.finish(
-                state_provider,
-                Some((
-                    outcome.state_root,
-                    Arc::unwrap_or_clone(outcome.trie_updates),
-                )),
-            )?,
+        builder.finish_with_state_root(state_provider, |_| match handle.state_root() {
+            Ok(outcome) => Ok(Some((
+                outcome.state_root,
+                Arc::unwrap_or_clone(outcome.trie_updates),
+            ))),
             Err(err) => {
                 tracing::warn!(
                     target: "payload_builder",
@@ -912,9 +920,9 @@ where
                     %err,
                     "sparse trie task failed, falling back to sync state root",
                 );
-                builder.finish(state_provider, None)?
+                Ok(None)
             }
-        }
+        })?
     } else {
         builder.finish(state_provider, None)?
     };
@@ -963,7 +971,7 @@ where
 
     let execution_output = BlockExecutionOutput {
         result: execution_result,
-        state: db.take_bundle(),
+        state: execution_state,
     };
 
     let executed = BuiltPayloadExecutedBlock {
@@ -1228,65 +1236,35 @@ mod tests {
     // read_withdraw_trie_root tests (requires mock DB)
     // =========================================================================
 
-    struct MockDb {
-        storage_value: U256,
-    }
-
-    impl revm::Database for MockDb {
-        type Error = std::convert::Infallible;
-
-        fn basic(
-            &mut self,
-            _address: alloy_primitives::Address,
-        ) -> Result<Option<revm::state::AccountInfo>, Self::Error> {
-            Ok(None)
-        }
-
-        fn code_by_hash(
-            &mut self,
-            _code_hash: B256,
-        ) -> Result<revm::bytecode::Bytecode, Self::Error> {
-            Ok(revm::bytecode::Bytecode::default())
-        }
-
-        fn storage(
-            &mut self,
-            _address: alloy_primitives::Address,
-            _index: U256,
-        ) -> Result<U256, Self::Error> {
-            Ok(self.storage_value)
-        }
-
-        fn block_hash(&mut self, _number: u64) -> Result<B256, Self::Error> {
-            Ok(B256::ZERO)
-        }
+    fn state_with_withdraw_trie_root(value: U256) -> State<'static> {
+        let mut db = evm2::evm::InMemoryDB::default();
+        db.insert_account_storage(
+            &L2_MESSAGE_QUEUE_ADDRESS,
+            &L2_MESSAGE_QUEUE_WITHDRAW_TRIE_ROOT_SLOT,
+            &value,
+        );
+        State::new(db)
     }
 
     #[test]
     fn test_read_withdraw_trie_root_zero() {
-        let mut db = MockDb {
-            storage_value: U256::ZERO,
-        };
-        let root = read_withdraw_trie_root(&mut db).unwrap();
+        let mut state = state_with_withdraw_trie_root(U256::ZERO);
+        let root = read_withdraw_trie_root(&mut state).unwrap();
         assert_eq!(root, B256::ZERO);
     }
 
     #[test]
     fn test_read_withdraw_trie_root_nonzero() {
         let expected = B256::from([0xAB; 32]);
-        let mut db = MockDb {
-            storage_value: expected.into(),
-        };
-        let root = read_withdraw_trie_root(&mut db).unwrap();
+        let mut state = state_with_withdraw_trie_root(expected.into());
+        let root = read_withdraw_trie_root(&mut state).unwrap();
         assert_eq!(root, expected);
     }
 
     #[test]
     fn test_read_withdraw_trie_root_max_value() {
-        let mut db = MockDb {
-            storage_value: U256::MAX,
-        };
-        let root = read_withdraw_trie_root(&mut db).unwrap();
+        let mut state = state_with_withdraw_trie_root(U256::MAX);
+        let root = read_withdraw_trie_root(&mut state).unwrap();
         assert_eq!(root, B256::from(U256::MAX));
     }
 }

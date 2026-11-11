@@ -8,10 +8,9 @@ use eyre::Result;
 use morph_chainspec::MorphChainSpec;
 use morph_evm::MorphEvmConfig;
 use morph_primitives::{MorphHeader, MorphPrimitives};
-use reth_node_api::{FullNodeComponents, FullNodeTypes, NodeTypes};
-use reth_node_builder::rpc::{EthApiBuilder, EthApiCtx};
-use reth_primitives_traits::RecoveredBlock;
-use reth_provider::{BlockReader, ChainSpecProvider};
+use reth_node_api::{FullNodeComponents, NodeTypes};
+use reth_node_builder::rpc::{EthApiBuilder, EthApiCtx, RpcNodeCoreFor};
+use reth_provider::ChainSpecProvider;
 use reth_rpc::EthApi;
 use reth_rpc_convert::{RpcConvert, RpcConverter, RpcTypes};
 use reth_rpc_eth_api::{
@@ -23,7 +22,7 @@ use reth_rpc_eth_api::{
     },
 };
 use reth_rpc_eth_types::{
-    EthApiError, EthStateCache, FeeHistoryCache, GasPriceOracle, StateCacheDb,
+    EthApiError, EthApiSettings, EthStateCache, FeeHistoryCache, GasPriceOracle,
 };
 use reth_tasks::{
     Runtime,
@@ -79,10 +78,6 @@ where
             Evm = MorphEvmConfig,
             Types: NodeTypes<Primitives = MorphPrimitives, ChainSpec = MorphChainSpec>,
             Provider: ChainSpecProvider<ChainSpec = MorphChainSpec>,
-        > + crate::eth::MorphNodeCore
-        + reth_rpc_eth_api::RpcNodeCore<
-            Provider = <N as FullNodeTypes>::Provider,
-            Pool = <N as FullNodeComponents>::Pool,
         >,
     NetworkT: RpcTypes<
             Header = RpcHeader<MorphHeader>,
@@ -92,12 +87,12 @@ where
         >,
     MorphRpcConverter<N, NetworkT>: reth_rpc_convert::RpcConvert<
             Network = NetworkT,
-            Primitives = <N as reth_rpc_eth_api::RpcNodeCore>::Primitives,
+            Primitives = MorphPrimitives,
             Error = reth_rpc_eth_types::EthApiError,
-            Evm = <N as reth_rpc_eth_api::RpcNodeCore>::Evm,
+            Evm = MorphEvmConfig,
         >,
 {
-    type EthApi = MorphEthApi<N, MorphRpcConverter<N, NetworkT>>;
+    type EthApi = MorphEthApi<RpcNodeCoreFor<N>, MorphRpcConverter<N, NetworkT>>;
 
     async fn build_eth_api(self, ctx: EthApiCtx<'_, N>) -> Result<Self::EthApi> {
         let rpc_converter = RpcConverter::new(MorphReceiptConverter::default());
@@ -160,6 +155,10 @@ where
 
     fn converter(&self) -> &Self::RpcConvert {
         self.inner.eth_api.converter()
+    }
+
+    fn eth_api_settings(&self) -> &EthApiSettings {
+        self.inner.eth_api.eth_api_settings()
     }
 }
 
@@ -395,16 +394,6 @@ where
     MorphEthApiError: reth_rpc_eth_types::error::FromEvmError<N::Evm>,
     Rpc: RpcConvert<Primitives = N::Primitives, Error = EthApiError, Evm = N::Evm>,
 {
-    fn apply_pre_execution_changes(
-        &self,
-        _block: &RecoveredBlock<<Self::Provider as BlockReader>::Block>,
-        _db: &mut StateCacheDb,
-    ) -> Result<(), Self::Error> {
-        // Morph must skip Ethereum's 4788-style pre-block system calls during replay.
-        // Standard Morph headers omit parentBeaconBlockRoot, so the default Ethereum
-        // SystemCaller prelude would fail with "EIP-4788 beacon root missing".
-        Ok(())
-    }
 }
 
 impl<N, Rpc> GetBlockAccessList for MorphEthApi<N, Rpc>

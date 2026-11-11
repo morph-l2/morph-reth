@@ -8,7 +8,6 @@ use crate::{
 use alloy_chains::Chain;
 use alloy_consensus::Sealable;
 use alloy_eips::eip7840::BlobParams;
-use alloy_evm::eth::spec::EthExecutorSpec;
 use alloy_genesis::Genesis;
 use alloy_primitives::{Address, B256, U256};
 use morph_primitives::MorphHeader;
@@ -418,12 +417,6 @@ impl EthChainSpec for MorphChainSpec {
 impl EthereumHardforks for MorphChainSpec {
     fn ethereum_fork_activation(&self, fork: EthereumHardfork) -> ForkCondition {
         self.inner.ethereum_fork_activation(fork)
-    }
-}
-
-impl EthExecutorSpec for MorphChainSpec {
-    fn deposit_contract_address(&self) -> Option<Address> {
-        self.inner.deposit_contract_address()
     }
 }
 
