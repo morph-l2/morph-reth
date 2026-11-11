@@ -3,19 +3,8 @@
 use std::path::PathBuf;
 
 use clap::Args;
-use morph_chainspec::MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK;
 use morph_proofs::DEFAULT_PROOFS_HISTORY_WINDOW;
 use morph_rpc::eth::proofs::DEFAULT_MAX_MULTI_PROOF_TARGETS;
-
-/// Default maximum L2 transaction payload bytes per block (720 KiB).
-///
-/// `720 KiB = 120 KiB × 6`. A Morph batch can carry up to 6 EIP-4844 blobs.
-/// Each blob's usable payload is `4096 × 31 = 126_976` bytes (~124 KiB), so
-/// six blobs hold 761_856 bytes uncompressed. 120 KiB per blob is the
-/// historical headroom under that usable size; six of them stay under the
-/// uncompressed 6-blob budget and do not require the submitter to split a
-/// single L2 block.
-pub const MORPH_DEFAULT_MAX_TX_PAYLOAD_BYTES: u64 = MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK;
 
 /// Morph-specific CLI arguments.
 ///
@@ -27,20 +16,12 @@ pub const MORPH_DEFAULT_MAX_TX_PAYLOAD_BYTES: u64 = MORPH_MAX_TX_PAYLOAD_BYTES_P
 #[derive(Debug, Clone, Args)]
 #[command(next_help_heading = "Morph")]
 pub struct MorphArgs {
-    /// Maximum L2 transaction payload bytes per block (L1 messages excluded).
+    /// Override the sequencer's maximum L2 transaction payload bytes per block.
     ///
-    /// Default: 737280 bytes (720 KiB), sized so one L2 block fits in a
-    /// 6-blob batch even without compression.
-    ///
-    /// Import-time consensus always enforces
-    /// [`morph_chainspec::MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK`], independent of
-    /// this flag. Packing above that value produces blocks other nodes reject.
-    #[arg(
-        long = "morph.max-tx-payload-bytes",
-        value_name = "BYTES",
-        default_value_t = MORPH_DEFAULT_MAX_TX_PAYLOAD_BYTES
-    )]
-    pub max_tx_payload_bytes: u64,
+    /// Defaults to the chain genesis `maxTxPayloadBytesPerBlock` value. This
+    /// local packing limit may be lower, but cannot exceed the consensus limit.
+    #[arg(long = "morph.max-tx-payload-bytes", value_name = "BYTES")]
+    pub max_tx_payload_bytes: Option<u64>,
 
     /// Enable the forward-only historical proof index and its RPC overrides.
     #[arg(long = "proofs-history", default_value_t = false)]
@@ -87,7 +68,7 @@ pub struct MorphArgs {
 impl Default for MorphArgs {
     fn default() -> Self {
         Self {
-            max_tx_payload_bytes: MORPH_DEFAULT_MAX_TX_PAYLOAD_BYTES,
+            max_tx_payload_bytes: None,
             proofs_history: false,
             proofs_history_storage_path: None,
             proofs_history_window: DEFAULT_PROOFS_HISTORY_WINDOW,
@@ -111,11 +92,7 @@ mod tests {
     #[test]
     fn test_default_args() {
         let args = CommandParser::<MorphArgs>::parse_from(["test"]).args;
-        assert_eq!(
-            args.max_tx_payload_bytes,
-            MORPH_DEFAULT_MAX_TX_PAYLOAD_BYTES
-        );
-        assert_eq!(args.max_tx_payload_bytes, 720 * 1024);
+        assert_eq!(args.max_tx_payload_bytes, None);
         assert!(!args.proofs_history);
         assert_eq!(args.proofs_history_storage_path, None);
         assert_eq!(args.proofs_history_window, DEFAULT_PROOFS_HISTORY_WINDOW);
@@ -134,7 +111,7 @@ mod tests {
             "100000",
         ])
         .args;
-        assert_eq!(args.max_tx_payload_bytes, 100000);
+        assert_eq!(args.max_tx_payload_bytes, Some(100000));
     }
 
     #[test]
@@ -199,9 +176,6 @@ mod tests {
     #[test]
     fn test_default_trait_impl() {
         let args = MorphArgs::default();
-        assert_eq!(
-            args.max_tx_payload_bytes,
-            MORPH_DEFAULT_MAX_TX_PAYLOAD_BYTES
-        );
+        assert_eq!(args.max_tx_payload_bytes, None);
     }
 }

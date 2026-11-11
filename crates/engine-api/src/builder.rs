@@ -11,7 +11,7 @@ use alloy_consensus::{
 use alloy_eips::eip2718::Decodable2718;
 use alloy_primitives::{Address, B64, B256, Sealable};
 use alloy_rpc_types_engine::{PayloadAttributes, PayloadStatus, PayloadStatusEnum};
-use morph_chainspec::MorphChainSpec;
+use morph_chainspec::{MorphChainSpec, MorphHardforks};
 use morph_payload_types::{
     AssembleL2BlockParams, AssembleL2BlockV2Params, ExecutableL2Data, GenericResponse,
     MorphBuiltPayload, MorphExecutionData, MorphPayloadTypes, SafeL2Data,
@@ -97,7 +97,8 @@ struct CanonicalHead {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TxPoolPolicy {
     /// Sequencer assembly: execute the supplied L1 messages, then pack the best pool
-    /// transactions.
+    /// transactions. A requested timestamp behind the parent's is raised (see
+    /// [`payload_timestamp`]).
     Include,
     /// Derivation import: execute exactly the supplied transactions and nothing else, so the
     /// rebuilt block is byte-identical to the one the sequencer committed to L1.
@@ -108,6 +109,42 @@ impl TxPoolPolicy {
     /// Maps to the `no_tx_pool` flag carried by [`morph_payload_types::MorphPayloadAttributes`].
     const fn no_tx_pool(self) -> bool {
         matches!(self, Self::Exclude)
+    }
+}
+
+/// Chooses the timestamp of a payload built on a parent with timestamp `parent_timestamp`.
+///
+/// `emerald_active` is whether Emerald is active at the parent's timestamp: from Emerald on a
+/// block may share its parent's timestamp, before it a block must be strictly later.
+fn payload_timestamp(
+    requested: Option<u64>,
+    parent_timestamp: u64,
+    emerald_active: bool,
+    tx_pool_policy: TxPoolPolicy,
+) -> u64 {
+    match requested {
+        // Sequencer assembly takes the CL's wall-clock second, which falls below the parent's
+        // timestamp when the clock steps back or HA leadership moves to a node whose clock is
+        // behind. Every follower rejects such a block, but the sequencer imports the payload it
+        // built without re-validating the header and would make it canonical, splitting the
+        // chain. Raise it to the earliest timestamp the header rules accept.
+        Some(timestamp) if tx_pool_policy == TxPoolPolicy::Include => {
+            let earliest = if emerald_active {
+                parent_timestamp
+            } else {
+                parent_timestamp + 1
+            };
+            timestamp.max(earliest)
+        }
+        // Derivation rebuilds a block already committed to L1 and must reproduce it exactly.
+        Some(timestamp) => timestamp,
+        None => std::cmp::max(
+            parent_timestamp + 1,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        ),
     }
 }
 
@@ -733,15 +770,24 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
         }
 
         // 3. Build payload attributes.
-        let timestamp = params.timestamp.unwrap_or_else(|| {
-            std::cmp::max(
-                parent_timestamp + 1,
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs(),
-            )
-        });
+        let timestamp = payload_timestamp(
+            params.timestamp,
+            parent_timestamp,
+            self.chain_spec
+                .is_emerald_active_at_timestamp(parent_timestamp),
+            tx_pool_policy,
+        );
+        if let Some(requested) = params.timestamp
+            && requested != timestamp
+        {
+            tracing::warn!(
+                target: "morph::engine",
+                requested,
+                timestamp,
+                parent_timestamp,
+                "raised a block timestamp behind its parent; check the sequencer clock"
+            );
+        }
         let base_fee_override = base_fee_override
             .map(|fee| {
                 u64::try_from(fee).map_err(|_| {
@@ -1387,5 +1433,63 @@ mod tests {
             }
             other => panic!("unexpected error: {other}"),
         }
+    }
+
+    #[test]
+    fn test_payload_timestamp_raises_assembly_timestamp_behind_parent() {
+        // From Emerald on a block may share its parent's timestamp.
+        assert_eq!(
+            payload_timestamp(Some(5), 10, true, TxPoolPolicy::Include),
+            10
+        );
+        // Before Emerald it must be strictly later, so an equal timestamp is raised too.
+        assert_eq!(
+            payload_timestamp(Some(5), 10, false, TxPoolPolicy::Include),
+            11
+        );
+        assert_eq!(
+            payload_timestamp(Some(10), 10, false, TxPoolPolicy::Include),
+            11
+        );
+    }
+
+    #[test]
+    fn test_payload_timestamp_keeps_valid_assembly_timestamp() {
+        assert_eq!(
+            payload_timestamp(Some(10), 10, true, TxPoolPolicy::Include),
+            10
+        );
+        assert_eq!(
+            payload_timestamp(Some(12), 10, true, TxPoolPolicy::Include),
+            12
+        );
+        assert_eq!(
+            payload_timestamp(Some(11), 10, false, TxPoolPolicy::Include),
+            11
+        );
+    }
+
+    #[test]
+    fn test_payload_timestamp_keeps_derivation_timestamp() {
+        // A derived block must reproduce the block committed to L1, even one that breaks the
+        // header rules.
+        assert_eq!(
+            payload_timestamp(Some(5), 10, true, TxPoolPolicy::Exclude),
+            5
+        );
+        assert_eq!(
+            payload_timestamp(Some(10), 10, false, TxPoolPolicy::Exclude),
+            10
+        );
+    }
+
+    #[test]
+    fn test_payload_timestamp_defaults_after_parent() {
+        // Ahead of the wall clock, so the parent decides the default.
+        let parent_timestamp = 20_000_000_000;
+        assert_eq!(
+            payload_timestamp(None, parent_timestamp, true, TxPoolPolicy::Include),
+            parent_timestamp + 1
+        );
     }
 }

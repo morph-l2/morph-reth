@@ -37,6 +37,9 @@ use crate::{
 };
 
 /// State provider that reads through an active [`MorphProofsBatchSession`]'s transaction.
+// `Constructor` emits `field: field`. Clippy 1.99 reports that on the field span
+// (rust-lang/rust-clippy#17525); the derive forwards this allow onto `new`.
+#[allow(clippy::redundant_field_names)]
 #[derive(Constructor)]
 pub struct MorphProofsBatchStateProviderRef<'a, S: MorphProofsBatchSession> {
     latest: Box<dyn StateProvider + Send + 'a>,

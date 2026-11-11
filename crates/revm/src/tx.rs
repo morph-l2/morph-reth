@@ -9,7 +9,10 @@ use alloy_eips::eip2718::Encodable2718;
 use alloy_eips::eip2930::AccessList;
 use alloy_eips::eip7702::RecoveredAuthority;
 use alloy_primitives::{Address, B256, Bytes, Signature, TxKind, U256};
-use morph_primitives::{L1_TX_TYPE_ID, MORPH_TX_TYPE_ID, MorphTxEnvelope, TxMorph};
+use morph_primitives::{
+    L1_TX_TYPE_ID, MORPH_TX_TYPE_ID, MorphTxEnvelope, TxMorph,
+    transaction::morph_transaction::{MORPH_TX_VERSION_1, MORPH_TX_VERSION_2},
+};
 use reth_evm::{FromRecoveredTx, FromTxWithEncoded, ToTxEnv, TransactionEnvMut};
 use revm::context::{Transaction, TxEnv};
 use revm::context_interface::transaction::{
@@ -115,7 +118,7 @@ impl MorphTxEnv {
         // 64 bytes of 0xff followed by yParity=1.
         let placeholder_signature = Signature::new(U256::MAX, U256::MAX, true);
 
-        match self.build_morph_tx_for_l1_fee(fallback_chain_id) {
+        match self.build_morph_tx_for_l1_fee(fallback_chain_id, placeholder_signature) {
             Some(morph_tx) => {
                 let signed = morph_tx.into_signed(placeholder_signature);
                 MorphTxEnvelope::Morph(signed).rlp()
@@ -126,10 +129,42 @@ impl MorphTxEnv {
         }
     }
 
-    fn build_morph_tx_for_l1_fee(&self, fallback_chain_id: u64) -> Option<TxMorph> {
+    fn build_morph_tx_for_l1_fee(
+        &self,
+        fallback_chain_id: u64,
+        placeholder_signature: Signature,
+    ) -> Option<TxMorph> {
         if !self.is_morph_tx() {
             return None;
         }
+
+        let version = self.version.unwrap_or_else(|| {
+            // If version is missing (e.g. from an older transaction type), fall back to
+            // the smallest version that can represent the request so the L1 fee is not
+            // underpriced: V2 when an authorization list is present, otherwise V1.
+            let fallback = if self.inner.authorization_list.is_empty() {
+                MORPH_TX_VERSION_1
+            } else {
+                MORPH_TX_VERSION_2
+            };
+            tracing::debug!(
+                target: "morph::evm",
+                fallback,
+                "MorphTx version not set, falling back for L1 fee calculation to safely overestimate"
+            );
+            fallback
+        });
+
+        // V2 carries the authorization list in its RLP payload (an empty list
+        // still encodes as `0xc0`); leaving it out would under-size the L1 data
+        // fee by the whole list (geth's `asUnsignedMorphTx` sizes it too).
+        // Recovered authorizations no longer carry their signature and reuse
+        // the fee-sizing placeholder.
+        let authorization_list = if version == MORPH_TX_VERSION_2 {
+            self.signed_authorizations_for_l1_fee(placeholder_signature)
+        } else {
+            Vec::new()
+        };
 
         Some(TxMorph {
             chain_id: self.chain_id().unwrap_or(fallback_chain_id),
@@ -143,17 +178,10 @@ impl MorphTxEnv {
             input: self.input().clone(),
             fee_token_id: self.fee_token_id.unwrap_or_default(),
             fee_limit: self.fee_limit.unwrap_or_default(),
-            version: self.version.unwrap_or_else(|| {
-                // If version is missing (e.g. from an older transaction type), we fallback to V1
-                // to safely overestimate the L1 fee, ensuring we don't underprice the transaction.
-                tracing::debug!(
-                    target: "morph::evm",
-                    "MorphTx version not set, falling back to V1 for L1 fee calculation to safely overestimate"
-                );
-                morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_1
-            }),
+            version,
             reference: self.reference,
             memo: self.memo.clone(),
+            authorization_list,
         })
     }
 
@@ -899,5 +927,162 @@ mod tests {
             ..Default::default()
         };
         assert!(!tx.encode_for_l1_fee(53077).is_empty());
+    }
+
+    fn sample_signed_authorization() -> SignedAuthorization {
+        alloy_eips::eip7702::Authorization {
+            chain_id: U256::from(53077),
+            address: Address::with_last_byte(0x42),
+            nonce: 7,
+        }
+        .into_signed(Signature::new(U256::from(1), U256::from(2), true))
+    }
+
+    fn morph_v2_tx_env(
+        version: Option<u8>,
+        authorization: Either<SignedAuthorization, RecoveredAuthorization>,
+    ) -> MorphTxEnv {
+        MorphTxEnv {
+            inner: TxEnv {
+                tx_type: MORPH_TX_TYPE_ID,
+                chain_id: Some(53077),
+                gas_limit: 100_000,
+                gas_price: 20_000_000_000,
+                gas_priority_fee: Some(1_000_000_000),
+                nonce: 1,
+                kind: TxKind::Call(Address::with_last_byte(0xf1)),
+                authorization_list: vec![authorization],
+                ..Default::default()
+            },
+            version,
+            fee_token_id: Some(1),
+            fee_limit: Some(U256::from(1000)),
+            ..Default::default()
+        }
+    }
+
+    /// The simulated MorphTx V2 envelope must carry the authorization list so
+    /// `eth_estimateGas` / `eth_call` size the L1 data fee like geth's
+    /// `asUnsignedMorphTx`; dropping it would under-price the transaction.
+    #[test]
+    fn encode_for_l1_fee_morph_tx_v2_includes_authorization_list() {
+        let signed_authorization = sample_signed_authorization();
+        let tx = morph_v2_tx_env(
+            Some(MORPH_TX_VERSION_2),
+            Either::Left(signed_authorization.clone()),
+        );
+
+        let encoded = tx.encode_for_l1_fee(53077);
+        assert_eq!(encoded[0], MORPH_TX_TYPE_ID);
+        assert_eq!(encoded[1], MORPH_TX_VERSION_2);
+
+        let decoded = MorphTxEnvelope::decode_2718(&mut encoded.as_ref()).unwrap();
+        let MorphTxEnvelope::Morph(decoded) = decoded else {
+            panic!("expected MorphTx envelope");
+        };
+        assert_eq!(decoded.tx().version, MORPH_TX_VERSION_2);
+        assert_eq!(decoded.tx().fee_token_id, 1);
+        assert_eq!(decoded.tx().authorization_list, vec![signed_authorization]);
+
+        // Sanity: the list actually contributes bytes versus the V1 shape.
+        let v1 = MorphTxEnv {
+            version: Some(MORPH_TX_VERSION_1),
+            inner: TxEnv {
+                authorization_list: vec![],
+                ..tx.inner.clone()
+            },
+            ..tx
+        };
+        assert!(encoded.len() > v1.encode_for_l1_fee(53077).len());
+    }
+
+    #[test]
+    fn encode_for_l1_fee_morph_tx_version_fallback_picks_v2_with_authorizations() {
+        let tx = morph_v2_tx_env(None, Either::Left(sample_signed_authorization()));
+
+        let encoded = tx.encode_for_l1_fee(53077);
+        let decoded = MorphTxEnvelope::decode_2718(&mut encoded.as_ref()).unwrap();
+        let MorphTxEnvelope::Morph(decoded) = decoded else {
+            panic!("expected MorphTx envelope");
+        };
+        assert_eq!(decoded.tx().version, MORPH_TX_VERSION_2);
+        assert_eq!(decoded.tx().authorization_list.len(), 1);
+
+        // Without a list the fallback stays V1.
+        let no_list = MorphTxEnv {
+            inner: TxEnv {
+                authorization_list: vec![],
+                ..tx.inner.clone()
+            },
+            ..tx
+        };
+        let encoded = no_list.encode_for_l1_fee(53077);
+        assert_eq!(encoded[1], MORPH_TX_VERSION_1);
+    }
+
+    #[test]
+    fn encode_for_l1_fee_morph_tx_v2_recovered_authorization_uses_placeholder_signature() {
+        let recovered = RecoveredAuthorization::new_unchecked(
+            alloy_eips::eip7702::Authorization {
+                chain_id: U256::from(53077),
+                address: Address::with_last_byte(0x42),
+                nonce: 7,
+            },
+            RecoveredAuthority::Valid(Address::with_last_byte(0x99)),
+        );
+        let tx = morph_v2_tx_env(Some(MORPH_TX_VERSION_2), Either::Right(recovered));
+
+        let encoded = tx.encode_for_l1_fee(53077);
+        let decoded = MorphTxEnvelope::decode_2718(&mut encoded.as_ref()).unwrap();
+        let MorphTxEnvelope::Morph(decoded) = decoded else {
+            panic!("expected MorphTx envelope");
+        };
+        let list = decoded.tx().authorization_list.clone();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].nonce, 7);
+        // go-ethereum's placeholder: r = s = 0xff..ff, yParity = 1
+        assert_eq!(list[0].r(), U256::MAX);
+        assert_eq!(list[0].s(), U256::MAX);
+    }
+
+    #[test]
+    fn from_recovered_tx_morph_v2_populates_authorization_list_and_version() {
+        use alloy_consensus::Signed;
+
+        let signed_authorization = sample_signed_authorization();
+        let morph_tx = TxMorph {
+            chain_id: 53077,
+            nonce: 1,
+            gas_limit: 100_000,
+            max_fee_per_gas: 20_000_000_000,
+            max_priority_fee_per_gas: 1_000_000_000,
+            to: TxKind::Call(Address::with_last_byte(0xf1)),
+            value: U256::ZERO,
+            access_list: AccessList::default(),
+            input: Bytes::new(),
+            version: MORPH_TX_VERSION_2,
+            fee_token_id: 0,
+            fee_limit: U256::ZERO,
+            reference: None,
+            memo: None,
+            authorization_list: vec![signed_authorization.clone()],
+        };
+        let envelope = MorphTxEnvelope::Morph(Signed::new_unchecked(
+            morph_tx,
+            Signature::new(U256::from(1), U256::from(2), false),
+            B256::ZERO,
+        ));
+
+        let env = MorphTxEnv::from_recovered_tx(&envelope, Address::with_last_byte(0x01));
+        assert_eq!(env.version, Some(MORPH_TX_VERSION_2));
+        assert_eq!(env.inner.tx_type, MORPH_TX_TYPE_ID);
+        assert_eq!(env.inner.authorization_list.len(), 1);
+        match &env.inner.authorization_list[0] {
+            Either::Right(recovered) => {
+                let (authorization, _authority) = recovered.clone().into_parts();
+                assert_eq!(&authorization, signed_authorization.inner());
+            }
+            other => panic!("expected a recovered authorization, got {other:?}"),
+        }
     }
 }
