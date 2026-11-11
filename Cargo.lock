@@ -5527,6 +5527,8 @@ dependencies = [
  "reth-revm",
  "reth-storage-api",
  "reth-transaction-pool",
+ "tokio",
+ "tokio-stream",
  "tracing",
 ]
 
