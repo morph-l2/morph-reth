@@ -29,6 +29,11 @@ pub struct MorphBuiltPayload {
     pub executable_data: ExecutableL2Data,
 
     /// Full execution artifacts for reth-native block persistence.
+    ///
+    /// `None` for blocks without transactions. reth pre-inserts every resolved payload
+    /// into the engine tree through these artifacts, and a sequencer discards most of
+    /// its empty candidates without ever supplying the finalized tag that would prune
+    /// them again, so empty blocks are left out and executed on import instead.
     pub executed: Option<BuiltPayloadExecutedBlock<MorphPrimitives>>,
 }
 
@@ -70,7 +75,7 @@ impl MorphBuiltPayload {
         &self.executable_data
     }
 
-    /// Returns execution artifacts if available.
+    /// Returns execution artifacts if available (`None` for blocks without transactions).
     pub fn executed(&self) -> Option<&BuiltPayloadExecutedBlock<MorphPrimitives>> {
         self.executed.as_ref()
     }
