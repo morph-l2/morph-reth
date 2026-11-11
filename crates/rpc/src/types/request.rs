@@ -9,11 +9,12 @@ use serde::{Deserialize, Serialize};
 /// Extends standard Ethereum transaction request with:
 /// - `feeTokenID`: Token ID for ERC20 gas payment
 /// - `feeLimit`: Maximum token amount willing to pay for fees
-/// - `version`: Explicit MorphTx version selector
 /// - `reference`: 32-byte reference key for transaction indexing
 /// - `memo`: Arbitrary memo data (up to 64 bytes)
 ///
-/// When omitted, MorphTx version is inferred from Morph-specific fields.
+/// The MorphTx version is not part of the request: it is derived from the
+/// content (V1 unless a non-empty `authorizationList` makes it V2). A legacy
+/// `version` key is ignored like any other unknown key.
 #[derive(
     Debug,
     Clone,
@@ -45,10 +46,6 @@ pub struct MorphTransactionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fee_limit: Option<U256>,
 
-    /// Explicit MorphTx version selector (only for MorphTx type 0x7F).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub version: Option<U64>,
-
     /// Reference key for transaction indexing (32 bytes).
     /// Used for looking up transactions by external systems.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -76,14 +73,13 @@ impl AsMut<TransactionRequest> for MorphTransactionRequest {
 
 /// Creates a [`MorphTransactionRequest`] from a standard [`TransactionRequest`].
 ///
-/// Sets `fee_token_id`, `fee_limit`, `version`, `reference`, and `memo` to `None`.
+/// Sets `fee_token_id`, `fee_limit`, `reference`, and `memo` to `None`.
 impl From<TransactionRequest> for MorphTransactionRequest {
     fn from(value: TransactionRequest) -> Self {
         Self {
             inner: value,
             fee_token_id: None,
             fee_limit: None,
-            version: None,
             reference: None,
             memo: None,
         }
@@ -120,7 +116,6 @@ mod tests {
         assert_eq!(morph_req.inner, inner);
         assert!(morph_req.fee_token_id.is_none());
         assert!(morph_req.fee_limit.is_none());
-        assert!(morph_req.version.is_none());
         assert!(morph_req.reference.is_none());
         assert!(morph_req.memo.is_none());
     }
@@ -131,7 +126,6 @@ mod tests {
             inner: basic_inner_request(),
             fee_token_id: Some(U64::from(1)),
             fee_limit: Some(U256::from(500)),
-            version: Some(U64::from(1)),
             reference: Some(b256!(
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             )),
@@ -186,7 +180,6 @@ mod tests {
             inner: basic_inner_request(),
             fee_token_id: Some(U64::from(5)),
             fee_limit: Some(U256::from(999)),
-            version: Some(U64::from(1)),
             reference: Some(b256!(
                 "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
             )),
@@ -203,13 +196,11 @@ mod tests {
             inner: basic_inner_request(),
             fee_token_id: Some(U64::from(1)),
             fee_limit: Some(U256::from(100)),
-            version: Some(U64::from(1)),
             ..Default::default()
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"feeTokenID\""));
         assert!(json.contains("\"feeLimit\""));
-        assert!(json.contains("\"version\""));
     }
 
     #[test]
@@ -226,13 +217,32 @@ mod tests {
         assert!(!json.contains("memo"));
     }
 
+    /// A `version` key from older clients is not an error; the version is
+    /// derived from the content instead.
+    #[test]
+    fn serde_ignores_legacy_version_key() {
+        let with_key: MorphTransactionRequest = serde_json::from_value(serde_json::json!({
+            "from": "0x0000000000000000000000000000000000000001",
+            "to": "0x0000000000000000000000000000000000000002",
+            "feeTokenID": "0x1",
+            "version": "0x2"
+        }))
+        .expect("a legacy version key must not break deserialization");
+        let without_key: MorphTransactionRequest = serde_json::from_value(serde_json::json!({
+            "from": "0x0000000000000000000000000000000000000001",
+            "to": "0x0000000000000000000000000000000000000002",
+            "feeTokenID": "0x1"
+        }))
+        .unwrap();
+        assert_eq!(with_key, without_key);
+    }
+
     #[test]
     fn default_creates_empty_request() {
         let req = MorphTransactionRequest::default();
         assert_eq!(req.inner, TransactionRequest::default());
         assert!(req.fee_token_id.is_none());
         assert!(req.fee_limit.is_none());
-        assert!(req.version.is_none());
         assert!(req.reference.is_none());
         assert!(req.memo.is_none());
     }
