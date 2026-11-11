@@ -20,14 +20,26 @@ RUSTFLAGS_ARCH :=
 # Keep build metadata stable across rebuilds of the same commit.
 SOURCE_DATE_EPOCH ?= $(shell git log -1 --format=%ct HEAD)
 
+# Internal build hosts cannot reach GitHub, so the Cargo git dependencies (reth,
+# discv5) come from the committed vendor/ directory instead. Plain cargo commands
+# never load this file, so external users keep fetching them from GitHub.
+VENDOR_CONFIG := --config vendor/cargo-config.toml
+
+# Cargo keeps no checksums for vendored git sources and would silently build a
+# stale vendor/, so refuse to build unless vendor/ was generated for the commits
+# pinned in Cargo.lock. Regenerate with `make vendor` on a host with GitHub access.
+CHECK_VENDOR = LC_ALL=C grep '^source = "git+' Cargo.lock | LC_ALL=C sort -u | diff -q - vendor/SOURCES >/dev/null \
+	|| { echo "error: vendor/ does not match the git dependencies in Cargo.lock; run 'make vendor'" >&2; exit 1; }
+
 define cargo_build_and_upload
 	if [ ! -d $(DIST_DIR) ]; then mkdir -p $(DIST_DIR); fi
-	CARGO_NET_GIT_FETCH_WITH_CLI=true cargo fetch --locked
+	$(CHECK_VENDOR)
+	CARGO_NET_GIT_FETCH_WITH_CLI=true cargo fetch --locked $(VENDOR_CONFIG)
 	SRC=$$(ls -d "$${CARGO_HOME:-$$HOME/.cargo}"/registry/src/*/ | head -1); \
 	SRC=$${SRC%/}; \
 	SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" LC_ALL=C TZ=UTC \
 	RUSTFLAGS="--remap-path-prefix=$$(pwd)=/morph-reth --remap-path-prefix=$${SRC}=/registry $(RUSTFLAGS_ARCH)" \
-	cargo build --bin $(BINARY) --profile "$(PROFILE)" --locked --target-dir "$(CARGO_TARGET_DIR)"
+	cargo build --bin $(BINARY) --profile "$(PROFILE)" --locked $(VENDOR_CONFIG) --target-dir "$(CARGO_TARGET_DIR)"
 	cp "$(CARGO_TARGET_DIR)/$(PROFILE)/$(BINARY)" "$(DIST_DIR)/"
 	tar -czvf $(TARBALL) $(DIST_DIR)
 	aws s3 cp $(TARBALL) $(1)
@@ -47,3 +59,9 @@ build-bk-prod-morph-prod-testnet-to-morph-reth-hoodi:
 
 build-bk-test-morph-test-qanet-to-morph-reth-qanet:
 	$(call cargo_build_and_upload,s3://morph-7637-morph-technical-department-qanet-data/morph-setup/morph-reth.tar.gz)
+
+# ─── Checks ──────────────────────────────────────────────────────────────────
+
+.PHONY: check-vendor
+check-vendor:
+	@$(CHECK_VENDOR)

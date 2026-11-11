@@ -1,0 +1,4 @@
+# Vendored third-party sources (see vendor/README.md). Keep their bytes exact so
+# the .cargo-checksum.json files stay valid on every platform, and collapse them
+# in GitHub diffs and language statistics.
+vendor/** -text linguist-vendored linguist-generated

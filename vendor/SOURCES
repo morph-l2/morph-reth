@@ -1,0 +1,2 @@
+source = "git+https://github.com/morph-l2/reth?tag=v2.5.2-morph.1#b3b64033e42d459b236542b845513bf56c6ba760"
+source = "git+https://github.com/sigp/discv5?rev=7663c00#7663c00ee0837ea98547caaedede95d9d6736f4d"

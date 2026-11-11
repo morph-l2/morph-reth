@@ -150,6 +150,12 @@ define docker_build_push
 		--push
 endef
 
+##@ Vendor
+
+.PHONY: vendor
+vendor: ## Regenerate vendor/ (git dependencies for MakefileBuild.mk builds). Needs GitHub access.
+	python3 etc/vendor-git-deps.py
+
 ##@ Other
 
 .PHONY: clean
