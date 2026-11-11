@@ -41,5 +41,7 @@ parking_lot.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+tokio.workspace = true
+tokio-stream = { workspace = true, features = ["sync"] }
 reth-evm-ethereum.workspace = true
 reth-provider = { workspace = true, features = ["test-utils"] }
