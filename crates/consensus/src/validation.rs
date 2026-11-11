@@ -46,7 +46,7 @@ use morph_chainspec::{
 };
 use morph_primitives::{
     Block, BlockBody, MorphHeader, MorphReceipt, MorphTxEnvelope,
-    transaction::morph_transaction::MORPH_TX_VERSION_1,
+    transaction::morph_transaction::{MORPH_TX_VERSION_1, MORPH_TX_VERSION_2},
 };
 use reth_consensus::{Consensus, ConsensusError, FullConsensus, HeaderValidator, ReceiptRootBloom};
 use reth_consensus_common::validation::{
@@ -320,7 +320,10 @@ impl Consensus<Block> for MorphConsensus {
         let is_jade = self
             .chain_spec
             .is_jade_active_at_timestamp(block.header().timestamp());
-        validate_morph_txs(&block.body().transactions, is_emerald, is_jade)?;
+        let is_celadon = self
+            .chain_spec
+            .is_celadon_active_at_timestamp(block.header().timestamp());
+        validate_morph_txs(&block.body().transactions, is_emerald, is_jade, is_celadon)?;
 
         // Validate L1 messages ordering and internal consistency with header.
         // This is the body-level half of L1 validation; it verifies that the L1
@@ -643,15 +646,18 @@ fn validate_l1_messages_in_block(
 ///
 /// Performs three checks per MorphTx:
 /// 1. **Type hardfork gate**: rejects MorphTx before the Emerald fork is active
-/// 2. **Version hardfork gate**: rejects V1 transactions before the Jade fork is active
+/// 2. **Version hardfork gate**: rejects V1 transactions before the Jade fork is
+///    active and V2 transactions before the Celadon fork is active
 /// 3. **Field validation**: delegates to [`TxMorph::validate()`] for version-specific
-///    field constraints, memo length, and gas price ordering
+///    field constraints (including the V2 authorization-list rules), memo length,
+///    and gas price ordering
 ///
 /// See [`TxMorph::validate()`] for the detailed per-version rules.
 fn validate_morph_txs(
     txs: &[MorphTxEnvelope],
     is_emerald: bool,
     is_jade: bool,
+    is_celadon: bool,
 ) -> Result<(), ConsensusError> {
     for tx in txs {
         let morph_tx = match tx {
@@ -670,6 +676,13 @@ fn validate_morph_txs(
         if !is_jade && morph_tx.version == MORPH_TX_VERSION_1 {
             return Err(ConsensusError::other(MorphConsensusError::InvalidBody(
                 "MorphTx version 1 is not yet active (jade fork not reached)".into(),
+            )));
+        }
+
+        // Reject MorphTx V2 (EIP-7702 authorization list) before Celadon fork.
+        if !is_celadon && morph_tx.version == MORPH_TX_VERSION_2 {
+            return Err(ConsensusError::other(MorphConsensusError::InvalidBody(
+                "MorphTx version 2 is not yet active (celadon fork not reached)".into(),
             )));
         }
 
@@ -1756,6 +1769,7 @@ mod tests {
             fee_limit: U256::from(1000u64),
             reference: None,
             memo: None,
+            authorization_list: Vec::new(),
             input: Bytes::new(),
         };
         MorphTxEnvelope::Morph(Signed::new_unchecked(
@@ -1783,6 +1797,7 @@ mod tests {
             fee_limit: U256::ZERO,
             reference: Some(B256::repeat_byte(0xab)),
             memo: Some(Bytes::from_static(b"test-memo")),
+            authorization_list: Vec::new(),
             input: Bytes::new(),
         };
         MorphTxEnvelope::Morph(Signed::new_unchecked(
@@ -1796,7 +1811,7 @@ mod tests {
     fn test_validate_morph_tx_v0_valid() {
         // V0 with fee_token_id > 0 and no reference/memo
         let txs = [create_morph_tx_v0(1)];
-        let result = validate_morph_txs(&txs, true, false);
+        let result = validate_morph_txs(&txs, true, false, false);
         assert!(result.is_ok());
     }
 
@@ -1804,7 +1819,7 @@ mod tests {
     fn test_validate_morph_tx_v0_zero_fee_token_rejected() {
         // V0 with fee_token_id == 0 should be rejected
         let txs = [create_morph_tx_v0(0)];
-        let result = validate_morph_txs(&txs, true, false);
+        let result = validate_morph_txs(&txs, true, false, false);
         assert!(result.is_err());
         assert!(
             result
@@ -1833,6 +1848,7 @@ mod tests {
             fee_limit: U256::from(1000u64),
             reference: Some(B256::repeat_byte(0x01)), // V0 should not have reference
             memo: None,
+            authorization_list: Vec::new(),
             input: Bytes::new(),
         };
         let envelope = MorphTxEnvelope::Morph(Signed::new_unchecked(
@@ -1842,7 +1858,7 @@ mod tests {
         ));
 
         let txs = [envelope];
-        let result = validate_morph_txs(&txs, true, false);
+        let result = validate_morph_txs(&txs, true, false, false);
         assert!(result.is_err());
         assert!(
             result
@@ -1856,7 +1872,7 @@ mod tests {
     fn test_validate_morph_tx_v1_before_jade_rejected() {
         // V1 before jade fork should be rejected
         let txs = [create_morph_tx_v1(1)];
-        let result = validate_morph_txs(&txs, true, false);
+        let result = validate_morph_txs(&txs, true, false, false);
         assert!(result.is_err());
         assert!(
             result
@@ -1870,8 +1886,193 @@ mod tests {
     fn test_validate_morph_tx_v1_after_jade_valid() {
         // V1 after jade fork should pass
         let txs = [create_morph_tx_v1(1)];
-        let result = validate_morph_txs(&txs, true, true);
+        let result = validate_morph_txs(&txs, true, true, true);
         assert!(result.is_ok());
+    }
+
+    fn sample_authorization() -> alloy_eips::eip7702::SignedAuthorization {
+        alloy_eips::eip7702::Authorization {
+            chain_id: U256::from(1337),
+            address: Address::repeat_byte(0x42),
+            nonce: 0,
+        }
+        .into_signed(Signature::new(U256::from(1), U256::from(2), false))
+    }
+
+    fn create_morph_tx_v2_with(
+        version: u8,
+        authorization_list: Vec<alloy_eips::eip7702::SignedAuthorization>,
+        to: alloy_primitives::TxKind,
+    ) -> MorphTxEnvelope {
+        use morph_primitives::TxMorph;
+
+        let tx = TxMorph {
+            chain_id: 1337,
+            nonce: 0,
+            gas_limit: 100_000,
+            max_fee_per_gas: 2_000_000_000,
+            max_priority_fee_per_gas: 1_000_000_000,
+            to,
+            value: U256::ZERO,
+            access_list: Default::default(),
+            version,
+            fee_token_id: 0,
+            fee_limit: U256::ZERO,
+            reference: Some(B256::repeat_byte(0xab)),
+            memo: Some(Bytes::from_static(b"test-memo")),
+            authorization_list,
+            input: Bytes::from_static(&[0x60, 0x80]),
+        };
+        MorphTxEnvelope::Morph(Signed::new_unchecked(
+            tx,
+            Signature::new(U256::ZERO, U256::ZERO, false),
+            B256::ZERO,
+        ))
+    }
+
+    fn create_morph_tx_v2() -> MorphTxEnvelope {
+        create_morph_tx_v2_with(
+            MORPH_TX_VERSION_2,
+            vec![sample_authorization()],
+            alloy_primitives::TxKind::Call(Address::repeat_byte(0x01)),
+        )
+    }
+
+    #[test]
+    fn test_validate_morph_tx_v2_before_celadon_rejected() {
+        let txs = [create_morph_tx_v2()];
+        let result = validate_morph_txs(&txs, true, true, false);
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("celadon fork not reached")
+        );
+    }
+
+    #[test]
+    fn test_validate_morph_tx_v2_after_celadon_valid() {
+        let txs = [create_morph_tx_v2()];
+        assert!(validate_morph_txs(&txs, true, true, true).is_ok());
+    }
+
+    /// A V2 with an empty list is valid after Celadon (and still Celadon-gated).
+    #[test]
+    fn test_validate_morph_tx_v2_empty_authorization_list_accepted() {
+        let txs = [create_morph_tx_v2_with(
+            MORPH_TX_VERSION_2,
+            vec![],
+            alloy_primitives::TxKind::Call(Address::repeat_byte(0x01)),
+        )];
+        assert!(validate_morph_txs(&txs, true, true, true).is_ok());
+        assert!(
+            validate_morph_txs(&txs, true, true, false)
+                .unwrap_err()
+                .to_string()
+                .contains("celadon fork not reached")
+        );
+    }
+
+    #[test]
+    fn test_validate_morph_tx_v2_create_with_authorizations_rejected() {
+        let txs = [create_morph_tx_v2_with(
+            MORPH_TX_VERSION_2,
+            vec![sample_authorization()],
+            alloy_primitives::TxKind::Create,
+        )];
+        let err = validate_morph_txs(&txs, true, true, true)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("MorphTx with an authorization list cannot create a contract"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// Without authorizations a V2 may create a contract, exactly like V1.
+    #[test]
+    fn test_validate_morph_tx_v2_create_without_authorizations_accepted() {
+        let txs = [create_morph_tx_v2_with(
+            MORPH_TX_VERSION_2,
+            vec![],
+            alloy_primitives::TxKind::Create,
+        )];
+        assert!(validate_morph_txs(&txs, true, true, true).is_ok());
+    }
+
+    #[test]
+    fn test_validate_morph_tx_v1_with_authorization_list_rejected() {
+        let txs = [create_morph_tx_v2_with(
+            MORPH_TX_VERSION_1,
+            vec![sample_authorization()],
+            alloy_primitives::TxKind::Call(Address::repeat_byte(0x01)),
+        )];
+        let err = validate_morph_txs(&txs, true, true, true)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("version 1 MorphTx does not support authorization list"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_block_pre_execution_rejects_v2_without_celadon() {
+        // `create_test_chainspec` schedules forks through Jade only.
+        let consensus = MorphConsensus::new(create_test_chainspec());
+        let block = create_sealed_block(0, vec![create_morph_tx_v2()]);
+
+        let err = consensus
+            .validate_block_pre_execution(&block)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("celadon fork not reached"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_block_pre_execution_uses_chainspec_celadon_activation() {
+        let genesis_json = serde_json::json!({
+            "config": {
+                "chainId": 1337,
+                "homesteadBlock": 0,
+                "eip150Block": 0,
+                "eip155Block": 0,
+                "eip158Block": 0,
+                "byzantiumBlock": 0,
+                "constantinopleBlock": 0,
+                "petersburgBlock": 0,
+                "istanbulBlock": 0,
+                "berlinBlock": 0,
+                "londonBlock": 0,
+                "bernoulliBlock": 0,
+                "curieBlock": 0,
+                "morph203Time": 0,
+                "viridianTime": 0,
+                "emeraldTime": 0,
+                "jadeForkTime": 0,
+                "celadonTime": 1000,
+                "morph": {}
+            },
+            "alloc": {}
+        });
+        let genesis: Genesis = serde_json::from_value(genesis_json).unwrap();
+        let consensus = MorphConsensus::new(Arc::new(MorphChainSpec::from(genesis)));
+
+        let before = create_sealed_block(999, vec![create_morph_tx_v2()]);
+        let err = consensus
+            .validate_block_pre_execution(&before)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("celadon fork not reached"),
+            "unexpected error: {err}"
+        );
+
+        let after = create_sealed_block(1000, vec![create_morph_tx_v2()]);
+        assert!(consensus.validate_block_pre_execution(&after).is_ok());
     }
 
     #[test]
@@ -2008,6 +2209,7 @@ mod tests {
             fee_limit: U256::from(100u64), // non-zero with fee_token_id=0
             reference: None,
             memo: None,
+            authorization_list: Vec::new(),
             input: Bytes::new(),
         };
         let envelope = MorphTxEnvelope::Morph(Signed::new_unchecked(
@@ -2017,7 +2219,7 @@ mod tests {
         ));
 
         let txs = [envelope];
-        let result = validate_morph_txs(&txs, true, true);
+        let result = validate_morph_txs(&txs, true, true, true);
         assert!(result.is_err());
         assert!(
             result
@@ -2046,6 +2248,7 @@ mod tests {
             fee_limit: U256::from(100u64),
             reference: None,
             memo: Some(Bytes::from(vec![0xab; MAX_MEMO_LENGTH + 1])), // too long
+            authorization_list: Vec::new(),
             input: Bytes::new(),
         };
         let envelope = MorphTxEnvelope::Morph(Signed::new_unchecked(
@@ -2055,7 +2258,7 @@ mod tests {
         ));
 
         let txs = [envelope];
-        let result = validate_morph_txs(&txs, true, true);
+        let result = validate_morph_txs(&txs, true, true, true);
         assert!(result.is_err());
         assert!(
             result
@@ -2084,6 +2287,7 @@ mod tests {
             fee_limit: U256::from(100u64),
             reference: None,
             memo: None,
+            authorization_list: Vec::new(),
             input: Bytes::new(),
         };
         let envelope = MorphTxEnvelope::Morph(Signed::new_unchecked(
@@ -2093,7 +2297,7 @@ mod tests {
         ));
 
         let txs = [envelope];
-        let result = validate_morph_txs(&txs, true, true);
+        let result = validate_morph_txs(&txs, true, true, true);
         assert!(result.is_err());
         assert!(
             result
@@ -2107,7 +2311,7 @@ mod tests {
     fn test_validate_morph_txs_skips_non_morph_tx() {
         // Regular transactions should be skipped entirely
         let txs = [create_regular_tx(), create_l1_msg_tx(0)];
-        let result = validate_morph_txs(&txs, false, false);
+        let result = validate_morph_txs(&txs, false, false, false);
         assert!(result.is_ok());
     }
 
@@ -2119,7 +2323,7 @@ mod tests {
             create_regular_tx(),
             create_morph_tx_v0(1),
         ];
-        let result = validate_morph_txs(&txs, true, false);
+        let result = validate_morph_txs(&txs, true, false, false);
         assert!(result.is_ok());
     }
 

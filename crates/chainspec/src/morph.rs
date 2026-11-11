@@ -64,5 +64,8 @@ mod tests {
 
         assert!(!MORPH_MAINNET.is_jade_active_at_timestamp(1775627999));
         assert!(MORPH_MAINNET.is_jade_active_at_timestamp(1775628000));
+
+        assert!(!MORPH_MAINNET.is_celadon_active_at_timestamp(1793771999));
+        assert!(MORPH_MAINNET.is_celadon_active_at_timestamp(1793772000));
     }
 }

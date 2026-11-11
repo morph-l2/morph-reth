@@ -11,10 +11,10 @@ ignore = [
     # https://rustsec.org/advisories/RUSTSEC-2026-0173 proc-macro-error2 is unmaintained
     # build-time proc-macro pulled transitively via alloy-sol-macro; no fix available
     "RUSTSEC-2026-0173",
-    # https://rustsec.org/advisories/RUSTSEC-2026-0247 bitmaps is unmaintained
-    # transitive dep via imbl -> reth-transaction-pool; all versions affected, no
-    # upgrade exists. Upstream reth ignores the same advisory.
-    "RUSTSEC-2026-0247",
+    # https://rustsec.org/advisories/RUSTSEC-2026-0387 crypto-bigint timing variability
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5 comes in through elliptic-curve 0.13 (k256/p256/ecdsa via alloy and reth); the fix is only in 0.7.6+, which needs the elliptic-curve 0.14 major upgrade upstream" },
+    # https://rustsec.org/advisories/RUSTSEC-2026-0441 pin-utils is unmaintained
+    { id = "RUSTSEC-2026-0441", reason = "pulled in only by wasmtimer, a wasm32-only dependency of the alloy provider/transport crates, so it is not built for our targets; no maintained release to move to" },
 ]
 
 # This section is considered when running `cargo deny check bans`.
@@ -82,6 +82,6 @@ license-files = [{ path = "LICENSE", hash = 0x001c7e6c }]
 unknown-registry = "warn"
 unknown-git = "deny"
 allow-git = [
-    "https://github.com/paradigmxyz/reth",
+    "https://github.com/morph-l2/reth",
     "https://github.com/sigp/discv5",
 ]
