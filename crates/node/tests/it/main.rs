@@ -16,6 +16,7 @@ mod invalid_payload_recovery;
 mod l1_messages;
 mod mixed_block_pressure;
 mod morph_tx;
+mod network;
 mod proof_history;
 mod reference_index;
 mod rpc;
