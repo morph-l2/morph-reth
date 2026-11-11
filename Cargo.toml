@@ -88,9 +88,17 @@ lto = "fat"
 codegen-units = 1
 
 # Deterministic release profile for reproducible production builds.
+#
+# Panics unwind, as in `release`: a panic in a non-critical task (RPC handler,
+# payload job, background indexer) then fails that task instead of aborting the
+# whole process before its in-memory blocks are persisted. Symbols and line
+# tables stay in the binary so a backtrace names the function and source line.
+# Both are deterministic once source paths are remapped (see MakefileBuild.mk).
 [profile.reproducible]
 inherits = "release"
-panic = "abort"
+panic = "unwind"
+debug = "line-tables-only"
+strip = "none"
 codegen-units = 1
 incremental = false
 
