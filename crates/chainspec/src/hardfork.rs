@@ -31,7 +31,7 @@
 //! ## Current State
 //!
 //! Bernoulli and Curie use block-based activation, while Morph203, Viridian,
-//! Emerald, and Jade use timestamp-based activation.
+//! Emerald, Jade, and Celadon use timestamp-based activation.
 
 use alloy_evm::revm::primitives::hardfork::SpecId;
 use alloy_hardforks::hardfork;
@@ -41,7 +41,7 @@ hardfork!(
     /// Morph-specific hardforks for network upgrades.
     ///
     /// Note: Bernoulli and Curie use block-based activation, while Morph203, Viridian,
-    /// Emerald, and Jade use timestamp-based activation (matching go-ethereum behavior).
+    /// Emerald, Jade, and Celadon use timestamp-based activation (matching go-ethereum behavior).
     #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
     #[derive(Default)]
     MorphHardfork {
@@ -58,6 +58,10 @@ hardfork!(
         /// Jade hardfork (timestamp-based).
         #[default]
         Jade,
+        /// Celadon hardfork (timestamp-based).
+        ///
+        /// Activates MorphTx version 2, which carries an EIP-7702 authorization list.
+        Celadon,
     }
 );
 
@@ -96,6 +100,12 @@ impl MorphHardfork {
     #[inline]
     pub fn is_jade(self) -> bool {
         self >= Self::Jade
+    }
+
+    /// Returns `true` if this hardfork is Celadon or later.
+    #[inline]
+    pub fn is_celadon(self) -> bool {
+        self >= Self::Celadon
     }
 }
 
@@ -143,12 +153,20 @@ pub trait MorphHardforks: EthereumHardforks {
             .active_at_timestamp(timestamp)
     }
 
+    /// Convenience method to check if Celadon hardfork is active at a given timestamp.
+    fn is_celadon_active_at_timestamp(&self, timestamp: u64) -> bool {
+        self.morph_fork_activation(MorphHardfork::Celadon)
+            .active_at_timestamp(timestamp)
+    }
+
     /// Retrieves the latest Morph hardfork active at a given block and timestamp.
     ///
     /// Note: This method checks both block-based (Bernoulli, Curie) and
-    /// timestamp-based (Morph203, Viridian, Emerald, Jade) hardforks.
+    /// timestamp-based (Morph203, Viridian, Emerald, Jade, Celadon) hardforks.
     fn morph_hardfork_at(&self, block_number: u64, timestamp: u64) -> MorphHardfork {
-        if self.is_jade_active_at_timestamp(timestamp) {
+        if self.is_celadon_active_at_timestamp(timestamp) {
+            MorphHardfork::Celadon
+        } else if self.is_jade_active_at_timestamp(timestamp) {
             MorphHardfork::Jade
         } else if self.is_emerald_active_at_timestamp(timestamp) {
             MorphHardfork::Emerald
@@ -171,14 +189,14 @@ impl From<MorphHardfork> for SpecId {
     /// The mapping must match go-ethereum Morph's EVM instruction sets:
     /// - Bernoulli/Curie/Morph203 = CANCUN gas tables (MCOPY, TSTORE/TLOAD, transient storage)
     /// - Viridian = PRAGUE (adds EIP-7702 delegation designator)
-    /// - Emerald/Jade = OSAKA (adds EIP-7939 CLZ opcode)
+    /// - Emerald/Jade/Celadon = OSAKA (adds EIP-7939 CLZ opcode)
     fn from(value: MorphHardfork) -> Self {
         match value {
             MorphHardfork::Bernoulli | MorphHardfork::Curie | MorphHardfork::Morph203 => {
                 Self::CANCUN
             }
             MorphHardfork::Viridian => Self::PRAGUE,
-            MorphHardfork::Emerald | MorphHardfork::Jade => Self::OSAKA,
+            MorphHardfork::Emerald | MorphHardfork::Jade | MorphHardfork::Celadon => Self::OSAKA,
         }
     }
 }
@@ -191,7 +209,7 @@ impl From<SpecId> for MorphHardfork {
     /// latest hardfork for the given spec level.
     fn from(spec: SpecId) -> Self {
         if spec.is_enabled_in(SpecId::OSAKA) {
-            Self::Jade
+            Self::Celadon
         } else if spec.is_enabled_in(SpecId::PRAGUE) {
             Self::Viridian
         } else {
@@ -218,6 +236,7 @@ mod tests {
         assert_eq!(SpecId::from(MorphHardfork::Viridian), SpecId::PRAGUE);
         assert_eq!(SpecId::from(MorphHardfork::Emerald), SpecId::OSAKA);
         assert_eq!(SpecId::from(MorphHardfork::Jade), SpecId::OSAKA);
+        assert_eq!(SpecId::from(MorphHardfork::Celadon), SpecId::OSAKA);
     }
 
     #[test]
@@ -229,6 +248,7 @@ mod tests {
             MorphHardfork::Viridian,
             MorphHardfork::Emerald,
             MorphHardfork::Jade,
+            MorphHardfork::Celadon,
         ];
 
         for fork in forks {
@@ -291,7 +311,15 @@ mod tests {
     fn test_specid_to_morph_hardfork_mapping() {
         assert_eq!(MorphHardfork::from(SpecId::CANCUN), MorphHardfork::Morph203);
         assert_eq!(MorphHardfork::from(SpecId::PRAGUE), MorphHardfork::Viridian);
-        assert_eq!(MorphHardfork::from(SpecId::OSAKA), MorphHardfork::Jade);
+        assert_eq!(MorphHardfork::from(SpecId::OSAKA), MorphHardfork::Celadon);
+    }
+
+    #[test]
+    fn test_is_celadon() {
+        assert!(MorphHardfork::Celadon.is_celadon());
+        assert!(MorphHardfork::Celadon.is_jade());
+        assert!(!MorphHardfork::Jade.is_celadon());
+        assert!(!MorphHardfork::Emerald.is_celadon());
     }
 
     /// SpecIds below CANCUN should map to Morph203 (the latest CANCUN-level hardfork).
@@ -315,8 +343,12 @@ mod tests {
         let spec = SpecId::from(MorphHardfork::Bernoulli);
         assert_eq!(MorphHardfork::from(spec), MorphHardfork::Morph203);
 
-        // Emerald -> OSAKA -> Jade (latest OSAKA hardfork)
+        // Emerald -> OSAKA -> Celadon (latest OSAKA hardfork)
         let spec = SpecId::from(MorphHardfork::Emerald);
-        assert_eq!(MorphHardfork::from(spec), MorphHardfork::Jade);
+        assert_eq!(MorphHardfork::from(spec), MorphHardfork::Celadon);
+
+        // Jade -> OSAKA -> Celadon (latest OSAKA hardfork)
+        let spec = SpecId::from(MorphHardfork::Jade);
+        assert_eq!(MorphHardfork::from(spec), MorphHardfork::Celadon);
     }
 }

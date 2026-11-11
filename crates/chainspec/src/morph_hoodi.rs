@@ -63,5 +63,8 @@ mod tests {
 
         assert!(!MORPH_HOODI.is_jade_active_at_timestamp(1774418399));
         assert!(MORPH_HOODI.is_jade_active_at_timestamp(1774418400));
+
+        assert!(!MORPH_HOODI.is_celadon_active_at_timestamp(1793167199));
+        assert!(MORPH_HOODI.is_celadon_active_at_timestamp(1793167200));
     }
 }

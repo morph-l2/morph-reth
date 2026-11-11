@@ -12,10 +12,11 @@ use alloy_rpc_types_engine::PayloadAttributes;
 use jsonrpsee::core::client::ClientT;
 use morph_node::test_utils::{
     HardforkSchedule, L1MessageBuilder, MorphTxBuilder, TEST_TOKEN_ID, TestNodeBuilder,
+    make_transfer_tx,
 };
 use morph_payload_types::{
-    AssembleL2BlockParams, ExecutableL2Data, GenericResponse, MorphPayloadAttributes,
-    MorphPayloadTypes, SafeL2Data,
+    AssembleL2BlockParams, AssembleL2BlockV2Params, ExecutableL2Data, GenericResponse,
+    MorphPayloadAttributes, MorphPayloadTypes, SafeL2Data,
 };
 use morph_primitives::MorphHeader;
 use reth_node_api::PayloadTypes;
@@ -24,9 +25,9 @@ use reth_payload_primitives::BuiltPayload;
 use reth_provider::{BlockIdReader, BlockReaderIdExt};
 
 use super::helpers::{
-    assemble_l2_block, build_block_no_submit, canonical_block, canonical_snapshot,
-    craft_and_try_import_block, head_timestamp, import_l2_block, transaction_hashes,
-    wait_until_pooled,
+    LOCAL_POLL_BUDGET, POLL_INTERVAL, assemble_l2_block, assemble_l2_block_v2,
+    build_block_no_submit, canonical_block, canonical_snapshot, craft_and_try_import_block,
+    head_timestamp, import_l2_block, transaction_hashes, wait_until_pooled,
 };
 
 /// Pre-Jade: a block with a wrong state root is still accepted.
@@ -570,6 +571,99 @@ async fn assemble_l2_block_v2_builds_on_explicit_parent() -> eyre::Result<()> {
     Ok(())
 }
 
+/// `engine_assembleL2BlockV2` raises a timestamp behind the parent's, so the block imports on
+/// every node.
+///
+/// The CL passes its wall-clock second, which falls behind the parent's timestamp when the
+/// sequencer's clock steps back or HA leadership moves to a node whose clock is behind.
+/// Unclamped, the sequencer would make such a block its head (it imports the payload it built
+/// without re-validating the header) while followers reject it as `TimestampIsInPast`. From
+/// Emerald on the block takes its parent's timestamp.
+#[tokio::test(flavor = "multi_thread")]
+async fn assemble_l2_block_v2_raises_timestamp_behind_parent() -> eyre::Result<()> {
+    assert_assembled_timestamp_raised(HardforkSchedule::AllActive, 0).await
+}
+
+/// Before Emerald a block must be strictly later than its parent, so the timestamp is raised
+/// to one second past the parent's.
+#[tokio::test(flavor = "multi_thread")]
+async fn assemble_l2_block_v2_raises_timestamp_past_parent_before_emerald() -> eyre::Result<()> {
+    assert_assembled_timestamp_raised(HardforkSchedule::PreViridian, 1).await
+}
+
+/// Assembles block 2 with a timestamp five seconds behind block 1, then checks that it comes
+/// back `min_gap` seconds after block 1 and becomes canonical on both the sequencer and a
+/// follower.
+async fn assert_assembled_timestamp_raised(
+    schedule: HardforkSchedule,
+    min_gap: u64,
+) -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, _wallet) = TestNodeBuilder::new()
+        .with_schedule(schedule)
+        .with_num_nodes(2)
+        .build()
+        .await?;
+    let follower = nodes.pop().expect("two nodes requested");
+    let sequencer = nodes.pop().expect("two nodes requested");
+    let client = sequencer.auth_server_handle().http_client();
+
+    let genesis_hash = sequencer
+        .inner
+        .provider
+        .sealed_header_by_number_or_tag(alloy_rpc_types_eth::BlockNumberOrTag::Latest)?
+        .expect("genesis header")
+        .hash();
+    let block1_ts = head_timestamp(&sequencer)? + 10;
+    let block1: ExecutableL2Data = client
+        .request(
+            "engine_assembleL2BlockV2",
+            (serde_json::json!({
+                "parentHash": genesis_hash,
+                "timestamp": format!("{block1_ts:#x}"),
+                "transactions": [],
+            }),),
+        )
+        .await?;
+    assert_eq!(
+        block1.timestamp, block1_ts,
+        "a timestamp after the parent's is kept"
+    );
+    import_l2_block(&sequencer, block1.clone()).await?;
+    import_l2_block(&follower, block1.clone()).await?;
+
+    // The sequencer's clock stepped back five seconds.
+    let block2: ExecutableL2Data = client
+        .request(
+            "engine_assembleL2BlockV2",
+            (serde_json::json!({
+                "parentHash": block1.hash,
+                "timestamp": format!("{:#x}", block1_ts - 5),
+                "transactions": [],
+            }),),
+        )
+        .await?;
+    assert_eq!(block2.timestamp, block1_ts + min_gap);
+
+    import_l2_block(&sequencer, block2.clone()).await?;
+    import_l2_block(&follower, block2.clone()).await?;
+    for node in [&sequencer, &follower] {
+        let head = node
+            .inner
+            .provider
+            .sealed_header_by_number_or_tag(alloy_rpc_types_eth::BlockNumberOrTag::Latest)?
+            .expect("head header");
+        assert_eq!(
+            head.hash(),
+            block2.hash,
+            "block 2 is canonical on every node"
+        );
+    }
+
+    Ok(())
+}
+
 /// `engine_validateL2Block` rejects a tampered block hash over authenticated RPC.
 #[tokio::test(flavor = "multi_thread")]
 async fn validate_l2_block_rejects_tampered_hash_over_rpc() -> eyre::Result<()> {
@@ -1031,6 +1125,130 @@ async fn new_safe_l2_block_rejects_transactions_over_gas_limit() -> eyre::Result
         canonical_snapshot(&node)?,
         head_before,
         "a rejected safe block must leave the canonical chain untouched"
+    );
+
+    Ok(())
+}
+
+/// An assembled empty candidate leaves nothing behind in the engine tree.
+///
+/// The CL's fast tick assembles a candidate on the head and discards it when it carries
+/// no transactions, without telling the EL. reth pre-inserts resolved payloads into the
+/// engine tree (surfacing them as the pending block) and only prunes non-canonical tree
+/// blocks below a finalized block, which a sequencer never receives. Empty candidates are
+/// therefore not pre-inserted at all, while a candidate with a transaction still is, so
+/// that its import stays a no-op.
+#[tokio::test(flavor = "multi_thread")]
+async fn empty_candidate_is_not_pre_inserted_into_engine_tree() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let node = nodes.pop().unwrap();
+
+    let head = canonical_snapshot(&node)?;
+    let timestamp = head_timestamp(&node)? + 1;
+
+    // The discarded-candidate shape: assemble on the head and never import.
+    let empty = assemble_l2_block_v2(
+        &node,
+        AssembleL2BlockV2Params {
+            parent_hash: head.hash,
+            transactions: vec![],
+            timestamp: Some(timestamp),
+        },
+    )
+    .await?;
+    assert!(
+        empty.transactions.is_empty(),
+        "precondition: the candidate must be empty"
+    );
+
+    // The built-payload event reaches the tree asynchronously; give it ample time.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert_eq!(
+        node.inner.provider.pending_block_num_hash()?,
+        None,
+        "an empty candidate must not be pre-inserted as the pending block"
+    );
+
+    // A candidate with a transaction is still pre-inserted.
+    let raw_tx = make_transfer_tx(wallet.chain_id, wallet.inner.clone(), 0).await;
+    let tx_hash = node.rpc.inject_tx(raw_tx).await?;
+    wait_until_pooled(&node, tx_hash).await?;
+    let candidate = assemble_l2_block_v2(
+        &node,
+        AssembleL2BlockV2Params {
+            parent_hash: head.hash,
+            transactions: vec![],
+            timestamp: Some(timestamp),
+        },
+    )
+    .await?;
+    assert_eq!(
+        candidate.transactions.len(),
+        1,
+        "precondition: the candidate must carry the transfer"
+    );
+
+    let deadline = tokio::time::Instant::now() + LOCAL_POLL_BUDGET;
+    loop {
+        let pending = node.inner.provider.pending_block_num_hash()?;
+        if pending.map(|p| p.hash) == Some(candidate.hash) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "a candidate with a transaction should be pre-inserted as the pending block, got {pending:?}"
+        );
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+
+    let header = import_l2_block(&node, candidate.clone()).await?;
+    assert_eq!(header.hash_slow(), candidate.hash);
+    assert_eq!(
+        canonical_snapshot(&node)?.hash,
+        candidate.hash,
+        "the pre-inserted candidate should become the canonical head"
+    );
+
+    Ok(())
+}
+
+/// A committed empty block is executed on import after being omitted from the
+/// tree's pre-inserted payloads.
+#[tokio::test(flavor = "multi_thread")]
+async fn empty_block_is_imported_without_execution_artifacts() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
+    let node = nodes.pop().unwrap();
+
+    let mut params = AssembleL2BlockParams::empty(1);
+    params.timestamp = Some(10);
+    let block1 = assemble_l2_block(&node, params).await?;
+    import_l2_block(&node, block1.clone()).await?;
+    let empty = assemble_l2_block_v2(
+        &node,
+        AssembleL2BlockV2Params {
+            parent_hash: block1.hash,
+            transactions: vec![],
+            timestamp: Some(11),
+        },
+    )
+    .await?;
+    assert!(empty.transactions.is_empty());
+
+    // The built-payload event is asynchronous. An empty payload must remain absent
+    // from the pending tree before import, then take the normal import path.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert_eq!(node.inner.provider.pending_block_num_hash()?, None);
+
+    let imported = import_l2_block(&node, empty.clone()).await?;
+    assert_eq!(imported.hash_slow(), empty.hash);
+    assert_eq!(
+        canonical_snapshot(&node)?.hash,
+        empty.hash,
+        "the empty block must become canonical through normal import"
     );
 
     Ok(())
