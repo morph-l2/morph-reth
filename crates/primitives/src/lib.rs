@@ -24,8 +24,8 @@
 //!
 //! # Node Primitives
 //!
-//! With the `reth-codec` feature enabled, [`MorphPrimitives`] implements reth's
-//! `NodePrimitives` trait and provides all type bindings needed for a Morph node.
+//! [`MorphPrimitives`] implements reth's `NodePrimitives` trait and provides all type
+//! bindings needed for a Morph node.
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg), allow(unexpected_cfgs))]
@@ -59,12 +59,14 @@ pub use transaction::{
 
 /// Morph's node-primitives type bindings.
 ///
-/// Implements [`reth_primitives_traits::NodePrimitives`] when the `reth-codec` feature is enabled.
+/// Implements [`reth_primitives_traits::NodePrimitives`]. The associated-type bounds only
+/// require `Compact` impls when `reth-primitives-traits/reth-codec` is enabled (via
+/// `MaybeCompact`), so this impl stays available on targets like SP1's zkvm where the
+/// `reth-codec` feature (and its `reth-db-api`/`quanta` chain) cannot be built.
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct MorphPrimitives;
 
-#[cfg(feature = "reth-codec")]
 impl reth_primitives_traits::NodePrimitives for MorphPrimitives {
     type Block = Block;
     type BlockHeader = MorphHeader;
