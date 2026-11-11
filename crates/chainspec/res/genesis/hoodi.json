@@ -22,6 +22,7 @@
     "viridianTime": 1761544800,
     "emeraldTime": 1766988000,
     "jadeForkTime": 1774418400,
+    "celadonTime": 1793167200,
     "morph": {
       "useZktrie": false,
       "maxTxPayloadBytesPerBlock": 122880,
