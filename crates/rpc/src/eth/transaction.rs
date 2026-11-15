@@ -7,7 +7,6 @@ use alloy_consensus::{
 use alloy_network::TxSigner;
 use alloy_primitives::{B256, Signature, TxKind, U64, U256};
 use alloy_rpc_types_eth::AccessList;
-use evm2::ethereum::LazyAuthorization;
 use reth_rpc_convert::{
     EthTxEnvError, SignTxRequestError, SignableTxRequest, TryIntoSimTx, TryIntoTxEnv,
     normalize_transaction_request,
@@ -15,7 +14,7 @@ use reth_rpc_convert::{
 use reth_rpc_eth_types::EthApiError;
 
 use morph_primitives::{MorphTxEnvelope, TxMorph};
-use morph_revm::{MorphEvmEnv, MorphTxEnv};
+use morph_revm::{MorphAuthorization, MorphEvmEnv, MorphTxEnv};
 use reth_evm::EvmEnv;
 
 /// Converts a [`MorphTransactionRequest`] into a simulated transaction envelope.
@@ -154,7 +153,7 @@ impl TryIntoTxEnv<Recovered<MorphTxEnv>, MorphEvmEnv> for MorphTransactionReques
                 .authorization_list
                 .unwrap_or_default()
                 .into_iter()
-                .map(LazyAuthorization::Signed)
+                .map(MorphAuthorization::Signed)
                 .collect(),
             ..Default::default()
         };

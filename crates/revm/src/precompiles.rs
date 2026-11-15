@@ -181,11 +181,11 @@ fn modexp_len_exceeds_32(data: &[u8], offset: usize) -> bool {
 ///
 /// Ref: <https://github.com/morph-l2/go-ethereum/blob/main/core/vm/contracts.go#L643-L648>
 fn modexp_with_32byte_limit(
-    _evm: &mut MorphEvm<'_>,
+    evm: &mut MorphEvm<'_>,
     message: &Message<MorphEvmTypes>,
     gas: &mut GasTracker,
 ) -> PrecompileResult {
-    let input = message.input.as_ref();
+    let input = evm.message_input(message);
     // The first 96 bytes of modexp input are three 32-byte big-endian length fields:
     // [0..32] = base_len, [32..64] = exp_len, [64..96] = mod_len
     if modexp_len_exceeds_32(input, 0)
@@ -208,11 +208,11 @@ fn modexp_with_32byte_limit(
 ///
 /// Ref: <https://github.com/morph-l2/go-ethereum/blob/main/core/vm/contracts.go#L860-L865>
 fn bn256_pairing_with_4pair_limit(
-    _evm: &mut MorphEvm<'_>,
+    evm: &mut MorphEvm<'_>,
     message: &Message<MorphEvmTypes>,
     gas: &mut GasTracker,
 ) -> PrecompileResult {
-    let input = message.input.as_ref();
+    let input = evm.message_input(message);
     if input.len() > 4 * 192 {
         return halt("bad elliptic curve pairing size");
     }

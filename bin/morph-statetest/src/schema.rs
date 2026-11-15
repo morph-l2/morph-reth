@@ -3,12 +3,11 @@ use alloy_primitives::{Address, B256, Bytes, TxKind, U256};
 use alloy_signer_local::PrivateKeySigner;
 use evm2::{
     bytecode::Bytecode,
-    ethereum::LazyAuthorization,
     evm::{AccountInfo, InMemoryDB},
 };
 use morph_chainspec::hardfork::MorphHardfork;
 use morph_primitives::transaction::morph_transaction::MORPH_TX_VERSION_2;
-use morph_revm::{MorphBlockEnv, MorphTxEnv, MorphTxExt};
+use morph_revm::{MorphAuthorization, MorphBlockEnv, MorphTxEnv, MorphTxExt};
 use serde::{Deserialize, Deserializer, de};
 use std::collections::BTreeMap;
 use thiserror::Error;
@@ -320,7 +319,7 @@ impl MorphTransactionParts {
             .map(|auth_list| {
                 auth_list
                     .into_iter()
-                    .map(|auth| LazyAuthorization::Signed(auth.0))
+                    .map(|auth| MorphAuthorization::Signed(auth.0))
                     .collect()
             })
             .unwrap_or_default();

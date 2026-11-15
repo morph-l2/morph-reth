@@ -14,7 +14,7 @@ use crate::evm::MorphEvm;
 use alloy_consensus::{Transaction, transaction::TxHashRef};
 use alloy_eip7928::{BlockAccessIndex, BlockAccessList};
 use alloy_primitives::{Address, B256};
-use evm2::{TxResultWithState, evm::Bal, registry::HandlerError};
+use evm2::{AnyError, TxResultWithState, evm::Bal, registry::HandlerError};
 use morph_primitives::{MorphReceipt, MorphTxEnvelope, MorphTxType};
 use morph_revm::{
     L1_GAS_PRICE_ORACLE_ADDRESS, MorphEvmTypes, MorphInvalidTransaction, TokenFeeInfo,
@@ -49,11 +49,15 @@ impl InvalidTxError for MorphInvalidTxError {
             self.0,
             HandlerError::GasLimitMoreThanBlock { .. }
                 | HandlerError::TxGasLimitGreaterThanCap { .. }
+                | HandlerError::IntrinsicGasGreaterThanCap { .. }
         )
     }
 
     fn is_gas_limit_too_low(&self) -> bool {
-        matches!(self.0, HandlerError::IntrinsicGasTooLow { .. })
+        matches!(
+            self.0,
+            HandlerError::IntrinsicGasTooLow { .. } | HandlerError::GasLimitBelowFloor { .. }
+        )
     }
 
     /// Exposes the wrapped [`HandlerError`] so RPC layers can recover the structured error.
@@ -72,7 +76,7 @@ fn map_transaction_error(error: HandlerError, hash: B256) -> BlockExecutionError
         HandlerError::Database(ref database_error) if !database_error.is_fatal() => {
             BlockValidationError::EVM {
                 hash,
-                error: Box::new(error),
+                error: AnyError::new(error),
             }
             .into()
         }
@@ -80,7 +84,7 @@ fn map_transaction_error(error: HandlerError, hash: B256) -> BlockExecutionError
         | HandlerError::Fatal(_)
         | HandlerError::WrongTransactionType { .. } => InternalBlockExecutionError::EVM {
             hash,
-            error: Box::new(error),
+            error: AnyError::new(error),
         }
         .into(),
         error => BlockValidationError::InvalidTx {
@@ -93,14 +97,16 @@ fn map_transaction_error(error: HandlerError, hash: B256) -> BlockExecutionError
 
 /// Returns the Morph error carried by a block execution error, if there is one.
 pub fn morph_invalid_tx_error(error: &BlockExecutionError) -> Option<&MorphInvalidTransaction> {
-    let BlockExecutionError::Validation(BlockValidationError::InvalidTx { error, .. }) = error
-    else {
-        return None;
+    let handler_error = match error {
+        BlockExecutionError::Validation(BlockValidationError::InvalidTx { error, .. }) => {
+            error.as_any().downcast_ref::<HandlerError>()?
+        }
+        BlockExecutionError::Validation(BlockValidationError::Other(error)) => {
+            error.downcast_ref::<HandlerError>()?
+        }
+        _ => return None,
     };
-    error
-        .as_any()
-        .downcast_ref::<HandlerError>()?
-        .external_ref::<MorphInvalidTransaction>()
+    handler_error.external_ref::<MorphInvalidTransaction>()
 }
 
 /// The fields a receipt needs from the transaction itself.
@@ -127,6 +133,10 @@ pub struct MorphTxResult {
 impl BlockTransactionResult<MorphEvmTypes> for MorphTxResult {
     fn result(&self) -> &TxResultWithState<MorphEvmTypes> {
         &self.result
+    }
+
+    fn into_result(self) -> TxResultWithState<MorphEvmTypes> {
+        self.result
     }
 }
 
@@ -475,7 +485,7 @@ mod tests {
     use morph_chainspec::{MorphChainSpec, hardfork::MorphHardfork};
     use morph_primitives::TxL1Msg;
     use morph_revm::{MorphBlockEnv, MorphTxEnv, morph_evm_env};
-    use reth_evm::{BlockExecutorFactory, ExecutableTxParts};
+    use reth_evm::BlockExecutorFactory;
     use reth_primitives_traits::Recovered;
 
     const SENDER: Address = Address::with_last_byte(0xaa);
@@ -519,7 +529,7 @@ mod tests {
     /// A signed transaction ready for the executor.
     fn executable(
         tx: MorphTxEnvelope,
-    ) -> impl ExecutableTxParts<Recovered<MorphTxEnv>, MorphTxEnvelope> {
+    ) -> reth_evm::WithTxEnv<Recovered<MorphTxEnv>, Recovered<MorphTxEnvelope>> {
         reth_evm::WithTxEnv {
             tx_env: Recovered::new_unchecked(MorphTxEnv::from_envelope(&tx), SENDER),
             tx: Arc::new(Recovered::new_unchecked(tx, SENDER)),
@@ -673,6 +683,13 @@ mod tests {
             morph_invalid_tx_error(&error),
             Some(&MorphInvalidTransaction::TokenNotActive(3))
         );
+
+        let direct_error =
+            evm2::block::map_handler_error(MorphInvalidTransaction::TokenNotActive(3).into());
+        assert_eq!(
+            morph_invalid_tx_error(&direct_error),
+            Some(&MorphInvalidTransaction::TokenNotActive(3))
+        );
     }
 
     #[test]
@@ -698,5 +715,163 @@ mod tests {
         };
         let executor = config.create_executor(evm, ctx);
         assert!(executor.receipts().is_empty());
+    }
+
+    #[test]
+    fn invalid_tx_error_classifies_gas_limit_bounds() {
+        for err in [
+            HandlerError::IntrinsicGasTooLow {
+                required: 21_000,
+                got: 20_000,
+            },
+            HandlerError::GasLimitBelowFloor {
+                required: 25_000,
+                got: 21_000,
+            },
+        ] {
+            let wrapped = MorphInvalidTxError(err);
+            assert!(wrapped.is_gas_limit_too_low(), "{wrapped:?}");
+            assert!(!wrapped.is_gas_limit_too_high(), "{wrapped:?}");
+        }
+
+        for err in [
+            HandlerError::GasLimitMoreThanBlock {
+                gas_limit: 31_000_000,
+                block_gas_limit: U256::from(30_000_000),
+            },
+            HandlerError::TxGasLimitGreaterThanCap {
+                gas_limit: 31_000_000,
+                cap: 30_000_000,
+            },
+            HandlerError::IntrinsicGasGreaterThanCap {
+                required: 31_000_000,
+                cap: 30_000_000,
+            },
+        ] {
+            let wrapped = MorphInvalidTxError(err);
+            assert!(wrapped.is_gas_limit_too_high(), "{wrapped:?}");
+            assert!(!wrapped.is_gas_limit_too_low(), "{wrapped:?}");
+        }
+    }
+
+    #[test]
+    fn inspect_transaction_without_commit_returns_inspector_and_hides_fee_frames() {
+        use evm2::{
+            Inspector,
+            bytecode::Bytecode,
+            interpreter::{Interpreter, Message, MessageResult},
+        };
+        use morph_primitives::TxMorph;
+        use morph_revm::{L2_TOKEN_REGISTRY_ADDRESS, compute_mapping_slot};
+
+        #[derive(Debug, Default)]
+        struct CallCounter(usize);
+
+        impl Inspector<MorphEvmTypes> for CallCounter {
+            fn call(
+                &mut self,
+                _interp: &mut Interpreter<'_, '_, MorphEvmTypes>,
+                _message: &mut Message<MorphEvmTypes>,
+            ) -> Option<MessageResult<MorphEvmTypes>> {
+                self.0 += 1;
+                None
+            }
+        }
+
+        // Call-mode ERC20: `balanceOf` and `transfer` run real EVM frames during fee deduction
+        // and reimbursement, which `FeeFrameFilter` must hide from `inspect_transaction_without_commit`.
+        let token = Address::with_last_byte(0xcc);
+        let erc20_code = Bytes::from_static(&[
+            0x36, 0x60, 0x44, 0x14, 0x60, 0x13, 0x57, 0x60, 0x04, 0x35, 0x54, 0x60, 0x00, 0x52,
+            0x60, 0x20, 0x60, 0x00, 0xf3, 0x5b, 0x60, 0x24, 0x35, 0x80, 0x33, 0x54, 0x03, 0x33,
+            0x55, 0x60, 0x04, 0x35, 0x80, 0x54, 0x82, 0x01, 0x90, 0x55, 0x50, 0x60, 0x01, 0x60,
+            0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3,
+        ]);
+
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(&SENDER, AccountInfo::default());
+        db.insert_account_info(
+            &token,
+            AccountInfo::default().with_code(Bytecode::new_legacy(erc20_code)),
+        );
+        db.insert_account_storage(
+            &token,
+            &U256::from_be_bytes(SENDER.into_word().0),
+            &U256::from(1_000_000u64),
+        );
+
+        let token_id = 1u16;
+        let mut token_id_bytes = [0u8; 32];
+        token_id_bytes[30..32].copy_from_slice(&token_id.to_be_bytes());
+        let base = compute_mapping_slot(U256::from(151), &token_id_bytes);
+        db.insert_account_storage(
+            &L2_TOKEN_REGISTRY_ADDRESS,
+            &base,
+            &U256::from_be_bytes(token.into_word().0),
+        );
+        let mut status = [0u8; 32];
+        status[30] = 18;
+        status[31] = 1;
+        db.insert_account_storage(
+            &L2_TOKEN_REGISTRY_ADDRESS,
+            &(base + U256::from(2)),
+            &U256::from_be_bytes(status),
+        );
+        db.insert_account_storage(
+            &L2_TOKEN_REGISTRY_ADDRESS,
+            &(base + U256::from(3)),
+            &U256::from(1),
+        );
+        db.insert_account_storage(
+            &L2_TOKEN_REGISTRY_ADDRESS,
+            &compute_mapping_slot(U256::from(153), &token_id_bytes),
+            &U256::from(1),
+        );
+
+        let evm = MorphEvm::new(
+            db,
+            morph_evm_env(
+                MorphHardfork::default(),
+                1337,
+                30_000_000,
+                MorphBlockEnv {
+                    basefee: U256::from(1),
+                    gas_limit: U256::from(30_000_000),
+                    beneficiary: Address::with_last_byte(0xbe),
+                    ..Default::default()
+                },
+            ),
+        );
+        let mut executor = MorphBlockExecutor::new(evm, DefaultMorphReceiptBuilder, None);
+
+        let morph_tx = MorphTxEnvelope::Morph(Signed::new_unhashed(
+            TxMorph {
+                chain_id: 1337,
+                nonce: 0,
+                gas_limit: 50_000,
+                max_fee_per_gas: 2,
+                max_priority_fee_per_gas: 1,
+                to: TxKind::Call(TARGET),
+                value: U256::ZERO,
+                access_list: Default::default(),
+                version: 1,
+                fee_token_id: token_id,
+                fee_limit: U256::from(1_000_000u64),
+                reference: None,
+                memo: None,
+                input: Bytes::new(),
+                authorization_list: Vec::new(),
+            },
+            Signature::test_signature(),
+        ));
+
+        let (inspector, output) = executor
+            .inspect_transaction_without_commit(executable(morph_tx), CallCounter::default())
+            .unwrap();
+        assert!(output.result().result.status);
+        // Only the user's top-level call to `TARGET` is observed; the fee-token `balanceOf` and
+        // `transfer` frames stay hidden.
+        assert_eq!(inspector.0, 1);
+        assert!(reth_evm::Evm::take_inspector(executor.evm_mut()).is_none());
     }
 }

@@ -84,7 +84,6 @@ unknown-git = "deny"
 allow-git = [
     "https://github.com/paradigmxyz/reth",
     "https://github.com/paradigmxyz/reth-core",
-    "https://github.com/sigp/discv5",
-    # evm2 has no crates.io release; reth requires this exact URL through a `[patch]`.
-    "https://www.github.com/alloy-rs/evm2",
+    # evm2 has no crates.io release; reth v2.11.0 requires this exact URL through a `[patch]`.
+    "https://github.com/DaniPopes/evm2",
 ]

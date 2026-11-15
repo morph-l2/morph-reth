@@ -67,4 +67,4 @@ pub use token_fee::{
     L2_TOKEN_REGISTRY_ADDRESS, TokenFeeInfo, compute_mapping_slot,
     compute_mapping_slot_for_address, encode_balance_of_calldata,
 };
-pub use tx::{MorphTxEnv, MorphTxExt};
+pub use tx::{MorphAuthorization, MorphTxEnv, MorphTxExt};

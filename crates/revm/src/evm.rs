@@ -151,7 +151,7 @@ fn morph_blockhash_result(chain_id: u64, current_number: u64, requested_number: 
 pub fn morph_blockhash(cx: _, [number]: [Word]) -> out {
     let requested_number = number.saturating_to::<u64>();
     let current_number = cx.state.host().block().number.saturating_to::<u64>();
-    let chain_id = cx.state.tx().chain_id.saturating_to::<u64>();
+    let chain_id = cx.state.host().tx_env().chain_id.saturating_to::<u64>();
     *out = morph_blockhash_result(chain_id, current_number, requested_number);
 }
 
@@ -228,9 +228,23 @@ impl<I> FeeFrameFilter<I> {
     pub const fn inner(&self) -> &I {
         &self.inner
     }
+
+    /// Returns a mutable reference to the wrapped inspector.
+    pub const fn inner_mut(&mut self) -> &mut I {
+        &mut self.inner
+    }
 }
 
 impl<I: Inspector<MorphEvmTypes>> Inspector<MorphEvmTypes> for FeeFrameFilter<I> {
+    #[inline]
+    fn inspector_config(&self) -> evm2::InspectorConfig {
+        if self.in_fee_frame {
+            evm2::InspectorConfig::without_steps()
+        } else {
+            self.inner.inspector_config()
+        }
+    }
+
     fn initialize_interp(&mut self, interp: &mut Interpreter<'_, '_, MorphEvmTypes>) {
         if !self.in_fee_frame {
             self.inner.initialize_interp(interp);
@@ -467,5 +481,34 @@ mod tests {
                 spec
             );
         }
+    }
+
+    #[test]
+    fn fee_frame_filter_forwards_inspector_config() {
+        struct NoSteps;
+        impl Inspector<MorphEvmTypes> for NoSteps {
+            fn inspector_config(&self) -> evm2::InspectorConfig {
+                evm2::InspectorConfig::without_steps()
+            }
+        }
+
+        assert_eq!(
+            Inspector::<MorphEvmTypes>::inspector_config(&FeeFrameFilter::new(NoSteps)),
+            evm2::InspectorConfig::without_steps(),
+        );
+
+        struct AllSteps;
+        impl Inspector<MorphEvmTypes> for AllSteps {}
+
+        let mut all_steps = FeeFrameFilter::new(AllSteps);
+        assert_eq!(
+            Inspector::<MorphEvmTypes>::inspector_config(&all_steps),
+            evm2::InspectorConfig::new(),
+        );
+        all_steps.in_fee_frame = true;
+        assert_eq!(
+            Inspector::<MorphEvmTypes>::inspector_config(&all_steps),
+            evm2::InspectorConfig::without_steps(),
+        );
     }
 }

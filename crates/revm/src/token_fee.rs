@@ -417,12 +417,13 @@ fn read_token_balance_with_fallback<DB: Database>(
     // rather than the other client's pool. GASPRICE is the one input this query still
     // cannot match: it stays at zero because the effective price depends on the next
     // block's base fee, which admission does not know. go-ethereum's pool has the same gap.
-    let tx_env = TxEnvExt {
+    let chain_id = evm.version().chain_id;
+    *evm.tx_env_mut() = TxEnvExt {
         origin: account,
-        chain_id: U256::from(evm.version().chain_id),
+        chain_id: U256::from(chain_id),
         ..TxEnvExt::default()
     };
-    crate::handler::evm_call_balance_of(&mut evm, &tx_env, token, account)
+    crate::handler::evm_call_balance_of(&mut evm, token, account)
 }
 
 /// Read ERC20 balance directly from storage slot.

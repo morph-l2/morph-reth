@@ -12,8 +12,8 @@ use alloy_eips::{
     eip2930::AccessList,
     eip7702::{RecoveredAuthorization, SignedAuthorization},
 };
-use alloy_primitives::{B256, Bytes, ChainId, Signature, TxKind, U256};
-use evm2::ethereum::LazyAuthorization;
+use alloy_primitives::{Address, B256, Bytes, ChainId, Signature, TxKind, U256};
+use evm2::ethereum::{LazyAuthorization, eip7702::Eip7702Authorization};
 use morph_primitives::{
     L1_TX_TYPE_ID, MORPH_TX_TYPE_ID, MorphTxEnvelope, TxMorph,
     transaction::morph_transaction::{MORPH_TX_VERSION_1, MORPH_TX_VERSION_2},
@@ -24,6 +24,63 @@ use reth_evm::{FromRecoveredTx, FromTxWithEncoded, TransactionEnvMut};
 const LEGACY_TX_TYPE: u8 = 0x00;
 /// EIP-2718 type byte of an EIP-2930 transaction.
 const EIP2930_TX_TYPE: u8 = 0x01;
+
+/// Owned EIP-7702 authorization stored in [`MorphTxEnv`].
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum MorphAuthorization {
+    /// Signed authorization whose authority is recovered on demand.
+    Signed(SignedAuthorization),
+    /// Authorization with a cached authority recovery result.
+    Recovered(RecoveredAuthorization),
+}
+
+impl Eip7702Authorization for MorphAuthorization {
+    fn chain_id(&self) -> U256 {
+        match self {
+            Self::Signed(signed) => *signed.chain_id(),
+            Self::Recovered(recovered) => *recovered.chain_id(),
+        }
+    }
+
+    fn nonce(&self) -> u64 {
+        match self {
+            Self::Signed(signed) => signed.nonce(),
+            Self::Recovered(recovered) => recovered.nonce(),
+        }
+    }
+
+    fn address(&self) -> Address {
+        match self {
+            Self::Signed(signed) => *signed.address(),
+            Self::Recovered(recovered) => *recovered.address(),
+        }
+    }
+
+    fn authority(&self) -> Option<Address> {
+        match self {
+            Self::Signed(signed) => LazyAuthorization::Signed(signed).authority(),
+            Self::Recovered(recovered) => recovered.authority(),
+        }
+    }
+}
+
+impl Eip7702Authorization for &MorphAuthorization {
+    fn chain_id(&self) -> U256 {
+        (*self).chain_id()
+    }
+
+    fn nonce(&self) -> u64 {
+        (*self).nonce()
+    }
+
+    fn address(&self) -> Address {
+        (*self).address()
+    }
+
+    fn authority(&self) -> Option<Address> {
+        (*self).authority()
+    }
+}
 
 /// Morph transaction environment with token fee support.
 ///
@@ -60,7 +117,7 @@ pub struct MorphTxEnv {
     /// EIP-2930 access list.
     pub access_list: AccessList,
     /// EIP-7702 authorizations, with their authorities recovered where possible.
-    pub authorization_list: Vec<LazyAuthorization>,
+    pub authorization_list: Vec<MorphAuthorization>,
     /// RLP encoded transaction bytes.
     /// Used only for L1 data fee calculation.
     pub rlp_bytes: Option<Bytes>,
@@ -275,10 +332,10 @@ impl MorphTxEnv {
         self.authorization_list
             .iter()
             .map(|auth| match auth {
-                LazyAuthorization::Signed(signed) => signed.clone(),
+                MorphAuthorization::Signed(signed) => signed.clone(),
                 // Recovered authorizations no longer carry their original
                 // signature, so reuse the fee-sizing placeholder.
-                LazyAuthorization::Recovered(recovered) => {
+                MorphAuthorization::Recovered(recovered) => {
                     recovered.clone().into_parts().0.into_signed(placeholder)
                 }
             })
@@ -311,9 +368,9 @@ impl MorphTxEnv {
                 .unwrap_or_default()
                 .iter()
                 .map(|auth| {
-                    LazyAuthorization::Recovered(RecoveredAuthorization::new_unchecked(
+                    MorphAuthorization::Recovered(RecoveredAuthorization::new_unchecked(
                         auth.inner().clone(),
-                        auth.recover_authority().map_or(
+                        LazyAuthorization::Signed(auth).authority().map_or(
                             alloy_eips::eip7702::RecoveredAuthority::Invalid,
                             alloy_eips::eip7702::RecoveredAuthority::Valid,
                         ),
@@ -756,7 +813,7 @@ mod tests {
             gas_priority_fee: Some(1_000_000_000),
             nonce: 1,
             kind: TxKind::Create,
-            authorization_list: vec![LazyAuthorization::Signed(sample_signed_authorization())],
+            authorization_list: vec![MorphAuthorization::Signed(sample_signed_authorization())],
             ..Default::default()
         };
 
@@ -779,7 +836,7 @@ mod tests {
             gas_priority_fee: Some(1_000_000_000),
             nonce: 1,
             kind: TxKind::Call(Address::with_last_byte(0xf1)),
-            authorization_list: vec![LazyAuthorization::Signed(signed_authorization.clone())],
+            authorization_list: vec![MorphAuthorization::Signed(signed_authorization.clone())],
             ..Default::default()
         };
 
@@ -825,7 +882,7 @@ mod tests {
         .into_signed(Signature::new(U256::from(1), U256::from(2), true))
     }
 
-    fn morph_v2_tx_env(version: Option<u8>, authorization: LazyAuthorization) -> MorphTxEnv {
+    fn morph_v2_tx_env(version: Option<u8>, authorization: MorphAuthorization) -> MorphTxEnv {
         MorphTxEnv {
             tx_type: MORPH_TX_TYPE_ID,
             chain_id: Some(53077),
@@ -850,7 +907,7 @@ mod tests {
         let signed_authorization = sample_signed_authorization();
         let tx = morph_v2_tx_env(
             Some(MORPH_TX_VERSION_2),
-            LazyAuthorization::Signed(signed_authorization.clone()),
+            MorphAuthorization::Signed(signed_authorization.clone()),
         );
 
         let encoded = tx.encode_for_l1_fee(53077);
@@ -878,7 +935,7 @@ mod tests {
     fn encode_for_l1_fee_morph_tx_version_fallback_picks_v2_with_authorizations() {
         let tx = morph_v2_tx_env(
             None,
-            LazyAuthorization::Signed(sample_signed_authorization()),
+            MorphAuthorization::Signed(sample_signed_authorization()),
         );
 
         let encoded = tx.encode_for_l1_fee(53077);
@@ -910,7 +967,7 @@ mod tests {
         );
         let tx = morph_v2_tx_env(
             Some(MORPH_TX_VERSION_2),
-            LazyAuthorization::Recovered(recovered),
+            MorphAuthorization::Recovered(recovered),
         );
 
         let encoded = tx.encode_for_l1_fee(53077);
@@ -959,7 +1016,7 @@ mod tests {
         assert_eq!(env.tx_type, MORPH_TX_TYPE_ID);
         assert_eq!(env.authorization_list.len(), 1);
         match &env.authorization_list[0] {
-            LazyAuthorization::Recovered(recovered) => {
+            MorphAuthorization::Recovered(recovered) => {
                 let (authorization, _authority) = recovered.clone().into_parts();
                 assert_eq!(&authorization, signed_authorization.inner());
             }
