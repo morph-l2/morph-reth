@@ -5719,6 +5719,7 @@ dependencies = [
  "alloy-eips",
  "alloy-primitives",
  "c-kzg",
+ "dashmap",
  "derive_more",
  "evm2",
  "futures",

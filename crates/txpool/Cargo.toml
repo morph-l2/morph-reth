@@ -35,6 +35,7 @@ alloy-primitives.workspace = true
 
 # Misc
 c-kzg = "2.1.5"
+dashmap.workspace = true
 derive_more.workspace = true
 futures.workspace = true
 parking_lot.workspace = true

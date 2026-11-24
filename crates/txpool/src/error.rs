@@ -33,6 +33,12 @@ pub enum MorphTxError {
         token_id: u16,
     },
 
+    /// Token scale is zero or invalid.
+    InvalidTokenScale {
+        /// The token ID with invalid scale.
+        token_id: u16,
+    },
+
     /// Insufficient ERC20 token balance to pay for gas.
     InsufficientTokenBalance {
         /// The token ID.
@@ -87,6 +93,9 @@ impl fmt::Display for MorphTxError {
             Self::InvalidPriceRatio { token_id } => {
                 write!(f, "token ID {token_id} has invalid price ratio (zero)")
             }
+            Self::InvalidTokenScale { token_id } => {
+                write!(f, "token ID {token_id} has invalid scale (zero)")
+            }
             Self::InsufficientTokenBalance {
                 token_id,
                 token_address,
@@ -128,8 +137,8 @@ impl PoolTransactionError for MorphTxError {
             Self::InvalidFormat { .. } => true,
             // Token not found or not active - could be due to temporary state, not penalizable
             Self::TokenNotFound { .. } | Self::TokenNotActive { .. } => false,
-            // Invalid price ratio - configuration issue, not penalizable
-            Self::InvalidPriceRatio { .. } => false,
+            // Invalid price ratio or scale - configuration issue, not penalizable
+            Self::InvalidPriceRatio { .. } | Self::InvalidTokenScale { .. } => false,
             // Insufficient balance or fee limit - normal validation failure
             Self::InsufficientTokenBalance { .. } | Self::InsufficientEthForValue { .. } => false,
             // Fetch failures - infrastructure issue, not penalizable
@@ -258,6 +267,7 @@ mod tests {
         assert!(!MorphTxError::TokenNotFound { token_id: 1 }.is_bad_transaction());
         assert!(!MorphTxError::TokenNotActive { token_id: 1 }.is_bad_transaction());
         assert!(!MorphTxError::InvalidPriceRatio { token_id: 1 }.is_bad_transaction());
+        assert!(!MorphTxError::InvalidTokenScale { token_id: 1 }.is_bad_transaction());
         assert!(
             !MorphTxError::TokenInfoFetchFailed {
                 token_id: 1,
@@ -275,6 +285,7 @@ mod tests {
             MorphTxError::TokenNotFound { token_id: 1 },
             MorphTxError::TokenNotActive { token_id: 2 },
             MorphTxError::InvalidPriceRatio { token_id: 3 },
+            MorphTxError::InvalidTokenScale { token_id: 3 },
             MorphTxError::InsufficientTokenBalance {
                 token_id: 4,
                 token_address: Address::ZERO,

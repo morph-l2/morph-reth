@@ -14,7 +14,7 @@ use evm2::{
 
 use crate::{
     MorphInvalidTransaction,
-    evm::{MorphEvmEnv, morph_evm},
+    evm::{MorphEvm, MorphEvmEnv, morph_evm},
 };
 
 /// L2 Token Registry contract address on Morph L2.
@@ -51,39 +51,55 @@ pub struct TokenFeeInfo {
 }
 
 /// Fee-token registry metadata without any caller-specific balance state.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct TokenRegistryEntry {
-    token_address: Address,
-    is_active: bool,
-    decimals: u8,
-    price_ratio: U256,
-    scale: U256,
-    balance_slot: Option<U256>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TokenRegistryEntry {
+    /// The registered ERC20 contract address.
+    pub token_address: Address,
+    /// Whether the token is active for gas payment.
+    pub is_active: bool,
+    /// Token decimals.
+    pub decimals: u8,
+    /// The price ratio of the token (relative to ETH).
+    pub price_ratio: U256,
+    /// The scale of the token for price calculation.
+    pub scale: U256,
+    /// The user's ERC20 balance storage slot (`None` means call-mode `balanceOf`).
+    pub balance_slot: Option<U256>,
 }
 
 impl TokenRegistryEntry {
     /// The registered ERC20 contract.
-    pub(crate) const fn token_address(&self) -> Address {
+    pub const fn token_address(&self) -> Address {
         self.token_address
     }
 
     /// The caller's balance storage slot, when the registry declares one.
     ///
     /// `None` means call mode: the balance has to be read by calling `balanceOf`.
-    pub(crate) const fn balance_slot(&self) -> Option<U256> {
+    pub const fn balance_slot(&self) -> Option<U256> {
         self.balance_slot
     }
 
     /// Load fee-token metadata without reading a caller's token balance.
-    pub(crate) fn load<DB: Database>(
-        db: &mut DB,
-        token_id: u16,
-    ) -> Result<Option<Self>, DB::Error> {
+    pub fn load<DB: Database>(db: &mut DB, token_id: u16) -> Result<Option<Self>, DB::Error> {
         Self::load_with(|address, slot| db.get_storage(&address, &slot), token_id)
     }
 
+    /// Load fee-token metadata through an existing [`MorphEvm`]'s backing database without
+    /// warming or tracking the registry slots in transaction state.
+    pub fn load_from_evm(
+        evm: &mut MorphEvm<'_>,
+        token_id: u16,
+    ) -> Result<Option<Self>, HandlerError> {
+        let state = evm.state_mut();
+        Ok(Self::load_with(
+            |address, slot| state.storage_slot_untracked(&address, &slot),
+            token_id,
+        )?)
+    }
+
     /// As [`Self::load`], reading storage through `read`.
-    pub(crate) fn load_with<E>(
+    pub fn load_with<E>(
         read: impl FnMut(Address, U256) -> Result<U256, E>,
         token_id: u16,
     ) -> Result<Option<Self>, E> {
@@ -91,7 +107,7 @@ impl TokenRegistryEntry {
     }
 
     /// Reject registry entries that cannot produce a valid token-denominated fee.
-    pub(crate) fn ensure_usable(self, token_id: u16) -> Result<Self, MorphInvalidTransaction> {
+    pub fn ensure_usable(self, token_id: u16) -> Result<Self, MorphInvalidTransaction> {
         if !self.is_active {
             return Err(MorphInvalidTransaction::TokenNotActive(token_id));
         }
@@ -101,8 +117,38 @@ impl TokenRegistryEntry {
         Ok(self)
     }
 
+    /// Read `caller`'s balance using an existing [`MorphEvm`], leaving its transaction-scoped
+    /// state completely clean so the same EVM instance can be reused across callers and tokens.
+    pub fn read_caller_balance_with_evm(
+        &self,
+        evm: &mut MorphEvm<'_>,
+        caller: Address,
+    ) -> Result<U256, HandlerError> {
+        if let Some(slot) = self.balance_slot {
+            let state = evm.state_mut();
+            return Ok(read_balance_from_storage(
+                |address, slot| state.storage_slot_untracked(&address, &slot),
+                self.token_address,
+                caller,
+                slot,
+            )?);
+        }
+
+        // Call mode: ORIGIN matches execution (`caller`); GASPRICE stays zero when admission
+        // does not know the next block's effective price.
+        let chain_id = evm.version().chain_id;
+        *evm.tx_env_mut() = TxEnvExt {
+            origin: caller,
+            chain_id: U256::from(chain_id),
+            ..TxEnvExt::default()
+        };
+        let result = crate::handler::evm_call_balance_of(evm, self.token_address, caller);
+        evm.state_mut().clear_transaction_state();
+        result
+    }
+
     /// Resolve the caller's balance to produce complete fee information.
-    pub(crate) fn load_for_caller<DB: Database>(
+    pub fn load_for_caller<DB: Database>(
         self,
         db: &mut DB,
         caller: Address,
@@ -136,7 +182,8 @@ impl TokenRegistryEntry {
         Ok(self.into_fee_info(caller, balance))
     }
 
-    pub(crate) fn into_fee_info(self, caller: Address, balance: U256) -> TokenFeeInfo {
+    /// Combine registry metadata with a resolved caller balance.
+    pub const fn into_fee_info(self, caller: Address, balance: U256) -> TokenFeeInfo {
         TokenFeeInfo {
             token_address: self.token_address,
             is_active: self.is_active,
@@ -163,9 +210,12 @@ impl TokenFeeInfo {
 
     /// Load token fee information with EVM call fallback.
     ///
-    /// Reads token parameters from L2 Token Registry storage. If the token's
-    /// balance slot is unknown, falls back to an EVM `balanceOf` call.
-    /// Returns `None` if the token is not registered.
+    /// Reads token parameters from L2 Token Registry storage and validates
+    /// usability (`is_active`, non-zero `price_ratio` and `scale`) before
+    /// resolving the caller's balance, so inactive or misconfigured call-mode
+    /// tokens never execute contract bytecode. If the token's balance slot is
+    /// unknown, falls back to an EVM `balanceOf` call.
+    /// Returns `Ok(None)` if the token is not registered.
     pub fn load_for_caller<DB: Database>(
         db: &mut DB,
         token_id: u16,
@@ -173,7 +223,7 @@ impl TokenFeeInfo {
         env: &MorphEvmEnv,
     ) -> Result<Option<Self>, HandlerError> {
         let entry = match TokenRegistryEntry::load(db, token_id).map_err(database_error::<DB>)? {
-            Some(e) => e,
+            Some(e) => e.ensure_usable(token_id)?,
             None => return Ok(None),
         };
 
@@ -626,6 +676,140 @@ pub(crate) mod tests {
         };
         let error = TokenFeeInfo::load_for_caller(&mut unreadable, 1, caller, &env).unwrap_err();
         assert!(is_token_read_failure(&error), "{error:?}");
+    }
+
+    #[test]
+    fn load_for_caller_rejects_unusable_call_mode_tokens_before_executing_bytecode() {
+        let token = address!("5300000000000000000000000000000000000042");
+        let caller = address!("0000000000000000000000000000000000000001");
+        let env = MorphEvmEnv::new(MorphHardfork::Emerald, MorphBlockEnv::default(), 1);
+
+        let mut token_id_bytes = [0u8; 32];
+        token_id_bytes[31] = 1;
+        let base = compute_mapping_slot(TOKEN_REGISTRY_SLOT, &token_id_bytes);
+
+        // Inactive token: `UnreadableTokenDb` would fail with `TokenReadFailure` if `balanceOf`
+        // were ever invoked, proving usability is checked before entering call-mode bytecode.
+        let mut inactive_inner = call_mode_token_state(token, 10_000_000);
+        let mut inactive_packed = [0u8; 32];
+        inactive_packed[30] = 18;
+        inactive_packed[31] = 0;
+        inactive_inner.insert_account_storage(
+            &L2_TOKEN_REGISTRY_ADDRESS,
+            &(base + U256::from(2)),
+            &U256::from_be_bytes(inactive_packed),
+        );
+        let mut unreadable_inactive = UnreadableTokenDb {
+            inner: inactive_inner,
+            token,
+        };
+        let err =
+            TokenFeeInfo::load_for_caller(&mut unreadable_inactive, 1, caller, &env).unwrap_err();
+        assert_eq!(
+            err.external_ref::<MorphInvalidTransaction>(),
+            Some(&MorphInvalidTransaction::TokenNotActive(1))
+        );
+
+        // Zero scale token: rejected with `InvalidTokenConfig(1)` before `balanceOf`.
+        let mut zero_scale_inner = call_mode_token_state(token, 10_000_000);
+        zero_scale_inner.insert_account_storage(
+            &L2_TOKEN_REGISTRY_ADDRESS,
+            &(base + U256::from(3)),
+            &U256::ZERO,
+        );
+        let mut unreadable_zero_scale = UnreadableTokenDb {
+            inner: zero_scale_inner,
+            token,
+        };
+        let err =
+            TokenFeeInfo::load_for_caller(&mut unreadable_zero_scale, 1, caller, &env).unwrap_err();
+        assert_eq!(
+            err.external_ref::<MorphInvalidTransaction>(),
+            Some(&MorphInvalidTransaction::InvalidTokenConfig(1))
+        );
+    }
+
+    #[test]
+    fn reused_evm_recovers_cleanly_after_proxy_delegatecall_db_failure() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        struct FlakyImplDb {
+            inner: InMemoryDB,
+            fail_impl: Arc<AtomicBool>,
+            token: Address,
+        }
+
+        impl Database for FlakyImplDb {
+            type Error = TokenReadFailure;
+
+            fn get_account(
+                &mut self,
+                address: &Address,
+            ) -> Result<Option<AccountInfo>, Self::Error> {
+                Ok(DynDatabase::get_account(&mut self.inner, address).unwrap())
+            }
+
+            fn get_code_by_hash(&mut self, code_hash: &B256) -> Result<Bytecode, Self::Error> {
+                Ok(DynDatabase::get_code_by_hash(&mut self.inner, code_hash).unwrap())
+            }
+
+            fn get_storage(&mut self, address: &Address, key: &Word) -> Result<Word, Self::Error> {
+                if *address == self.token && self.fail_impl.load(Ordering::Relaxed) {
+                    return Err(TokenReadFailure);
+                }
+                Ok(DynDatabase::get_storage(&mut self.inner, address, key).unwrap())
+            }
+
+            fn get_block_hash(&mut self, number: &Word) -> Result<B256, Self::Error> {
+                Ok(DynDatabase::get_block_hash(&mut self.inner, number).unwrap())
+            }
+        }
+
+        let proxy = address!("5300000000000000000000000000000000000042");
+        let implementation = address!("5300000000000000000000000000000000000099");
+        let caller = address!("0000000000000000000000000000000000000001");
+
+        // Minimal DELEGATECALL proxy -> implementation reading slot 0.
+        let mut proxy_code = vec![0x36, 0x5f, 0x5f, 0x37, 0x5f, 0x5f, 0x36, 0x5f, 0x73];
+        proxy_code.extend_from_slice(implementation.as_slice());
+        proxy_code.extend_from_slice(&[0x5a, 0xf4, 0x3d, 0x5f, 0x5f, 0x3e, 0x50, 0x3d, 0x5f, 0xf3]);
+
+        let mut inner = call_mode_token_state_with_code(proxy, 777_000, Bytes::from(proxy_code));
+        inner.insert_account_info(
+            &implementation,
+            AccountInfo::default().with_code(Bytecode::new_legacy(bytes!("6000545f5260205ff3"))),
+        );
+
+        let fail_impl = Arc::new(AtomicBool::new(true));
+        let db = FlakyImplDb {
+            inner,
+            fail_impl: Arc::clone(&fail_impl),
+            token: proxy,
+        };
+        let env = MorphEvmEnv::new(MorphHardfork::Emerald, MorphBlockEnv::default(), 2818);
+        let mut evm = morph_evm(Db::new(db), env);
+
+        let entry = TokenRegistryEntry::load_from_evm(&mut evm, 1)
+            .unwrap()
+            .unwrap()
+            .ensure_usable(1)
+            .unwrap();
+
+        // First call fails mid-DELEGATECALL with DB read error.
+        let err = entry
+            .read_caller_balance_with_evm(&mut evm, caller)
+            .unwrap_err();
+        assert!(is_token_read_failure(&err), "{err:?}");
+
+        // Flip DB healthy and reuse the exact same `MorphEvm` instance: must succeed cleanly.
+        fail_impl.store(false, Ordering::Relaxed);
+        let balance = entry
+            .read_caller_balance_with_evm(&mut evm, caller)
+            .expect("reused EVM must recover cleanly after nested frame DB error");
+        assert_eq!(balance, U256::from(777_000u64));
     }
 
     #[test]

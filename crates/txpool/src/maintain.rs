@@ -21,14 +21,18 @@
 //! and `demoteUnexecutables` (tx_pool.go), but implemented as a separate
 //! maintenance task since we cannot modify reth's internal pool logic.
 
-use crate::MorphPooledTransaction;
+use crate::{
+    MorphPooledTransaction,
+    morph_tx_validation::validate_morph_tx_with,
+    state_cache::{StateCache, StateCacheDb, TokenFeeValidator, morph_evm_env_from_header},
+};
 use alloy_consensus::Transaction;
 use alloy_consensus::Typed2718;
 use alloy_primitives::{Address, TxHash, U256};
 use futures::StreamExt;
 use morph_chainspec::hardfork::MorphHardforks;
 use morph_revm::L1BlockInfo;
-use reth_chainspec::ChainSpecProvider;
+use reth_chainspec::{ChainSpecProvider, EthChainSpec};
 use reth_evm::{Database, database::StateProviderDatabase};
 use reth_primitives_traits::AlloyBlockHeader;
 use reth_provider::CanonStateSubscriptions;
@@ -117,7 +121,7 @@ fn exceeds_block_gas_limit(tx_gas_limit: u64, block_gas_limit: u64) -> bool {
 pub async fn maintain_morph_pool<Pool, Client>(pool: Pool, client: Client)
 where
     Pool: TransactionPool<Transaction = MorphPooledTransaction> + Clone,
-    Client: ChainSpecProvider<ChainSpec: MorphHardforks>
+    Client: ChainSpecProvider<ChainSpec: EthChainSpec + MorphHardforks>
         + StateProviderFactory
         + CanonStateSubscriptions
         + Clone
@@ -176,7 +180,9 @@ where
             }
         };
 
-        let mut db = StateProviderDatabase::new((&state_provider).into_evm_state_provider());
+        let evm_state_provider = (&state_provider).into_evm_state_provider();
+        let cache = StateCache::default();
+        let mut db = StateCacheDb::new(&cache, StateProviderDatabase::new(&evm_state_provider));
 
         // Fetch L1 block info for fee calculation
         let l1_block_info = match L1BlockInfo::try_fetch(&mut db, hardfork) {
@@ -190,6 +196,14 @@ where
                 continue;
             }
         };
+
+        let evm_env =
+            morph_evm_env_from_header(hardfork, client.chain_spec().chain().id(), new_tip.header());
+        let mut token_validator = TokenFeeValidator::new(
+            &cache,
+            StateProviderDatabase::new(&evm_state_provider),
+            evm_env,
+        );
 
         tracing::trace!(
             target: "morph::txpool::maintain",
@@ -260,7 +274,9 @@ where
                     hardfork,
                 };
 
-                let validation = match crate::validate_morph_tx(&mut db, &input) {
+                let validation = match validate_morph_tx_with(&input, |token_id, caller| {
+                    token_validator.resolve_token_fee_info(token_id, caller)
+                }) {
                     Ok(v) => v,
                     Err(err) => {
                         tracing::debug!(

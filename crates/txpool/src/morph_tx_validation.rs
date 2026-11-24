@@ -13,7 +13,10 @@ use morph_primitives::{
 use morph_revm::{MorphEvmEnv, TokenFeeInfo};
 use reth_evm::Database;
 
-use crate::MorphTxError;
+use crate::{
+    MorphTxError,
+    state_cache::{StateCache, TokenFeeValidator},
+};
 
 /// High-level input for MorphTx validation.
 ///
@@ -56,6 +59,22 @@ pub struct MorphTxValidationResult {
 pub fn validate_morph_tx<DB: Database>(
     db: &mut DB,
     input: &MorphTxValidationInput<'_>,
+) -> Result<MorphTxValidationResult, MorphTxError> {
+    let cache = StateCache::default();
+    let env = MorphEvmEnv::new(input.hardfork, morph_revm::MorphBlockEnv::default(), 1);
+    let mut validator = TokenFeeValidator::new(&cache, db, env);
+    validate_morph_tx_with(input, |token_id, sender| {
+        validator.resolve_token_fee_info(token_id, sender)
+    })
+}
+
+/// Validates a MorphTx transaction using a caller-supplied fee-token resolver.
+///
+/// Structural rules, ETH `value` coverage, and `fee_token_id == 0` ETH-fee checks run before
+/// `resolve_token`, so invalid or ETH-paid MorphTxs never touch token registry state.
+pub(crate) fn validate_morph_tx_with(
+    input: &MorphTxValidationInput<'_>,
+    resolve_token: impl FnOnce(u16, Address) -> Result<TokenFeeInfo, MorphTxError>,
 ) -> Result<MorphTxValidationResult, MorphTxError> {
     // Keep MorphTx structural validation in the shared path so both initial
     // admission and background revalidation enforce the same invariants.
@@ -121,33 +140,7 @@ pub fn validate_morph_tx<DB: Database>(
         });
     }
 
-    // Pool admission has no block environment, so a call-mode token's `balanceOf`
-    // is evaluated under the hardfork's defaults. That matches the pool's previous
-    // behaviour; threading the real head environment through admission is txpool
-    // work and does not belong in this change.
-    let env = MorphEvmEnv::new(input.hardfork, morph_revm::MorphBlockEnv::default(), 1);
-    let token_info = TokenFeeInfo::load_for_caller(db, fee_token_id, input.sender, &env)
-        .map_err(|err| MorphTxError::TokenInfoFetchFailed {
-            token_id: fee_token_id,
-            message: format!("{err:?}"),
-        })?
-        .ok_or(MorphTxError::TokenNotFound {
-            token_id: fee_token_id,
-        })?;
-
-    // Check token is active
-    if !token_info.is_active {
-        return Err(MorphTxError::TokenNotActive {
-            token_id: fee_token_id,
-        });
-    }
-
-    // Check price ratio is valid
-    if token_info.price_ratio.is_zero() {
-        return Err(MorphTxError::InvalidPriceRatio {
-            token_id: fee_token_id,
-        });
-    }
+    let token_info = resolve_token(fee_token_id, input.sender)?;
 
     // Txpool admission follows geth's conservative budget check and requires
     // enough tokens for the max fee cap. Execution still charges the effective price.
