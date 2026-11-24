@@ -51,7 +51,6 @@ use reth_chainspec::ChainSpecProvider;
 use reth_evm::{ConfigureEvm, EvmFactory, EvmFactoryFor};
 use reth_primitives_traits::{AlloyBlockHeader, HeaderTy, NodePrimitives, SealedHeader};
 use reth_provider::CanonStateSubscriptions;
-use reth_revm::database::StateProviderDatabase;
 use reth_storage_api::{BlockReaderIdExt, StateProviderFactory};
 use reth_transaction_pool::{PoolTransaction, TransactionPool};
 use std::collections::{HashMap, HashSet};
@@ -111,10 +110,10 @@ fn collect_removable_transactions<DB: alloy_evm::Database>(
     pool_txs: Vec<&MorphPooledTransaction>,
 ) -> Vec<TxHash> {
     let hardfork = *evm_env.cfg_env.spec();
-    // These caches live for exactly this provider/environment snapshot. Cache successful
-    // reads only; a later block must re-read changed registry parameters and balances.
-    let mut token_entries = HashMap::new();
-    let mut token_balances = HashMap::new();
+    // Per-round cache: checks token usability before call-mode `balanceOf`, reuses one
+    // `MorphEvm` across the entire round, and caches both balances and deterministic
+    // query failures (never DB errors).
+    let mut token_cache = crate::morph_tx_validation::TokenFeeCache::new(db);
     // Group by sender and process in nonce order so removing a transaction parks its descendants.
     let mut txs_by_sender: HashMap<Address, Vec<&MorphPooledTransaction>> = HashMap::new();
     for tx in pool_txs {
@@ -128,7 +127,7 @@ fn collect_removable_transactions<DB: alloy_evm::Database>(
 
         // Read one account per sender. Affordability is per transaction, matching
         // admission and geth; cumulative ETH parking remains owned by reth.
-        let account = match db.basic(sender) {
+        let account = match token_cache.db_mut().basic(sender) {
             Ok(account) => account.unwrap_or_default(),
             Err(err) => {
                 tracing::warn!(
@@ -196,28 +195,8 @@ fn collect_removable_transactions<DB: alloy_evm::Database>(
                 evm_env,
             };
 
-            match crate::morph_tx_validation::validate_morph_tx_with_token_info(
-                &input,
-                |token_id| {
-                    use morph_revm::TokenRegistryEntry;
-                    let entry = match token_entries.entry(token_id) {
-                        std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
-                        std::collections::hash_map::Entry::Vacant(entry) => {
-                            *entry.insert(TokenRegistryEntry::load(db, token_id)?)
-                        }
-                    };
-                    let Some(entry) = entry else {
-                        return Ok(None);
-                    };
-                    let info = match token_balances.entry((sender, token_id)) {
-                        std::collections::hash_map::Entry::Occupied(info) => *info.get(),
-                        std::collections::hash_map::Entry::Vacant(info) => {
-                            *info.insert(entry.load_for_caller(db, sender, evm_env)?)
-                        }
-                    };
-                    Ok(Some(info))
-                },
-            ) {
+            match crate::morph_tx_validation::validate_morph_tx_with_cache(&mut token_cache, &input)
+            {
                 Ok(_) => {}
                 Err(MorphTxValidationError::State(err)) => {
                     tracing::warn!(
@@ -288,7 +267,7 @@ where
     if head.hash() == judged_at {
         return candidates;
     }
-    let state = match source.state_for(head.header()) {
+    let mut state = match source.state_for(head.header()) {
         Ok(state) => state,
         Err(err) => {
             tracing::warn!(target: "morph::txpool::maintain", %err, "Failed to open the canonical head; skipping removals");
@@ -305,9 +284,8 @@ where
         .into_iter()
         .flat_map(|sender| pool.get_transactions_by_sender(sender))
         .collect();
-    let mut db = StateProviderDatabase::new(state.provider);
     let still_removable: HashSet<TxHash> = collect_removable_transactions(
-        &mut db,
+        state.token_cache.db_mut(),
         &state.head.l1_block_info,
         &state.head.evm_env,
         head.gas_limit(),
@@ -404,14 +382,13 @@ async fn maintain_morph_pool_with<Pool, N, Source, Events>(
             continue;
         }
 
-        let state = match source.state_for(new_tip.header()) {
+        let mut state = match source.state_for(new_tip.header()) {
             Ok(state) => state,
             Err(err) => {
                 tracing::warn!(target: "morph::txpool::maintain", %err, "Failed to prepare fee revalidation state");
                 continue;
             }
         };
-        let mut db = StateProviderDatabase::new(state.provider);
         let l1_block_info = state.head.l1_block_info;
         let evm_env = &state.head.evm_env;
 
@@ -422,7 +399,7 @@ async fn maintain_morph_pool_with<Pool, N, Source, Events>(
         );
 
         let to_remove = collect_removable_transactions(
-            &mut db,
+            state.token_cache.db_mut(),
             &l1_block_info,
             evm_env,
             block_gas_limit,
@@ -1588,5 +1565,106 @@ mod tests {
             [0]
         );
         assert!(all.queued.is_empty());
+    }
+
+    /// M-H04: Maintenance skips call-mode `balanceOf` for inactive, zero-price-ratio,
+    /// and zero-scale tokens while still evicting those transactions cleanly.
+    #[test]
+    fn maintenance_skips_balance_of_for_unusable_call_mode_tokens() {
+        use crate::morph_tx_validation::tests::CountingTokenDb;
+        use morph_revm::compute_mapping_slot;
+
+        let mut token_key = [0u8; 32];
+        token_key[30..].copy_from_slice(&TOKEN_ID.to_be_bytes());
+        let base = compute_mapping_slot(U256::from(151), &token_key);
+        let price_slot = compute_mapping_slot(U256::from(153), &token_key);
+
+        let tx = token_fee_tx(0);
+        let evm_env = test_evm_env();
+
+        let mut inactive = [0u8; 32];
+        inactive[30] = 18;
+        inactive[31] = 0;
+
+        for (label, slot, val) in [
+            (
+                "inactive",
+                base + U256::from(2),
+                U256::from_be_bytes(inactive),
+            ),
+            ("zero price_ratio", price_slot, U256::ZERO),
+            ("zero scale", base + U256::from(3), U256::ZERO),
+        ] {
+            let mut inner =
+                test_state_with_token_code(0, 0, TX_TOKEN_BUDGET * 10, FAILING_BALANCE_OF[0]);
+            inner
+                .insert_account_storage(L2_TOKEN_REGISTRY_ADDRESS, slot, val)
+                .unwrap();
+            let mut db = CountingTokenDb::new(inner, FEE_TOKEN);
+            let removable = collect_removable_transactions(
+                &mut db,
+                &L1BlockInfo::default(),
+                &evm_env,
+                30_000_000,
+                vec![&tx],
+            );
+            assert_eq!(
+                removable,
+                vec![*tx.hash()],
+                "{label}: unusable token tx must be evicted"
+            );
+            assert_eq!(
+                db.reads(),
+                0,
+                "{label}: maintenance must not execute balanceOf on unusable token"
+            );
+        }
+    }
+
+    /// M-H04: Maintenance caches call-mode `balanceOf` results per `(sender, token_id)`
+    /// within a single round (reusing one `MorphEvm` across the round).
+    #[test]
+    fn maintenance_caches_balance_of_within_round() {
+        use crate::morph_tx_validation::tests::CountingTokenDb;
+
+        // 1. Multiple valid MorphTxs from the same sender hit the cache after the first
+        // `balanceOf` call instead of re-executing EVM per transaction.
+        let inner = test_state_with_token_code(0, 0, TX_TOKEN_BUDGET * 10, BALANCE_OF_RUNTIME);
+        let mut db = CountingTokenDb::new(inner, FEE_TOKEN);
+        let tx0 = token_fee_tx(0);
+        let tx1 = token_fee_tx(1);
+        let tx2 = token_fee_tx(2);
+        let evm_env = test_evm_env();
+
+        let removable = collect_removable_transactions(
+            &mut db,
+            &L1BlockInfo::default(),
+            &evm_env,
+            30_000_000,
+            vec![&tx0, &tx1, &tx2],
+        );
+        assert!(removable.is_empty(), "all 3 txs are payable");
+        assert_eq!(
+            db.reads(),
+            1,
+            "balanceOf must execute only once per (sender, token_id) across 3 txs in a round"
+        );
+
+        // 2. Reverting `balanceOf` evicts cleanly and executes only once.
+        let inner = test_state_with_token_code(0, 0, TX_TOKEN_BUDGET * 10, FAILING_BALANCE_OF[0]);
+        let mut db = CountingTokenDb::new(inner, FEE_TOKEN);
+        let removable = collect_removable_transactions(
+            &mut db,
+            &L1BlockInfo::default(),
+            &evm_env,
+            30_000_000,
+            vec![&tx0, &tx1],
+        );
+        assert_eq!(removable, vec![*tx0.hash()]);
+        assert_eq!(
+            db.reads(),
+            1,
+            "reverting balanceOf must run only once per (sender, token_id)"
+        );
     }
 }

@@ -10,6 +10,7 @@
 //! - MorphTx (0x7F) ERC20 token balance validation
 
 use crate::MorphTxValidationError;
+use crate::morph_tx_validation::{TokenFeeCache, validate_morph_tx_with_cache};
 use alloy_consensus::{BlockHeader, Sealable, Transaction};
 use alloy_eips::{Encodable2718, Typed2718};
 use alloy_primitives::{Address, B256, U256};
@@ -124,11 +125,25 @@ impl MorphL1BlockInfo {
 /// State and fee-validation inputs pinned to one block for a transaction batch.
 ///
 /// Created lazily by [`MorphTransactionValidator::validate_one_with_state`]. Reusing it
-/// keeps account reads, token reads and the EVM environment on the same block, even if
-/// the canonical head advances. Start with `None` to validate a new batch at the new head.
+/// keeps account reads, token reads, the per-batch fee-token cache / call-mode EVM, and
+/// the EVM environment on the same block, even if the canonical head advances. Start
+/// with `None` to validate a new batch at the new head.
 pub struct MorphValidationState {
     pub(crate) head: Arc<MorphValidationHead>,
-    pub(crate) provider: StateProviderBox,
+    pub(crate) token_cache: TokenFeeCache<StateProviderDatabase<StateProviderBox>>,
+}
+
+impl MorphValidationState {
+    pub(crate) fn new(head: Arc<MorphValidationHead>, provider: StateProviderBox) -> Self {
+        Self {
+            head,
+            token_cache: TokenFeeCache::new(StateProviderDatabase::new(provider)),
+        }
+    }
+
+    pub(crate) fn provider(&self) -> &StateProviderBox {
+        &self.token_cache.db().0
+    }
 }
 
 /// Opens state, EVM environment and L1 parameters for exactly one header.
@@ -150,8 +165,8 @@ where
         &mut StateProviderDatabase::new(&provider),
         *evm_env.cfg_env.spec(),
     )?;
-    Ok(MorphValidationState {
-        head: Arc::new(MorphValidationHead {
+    Ok(MorphValidationState::new(
+        Arc::new(MorphValidationHead {
             hash: header.hash_slow(),
             number: header.number(),
             timestamp: header.timestamp(),
@@ -160,7 +175,7 @@ where
             evm_env,
         }),
         provider,
-    })
+    ))
 }
 
 impl std::fmt::Debug for MorphValidationState {
@@ -297,7 +312,7 @@ where
         let head = self.block_info.head.read().clone();
         if let Some(head) = head {
             let provider = self.client().state_by_block_hash(head.hash)?;
-            return Ok(MorphValidationState { head, provider });
+            return Ok(MorphValidationState::new(head, provider));
         }
         let header = self
             .client()
@@ -358,8 +373,8 @@ where
                 Err(err) => return TransactionValidationOutcome::Error(*transaction.hash(), err),
             }
         }
-        let state = state.as_ref().expect("validation state initialized above");
-        let head = &state.head;
+        let state = state.as_mut().expect("validation state initialized above");
+        let head = Arc::clone(&state.head);
 
         // Reject EIP-7702 transactions before Viridian hardfork (PRAGUE)
         if transaction.is_eip7702()
@@ -440,7 +455,7 @@ where
         }
         let outcome = self
             .inner
-            .validate_stateful(origin, transaction, &state.provider);
+            .validate_stateful(origin, transaction, state.provider().as_ref());
         if outcome.is_invalid() || outcome.is_error() {
             tracing::trace!(target: "morph::txpool", ?outcome, "tx pool validation failed");
             return outcome;
@@ -519,10 +534,9 @@ where
         sender: Address,
         eth_balance: U256,
         l1_data_fee: U256,
-        state: &MorphValidationState,
+        state: &mut MorphValidationState,
     ) -> Result<crate::MorphTxValidationResult, MorphTxValidationError<reth_provider::ProviderError>>
     {
-        let mut db = StateProviderDatabase::new(&state.provider);
         let input = crate::MorphTxValidationInput {
             consensus_tx,
             sender,
@@ -532,7 +546,7 @@ where
             evm_env: &state.head.evm_env,
         };
 
-        let result = crate::validate_morph_tx(&mut db, &input)?;
+        let result = validate_morph_tx_with_cache(&mut state.token_cache, &input)?;
         let token_balance = result
             .token_info
             .as_ref()
@@ -1385,5 +1399,113 @@ mod tests {
             TransactionValidationOutcome::Invalid(_, InvalidPoolTransactionError::Overdraft { cost, balance })
                 if cost == U256::from(2_100_000) && balance == U256::from(300_000)
         ));
+    }
+
+    /// M-H04: `validate_all` shares a single `MorphValidationState` (`TokenFeeCache` +
+    /// one reused `MorphEvm`) across the entire batch, caching both balances and
+    /// deterministic `TokenBalanceQueryFailed` errors per `(sender, token_id)`.
+    #[test]
+    fn validate_all_reuses_token_cache_and_single_evm_across_batch() {
+        let signer_a = address!("0000000000000000000000000000000000000001");
+        let signer_b = address!("0000000000000000000000000000000000000002");
+        let fee_token = address!("5300000000000000000000000000000000000042");
+
+        let client = new_mock_provider();
+        let header = morph_primitives::MorphHeader::from(alloy_consensus::Header {
+            number: 1,
+            timestamp: 1_767_765_600,
+            gas_limit: 30_000_000,
+            base_fee_per_gas: Some(10),
+            ..Default::default()
+        });
+        client.add_block(
+            header.hash_slow(),
+            morph_primitives::Block {
+                header,
+                body: Default::default(),
+            },
+        );
+        client.add_account(signer_a, ExtendedAccount::new(0, U256::ZERO));
+        client.add_account(signer_b, ExtendedAccount::new(0, U256::ZERO));
+        client.add_account(
+            L2_TOKEN_REGISTRY_ADDRESS,
+            token_registry_account(1, fee_token),
+        );
+        client.add_account(
+            fee_token,
+            ExtendedAccount::new(0, U256::ZERO)
+                .with_bytecode(Bytes::from_static(BALANCE_OF_RUNTIME))
+                .extend_storage([
+                    (
+                        storage_key(token_balance_key(signer_a)),
+                        U256::from(10_000_000u64),
+                    ),
+                    (
+                        storage_key(token_balance_key(signer_b)),
+                        U256::from(10_000_000u64),
+                    ),
+                ]),
+        );
+
+        let morph_evm_config = MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone());
+        let eth_validator: EthTransactionValidator<
+            _,
+            crate::MorphPooledTransaction,
+            MorphEvmConfig,
+        > = EthTransactionValidatorBuilder::new(client, morph_evm_config)
+            .disable_balance_check()
+            .with_custom_tx_type(morph_primitives::MORPH_TX_TYPE_ID)
+            .build::<crate::MorphPooledTransaction, _>(InMemoryBlobStore::default());
+        let validator = MorphTransactionValidator::new(eth_validator);
+
+        let make_tx = |signer: Address, nonce: u64| {
+            let tx = TxMorph {
+                chain_id: 2818,
+                nonce,
+                gas_limit: 21_000,
+                max_fee_per_gas: 100,
+                max_priority_fee_per_gas: 1,
+                to: TxKind::Call(address!("0000000000000000000000000000000000000009")),
+                value: U256::ZERO,
+                access_list: Default::default(),
+                version: 0,
+                fee_token_id: 1,
+                fee_limit: U256::ZERO,
+                reference: None,
+                memo: None,
+                authorization_list: Vec::new(),
+                input: Default::default(),
+            };
+            let envelope = MorphTxEnvelope::Morph(Signed::new_unchecked(
+                tx,
+                Signature::test_signature(),
+                B256::from_slice(&[nonce as u8; 32]),
+            ));
+            let recovered = Recovered::new_unchecked(envelope, signer);
+            let len = recovered.encode_2718_len();
+            crate::MorphPooledTransaction::new(recovered, len)
+        };
+
+        // Validate 3 transactions across 2 senders using one pinned `MorphValidationState`
+        // (exact same path as `validate_all`), and inspect the cache + EVM reuse directly.
+        let mut state = None;
+        for (signer, nonce) in [(signer_a, 0), (signer_a, 1), (signer_b, 0)] {
+            let outcome = validator.validate_one_with_state(
+                TransactionOrigin::Local,
+                make_tx(signer, nonce),
+                &mut state,
+            );
+            assert!(
+                matches!(outcome, TransactionValidationOutcome::Valid { .. }),
+                "expected valid tx for {signer:?} nonce {nonce}, got {outcome:?}"
+            );
+        }
+
+        let state = state.expect("state must be initialized");
+        assert_eq!(
+            state.token_cache.evm_instantiations(),
+            1,
+            "batch must instantiate at most one MorphEvm across all call-mode lookups"
+        );
     }
 }

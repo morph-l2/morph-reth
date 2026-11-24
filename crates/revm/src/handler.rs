@@ -219,12 +219,26 @@ where
             exec_result.gas_mut().set_refund(0);
             return Ok(());
         }
-        exec_result.gas_mut().record_refund(evm.pre_fee_refund);
-        post_execution::refund(
-            evm.ctx().cfg().gas_params(),
-            exec_result.gas_mut(),
-            eip7702_refund,
-        );
+        let gas = exec_result.gas_mut();
+        gas.record_refund(evm.pre_fee_refund);
+        gas.record_refund(eip7702_refund);
+        // Direct-slot fee deduction writes the caller's balance slot directly via
+        // `journal.sstore` without recording an EVM SSTORE clearing refund
+        // (`evm.pre_fee_refund == 0`), while keeping `original_value` intact for EIP-2200.
+        // If deduction clears the slot (`X -> 0`) and the main frame subsequently credits
+        // that slot (`0 -> Y`), EIP-2200 SSTORE subtracts `4800` (or net `2000` if
+        // `Y == X`), leaving `gas.refunded() < 0`.
+        //
+        // In morph-geth, `TransferAltTokenByState` calls `StateDB.SetState` without
+        // `AddRefund(4800)`, so on the same clear-then-credit path morph-geth's `SSTORE`
+        // invokes `StateDB.SubRefund(4800)` (which panics if `s.refund < 4800`, and
+        // otherwise subtracts from `s.refund` without wrapping). Clamping negative totals
+        // to `0` here prevents `Gas::set_final_refund`'s `self.refunded() as u64` cast
+        // from wrapping a negative `i64` into `u64` and awarding the maximum 20% refund.
+        if gas.refunded() < 0 {
+            gas.set_refund(0);
+        }
+        post_execution::refund(evm.ctx().cfg().gas_params(), gas, 0);
         Ok(())
     }
 
@@ -279,9 +293,12 @@ where
 
         // MorphTx maps to `TransactionType::Custom`, so revm's standard path
         // does not enforce EIP-1559 fee-cap rules. Those rules are independent
-        // of which asset ultimately pays the fee, matching Morph geth's preCheck.
-        if evm.ctx_ref().tx().is_morph_tx() && !evm.ctx_ref().cfg().is_fee_charge_disabled() {
-            let base_fee = Some(evm.ctx_ref().block().basefee() as u128);
+        // of which asset ultimately pays the fee, matching Morph geth's preCheck
+        // and upstream revm's `TransactionType::Eip1559` branch.
+        if evm.ctx_ref().tx().is_morph_tx() {
+            let cfg = evm.ctx_ref().cfg();
+            let base_fee = (!cfg.is_base_fee_check_disabled())
+                .then_some(evm.ctx_ref().block().basefee() as u128);
             validation::validate_priority_fee_tx(
                 evm.ctx_ref().tx().max_fee_per_gas(),
                 evm.ctx_ref()
@@ -289,7 +306,7 @@ where
                     .max_priority_fee_per_gas()
                     .unwrap_or_default(),
                 base_fee,
-                evm.ctx_ref().cfg().is_priority_fee_check_disabled(),
+                cfg.is_priority_fee_check_disabled(),
             )?;
         }
 
@@ -504,9 +521,9 @@ where
         let hardfork = *evm.ctx_ref().cfg().spec();
 
         let refunded = gas.refunded().max(0) as u64;
-        let reimburse_eth = U256::from(
-            effective_gas_price.saturating_mul(gas.remaining().saturating_add(refunded) as u128),
-        );
+        let reimburse_gas = gas.remaining().saturating_add(refunded);
+        let reimburse_eth =
+            U256::from(effective_gas_price).saturating_mul(U256::from(reimburse_gas));
 
         if reimburse_eth.is_zero() {
             return Ok(());
@@ -663,6 +680,21 @@ where
         }
 
         let hardfork = *evm.ctx_ref().cfg().spec();
+
+        // Match morph-geth's `StateDB.SetTxContext` (`s.accessList = newAccessList()`),
+        // which resets the access list before every tx so all precompiles start cold
+        // during `buyAltTokenGas` (`balanceOf` / `transfer`) on every tx in a block
+        // (and in txpool `getBalanceFunc`). Without clearing `precompile_set` here,
+        // `JournalInner::finalize` / `commit_tx` carries warmed precompiles from tx #0
+        // into tx #1+, making precompile calls 2,500 gas cheaper on tx #1+ than on tx #0.
+        // `pre_execution::load_accounts` runs after `validate()` and re-warms all active
+        // precompiles whenever `precompile_addresses().is_empty()`, matching `StateDB.Prepare`
+        // before the main frame and `reimburse_caller_token_fee`.
+        if token_registry_entry.balance_slot().is_none() {
+            evm.ctx_mut()
+                .journal_mut()
+                .warm_precompiles(&revm::primitives::AddressSet::default());
+        }
 
         let token_fee_info = load_token_fee_info(evm, token_registry_entry, caller_addr)?;
 
@@ -3592,5 +3624,556 @@ mod refund_rounding_tests {
             U256::from(VAULT_BALANCE),
             "a zero refund must leave the vault balance alone"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Audit fixes: M-C01, M-H01, M-M01, M-M04 (validate_env)
+    // -------------------------------------------------------------------------
+
+    /// M-C01: Direct-slot fee deduction clearing the caller's exact token balance
+    /// (`X -> 0`, `pre_fee_refund == 0`) followed by a main-frame credit (`0 -> Y`)
+    /// produces a negative EIP-2200 SSTORE refund (`-4800` when `Y != X`, `-2000`
+    /// when `Y == X`). `MorphEvmHandler::refund` must clamp negative totals to `0`
+    /// before `set_final_refund`, never wrapping `i64 as u64` into a 20% refund.
+    #[test]
+    fn direct_slot_clear_then_main_frame_credit_clamps_negative_refund_to_zero() {
+        use alloy_primitives::keccak256;
+        use revm::{Database as _, ExecuteCommitEvm as _, state::Bytecode};
+
+        // Bytecode on TOKEN: SSTORE(calldataload(0), calldataload(32)); STOP
+        let credit_code = Bytes::from_static(&[0x60, 0x20, 0x35, 0x5f, 0x35, 0x55, 0x00]);
+        let gas_limit = 100_000u64;
+        let caller_slot = slot_of(CALLER);
+
+        for credit_amount in [U256::from(1u64), U256::from(gas_limit)] {
+            let mut db = CacheDB::new(EmptyDB::default());
+            // Direct-slot token at 1:1 ratio (scale = 1, price_ratio = 1)
+            let mut key = [0u8; 32];
+            key[30..].copy_from_slice(&FEE_TOKEN_ID.to_be_bytes());
+            let base = compute_mapping_slot(U256::from(151), &key);
+            let mut packed = [0u8; 32];
+            packed[30] = 18;
+            packed[31] = 1;
+            for (slot, val) in [
+                (base, U256::from_be_bytes(TOKEN.into_word().0)),
+                (base + U256::from(1), BALANCE_SLOT + U256::from(1)),
+                (base + U256::from(2), U256::from_be_bytes(packed)),
+                (base + U256::from(3), U256::from(1u64)),
+                (
+                    compute_mapping_slot(U256::from(153), &key),
+                    U256::from(1u64),
+                ),
+            ] {
+                db.insert_account_storage(L2_TOKEN_REGISTRY_ADDRESS, slot, val)
+                    .unwrap();
+            }
+
+            db.insert_account_info(
+                TOKEN,
+                AccountInfo {
+                    code_hash: keccak256(credit_code.as_ref()),
+                    code: Some(Bytecode::new_raw(credit_code.clone())),
+                    ..Default::default()
+                },
+            );
+            // Caller starts with EXACT token balance == gas_limit so direct-slot
+            // deduction clears the slot from X -> 0.
+            db.insert_account_storage(TOKEN, caller_slot, U256::from(gas_limit))
+                .unwrap();
+            db.insert_account_storage(TOKEN, slot_of(BENEFICIARY), U256::ZERO)
+                .unwrap();
+            db.insert_account_info(CALLER, AccountInfo::default());
+
+            let mut evm =
+                MorphEvm::new(MorphContext::new(db, MorphHardfork::Celadon), NoOpInspector);
+            evm.block.inner.beneficiary = BENEFICIARY;
+            evm.block.inner.basefee = 0;
+
+            let mut calldata = Vec::with_capacity(64);
+            calldata.extend_from_slice(&caller_slot.to_be_bytes::<32>());
+            calldata.extend_from_slice(&credit_amount.to_be_bytes::<32>());
+
+            let tx = MorphTxEnv {
+                inner: TxEnv {
+                    tx_type: MORPH_TX_TYPE_ID,
+                    caller: CALLER,
+                    kind: TxKind::Call(TOKEN),
+                    gas_limit,
+                    gas_price: 1,
+                    data: Bytes::from(calldata),
+                    ..Default::default()
+                },
+                fee_token_id: Some(FEE_TOKEN_ID),
+                ..Default::default()
+            };
+
+            let result = evm.transact_commit(tx).expect("tx must succeed");
+            assert!(result.is_success(), "expected success, got {result:?}");
+            assert_eq!(
+                result.gas().inner_refunded(),
+                0,
+                "negative SSTORE refund must clamp to 0, not wrap to 20% (credit={credit_amount})"
+            );
+            assert_eq!(
+                result.gas().final_refunded(),
+                0,
+                "final refunded gas must be 0 (credit={credit_amount})"
+            );
+
+            let gas_used = result.tx_gas_used();
+            // Intrinsic (~21k + calldata) + cold SSTORE (2200+) => strictly > 23_000.
+            assert!(gas_used > 23_000, "unexpected gas_used={gas_used}");
+
+            let vault_bal = evm
+                .ctx_mut()
+                .db_mut()
+                .storage(TOKEN, slot_of(BENEFICIARY))
+                .unwrap();
+            let caller_bal = evm.ctx_mut().db_mut().storage(TOKEN, caller_slot).unwrap();
+
+            assert_eq!(
+                vault_bal,
+                U256::from(gas_used),
+                "FeeVault must keep full gas_used without 20% drain (credit={credit_amount})"
+            );
+            assert_eq!(
+                caller_bal,
+                credit_amount + U256::from(gas_limit - gas_used),
+                "caller must only receive credit + unused gas refund (credit={credit_amount})"
+            );
+        }
+    }
+
+    /// M-H01: `reimburse_caller_token_fee` must widen `effective_gas_price *
+    /// (remaining + refunded)` to `U256` before multiplying so high gas prices
+    /// exceeding `u128::MAX` in product reimburse the exact token amount.
+    #[test]
+    fn reimburse_caller_token_fee_widens_to_u256_above_u128_max() {
+        use revm::{Database as _, ExecuteCommitEvm as _};
+
+        // 10^35 * 79_000 = 7.9e39 > u128::MAX (~3.40e38), while 10^35 < u128::MAX.
+        let high_gas_price: u128 = 10u128.pow(35);
+        let gas_limit = 100_000u64;
+        let starting_tokens = U256::from(gas_limit);
+
+        for spec in [MorphHardfork::Jade, MorphHardfork::Celadon] {
+            let mut db = CacheDB::new(EmptyDB::default());
+            let mut key = [0u8; 32];
+            key[30..].copy_from_slice(&FEE_TOKEN_ID.to_be_bytes());
+            let base = compute_mapping_slot(U256::from(151), &key);
+            let mut packed = [0u8; 32];
+            packed[30] = 18;
+            packed[31] = 1;
+            for (slot, val) in [
+                (base, U256::from_be_bytes(TOKEN.into_word().0)),
+                (base + U256::from(1), BALANCE_SLOT + U256::from(1)),
+                (base + U256::from(2), U256::from_be_bytes(packed)),
+                (base + U256::from(3), U256::from(1u64)), // scale = 1
+                (
+                    compute_mapping_slot(U256::from(153), &key),
+                    U256::from(high_gas_price), // price_ratio = 10^35 => 1 token == 10^35 wei
+                ),
+            ] {
+                db.insert_account_storage(L2_TOKEN_REGISTRY_ADDRESS, slot, val)
+                    .unwrap();
+            }
+
+            db.insert_account_info(TOKEN, AccountInfo::default());
+            db.insert_account_storage(TOKEN, slot_of(CALLER), starting_tokens)
+                .unwrap();
+            db.insert_account_storage(TOKEN, slot_of(BENEFICIARY), U256::ZERO)
+                .unwrap();
+            db.insert_account_info(CALLER, AccountInfo::default());
+
+            let mut evm = MorphEvm::new(MorphContext::new(db, spec), NoOpInspector);
+            evm.block.inner.beneficiary = BENEFICIARY;
+            evm.block.inner.basefee = 0;
+
+            let tx = MorphTxEnv {
+                inner: TxEnv {
+                    tx_type: MORPH_TX_TYPE_ID,
+                    caller: CALLER,
+                    kind: TxKind::Call(Address::repeat_byte(0x0e)),
+                    gas_limit,
+                    gas_price: high_gas_price,
+                    gas_priority_fee: Some(high_gas_price),
+                    ..Default::default()
+                },
+                fee_token_id: Some(FEE_TOKEN_ID),
+                ..Default::default()
+            };
+
+            let result = evm.transact_commit(tx).expect("tx must succeed");
+            assert!(result.is_success());
+            let gas_used = result.tx_gas_used();
+            assert_eq!(gas_used, 21_000);
+
+            let caller_bal = evm
+                .ctx_mut()
+                .db_mut()
+                .storage(TOKEN, slot_of(CALLER))
+                .unwrap();
+            let vault_bal = evm
+                .ctx_mut()
+                .db_mut()
+                .storage(TOKEN, slot_of(BENEFICIARY))
+                .unwrap();
+
+            // Exact U256 reimbursement: 79_000 tokens (u128 saturation would refund only ~3_402).
+            assert_eq!(
+                caller_bal,
+                U256::from(79_000u64),
+                "spec {spec:?}: must refund exact 79_000 tokens without u128 saturation"
+            );
+            assert_eq!(
+                vault_bal,
+                U256::from(21_000u64),
+                "spec {spec:?}: FeeVault must retain exactly 21_000 tokens"
+            );
+        }
+    }
+
+    /// M-M01: Call-mode fee deduction (`balanceOf` / `transfer`) must meter precompile
+    /// calls identically (cold, matching morph-geth's `SetTxContext` before `Prepare`)
+    /// on tx #0, tx #1+ in the same `MorphEvm` instance, and in `TokenFeeInfo::load_for_caller`,
+    /// while main-frame execution and reimbursement still see precompiles warm.
+    #[test]
+    fn call_mode_precompile_gas_is_identical_across_tx0_tx1_and_load_for_caller() {
+        use alloy_primitives::keccak256;
+        use revm::{Database as _, ExecuteCommitEvm as _, state::Bytecode};
+
+        // Bytecode measuring `STATICCALL` to IDENTITY precompile (0x04) and storing the
+        // gas delta into `dest_slot`:
+        //   GAS; PUSH0; PUSH0; PUSH0; PUSH0; PUSH1 0x04; PUSH2 0x2710; STATICCALL; POP;
+        //   GAS; SWAP1; SUB; PUSH1 dest_slot; SSTORE
+        fn push_measure_precompile_to_slot(code: &mut Vec<u8>, dest_slot: u8) {
+            code.extend_from_slice(&[
+                0x5a, // GAS
+                0x5f, 0x5f, 0x5f, 0x5f, // retLen=0, retOff=0, argLen=0, argOff=0
+                0x60, 0x04, // addr = IDENTITY (0x04)
+                0x61, 0x27, 0x10, // gas = 10_000
+                0xfa, // STATICCALL
+                0x50, // POP success
+                0x5a, // GAS
+                0x90, // SWAP1
+                0x03, // SUB (gas_before - gas_after)
+                0x60, dest_slot, // PUSH1 dest_slot
+                0x55,      // SSTORE
+            ]);
+        }
+
+        // Main-frame target contract: measures precompile 0x04 gas into slot 0x99 and stops.
+        let target = Address::repeat_byte(0x44);
+        let mut target_code = Vec::new();
+        push_measure_precompile_to_slot(&mut target_code, 0x99);
+        target_code.push(0x00); // STOP
+
+        // Call-mode ERC20 contract where balances live at storage slot == address:
+        // - selector 0x70 (balanceOf(addr)): returns storage[calldataload(4)]
+        // - selector 0xa9 (transfer(to, amt)):
+        //     if caller == BENEFICIARY (refund), records 0x04 gas delta in slot 0x9a,
+        //     else (deduction), records 0x04 gas delta in slot 0x99;
+        //     then updates storage[caller] -= amt, storage[to] += amt and returns true (1).
+        let mut token_code = Vec::new();
+        // Dispatch: if calldata[0] == 0x70 jump to balanceOf
+        token_code.extend_from_slice(&[
+            0x5f, 0x35, // PUSH0, CALLDATALOAD
+            0x60, 0xf8, 0x1c, // PUSH1 248, SHR
+            0x60, 0x70, 0x14, // PUSH1 0x70, EQ
+            0x61, 0x00, 0x00, // PUSH2 <balance_of_pc> (patched below)
+            0x57, // JUMPI
+        ]);
+        let balance_of_patch_pos = token_code.len() - 3;
+
+        // transfer branch: check caller == BENEFICIARY
+        token_code.push(0x33); // CALLER
+        token_code.push(0x73); // PUSH20 BENEFICIARY
+        token_code.extend_from_slice(BENEFICIARY.as_slice());
+        token_code.extend_from_slice(&[
+            0x14, // EQ
+            0x61, 0x00, 0x00, // PUSH2 <refund_branch_pc> (patched below)
+            0x57, // JUMPI
+        ]);
+        let refund_patch_pos = token_code.len() - 3;
+
+        // Deduction measurement -> slot 0x99
+        push_measure_precompile_to_slot(&mut token_code, 0x99);
+        token_code.extend_from_slice(&[
+            0x61, 0x00, 0x00, // PUSH2 <do_transfer_pc> (patched below)
+            0x56, // JUMP
+        ]);
+        let do_transfer_patch_pos = token_code.len() - 3;
+
+        // Refund measurement -> slot 0x9a
+        let refund_branch_pc = token_code.len() as u16;
+        token_code.push(0x5b); // JUMPDEST
+        push_measure_precompile_to_slot(&mut token_code, 0x9a);
+
+        // Actual transfer: storage[caller] -= amt; storage[to] += amt; return 1
+        let do_transfer_pc = token_code.len() as u16;
+        token_code.push(0x5b); // JUMPDEST
+        token_code.extend_from_slice(&[
+            0x60, 0x24, 0x35, // amt
+            0x33, 0x54, // bal_from
+            0x03, // bal_from - amt
+            0x33, 0x55, // storage[caller] = bal_from - amt
+            0x60, 0x24, 0x35, // amt
+            0x60, 0x04, 0x35, 0x54, // bal_to
+            0x01, // bal_to + amt
+            0x60, 0x04, 0x35, 0x55, // storage[to] = bal_to + amt
+            0x60, 0x01, 0x5f, 0x52, // mstore(0, 1)
+            0x60, 0x20, 0x5f, 0xf3, // return(0, 32)
+        ]);
+
+        // balanceOf branch
+        let balance_of_pc = token_code.len() as u16;
+        token_code.push(0x5b); // JUMPDEST
+        token_code.extend_from_slice(&[
+            0x60, 0x04, 0x35, 0x54, // storage[account]
+            0x5f, 0x52, // mstore(0, bal)
+            0x60, 0x20, 0x5f, 0xf3, // return(0, 32)
+        ]);
+
+        // Patch PUSH2 targets
+        token_code[balance_of_patch_pos..balance_of_patch_pos + 2]
+            .copy_from_slice(&balance_of_pc.to_be_bytes());
+        token_code[refund_patch_pos..refund_patch_pos + 2]
+            .copy_from_slice(&refund_branch_pc.to_be_bytes());
+        token_code[do_transfer_patch_pos..do_transfer_patch_pos + 2]
+            .copy_from_slice(&do_transfer_pc.to_be_bytes());
+
+        let mut db = CacheDB::new(EmptyDB::default());
+        // Register TOKEN as active call-mode token (balanceSlot = 0) at 1:1 ratio
+        let mut key = [0u8; 32];
+        key[30..].copy_from_slice(&FEE_TOKEN_ID.to_be_bytes());
+        let base = compute_mapping_slot(U256::from(151), &key);
+        let mut packed = [0u8; 32];
+        packed[30] = 18;
+        packed[31] = 1;
+        for (slot, val) in [
+            (base, U256::from_be_bytes(TOKEN.into_word().0)),
+            (base + U256::from(1), U256::ZERO), // call mode
+            (base + U256::from(2), U256::from_be_bytes(packed)),
+            (base + U256::from(3), U256::from(1u64)),
+            (
+                compute_mapping_slot(U256::from(153), &key),
+                U256::from(1u64),
+            ),
+        ] {
+            db.insert_account_storage(L2_TOKEN_REGISTRY_ADDRESS, slot, val)
+                .unwrap();
+        }
+        let token_bytes = Bytes::from(token_code);
+        db.insert_account_info(
+            TOKEN,
+            AccountInfo {
+                code_hash: keccak256(token_bytes.as_ref()),
+                code: Some(Bytecode::new_raw(token_bytes)),
+                ..Default::default()
+            },
+        );
+        let target_bytes = Bytes::from(target_code);
+        db.insert_account_info(
+            target,
+            AccountInfo {
+                code_hash: keccak256(target_bytes.as_ref()),
+                code: Some(Bytecode::new_raw(target_bytes)),
+                ..Default::default()
+            },
+        );
+        db.insert_account_storage(
+            TOKEN,
+            U256::from_be_bytes(CALLER.into_word().0),
+            U256::from(10_000_000u64),
+        )
+        .unwrap();
+        db.insert_account_info(CALLER, AccountInfo::default());
+
+        let mut evm = MorphEvm::new(MorphContext::new(db, MorphHardfork::Celadon), NoOpInspector);
+        evm.block.inner.beneficiary = BENEFICIARY;
+        evm.block.inner.basefee = 0;
+
+        let make_tx = |nonce: u64| MorphTxEnv {
+            inner: TxEnv {
+                tx_type: MORPH_TX_TYPE_ID,
+                caller: CALLER,
+                nonce,
+                kind: TxKind::Call(target),
+                gas_limit: 200_000,
+                gas_price: 1,
+                ..Default::default()
+            },
+            fee_token_id: Some(FEE_TOKEN_ID),
+            ..Default::default()
+        };
+
+        // Tx #0 on a fresh MorphEvm
+        let res0 = evm.transact_commit(make_tx(0)).expect("tx #0 must succeed");
+        assert!(res0.is_success());
+        let tx0_deduct_gas = evm
+            .ctx_mut()
+            .db_mut()
+            .storage(TOKEN, U256::from(0x99))
+            .unwrap();
+        let tx0_refund_gas = evm
+            .ctx_mut()
+            .db_mut()
+            .storage(TOKEN, U256::from(0x9a))
+            .unwrap();
+        let tx0_main_gas = evm
+            .ctx_mut()
+            .db_mut()
+            .storage(target, U256::from(0x99))
+            .unwrap();
+
+        // Reset measurement slots before tx #1 on the SAME MorphEvm instance
+        evm.ctx_mut()
+            .db_mut()
+            .insert_account_storage(TOKEN, U256::from(0x99), U256::ZERO)
+            .unwrap();
+        evm.ctx_mut()
+            .db_mut()
+            .insert_account_storage(TOKEN, U256::from(0x9a), U256::ZERO)
+            .unwrap();
+        evm.ctx_mut()
+            .db_mut()
+            .insert_account_storage(target, U256::from(0x99), U256::ZERO)
+            .unwrap();
+
+        // Tx #1 on the SAME MorphEvm (where `precompile_set` was populated by tx #0)
+        let res1 = evm.transact_commit(make_tx(1)).expect("tx #1 must succeed");
+        assert!(res1.is_success());
+        let tx1_deduct_gas = evm
+            .ctx_mut()
+            .db_mut()
+            .storage(TOKEN, U256::from(0x99))
+            .unwrap();
+        let tx1_refund_gas = evm
+            .ctx_mut()
+            .db_mut()
+            .storage(TOKEN, U256::from(0x9a))
+            .unwrap();
+        let tx1_main_gas = evm
+            .ctx_mut()
+            .db_mut()
+            .storage(target, U256::from(0x99))
+            .unwrap();
+
+        // Deduction sees cold precompile (> 2600 gas) on BOTH tx #0 and tx #1.
+        assert!(
+            tx0_deduct_gas > U256::from(2_600u64),
+            "tx #0 call-mode deduction must pay cold precompile gas, got {tx0_deduct_gas}"
+        );
+        assert_eq!(
+            tx0_deduct_gas, tx1_deduct_gas,
+            "tx #1 call-mode deduction must meter precompiles identically to tx #0"
+        );
+
+        // Main frame and reimbursement run after `load_accounts` (morph-geth `Prepare`)
+        // and both see warm precompiles (< 200 gas) on tx #0 and tx #1.
+        assert!(
+            tx0_main_gas < U256::from(200u64),
+            "tx #0 main frame must pay warm precompile gas, got {tx0_main_gas}"
+        );
+        assert_eq!(tx0_main_gas, tx1_main_gas);
+        assert!(
+            tx0_refund_gas < U256::from(200u64),
+            "tx #0 call-mode reimbursement must pay warm precompile gas, got {tx0_refund_gas}"
+        );
+        assert_eq!(tx0_refund_gas, tx1_refund_gas);
+        assert_eq!(
+            tx0_deduct_gas - tx0_main_gas,
+            U256::from(2_500u64),
+            "cold vs warm precompile delta must be exactly 2500 gas (EIP-2929)"
+        );
+
+        // Also verify txpool `TokenFeeInfo::load_for_caller` matches the exact same cold gas.
+        let balance_of_precompile_gas_code = Bytes::from_static(&[
+            0x5a, // GAS
+            0x5f, 0x5f, 0x5f, 0x5f, 0x60, 0x04, 0x61, 0x27, 0x10, 0xfa, // STATICCALL 0x04
+            0x50, // POP
+            0x5a, 0x90, 0x03, // gas_before - gas_after
+            0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3, // return 32-byte delta
+        ]);
+        evm.ctx_mut().db_mut().insert_account_info(
+            TOKEN,
+            AccountInfo {
+                code_hash: keccak256(balance_of_precompile_gas_code.as_ref()),
+                code: Some(Bytecode::new_raw(balance_of_precompile_gas_code)),
+                ..Default::default()
+            },
+        );
+        let env = crate::MorphEvmEnv::new(
+            revm::context::CfgEnv::new_with_spec(MorphHardfork::Celadon),
+            crate::MorphBlockEnv::default(),
+        );
+        let pool_info =
+            TokenFeeInfo::load_for_caller(evm.ctx_mut().db_mut(), FEE_TOKEN_ID, CALLER, &env)
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            pool_info.balance, tx0_deduct_gas,
+            "txpool load_for_caller must observe the exact same cold precompile gas as block execution"
+        );
+    }
+
+    /// M-M04: MorphTx `validate_env` must honor `is_base_fee_check_disabled()` and
+    /// `is_priority_fee_check_disabled()` identically to standard EIP-1559 transactions,
+    /// rather than gating the entire check on `!is_fee_charge_disabled()`.
+    #[test]
+    fn validate_env_morph_tx_honors_base_fee_and_priority_fee_flags() {
+        let make_evm =
+            |disable_base_fee: bool, disable_fee_charge: bool, max_fee: u128, max_tip: u128| {
+                let mut evm = MorphEvm::new(
+                    MorphContext::new(CacheDB::new(EmptyDB::default()), MorphHardfork::Celadon),
+                    NoOpInspector,
+                );
+                evm.cfg.disable_base_fee = disable_base_fee;
+                evm.cfg.disable_fee_charge = disable_fee_charge;
+                evm.block.inner.basefee = 100;
+                evm.tx = MorphTxEnv {
+                    inner: TxEnv {
+                        tx_type: MORPH_TX_TYPE_ID,
+                        gas_limit: 21_000,
+                        gas_price: max_fee,
+                        gas_priority_fee: Some(max_tip),
+                        kind: TxKind::Call(Address::ZERO),
+                        ..Default::default()
+                    },
+                    fee_token_id: Some(FEE_TOKEN_ID),
+                    ..Default::default()
+                };
+                evm
+            };
+
+        // 1. disable_base_fee=true allows max_fee < basefee even when disable_fee_charge=false.
+        let mut evm = make_evm(true, false, 50, 10);
+        MorphEvmHandler::default()
+            .validate_env(&mut evm)
+            .expect("disable_base_fee must skip basefee check for MorphTx");
+
+        // 2. disable_fee_charge=true still rejects tip > max_fee when priority fee check is active.
+        let mut evm = make_evm(true, true, 50, 60);
+        let err = MorphEvmHandler::default()
+            .validate_env(&mut evm)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            EVMError::Transaction(MorphInvalidTransaction::EthInvalidTransaction(
+                InvalidTransaction::PriorityFeeGreaterThanMaxFee
+            ))
+        ));
+
+        // 3. disable_fee_charge=true with disable_base_fee=false still checks basefee.
+        let mut evm = make_evm(false, true, 50, 10);
+        let err = MorphEvmHandler::default()
+            .validate_env(&mut evm)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            EVMError::Transaction(MorphInvalidTransaction::EthInvalidTransaction(
+                InvalidTransaction::GasPriceLessThanBasefee
+            ))
+        ));
     }
 }

@@ -8,8 +8,13 @@
 use alloy_evm::Database;
 use alloy_primitives::{Address, Bytes, U256, address, keccak256};
 use morph_chainspec::hardfork::MorphHardfork;
-use revm::Database as RevmDatabase;
-use revm::{context_interface::result::EVMError, inspector::NoOpInspector};
+use revm::{
+    Database as RevmDatabase, ExecuteEvm as _,
+    context_interface::{ContextTr as _, JournalTr as _, LocalContextTr as _, result::EVMError},
+    handler::EvmTr as _,
+    inspector::NoOpInspector,
+    primitives::AddressSet,
+};
 
 use crate::{MorphEvm, MorphInvalidTransaction};
 
@@ -67,14 +72,34 @@ pub struct TokenRegistryEntry {
 
 impl TokenRegistryEntry {
     /// The registered ERC20 contract.
-    pub(crate) const fn token_address(&self) -> Address {
+    pub const fn token_address(&self) -> Address {
         self.token_address
+    }
+
+    /// Whether the token is active for gas payment.
+    pub const fn is_active(&self) -> bool {
+        self.is_active
+    }
+
+    /// The token's decimals.
+    pub const fn decimals(&self) -> u8 {
+        self.decimals
+    }
+
+    /// The token's price ratio relative to ETH.
+    pub const fn price_ratio(&self) -> U256 {
+        self.price_ratio
+    }
+
+    /// The token's scale for price calculation.
+    pub const fn scale(&self) -> U256 {
+        self.scale
     }
 
     /// The caller's balance storage slot, when the registry declares one.
     ///
     /// `None` means call mode: the balance has to be read by calling `balanceOf`.
-    pub(crate) const fn balance_slot(&self) -> Option<U256> {
+    pub const fn balance_slot(&self) -> Option<U256> {
         self.balance_slot
     }
 
@@ -84,7 +109,7 @@ impl TokenRegistryEntry {
     }
 
     /// Reject registry entries that cannot produce a valid token-denominated fee.
-    pub(crate) fn ensure_usable(self, token_id: u16) -> Result<Self, MorphInvalidTransaction> {
+    pub fn ensure_usable(self, token_id: u16) -> Result<Self, MorphInvalidTransaction> {
         if !self.is_active {
             return Err(MorphInvalidTransaction::TokenNotActive(token_id));
         }
@@ -108,6 +133,30 @@ impl TokenRegistryEntry {
             self.balance_slot,
             env,
         )?;
+        Ok(self.into_fee_info(caller, balance))
+    }
+
+    /// Resolve the caller's balance using a caller-supplied [`MorphEvm`] instance.
+    ///
+    /// For call-mode tokens (`balance_slot == None`), executes `balanceOf(caller)` on
+    /// `evm` and clears the journal, local memory, and context error afterward so the
+    /// same EVM instance can be reused across a validation batch or maintenance round
+    /// without leaking warm state across queries.
+    pub fn load_for_caller_with_evm<DB: Database, I>(
+        self,
+        evm: &mut MorphEvm<DB, I>,
+        caller: Address,
+    ) -> Result<TokenFeeInfo, EVMError<DB::Error, MorphInvalidTransaction>> {
+        let balance = if let Some(slot) = self.balance_slot {
+            read_balance_from_storage(
+                evm.ctx_mut().journal_mut().db_mut(),
+                self.token_address,
+                caller,
+                slot,
+            )?
+        } else {
+            query_token_balance_with_evm(evm, self.token_address, caller)?
+        };
         Ok(self.into_fee_info(caller, balance))
     }
 
@@ -151,9 +200,9 @@ impl TokenFeeInfo {
 
     /// Load token fee information with EVM call fallback.
     ///
-    /// Reads token parameters from L2 Token Registry storage. If the token's
-    /// balance slot is unknown, falls back to an EVM `balanceOf` call.
-    /// Returns `None` if the token is not registered.
+    /// Reads token parameters from L2 Token Registry storage and checks usability
+    /// (`is_active`, non-zero `price_ratio` and `scale`) before invoking call-mode
+    /// `balanceOf`. Returns `None` if the token is not registered.
     pub fn load_for_caller<DB: Database>(
         db: &mut DB,
         token_id: u16,
@@ -164,6 +213,7 @@ impl TokenFeeInfo {
             Some(e) => e,
             None => return Ok(None),
         };
+        let entry = entry.ensure_usable(token_id)?;
 
         entry.load_for_caller(db, caller, env).map(Some)
     }
@@ -369,6 +419,24 @@ fn read_token_balance_with_fallback<DB: Database>(
     // answer for a token whose balance depends on block context or `msg.sender`.
     let db: &mut dyn Database<Error = DB::Error> = db;
     let mut evm = MorphEvm::from_env(db, env.clone(), NoOpInspector {});
+    query_token_balance_with_evm(&mut evm, token, account)
+}
+
+/// Queries `balanceOf(account)` on `token` using a reusable [`MorphEvm`], resetting
+/// journal, local memory, and context error state afterward.
+fn query_token_balance_with_evm<DB: Database, I>(
+    evm: &mut MorphEvm<DB, I>,
+    token: Address,
+    account: Address,
+) -> Result<U256, EVMError<DB::Error, MorphInvalidTransaction>> {
+    // Match morph-geth's pre-`Prepare` call-mode environment where all precompiles
+    // start cold (`SetTxContext` / `pool.getBalanceFunc` / `DoEstimateGas`).
+    if !evm.ctx_ref().journal().precompile_addresses().is_empty() {
+        evm.ctx_mut()
+            .journal_mut()
+            .warm_precompiles(&AddressSet::default());
+    }
+
     // ORIGIN follows this client's own execution layer, which resolves the same
     // `balanceOf` against the transaction's `caller`. go-ethereum's pool instead builds
     // its query on an empty `vm.TxContext{}` (core/tx_pool.go:341), leaving ORIGIN at the
@@ -379,7 +447,15 @@ fn read_token_balance_with_fallback<DB: Database>(
     // depends on the next block's base fee, which admission does not know. go-ethereum's
     // pool has the same gap.
     evm.tx.inner.caller = account;
-    crate::handler::evm_call_balance_of(&mut evm, token, account)
+    let result = crate::handler::evm_call_balance_of(evm, token, account);
+
+    // Clear all per-query journal state, local memory, and any residual context error
+    // so subsequent queries on the same EVM instance start from a clean slate.
+    let _ = evm.finalize();
+    evm.ctx_mut().local_mut().clear();
+    evm.ctx_mut().error = Ok(());
+
+    result
 }
 
 /// Read ERC20 balance directly from storage slot.
@@ -857,5 +933,96 @@ pub(crate) mod tests {
         assert_eq!(&calldata[0..4], &[0x70, 0xa0, 0x82, 0x31]);
         // Address should be all zeros
         assert!(calldata[4..36].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn load_for_caller_checks_usability_before_call_mode_balance_of() {
+        let token = address!("5300000000000000000000000000000000000042");
+        let caller = address!("0000000000000000000000000000000000000001");
+        let env = MorphEvmEnv::new(
+            revm::context::CfgEnv::new_with_spec(MorphHardfork::Celadon),
+            crate::MorphBlockEnv::default(),
+        );
+
+        let mut token_id_bytes = [0u8; 32];
+        token_id_bytes[31] = 1;
+        let base = compute_mapping_slot(TOKEN_REGISTRY_SLOT, &token_id_bytes);
+        let price_slot = compute_mapping_slot(PRICE_RATIO_SLOT, &token_id_bytes);
+
+        // Inactive call-mode token: must return TokenNotActive without touching UnreadableTokenDb.
+        let mut inner = call_mode_token_state(token, 1_000);
+        let mut inactive_packed = [0u8; 32];
+        inactive_packed[30] = 18;
+        inactive_packed[31] = 0;
+        inner
+            .insert_account_storage(
+                L2_TOKEN_REGISTRY_ADDRESS,
+                base + U256::from(2),
+                U256::from_be_bytes(inactive_packed),
+            )
+            .unwrap();
+        let mut db = UnreadableTokenDb { inner, token };
+        assert_eq!(
+            TokenFeeInfo::load_for_caller(&mut db, 1, caller, &env).unwrap_err(),
+            EVMError::Transaction(MorphInvalidTransaction::TokenNotActive(1))
+        );
+
+        // Zero price_ratio call-mode token: must return InvalidTokenConfig without touching token.
+        let mut inner = call_mode_token_state(token, 1_000);
+        inner
+            .insert_account_storage(L2_TOKEN_REGISTRY_ADDRESS, price_slot, U256::ZERO)
+            .unwrap();
+        let mut db = UnreadableTokenDb { inner, token };
+        assert_eq!(
+            TokenFeeInfo::load_for_caller(&mut db, 1, caller, &env).unwrap_err(),
+            EVMError::Transaction(MorphInvalidTransaction::InvalidTokenConfig(1))
+        );
+
+        // Zero scale call-mode token: must return InvalidTokenConfig without touching token.
+        let mut inner = call_mode_token_state(token, 1_000);
+        inner
+            .insert_account_storage(L2_TOKEN_REGISTRY_ADDRESS, base + U256::from(3), U256::ZERO)
+            .unwrap();
+        let mut db = UnreadableTokenDb { inner, token };
+        assert_eq!(
+            TokenFeeInfo::load_for_caller(&mut db, 1, caller, &env).unwrap_err(),
+            EVMError::Transaction(MorphInvalidTransaction::InvalidTokenConfig(1))
+        );
+    }
+
+    #[test]
+    fn load_for_caller_with_evm_reuses_evm_and_clears_journal_between_queries() {
+        let token = address!("5300000000000000000000000000000000000042");
+        let caller1 = address!("0000000000000000000000000000000000000001");
+        let caller2 = address!("0000000000000000000000000000000000000002");
+
+        // `balanceOf` returns the exact gas cost of SLOAD(0). If journal warmth leaked
+        // between queries on the reused EVM, query #2 would return warm cost (~100)
+        // instead of cold cost (~2100).
+        let sload_gas_code = bytes!("5a600054505a90035f5260205ff3");
+        let mut db = call_mode_token_state_with_code(token, 42, sload_gas_code);
+        let entry = TokenRegistryEntry::load(&mut db, 1)
+            .unwrap()
+            .unwrap()
+            .ensure_usable(1)
+            .unwrap();
+
+        let env = MorphEvmEnv::new(
+            revm::context::CfgEnv::new_with_spec(MorphHardfork::Celadon),
+            crate::MorphBlockEnv::default(),
+        );
+        let mut evm = MorphEvm::from_env(db, env, NoOpInspector {});
+
+        let info1 = entry.load_for_caller_with_evm(&mut evm, caller1).unwrap();
+        let info2 = entry.load_for_caller_with_evm(&mut evm, caller2).unwrap();
+        assert!(
+            info1.balance > U256::from(2_000u64),
+            "first query SLOAD must be cold, got {}",
+            info1.balance
+        );
+        assert_eq!(
+            info1.balance, info2.balance,
+            "second query on reused MorphEvm must also see cold SLOAD (journal cleared)"
+        );
     }
 }

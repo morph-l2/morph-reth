@@ -10,9 +10,9 @@
 use crate::MorphEthApiError;
 use crate::eth::{MorphEthApi, MorphNodeCore};
 use alloy_evm::call::{CallError, caller_gas_allowance as upstream_caller_gas_allowance};
-use alloy_primitives::U256;
+use alloy_primitives::{Address, B256, U256, U512};
 use morph_chainspec::{MorphChainSpec, MorphHardforks};
-use morph_revm::{L1BlockInfo, MorphTxExt, TokenFeeInfo};
+use morph_revm::{L1BlockInfo, MorphEvmEnv, MorphTxExt, TokenFeeInfo};
 use reth_evm::{EvmEnvFor, TxEnvFor};
 use reth_provider::ChainSpecProvider;
 use reth_rpc_eth_api::{
@@ -20,7 +20,62 @@ use reth_rpc_eth_api::{
     helpers::{Call, EthCall, estimate::EstimateCall},
 };
 use reth_rpc_eth_types::EthApiError;
-use revm::{Database, context::Transaction as RevmTransaction};
+use revm::{
+    Database,
+    bytecode::Bytecode,
+    context::{Transaction as RevmTransaction, result::EVMError},
+    database_interface::DBErrorMarker,
+    state::AccountInfo,
+};
+
+/// Wrapper turning any [`EthApiError`] produced by an RPC database into a
+/// `revm::database_interface::DBErrorMarker` error for `alloy_evm::Database`.
+#[derive(Debug, thiserror::Error)]
+#[error(transparent)]
+struct EthApiDbError(EthApiError);
+
+impl DBErrorMarker for EthApiDbError {}
+
+/// Bridges `revm::Database<Error: Into<EthApiError>>` (which lacks `Debug` and
+/// `DBErrorMarker`) to `alloy_evm::Database` so `TokenFeeInfo::load_for_caller`
+/// can execute call-mode `balanceOf` directly against the RPC state DB.
+struct EthApiDbAdapter<'a, DB>(&'a mut DB);
+
+impl<DB> core::fmt::Debug for EthApiDbAdapter<'_, DB> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("EthApiDbAdapter").finish_non_exhaustive()
+    }
+}
+
+impl<DB> Database for EthApiDbAdapter<'_, DB>
+where
+    DB: Database,
+    DB::Error: Into<EthApiError>,
+{
+    type Error = EthApiDbError;
+
+    fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
+        self.0.basic(address).map_err(|e| EthApiDbError(e.into()))
+    }
+
+    fn code_by_hash(&mut self, code_hash: B256) -> Result<Bytecode, Self::Error> {
+        self.0
+            .code_by_hash(code_hash)
+            .map_err(|e| EthApiDbError(e.into()))
+    }
+
+    fn storage(&mut self, address: Address, index: U256) -> Result<U256, Self::Error> {
+        self.0
+            .storage(address, index)
+            .map_err(|e| EthApiDbError(e.into()))
+    }
+
+    fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error> {
+        self.0
+            .block_hash(number)
+            .map_err(|e| EthApiDbError(e.into()))
+    }
+}
 
 impl<N, Rpc> EthCall for MorphEthApi<N, Rpc>
 where
@@ -91,6 +146,7 @@ where
         if let Some(fee_token_id) = tx_env.fee_token_id.filter(|id| *id > 0) {
             return self.caller_gas_allowance_with_token(
                 &mut db,
+                evm_env,
                 tx_env.caller(),
                 tx_env.value(),
                 l1_fee,
@@ -169,7 +225,8 @@ where
     fn caller_gas_allowance_with_token<DB>(
         &self,
         db: &mut DB,
-        caller: alloy_primitives::Address,
+        evm_env: &MorphEvmEnv,
+        caller: Address,
         value: U256,
         l1_fee: U256,
         fee_token_id: u16,
@@ -180,22 +237,13 @@ where
         DB: revm::Database,
         DB::Error: Into<EthApiError>,
     {
-        let token_fee_info = TokenFeeInfo::load_storage_only(db, fee_token_id, caller)
-            .map_err(|_| MorphEthApiError::InvalidFeeToken)?
-            .ok_or(MorphEthApiError::InvalidFeeToken)?;
-
-        // ETH only needs to cover `value`; gas + L1 fee are paid in tokens.
-        let eth_balance = db
-            .basic(caller)
-            .map_err(|e| MorphEthApiError::Eth(e.into()))?
-            .map(|acc| acc.balance)
-            .unwrap_or_default();
-
-        token_gas_allowance(
-            eth_balance,
+        load_caller_token_gas_allowance(
+            db,
+            evm_env,
+            caller,
             value,
-            &token_fee_info,
             l1_fee,
+            fee_token_id,
             fee_limit,
             gas_price,
             self.eth_api().gas_cap(),
@@ -203,16 +251,64 @@ where
     }
 }
 
+/// Loads token fee info (checking registry usability first and resolving call-mode
+/// `balanceOf(caller)` via `TokenFeeInfo::load_for_caller`) and computes the caller's
+/// gas allowance, propagating database errors as [`MorphEthApiError::Eth`].
+#[allow(clippy::too_many_arguments)]
+fn load_caller_token_gas_allowance<DB>(
+    db: &mut DB,
+    evm_env: &MorphEvmEnv,
+    caller: Address,
+    value: U256,
+    l1_fee: U256,
+    fee_token_id: u16,
+    fee_limit: Option<U256>,
+    gas_price: u128,
+    gas_cap: u64,
+) -> Result<u64, MorphEthApiError>
+where
+    DB: revm::Database,
+    DB::Error: Into<EthApiError>,
+{
+    // `TokenFeeInfo::load_for_caller` validates `ensure_usable` before running
+    // call-mode `balanceOf`, and propagates DB errors as `EVMError::Database`.
+    let token_fee_info =
+        TokenFeeInfo::load_for_caller(&mut EthApiDbAdapter(db), fee_token_id, caller, evm_env)
+            .map_err(|err| match err {
+                EVMError::Database(EthApiDbError(eth_err)) => MorphEthApiError::Eth(eth_err),
+                _ => MorphEthApiError::InvalidFeeToken,
+            })?
+            .ok_or(MorphEthApiError::InvalidFeeToken)?;
+
+    // ETH only needs to cover `value`; gas + L1 fee are paid in tokens.
+    let eth_balance = db
+        .basic(caller)
+        .map_err(|e| MorphEthApiError::Eth(e.into()))?
+        .map(|acc| acc.balance)
+        .unwrap_or_default();
+
+    token_gas_allowance(
+        eth_balance,
+        value,
+        &token_fee_info,
+        l1_fee,
+        fee_limit,
+        gas_price,
+        gas_cap,
+    )
+}
+
 /// Compute the gas allowance for a MorphTx fee-token caller.
 ///
-/// Pure function over the inputs `caller_gas_allowance_with_token` would
-/// load from the database, factored out so the affordability and bounding
-/// logic can be unit-tested without an EVM/DB stack.
+/// Pure function over the inputs `load_caller_token_gas_allowance` loads from
+/// the database, factored out so the affordability and bounding logic can be
+/// unit-tested without an EVM/DB stack.
 ///
 /// The `gas_cap` argument is the per-call RPC ceiling (`EthApiNodeBackend::gas_cap()`),
-/// only consumed in EVM-call mode: as the no-`fee_limit` fallback (instead of `u64::MAX`)
-/// and as the clamp on a user-supplied `fee_limit`. See the in-body comment for the security
-/// rationale.
+/// normalized so `0` means unlimited (`u64::MAX`) to match upstream reth. In call mode
+/// (`balance_slot.is_none()`), the resulting gas allowance is additionally clamped by
+/// `effective_gas_cap` so a call-mode token reporting a huge `balanceOf` cannot bypass
+/// an operator-configured `--rpc.gascap`.
 fn token_gas_allowance(
     eth_balance: U256,
     value: U256,
@@ -233,53 +329,41 @@ fn token_gas_allowance(
         return Err(MorphEthApiError::InsufficientFundsForTransfer);
     }
 
-    // Determine the token-denominated affordability cap.
-    //
-    // - Slot mode (`balance_slot.is_some()`): RPC reads balance directly
-    //   from token storage; cap by `min(balance, fee_limit)`. The
-    //   trusted balance is the natural ceiling.
-    // - EVM-call mode (`balance_slot.is_none()`): RPC cannot resolve the
-    //   balance without spinning up an EVM (the handler does that at real
-    //   execution via `load_token_fee_info`). On the estimateGas path
-    //   `disable_fee_charge=true` short-circuits the handler's check, so
-    //   there is no natural balance ceiling — we MUST enforce `gas_cap`
-    //   here, matching `eth_call`'s effective ceiling. Trusting a
-    //   user-supplied `fee_limit` alone would let `fee_limit = U256::MAX`
-    //   bypass the operator-configured `--rpc.gascap`.
-    let (limit, clamp_to_gas_cap) = match (token_fee_info.balance_slot, fee_limit) {
-        (Some(_), Some(limit)) if !limit.is_zero() => (token_fee_info.balance.min(limit), false),
-        (Some(_), _) => (token_fee_info.balance, false),
-        (None, Some(limit)) if !limit.is_zero() => (limit, true),
-        (None, _) => return Ok(gas_cap),
-    };
-
+    // Both slot-mode and call-mode now carry the caller's resolved token balance
+    // (`load_for_caller`), so both use `effective_fee_limit`: `min(balance, fee_limit)`
+    // when `fee_limit > 0`, or `balance` when `fee_limit` is omitted / zero.
+    let limit = token_fee_info.effective_fee_limit(fee_limit.unwrap_or_default());
     let allowance = gas_allowance_from_token_limit(limit, l1_fee, token_fee_info, gas_price)?;
-    Ok(if clamp_to_gas_cap {
-        allowance.min(gas_cap)
+
+    if token_fee_info.balance_slot.is_none() {
+        let effective_gas_cap = if gas_cap == 0 { u64::MAX } else { gas_cap };
+        Ok(allowance.min(effective_gas_cap))
     } else {
-        allowance
-    })
+        Ok(allowance)
+    }
 }
 
 /// Convert a token-denominated affordability cap into a gas allowance.
 ///
-/// Subtracts the L1 fee (converted to tokens) from `limit_token`, then
-/// converts the remaining token budget back to ETH and divides by
-/// `gas_price`. Returns `InsufficientFundsForL1Fee` if the L1 fee swallows
-/// the entire limit, matching the semantics surfaced for the ETH path.
+/// Computes the exact ETH-space budget `max_eth = floor(limit_token * price_ratio / scale)`
+/// (the exact inverse of `ceil((l2_fee + l1_fee) * scale / price_ratio) <= limit_token`),
+/// avoiding double-rounding the L1 fee in token space. Returns
+/// `InsufficientFundsForL1Fee` when `max_eth < l1_fee` or when a non-zero L1 fee leaves
+/// zero ETH for L2 execution gas.
 fn gas_allowance_from_token_limit(
     limit_token: U256,
     l1_fee: U256,
     token_info: &TokenFeeInfo,
     gas_price: u128,
 ) -> Result<u64, MorphEthApiError> {
-    let l1_fee_in_token = token_info.eth_to_token_amount(l1_fee);
-    if l1_fee_in_token >= limit_token {
+    let max_eth =
+        token_amount_to_eth(limit_token, token_info).ok_or(MorphEthApiError::InvalidFeeToken)?;
+    let Some(available_eth) = max_eth.checked_sub(l1_fee) else {
+        return Err(MorphEthApiError::InsufficientFundsForL1Fee);
+    };
+    if available_eth.is_zero() && !l1_fee.is_zero() {
         return Err(MorphEthApiError::InsufficientFundsForL1Fee);
     }
-    let available_token = limit_token - l1_fee_in_token;
-    let available_eth = token_amount_to_eth(available_token, token_info)
-        .ok_or(MorphEthApiError::InvalidFeeToken)?;
     Ok(gas_allowance_from_balance(available_eth, gas_price))
 }
 
@@ -318,7 +402,14 @@ fn token_amount_to_eth(token_amount: U256, info: &TokenFeeInfo) -> Option<U256> 
     if info.price_ratio.is_zero() || info.scale.is_zero() {
         return None;
     }
-    Some(token_amount.saturating_mul(info.price_ratio) / info.scale)
+    let numerator = U512::from(token_amount) * U512::from(info.price_ratio);
+    let quotient = numerator / U512::from(info.scale);
+    let eth = if quotient > U512::from(U256::MAX) {
+        U256::MAX
+    } else {
+        U256::from_limbs_slice(&quotient.as_limbs()[..4])
+    };
+    Some(eth)
 }
 
 #[cfg(test)]
@@ -411,11 +502,11 @@ mod tests {
         }
     }
 
-    /// EVM-call mode with a user-supplied `fee_limit` that covers the L1 fee
+    /// EVM-call mode with a user-supplied `fee_limit` bounded by `balanceOf(caller)`
     /// must return the remaining-budget gas, never `u64::MAX`.
     #[test]
     fn token_evm_call_mode_with_fee_limit_uses_user_budget() {
-        let token = token_1to1(None, U256::ZERO);
+        let token = token_1to1(None, U256::from(1_000u64));
         let allowance = token_gas_allowance(
             /* eth_balance */ U256::from(1u64),
             /* value */ U256::ZERO,
@@ -425,16 +516,34 @@ mod tests {
             /* gas_price */ 1,
             /* gas_cap */ 50_000_000,
         )
-        .expect("fee_limit covers L1 fee with 100 wei to spare");
-        // (110 - 10) / 1 = 100 gas
+        .expect("fee_limit and balance cover L1 fee with 100 wei to spare");
+        // (min(1000, 110) - 10) / 1 = 100 gas
         assert_eq!(allowance, 100);
+    }
+
+    /// EVM-call mode with zero caller balance cannot bypass affordability by
+    /// specifying a large `fee_limit`.
+    #[test]
+    fn token_evm_call_mode_zero_balance_rejects_even_with_large_fee_limit() {
+        let token = token_1to1(None, U256::ZERO);
+        let err = token_gas_allowance(
+            U256::ZERO,
+            U256::ZERO,
+            &token,
+            /* l1_fee */ U256::from(10u64),
+            /* fee_limit */ Some(U256::from(1_000_000u64)),
+            1,
+            50_000_000,
+        )
+        .expect_err("zero balance cannot cover non-zero L1 fee");
+        assert!(matches!(err, MorphEthApiError::InsufficientFundsForL1Fee));
     }
 
     /// EVM-call mode + `fee_limit` ≤ L1 fee: surface `InsufficientFundsForL1Fee`
     /// rather than silently capping at zero.
     #[test]
     fn token_evm_call_mode_l1_fee_swallows_limit_returns_clear_error() {
-        let token = token_1to1(None, U256::ZERO);
+        let token = token_1to1(None, U256::from(1_000u64));
         let err = token_gas_allowance(
             U256::ZERO,
             U256::ZERO,
@@ -448,12 +557,11 @@ mod tests {
         assert!(matches!(err, MorphEthApiError::InsufficientFundsForL1Fee));
     }
 
-    /// EVM-call mode without a `fee_limit` must cap at the per-call `gas_cap`,
-    /// never `u64::MAX` (which lets estimateGas binary-search 25× the
-    /// block_gas_limit of free EVM work).
+    /// EVM-call mode without a `fee_limit` uses `balanceOf(caller)` and clamps
+    /// large balances at the per-call `gas_cap` (never `u64::MAX`).
     #[test]
-    fn token_evm_call_mode_without_fee_limit_falls_back_to_gas_cap() {
-        let token = token_1to1(None, U256::ZERO);
+    fn token_evm_call_mode_without_fee_limit_uses_balance_clamped_to_gas_cap() {
+        let token = token_1to1(None, U256::from(100_000_000u64));
         let cap = 5_000_000u64;
         let allowance = token_gas_allowance(
             U256::ZERO,
@@ -464,11 +572,10 @@ mod tests {
             1,
             cap,
         )
-        .expect("no fee_limit must fall back to gas_cap, not u64::MAX");
+        .expect("large call-mode balance must clamp to gas_cap, not u64::MAX");
         assert_eq!(allowance, cap, "must equal gas_cap, not u64::MAX");
 
-        // Same with explicit Some(0), which the production code treats as
-        // "no usable cap" via the `if !limit.is_zero()` guard.
+        // Explicit Some(0) means "full balance", likewise clamped by gas_cap.
         let allowance = token_gas_allowance(
             U256::ZERO,
             U256::ZERO,
@@ -478,8 +585,40 @@ mod tests {
             1,
             cap,
         )
-        .expect("Some(0) fee_limit must fall back to gas_cap");
+        .expect("Some(0) fee_limit must use full balance clamped to gas_cap");
         assert_eq!(allowance, cap);
+
+        // Smaller call-mode balance binds below gas_cap.
+        let small = token_1to1(None, U256::from(1_000u64));
+        let allowance = token_gas_allowance(
+            U256::ZERO,
+            U256::ZERO,
+            &small,
+            U256::from(123u64),
+            None,
+            1,
+            cap,
+        )
+        .expect("call-mode balance below gas_cap must bind");
+        assert_eq!(allowance, 877);
+    }
+
+    /// Programmatic `gas_cap == 0` means unlimited (`u64::MAX`), matching upstream
+    /// reth, rather than clamping call-mode gas allowance to 0.
+    #[test]
+    fn token_evm_call_mode_gas_cap_zero_means_unlimited() {
+        let token = token_1to1(None, U256::from(10_000u64));
+        let allowance = token_gas_allowance(
+            U256::ZERO,
+            U256::ZERO,
+            &token,
+            U256::from(100u64),
+            None,
+            1,
+            /* gas_cap == 0 -> unlimited */ 0,
+        )
+        .expect("gas_cap == 0 must normalize to u64::MAX");
+        assert_eq!(allowance, 9_900);
     }
 
     /// Slot-mode regression: `min(balance, fee_limit)` budget; gas_cap unused.
@@ -566,11 +705,11 @@ mod tests {
     }
 
     /// EVM-call mode with an absurd user-supplied `fee_limit` (e.g.
-    /// `U256::MAX`) must clamp to `gas_cap`, never bypass the
+    /// `U256::MAX`) and large balance must clamp to `gas_cap`, never bypass the
     /// operator-configured `--rpc.gascap < block_gas_limit`.
     #[test]
     fn token_evm_call_mode_huge_fee_limit_clamps_to_gas_cap() {
-        let token = token_1to1(None, U256::ZERO);
+        let token = token_1to1(None, U256::MAX);
         let cap = 5_000_000u64;
         let allowance = token_gas_allowance(
             U256::ZERO,
@@ -583,6 +722,214 @@ mod tests {
         )
         .expect("huge fee_limit must clamp, not error");
         assert_eq!(allowance, cap, "must clamp to gas_cap, not u64::MAX");
+    }
+
+    /// M-M04: Tight `fee_limit` near L1 fee must not be falsely rejected due to
+    /// double-rounding L1 fee in token space (`ceil(l1 * S / P) >= limit`).
+    #[test]
+    fn gas_allowance_from_token_limit_avoids_double_rounding_near_l1_fee() {
+        // 6-decimal high-value token: 1 smallest unit = 3e14 wei (price_ratio=3e20, scale=1e6).
+        let token = TokenFeeInfo {
+            price_ratio: U256::from(300_000_000_000_000_000_000u128), // 3e20
+            scale: U256::from(1_000_000u64),                          // 1e6
+            ..token_1to1(Some(U256::from(1u64)), U256::from(1u64))
+        };
+        let l1_fee = U256::from(1_000_000_000_000u64); // 1e12 wei
+        let gas_price = 1_000_000u128; // 0.001 gwei
+
+        // Protocol charges ceil(1e12 * 1e6 / 3e20) = 1 token unit for L1 fee alone,
+        // yet 1 token unit buys 3e14 wei total (covering L1 fee + 299M gas!).
+        assert_eq!(token.eth_to_token_amount(l1_fee), U256::from(1u64));
+
+        let allowance = gas_allowance_from_token_limit(U256::from(1u64), l1_fee, &token, gas_price)
+            .expect("1 token unit covers l1_fee + 299M gas");
+        assert_eq!(allowance, 299_000_000);
+
+        // Roundtrip tightness check: `allowance` fits inside 1 token unit, `allowance + 1` does not.
+        let total_at_allowance = l1_fee + U256::from(allowance) * U256::from(gas_price);
+        assert_eq!(
+            token.eth_to_token_amount(total_at_allowance),
+            U256::from(1u64)
+        );
+        let total_above = l1_fee + U256::from(allowance + 1) * U256::from(gas_price);
+        assert_eq!(token.eth_to_token_amount(total_above), U256::from(2u64));
+    }
+
+    /// M-M04: When `l1_fee == 0` and caller has `0` token budget, return `Ok(0)`
+    /// (for non-zero `gas_price`) instead of misleading `InsufficientFundsForL1Fee`.
+    #[test]
+    fn gas_allowance_from_token_limit_zero_l1_fee_zero_budget_returns_zero() {
+        let token = token_1to1(Some(U256::from(1u64)), U256::ZERO);
+        let allowance = gas_allowance_from_token_limit(U256::ZERO, U256::ZERO, &token, 1)
+            .expect("zero L1 fee with zero balance must not error as InsufficientFundsForL1Fee");
+        assert_eq!(allowance, 0);
+    }
+
+    /// M-M04: `token_amount_to_eth` uses `U512` intermediate arithmetic so large
+    /// `token_amount * price_ratio` products do not saturate in `U256` before dividing by `scale`.
+    #[test]
+    fn token_amount_to_eth_uses_u512_without_u256_mul_saturation() {
+        let info = TokenFeeInfo {
+            price_ratio: U256::from(10u128.pow(18)),
+            scale: U256::from(10u128.pow(18)),
+            ..token_1to1(None, U256::MAX)
+        };
+        assert_eq!(token_amount_to_eth(U256::MAX, &info), Some(U256::MAX));
+    }
+
+    /// M-M04: `load_caller_token_gas_allowance` executes call-mode `balanceOf`,
+    /// short-circuits unusable tokens before `balanceOf`, and propagates DB errors
+    /// as `MorphEthApiError::Eth` rather than swallowing them into `InvalidFeeToken`.
+    #[test]
+    fn load_caller_token_gas_allowance_call_mode_and_db_error_propagation() {
+        use alloy_primitives::{Bytes, address, keccak256};
+        use morph_chainspec::MorphHardfork;
+        use morph_revm::{L2_TOKEN_REGISTRY_ADDRESS, MorphBlockEnv, compute_mapping_slot};
+        use revm::database::{CacheDB, EmptyDB};
+
+        let caller = address!("1000000000000000000000000000000000000001");
+        let token = address!("5300000000000000000000000000000000000042");
+        let evm_env = MorphEvmEnv::new(
+            revm::context::CfgEnv::new_with_spec(MorphHardfork::Celadon),
+            MorphBlockEnv::default(),
+        );
+
+        let build_call_mode_db = |balance: u64, active: bool| {
+            let mut db = CacheDB::new(EmptyDB::default());
+            let mut key = [0u8; 32];
+            key[31] = 1;
+            let base = compute_mapping_slot(U256::from(151), &key);
+            let mut packed = [0u8; 32];
+            packed[30] = 18;
+            packed[31] = u8::from(active);
+            for (slot, val) in [
+                (base, U256::from_be_bytes(token.into_word().0)),
+                (base + U256::from(1), U256::ZERO), // call mode
+                (base + U256::from(2), U256::from_be_bytes(packed)),
+                (base + U256::from(3), U256::from(1u64)),
+                (
+                    compute_mapping_slot(U256::from(153), &key),
+                    U256::from(1u64),
+                ),
+            ] {
+                db.insert_account_storage(L2_TOKEN_REGISTRY_ADDRESS, slot, val)
+                    .unwrap();
+            }
+            // `balanceOf`: returns storage[0]
+            let code = Bytes::from_static(&[0x60, 0x00, 0x54, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3]);
+            db.insert_account_info(
+                token,
+                AccountInfo {
+                    code_hash: keccak256(code.as_ref()),
+                    code: Some(Bytecode::new_raw(code)),
+                    ..Default::default()
+                },
+            );
+            db.insert_account_storage(token, U256::ZERO, U256::from(balance))
+                .unwrap();
+            db
+        };
+
+        // 1. Call-mode `balanceOf` returns 500 -> allowance is (500 - 50) / 1 = 450.
+        let mut db = build_call_mode_db(500, true);
+        let allowance = load_caller_token_gas_allowance(
+            &mut db,
+            &evm_env,
+            caller,
+            U256::ZERO,
+            U256::from(50u64),
+            1,
+            None,
+            1,
+            50_000_000,
+        )
+        .expect("call-mode balanceOf should resolve 500 tokens");
+        assert_eq!(allowance, 450);
+
+        // 2. Call-mode `balanceOf` returns 0 -> cannot pay non-zero L1 fee.
+        let mut db = build_call_mode_db(0, true);
+        let err = load_caller_token_gas_allowance(
+            &mut db,
+            &evm_env,
+            caller,
+            U256::ZERO,
+            U256::from(50u64),
+            1,
+            Some(U256::from(1_000u64)),
+            1,
+            50_000_000,
+        )
+        .expect_err("zero balanceOf must reject");
+        assert!(matches!(err, MorphEthApiError::InsufficientFundsForL1Fee));
+
+        // 3. DB error during `balanceOf` storage read propagates as `MorphEthApiError::Eth`,
+        //    NOT `MorphEthApiError::InvalidFeeToken`.
+        struct FailingTokenDb {
+            inner: CacheDB<EmptyDB>,
+            fail_addr: Address,
+        }
+        impl Database for FailingTokenDb {
+            type Error = reth_errors::ProviderError;
+
+            fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
+                Ok(self.inner.basic(address).unwrap())
+            }
+            fn code_by_hash(&mut self, code_hash: B256) -> Result<Bytecode, Self::Error> {
+                Ok(self.inner.code_by_hash(code_hash).unwrap())
+            }
+            fn storage(&mut self, address: Address, index: U256) -> Result<U256, Self::Error> {
+                if address == self.fail_addr {
+                    return Err(reth_errors::ProviderError::BestBlockNotFound);
+                }
+                Ok(self.inner.storage(address, index).unwrap())
+            }
+            fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error> {
+                Ok(self.inner.block_hash(number).unwrap())
+            }
+        }
+
+        let mut failing_db = FailingTokenDb {
+            inner: build_call_mode_db(500, true),
+            fail_addr: token,
+        };
+        let err = load_caller_token_gas_allowance(
+            &mut failing_db,
+            &evm_env,
+            caller,
+            U256::ZERO,
+            U256::from(50u64),
+            1,
+            None,
+            1,
+            50_000_000,
+        )
+        .expect_err("DB failure must propagate as Eth error");
+        assert!(
+            matches!(err, MorphEthApiError::Eth(_)),
+            "expected MorphEthApiError::Eth, got {err:?}"
+        );
+
+        // 4. Inactive call-mode token rejects as `InvalidFeeToken` BEFORE touching `token` DB.
+        let mut inactive_failing_db = FailingTokenDb {
+            inner: build_call_mode_db(500, false),
+            fail_addr: token,
+        };
+        let err = load_caller_token_gas_allowance(
+            &mut inactive_failing_db,
+            &evm_env,
+            caller,
+            U256::ZERO,
+            U256::from(50u64),
+            1,
+            None,
+            1,
+            50_000_000,
+        )
+        .expect_err("inactive token must reject before call-mode balanceOf");
+        assert!(
+            matches!(err, MorphEthApiError::InvalidFeeToken),
+            "expected MorphEthApiError::InvalidFeeToken, got {err:?}"
+        );
     }
 
     /// `token_amount_to_eth` must floor, not ceil. Inverse of

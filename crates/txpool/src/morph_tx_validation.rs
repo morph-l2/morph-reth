@@ -11,10 +11,159 @@ use morph_primitives::{
     MorphTxEnvelope,
     transaction::morph_transaction::{MORPH_TX_VERSION_1, MORPH_TX_VERSION_2},
 };
-use morph_revm::{MorphEvmEnv, MorphInvalidTransaction, TokenFeeInfo};
-use reth_revm::revm::context::result::EVMError;
+use morph_revm::{MorphEvm, MorphEvmEnv, TokenFeeInfo, TokenRegistryEntry};
+use reth_revm::revm::{
+    context::result::EVMError,
+    context_interface::{ContextTr as _, JournalTr as _},
+    handler::EvmTr as _,
+    inspector::NoOpInspector,
+};
+use std::collections::HashMap;
 
 use crate::{MorphTxError, MorphTxValidationError};
+
+/// Lazily initialized database-or-EVM backend for [`TokenFeeCache`].
+///
+/// Avoids allocating a [`MorphEvm`] (instruction table, precompiles, frame stack)
+/// unless a call-mode fee token actually needs `balanceOf` execution.
+enum TokenQueryBackend<DB: Database> {
+    Db(DB),
+    Evm(Box<MorphEvm<DB, NoOpInspector>>),
+}
+
+/// Per-batch / per-round fee-token lookup cache.
+///
+/// - Loads `TokenRegistryEntry` once per `token_id` (only caching successful DB reads)
+/// - Enforces registry usability (`is_active`, `!price_ratio.is_zero()`, `!scale.is_zero()`)
+///   **before** invoking call-mode EVM `balanceOf`
+/// - Reuses a single [`MorphEvm`] across all call-mode queries in the batch/round
+/// - Caches per-`(sender, token_id)` balance results, including deterministic
+///   `TokenBalanceQueryFailed` errors (never transient DB/state errors)
+pub(crate) struct TokenFeeCache<DB: Database> {
+    token_entries: HashMap<u16, Option<TokenRegistryEntry>>,
+    token_balances: HashMap<(Address, u16), Result<TokenFeeInfo, MorphTxError>>,
+    /// `Option` enables moving `DB` into `MorphEvm` without requiring `DB: Default`.
+    backend: Option<TokenQueryBackend<DB>>,
+    #[cfg(test)]
+    evm_instantiations: usize,
+}
+
+impl<DB: Database> TokenFeeCache<DB> {
+    pub(crate) fn new(db: DB) -> Self {
+        Self {
+            token_entries: HashMap::new(),
+            token_balances: HashMap::new(),
+            backend: Some(TokenQueryBackend::Db(db)),
+            #[cfg(test)]
+            evm_instantiations: 0,
+        }
+    }
+
+    /// Shared access to the underlying database, whether or not the call-mode EVM
+    /// has been instantiated yet.
+    pub(crate) fn db(&self) -> &DB {
+        match self.backend.as_ref().expect("backend always present") {
+            TokenQueryBackend::Db(db) => db,
+            TokenQueryBackend::Evm(evm) => evm.ctx_ref().db_ref(),
+        }
+    }
+
+    /// Mutable access to the underlying database, whether or not the call-mode EVM
+    /// has been instantiated yet.
+    pub(crate) fn db_mut(&mut self) -> &mut DB {
+        match self.backend.as_mut().expect("backend always present") {
+            TokenQueryBackend::Db(db) => db,
+            TokenQueryBackend::Evm(evm) => evm.ctx_mut().journal_mut().db_mut(),
+        }
+    }
+
+    fn evm_mut(&mut self, evm_env: &MorphEvmEnv) -> &mut MorphEvm<DB, NoOpInspector> {
+        if matches!(self.backend, Some(TokenQueryBackend::Db(_))) {
+            let Some(TokenQueryBackend::Db(db)) = self.backend.take() else {
+                unreachable!("checked Db variant above");
+            };
+            let evm = MorphEvm::from_env(db, evm_env.clone(), NoOpInspector {});
+            #[cfg(test)]
+            {
+                self.evm_instantiations += 1;
+            }
+            self.backend = Some(TokenQueryBackend::Evm(Box::new(evm)));
+        }
+        match self.backend.as_mut().expect("backend always present") {
+            TokenQueryBackend::Evm(evm) => evm,
+            TokenQueryBackend::Db(_) => unreachable!("transitioned to Evm above"),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn evm_instantiations(&self) -> usize {
+        self.evm_instantiations
+    }
+
+    /// Resolves a usable [`TokenFeeInfo`] for `(caller, token_id)`, checking registry
+    /// usability before invoking call-mode `balanceOf`.
+    pub(crate) fn load_usable_token_for_caller(
+        &mut self,
+        token_id: u16,
+        caller: Address,
+        evm_env: &MorphEvmEnv,
+    ) -> Result<TokenFeeInfo, MorphTxValidationError<DB::Error>> {
+        let entry = if let Some(cached) = self.token_entries.get(&token_id) {
+            *cached
+        } else {
+            let loaded = TokenRegistryEntry::load(self.db_mut(), token_id)
+                .map_err(MorphTxValidationError::State)?;
+            self.token_entries.insert(token_id, loaded);
+            loaded
+        };
+
+        let entry = entry.ok_or(MorphTxError::TokenNotFound { token_id })?;
+        validate_registry_entry_usable(entry, token_id)?;
+
+        if let Some(cached) = self.token_balances.get(&(caller, token_id)) {
+            return cached.clone().map_err(MorphTxValidationError::Invalid);
+        }
+
+        let result = if entry.balance_slot().is_some() {
+            entry.load_for_caller(self.db_mut(), caller, evm_env)
+        } else {
+            let evm = self.evm_mut(evm_env);
+            entry.load_for_caller_with_evm(evm, caller)
+        };
+
+        match result {
+            Ok(info) => {
+                self.token_balances.insert((caller, token_id), Ok(info));
+                Ok(info)
+            }
+            Err(EVMError::Database(err)) => Err(MorphTxValidationError::State(err)),
+            Err(_) => {
+                let err = MorphTxError::TokenBalanceQueryFailed { token_id };
+                self.token_balances
+                    .insert((caller, token_id), Err(err.clone()));
+                Err(MorphTxValidationError::Invalid(err))
+            }
+        }
+    }
+}
+
+/// Validates registry usability before any call-mode EVM `balanceOf` executes,
+/// matching `TokenRegistryEntry::ensure_usable` in `morph-revm`.
+fn validate_registry_entry_usable(
+    entry: TokenRegistryEntry,
+    token_id: u16,
+) -> Result<(), MorphTxError> {
+    if !entry.is_active() {
+        return Err(MorphTxError::TokenNotActive { token_id });
+    }
+    if entry.price_ratio().is_zero() {
+        return Err(MorphTxError::InvalidPriceRatio { token_id });
+    }
+    if entry.scale().is_zero() {
+        return Err(MorphTxError::InvalidTokenScale { token_id });
+    }
+    Ok(())
+}
 
 /// High-level input for MorphTx validation.
 ///
@@ -61,16 +210,25 @@ pub fn validate_morph_tx<DB: Database>(
     db: &mut DB,
     input: &MorphTxValidationInput<'_>,
 ) -> Result<MorphTxValidationResult, MorphTxValidationError<DB::Error>> {
+    let mut cache = TokenFeeCache::new(db);
+    validate_morph_tx_with_cache(&mut cache, input)
+}
+
+/// Validates a MorphTx using a caller-owned per-batch / per-round [`TokenFeeCache`].
+pub(crate) fn validate_morph_tx_with_cache<DB: Database>(
+    cache: &mut TokenFeeCache<DB>,
+    input: &MorphTxValidationInput<'_>,
+) -> Result<MorphTxValidationResult, MorphTxValidationError<DB::Error>> {
     validate_morph_tx_with_token_info(input, |token_id| {
-        TokenFeeInfo::load_for_caller(db, token_id, input.sender, input.evm_env)
+        cache.load_usable_token_for_caller(token_id, input.sender, input.evm_env)
     })
 }
 
 /// Shared checks with a caller-provided, fixed-state token lookup.
-/// Maintenance supplies a per-round cache; admission performs a fresh lookup.
+/// Callers check registry usability before running call-mode `balanceOf`.
 pub(crate) fn validate_morph_tx_with_token_info<E>(
     input: &MorphTxValidationInput<'_>,
-    load_token: impl FnOnce(u16) -> Result<Option<TokenFeeInfo>, EVMError<E, MorphInvalidTransaction>>,
+    load_token: impl FnOnce(u16) -> Result<TokenFeeInfo, MorphTxValidationError<E>>,
 ) -> Result<MorphTxValidationResult, MorphTxValidationError<E>> {
     // Keep MorphTx structural validation in the shared path so both initial
     // admission and background revalidation enforce the same invariants.
@@ -140,18 +298,9 @@ pub(crate) fn validate_morph_tx_with_token_info<E>(
         });
     }
 
-    let token_info = load_token(fee_token_id)
-        .map_err(|err| match err {
-            EVMError::Database(err) => MorphTxValidationError::State(err),
-            _ => MorphTxValidationError::Invalid(MorphTxError::TokenBalanceQueryFailed {
-                token_id: fee_token_id,
-            }),
-        })?
-        .ok_or(MorphTxError::TokenNotFound {
-            token_id: fee_token_id,
-        })?;
+    let token_info = load_token(fee_token_id)?;
 
-    // Check token is active
+    // Defensive checks in case a caller bypasses `TokenFeeCache`'s pre-call usability gate.
     if !token_info.is_active {
         return Err(MorphTxError::TokenNotActive {
             token_id: fee_token_id,
@@ -159,9 +308,15 @@ pub(crate) fn validate_morph_tx_with_token_info<E>(
         .into());
     }
 
-    // Check price ratio is valid
     if token_info.price_ratio.is_zero() {
         return Err(MorphTxError::InvalidPriceRatio {
+            token_id: fee_token_id,
+        }
+        .into());
+    }
+
+    if token_info.scale.is_zero() {
+        return Err(MorphTxError::InvalidTokenScale {
             token_id: fee_token_id,
         }
         .into());
@@ -876,5 +1031,210 @@ pub(crate) mod tests {
                 "{failing:?}"
             );
         }
+    }
+
+    /// Counts reads targeting `token` so tests can assert whether call-mode `balanceOf`
+    /// actually executed and how many times it ran.
+    #[derive(Debug)]
+    pub(crate) struct CountingTokenDb {
+        pub(crate) inner: CacheDB<EmptyDB>,
+        pub(crate) token: Address,
+        pub(crate) token_basic_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl CountingTokenDb {
+        pub(crate) fn new(inner: CacheDB<EmptyDB>, token: Address) -> Self {
+            Self {
+                inner,
+                token,
+                token_basic_reads: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
+        }
+
+        pub(crate) fn reads(&self) -> usize {
+            self.token_basic_reads
+                .load(std::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    impl reth_revm::Database for CountingTokenDb {
+        type Error = reth_provider::ProviderError;
+
+        fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
+            if address == self.token {
+                self.token_basic_reads
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            Ok(self.inner.basic(address).unwrap())
+        }
+
+        fn code_by_hash(&mut self, code_hash: B256) -> Result<Bytecode, Self::Error> {
+            Ok(self.inner.code_by_hash(code_hash).unwrap())
+        }
+
+        fn storage(&mut self, address: Address, index: U256) -> Result<U256, Self::Error> {
+            Ok(self.inner.storage(address, index).unwrap())
+        }
+
+        fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error> {
+            Ok(self.inner.block_hash(number).unwrap())
+        }
+    }
+
+    /// M-H04: Inactive, zero-price-ratio, and zero-scale call-mode tokens must fail
+    /// immediately on registry usability checks WITHOUT executing call-mode `balanceOf`.
+    #[test]
+    fn unusable_call_mode_tokens_never_execute_balance_of() {
+        let mut token_key = [0u8; 32];
+        token_key[30..].copy_from_slice(&1u16.to_be_bytes());
+        let base = compute_mapping_slot(U256::from(151), &token_key);
+        let price_slot = compute_mapping_slot(U256::from(153), &token_key);
+
+        // Use reverting `balanceOf` bytecode AND assert 0 reads on `FEE_TOKEN`: if
+        // `balanceOf` had executed, it would both touch `FEE_TOKEN` and return
+        // `TokenBalanceQueryFailed` instead of the specific registry error.
+        let reverting_code = FAILING_BALANCE_OF[0];
+
+        // 1. Inactive token
+        let mut inner = call_mode_token_state(1, FEE_TOKEN, reverting_code, TOKEN_PAYER, U256::MAX);
+        let mut inactive = [0u8; 32];
+        inactive[30] = 18;
+        inactive[31] = 0;
+        inner
+            .insert_account_storage(
+                L2_TOKEN_REGISTRY_ADDRESS,
+                base + U256::from(2),
+                U256::from_be_bytes(inactive),
+            )
+            .unwrap();
+        let mut db = CountingTokenDb::new(inner, FEE_TOKEN);
+        assert!(matches!(
+            validate_token_fee(&mut db),
+            Err(MorphTxValidationError::Invalid(
+                MorphTxError::TokenNotActive { token_id: 1 }
+            ))
+        ));
+        assert_eq!(db.reads(), 0, "inactive token must not execute balanceOf");
+
+        // 2. price_ratio == 0
+        let mut inner = call_mode_token_state(1, FEE_TOKEN, reverting_code, TOKEN_PAYER, U256::MAX);
+        inner
+            .insert_account_storage(L2_TOKEN_REGISTRY_ADDRESS, price_slot, U256::ZERO)
+            .unwrap();
+        let mut db = CountingTokenDb::new(inner, FEE_TOKEN);
+        assert!(matches!(
+            validate_token_fee(&mut db),
+            Err(MorphTxValidationError::Invalid(
+                MorphTxError::InvalidPriceRatio { token_id: 1 }
+            ))
+        ));
+        assert_eq!(db.reads(), 0, "zero price_ratio must not execute balanceOf");
+
+        // 3. scale == 0 (previously omitted, admitting balance == U256::MAX!)
+        let mut inner =
+            call_mode_token_state(1, FEE_TOKEN, BALANCE_OF_RUNTIME, TOKEN_PAYER, U256::MAX);
+        inner
+            .insert_account_storage(L2_TOKEN_REGISTRY_ADDRESS, base + U256::from(3), U256::ZERO)
+            .unwrap();
+        let mut db = CountingTokenDb::new(inner, FEE_TOKEN);
+        assert!(matches!(
+            validate_token_fee(&mut db),
+            Err(MorphTxValidationError::Invalid(
+                MorphTxError::InvalidTokenScale { token_id: 1 }
+            ))
+        ));
+        assert_eq!(db.reads(), 0, "zero scale must not execute balanceOf");
+    }
+
+    /// M-H04: `TokenFeeCache` reuses a single `MorphEvm` across distinct senders,
+    /// caches deterministic `TokenBalanceQueryFailed` errors per `(sender, token_id)`,
+    /// and never caches transient DB/state errors.
+    #[test]
+    fn token_fee_cache_reuses_evm_and_caches_deterministic_errors_not_db_errors() {
+        let evm_env = test_evm_env(MorphHardfork::Celadon);
+        let envelope = token_fee_envelope();
+        let sender_a = TOKEN_PAYER;
+        let sender_b = address!("2000000000000000000000000000000000000002");
+
+        // 1. Reverting `balanceOf`: repeated calls for sender_a execute `balanceOf` ONCE,
+        // and calling sender_b reuses the exact same `MorphEvm` instance.
+        let inner = call_mode_token_state(
+            1,
+            FEE_TOKEN,
+            FAILING_BALANCE_OF[0],
+            sender_a,
+            U256::from(TOKEN_FEE),
+        );
+        let db = CountingTokenDb::new(inner, FEE_TOKEN);
+        let reads = std::sync::Arc::clone(&db.token_basic_reads);
+        let mut cache = TokenFeeCache::new(db);
+
+        let input_a = MorphTxValidationInput {
+            consensus_tx: &envelope,
+            sender: sender_a,
+            eth_balance: U256::ZERO,
+            l1_data_fee: U256::ZERO,
+            hardfork: MorphHardfork::Celadon,
+            evm_env: &evm_env,
+        };
+        for _ in 0..3 {
+            assert!(matches!(
+                validate_morph_tx_with_cache(&mut cache, &input_a),
+                Err(MorphTxValidationError::Invalid(
+                    MorphTxError::TokenBalanceQueryFailed { token_id: 1 }
+                ))
+            ));
+        }
+        assert_eq!(
+            reads.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "deterministic TokenBalanceQueryFailed must be cached per (sender, token_id)"
+        );
+        assert_eq!(cache.evm_instantiations(), 1);
+
+        let input_b = MorphTxValidationInput {
+            sender: sender_b,
+            ..input_a.clone()
+        };
+        assert!(matches!(
+            validate_morph_tx_with_cache(&mut cache, &input_b),
+            Err(MorphTxValidationError::Invalid(
+                MorphTxError::TokenBalanceQueryFailed { token_id: 1 }
+            ))
+        ));
+        assert_eq!(
+            reads.load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "distinct sender should execute balanceOf once"
+        );
+        assert_eq!(
+            cache.evm_instantiations(),
+            1,
+            "same MorphEvm instance must be reused across senders"
+        );
+
+        // 2. Transient DB error must NOT be cached (second call must retry DB).
+        let unreadable = UnreadableTokenDb {
+            inner: call_mode_token_state(
+                1,
+                FEE_TOKEN,
+                BALANCE_OF_RUNTIME,
+                sender_a,
+                U256::from(TOKEN_FEE),
+            ),
+            token: FEE_TOKEN,
+            failing: TokenRead::Storage,
+        };
+        let mut cache = TokenFeeCache::new(unreadable);
+        for _ in 0..2 {
+            assert!(matches!(
+                validate_morph_tx_with_cache(&mut cache, &input_a),
+                Err(MorphTxValidationError::State(_))
+            ));
+        }
+        assert!(
+            cache.token_balances.is_empty(),
+            "DB/state errors must never populate token_balances cache"
+        );
     }
 }
