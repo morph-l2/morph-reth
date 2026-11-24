@@ -12077,6 +12077,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
+          "description": "Rolling growth over the dashboard Interval: size(t) - size(t - Interval), per service. Empty where no data exists one Interval earlier. Series are collapsed with max by (service), so restarts that change instance/pod labels do not skew the result.",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -12160,9 +12161,8 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "avg by (service) (delta(reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"PlainAccountState\"}[$interval]))",
+              "expr": "max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"PlainAccountState\"}) - max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"PlainAccountState\"} offset $interval)",
               "instant": false,
-              "interval": "$interval",
               "legendFormat": "{{service}} · Account",
               "range": true,
               "refId": "A"
@@ -12173,10 +12173,9 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "avg by (service) (delta(reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"PlainStorageState\"}[$interval]))",
+              "expr": "max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"PlainStorageState\"}) - max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"PlainStorageState\"} offset $interval)",
               "hide": false,
               "instant": false,
-              "interval": "$interval",
               "legendFormat": "{{service}} · Storage",
               "range": true,
               "refId": "B"
@@ -12187,10 +12186,9 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "avg by (service) (delta(reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Bytecodes\"}[$interval]))",
+              "expr": "max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Bytecodes\"}) - max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Bytecodes\"} offset $interval)",
               "hide": false,
               "instant": false,
-              "interval": "$interval",
               "legendFormat": "{{service}} · Bytecodes",
               "range": true,
               "refId": "C"
@@ -12201,10 +12199,9 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "avg by (service) (delta(reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"PlainAccountState\"}[$interval])) + avg by (service) (delta(reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"PlainStorageState\"}[$interval])) + avg by (service) (delta(reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Bytecodes\"}[$interval]))",
+              "expr": "(max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"PlainAccountState\"}) + max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"PlainStorageState\"}) + max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Bytecodes\"})) - (max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"PlainAccountState\"} offset $interval) + max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"PlainStorageState\"} offset $interval) + max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Bytecodes\"} offset $interval))",
               "hide": false,
               "instant": false,
-              "interval": "$interval",
               "legendFormat": "{{service}} · Total",
               "range": true,
               "refId": "D"
@@ -12359,6 +12356,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
+          "description": "Rolling growth over the dashboard Interval: size(t) - size(t - Interval), per service. Empty where no data exists one Interval earlier. Series are collapsed with max by (service), so restarts that change instance/pod labels do not skew the result.",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -12440,9 +12438,8 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "avg by (service) (delta(reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"PlainAccountState\"}[$interval]))",
+              "expr": "max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"PlainAccountState\"}) - max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"PlainAccountState\"} offset $interval)",
               "instant": false,
-              "interval": "$interval",
               "legendFormat": "{{service}}",
               "range": true,
               "refId": "A"
@@ -12456,6 +12453,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
+          "description": "Rolling growth over the dashboard Interval: size(t) - size(t - Interval), per service. Empty where no data exists one Interval earlier. Series are collapsed with max by (service), so restarts that change instance/pod labels do not skew the result.",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -12537,9 +12535,8 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "avg by (service) (delta(reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"PlainStorageState\"}[$interval]))",
+              "expr": "max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"PlainStorageState\"}) - max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"PlainStorageState\"} offset $interval)",
               "instant": false,
-              "interval": "$interval",
               "legendFormat": "{{service}}",
               "range": true,
               "refId": "A"
@@ -12553,6 +12550,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
+          "description": "Rolling growth over the dashboard Interval: size(t) - size(t - Interval), per service. Empty where no data exists one Interval earlier. Series are collapsed with max by (service), so restarts that change instance/pod labels do not skew the result.",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -12634,9 +12632,8 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "avg by (service) (delta(reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Bytecodes\"}[$interval]))",
+              "expr": "max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Bytecodes\"}) - max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Bytecodes\"} offset $interval)",
               "instant": false,
-              "interval": "$interval",
               "legendFormat": "{{service}}",
               "range": true,
               "refId": "A"
@@ -12650,6 +12647,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
+          "description": "Rolling growth over the dashboard Interval: size(t) - size(t - Interval), per service. Empty where no data exists one Interval earlier. Series are collapsed with max by (service), so restarts that change instance/pod labels do not skew the result.",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -12733,9 +12731,8 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "avg by (service) (delta(reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Headers\"}[$interval])) + avg by (service) (delta(reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"headers\"}[$interval]))",
+              "expr": "(max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Headers\"}) + max by (service) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"headers\"})) - (max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Headers\"} offset $interval) + max by (service) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"headers\"} offset $interval))",
               "instant": false,
-              "interval": "$interval",
               "legendFormat": "{{service}} · Headers",
               "range": true,
               "refId": "A"
@@ -12746,10 +12743,9 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "avg by (service) (delta(reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Receipts\"}[$interval])) + avg by (service) (delta(reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"receipts\"}[$interval]))",
+              "expr": "(max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Receipts\"}) + max by (service) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"receipts\"})) - (max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Receipts\"} offset $interval) + max by (service) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"receipts\"} offset $interval))",
               "hide": false,
               "instant": false,
-              "interval": "$interval",
               "legendFormat": "{{service}} · Receipts",
               "range": true,
               "refId": "B"
@@ -12760,37 +12756,28 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "avg by (service) (delta(reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Transactions\"}[$interval])) + avg by (service) (delta(reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"transactions\"}[$interval]))",
+              "expr": "(max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Transactions\"}) + max by (service) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"transactions\"})) - (max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Transactions\"} offset $interval) + max by (service) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"transactions\"} offset $interval))",
               "hide": false,
               "instant": false,
-              "interval": "$interval",
               "legendFormat": "{{service}} · Transactions",
               "range": true,
               "refId": "C"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "(max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Headers\"}) + max by (service) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"headers\"}) + max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Receipts\"}) + max by (service) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"receipts\"}) + max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Transactions\"}) + max by (service) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"transactions\"})) - (max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Headers\"} offset $interval) + max by (service) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"headers\"} offset $interval) + max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Receipts\"} offset $interval) + max by (service) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"receipts\"} offset $interval) + max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Transactions\"} offset $interval) + max by (service) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"transactions\"} offset $interval))",
+              "hide": false,
+              "instant": false,
+              "legendFormat": "{{service}} · Total",
+              "range": true,
+              "refId": "D"
             }
           ],
           "title": "History Growth (interval = ${interval})",
-          "transformations": [
-            {
-              "id": "calculateField",
-              "options": {
-                "binary": {
-                  "left": "Headers",
-                  "reducer": "sum",
-                  "right": "Receipts"
-                },
-                "mode": "reduceRow",
-                "reduce": {
-                  "include": [
-                    "Headers",
-                    "Receipts",
-                    "Transactions"
-                  ],
-                  "reducer": "sum"
-                }
-              }
-            }
-          ],
           "type": "timeseries"
         },
         {
@@ -12915,25 +12902,23 @@
               "legendFormat": "{{service}} · Transactions",
               "range": true,
               "refId": "C"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Headers\"}) + sum by (service) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"headers\"}) + sum by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Receipts\"}) + sum by (service) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"receipts\"}) + sum by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Transactions\"}) + sum by (service) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"transactions\"})",
+              "hide": false,
+              "instant": false,
+              "interval": "10m",
+              "legendFormat": "{{service}} · Total",
+              "range": true,
+              "refId": "D"
             }
           ],
           "title": "History Size",
-          "transformations": [
-            {
-              "id": "calculateField",
-              "options": {
-                "mode": "reduceRow",
-                "reduce": {
-                  "include": [
-                    "Headers",
-                    "Receipts",
-                    "Transactions"
-                  ],
-                  "reducer": "sum"
-                }
-              }
-            }
-          ],
           "type": "timeseries"
         },
         {
@@ -12941,6 +12926,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
+          "description": "Rolling growth over the dashboard Interval: size(t) - size(t - Interval), per service. Empty where no data exists one Interval earlier. Series are collapsed with max by (service), so restarts that change instance/pod labels do not skew the result.",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -13022,9 +13008,8 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "avg by (service) (delta(reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Headers\"}[$interval])) + avg by (service) (delta(reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"headers\"}[$interval]))",
+              "expr": "(max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Headers\"}) + max by (service) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"headers\"})) - (max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Headers\"} offset $interval) + max by (service) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"headers\"} offset $interval))",
               "instant": false,
-              "interval": "$interval",
               "legendFormat": "{{service}}",
               "range": true,
               "refId": "A"
@@ -13038,6 +13023,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
+          "description": "Rolling growth over the dashboard Interval: size(t) - size(t - Interval), per service. Empty where no data exists one Interval earlier. Series are collapsed with max by (service), so restarts that change instance/pod labels do not skew the result.",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -13119,9 +13105,8 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "avg by (service) (delta(reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Receipts\"}[$interval])) + avg by (service) (delta(reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"receipts\"}[$interval]))",
+              "expr": "(max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Receipts\"}) + max by (service) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"receipts\"})) - (max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Receipts\"} offset $interval) + max by (service) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"receipts\"} offset $interval))",
               "instant": false,
-              "interval": "$interval",
               "legendFormat": "{{service}}",
               "range": true,
               "refId": "A"
@@ -13135,6 +13120,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
+          "description": "Rolling growth over the dashboard Interval: size(t) - size(t - Interval), per service. Empty where no data exists one Interval earlier. Series are collapsed with max by (service), so restarts that change instance/pod labels do not skew the result.",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -13216,9 +13202,8 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "avg by (service) (delta(reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Transactions\"}[$interval])) + avg by (service) (delta(reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"transactions\"}[$interval]))",
+              "expr": "(max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Transactions\"}) + max by (service) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"transactions\"})) - (max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Transactions\"} offset $interval) + max by (service) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"transactions\"} offset $interval))",
               "instant": false,
-              "interval": "$interval",
               "legendFormat": "{{service}}",
               "range": true,
               "refId": "A"
