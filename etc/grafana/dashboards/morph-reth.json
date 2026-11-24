@@ -286,10 +286,11 @@
           },
           "editorMode": "builder",
           "exemplar": false,
-          "expr": "reth_network_connected_peers{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+          "expr": "max by (service) (reth_network_connected_peers{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
           "instant": true,
           "legendFormat": "{{service}}",
-          "refId": "A"
+          "refId": "A",
+          "range": false
         }
       ],
       "title": "Connected peers",
@@ -446,7 +447,7 @@
           },
           "editorMode": "code",
           "exemplar": false,
-          "expr": "sum by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
+          "expr": "sum by (service) (max by (service, table) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}))",
           "format": "table",
           "instant": true,
           "legendFormat": "__auto",
@@ -460,7 +461,7 @@
           },
           "editorMode": "code",
           "exemplar": false,
-          "expr": "sum by (service) (reth_db_freelist{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} * reth_db_page_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
+          "expr": "max by (service) (reth_db_freelist{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} * reth_db_page_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
           "format": "table",
           "instant": true,
           "legendFormat": "__auto",
@@ -474,7 +475,7 @@
           },
           "editorMode": "code",
           "exemplar": false,
-          "expr": "sum by (service) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
+          "expr": "sum by (service) (max by (service, segment) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}))",
           "format": "table",
           "instant": true,
           "legendFormat": "__auto",
@@ -488,7 +489,7 @@
           },
           "editorMode": "code",
           "exemplar": false,
-          "expr": "sum by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) + sum by (service) (reth_db_freelist{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} * reth_db_page_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) + sum by (service) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
+          "expr": "sum by (service) (max by (service, table) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})) + max by (service) (reth_db_freelist{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} * reth_db_page_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) + sum by (service) (max by (service, segment) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}))",
           "format": "table",
           "instant": true,
           "legendFormat": "__auto",
@@ -641,7 +642,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_sync_execution_gas_per_second{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+          "expr": "max by (service) (reth_sync_execution_gas_per_second{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
           "legendFormat": "{{service}} · Gas/s",
           "range": true,
           "refId": "A"
@@ -653,7 +654,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "builder",
-          "expr": "avg_over_time(reth_sync_execution_gas_per_second{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[1m])",
+          "expr": "avg by (service) (avg_over_time(reth_sync_execution_gas_per_second{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[1m]))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -669,7 +670,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "builder",
-          "expr": "avg_over_time(reth_sync_execution_gas_per_second{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[5m])",
+          "expr": "avg by (service) (avg_over_time(reth_sync_execution_gas_per_second{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[5m]))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -685,7 +686,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "builder",
-          "expr": "avg_over_time(reth_sync_execution_gas_per_second{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[10m])",
+          "expr": "avg by (service) (avg_over_time(reth_sync_execution_gas_per_second{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[10m]))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -701,7 +702,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "builder",
-          "expr": "avg_over_time(reth_sync_execution_gas_per_second{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[30m])",
+          "expr": "avg by (service) (avg_over_time(reth_sync_execution_gas_per_second{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[30m]))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -717,7 +718,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "builder",
-          "expr": "avg_over_time(reth_sync_execution_gas_per_second{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[1h])",
+          "expr": "avg by (service) (avg_over_time(reth_sync_execution_gas_per_second{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[1h]))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -733,7 +734,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "builder",
-          "expr": "avg_over_time(reth_sync_execution_gas_per_second{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[24h])",
+          "expr": "avg by (service) (avg_over_time(reth_sync_execution_gas_per_second{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[24h]))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -792,11 +793,11 @@
       "type": "timeseries",
       "targets": [
         {
-          "expr": "rate(reth_morph_engine_new_l2_block_duration_seconds_count{role=~\"$role\", chain=\"$chain\", service=~\"$service\"}[$__rate_interval]) > 0",
+          "expr": "sum by (service) (rate(reth_morph_engine_new_l2_block_duration_seconds_count{role=~\"$role\", chain=\"$chain\", service=~\"$service\"}[$__rate_interval])) > 0",
           "legendFormat": "{{service}} newL2Block"
         },
         {
-          "expr": "rate(reth_morph_engine_new_safe_l2_block_duration_seconds_count{role=~\"$role\", chain=\"$chain\", service=~\"$service\"}[$__rate_interval]) > 0",
+          "expr": "sum by (service) (rate(reth_morph_engine_new_safe_l2_block_duration_seconds_count{role=~\"$role\", chain=\"$chain\", service=~\"$service\"}[$__rate_interval])) > 0",
           "legendFormat": "{{service}} newSafe"
         }
       ]
@@ -852,7 +853,7 @@
       "type": "stat",
       "targets": [
         {
-          "expr": "reth_morph_engine_head_block_timegap_seconds{role=~\"$role\", chain=\"$chain\", service=~\"$service\"}",
+          "expr": "max by (service) (reth_morph_engine_head_block_timegap_seconds{role=~\"$role\", chain=\"$chain\", service=~\"$service\"})",
           "legendFormat": "{{service}}"
         }
       ]
@@ -904,7 +905,7 @@
       "type": "timeseries",
       "targets": [
         {
-          "expr": "reth_morph_engine_head_block_timegap_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+          "expr": "max by (service) (reth_morph_engine_head_block_timegap_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
           "legendFormat": "{{service}}"
         }
       ]
@@ -968,11 +969,11 @@
       "type": "timeseries",
       "targets": [
         {
-          "expr": "rate(reth_morph_engine_new_l2_block_duration_seconds_sum{role=~\"$role\", chain=\"$chain\", service=~\"$service\"}[$__rate_interval]) / rate(reth_morph_engine_new_l2_block_duration_seconds_count{role=~\"$role\", chain=\"$chain\", service=~\"$service\"}[$__rate_interval]) > 0",
+          "expr": "(sum by (service) (rate(reth_morph_engine_new_l2_block_duration_seconds_sum{role=~\"$role\", chain=\"$chain\", service=~\"$service\"}[$__rate_interval])) / sum by (service) (rate(reth_morph_engine_new_l2_block_duration_seconds_count{role=~\"$role\", chain=\"$chain\", service=~\"$service\"}[$__rate_interval]))) > 0",
           "legendFormat": "{{service}} avg"
         },
         {
-          "expr": "reth_morph_engine_new_l2_block_duration_seconds{role=~\"$role\", chain=\"$chain\", service=~\"$service\", quantile=\"$quantile\"} > 0",
+          "expr": "max by (service, quantile) (reth_morph_engine_new_l2_block_duration_seconds{role=~\"$role\", chain=\"$chain\", service=~\"$service\", quantile=\"$quantile\"}) > 0",
           "legendFormat": "{{service}} p{{quantile}}"
         }
       ]
@@ -1023,11 +1024,11 @@
       "type": "timeseries",
       "targets": [
         {
-          "expr": "rate(reth_morph_engine_new_safe_l2_block_duration_seconds_sum{role=~\"$role\", chain=\"$chain\", service=~\"$service\"}[$__rate_interval]) / rate(reth_morph_engine_new_safe_l2_block_duration_seconds_count{role=~\"$role\", chain=\"$chain\", service=~\"$service\"}[$__rate_interval]) > 0",
+          "expr": "(sum by (service) (rate(reth_morph_engine_new_safe_l2_block_duration_seconds_sum{role=~\"$role\", chain=\"$chain\", service=~\"$service\"}[$__rate_interval])) / sum by (service) (rate(reth_morph_engine_new_safe_l2_block_duration_seconds_count{role=~\"$role\", chain=\"$chain\", service=~\"$service\"}[$__rate_interval]))) > 0",
           "legendFormat": "{{service}} avg"
         },
         {
-          "expr": "reth_morph_engine_new_safe_l2_block_duration_seconds{role=~\"$role\", chain=\"$chain\", service=~\"$service\", quantile=\"$quantile\"} > 0",
+          "expr": "max by (service, quantile) (reth_morph_engine_new_safe_l2_block_duration_seconds{role=~\"$role\", chain=\"$chain\", service=~\"$service\", quantile=\"$quantile\"}) > 0",
           "legendFormat": "{{service}} p{{quantile}}"
         }
       ]
@@ -1078,11 +1079,11 @@
       "type": "timeseries",
       "targets": [
         {
-          "expr": "rate(reth_morph_engine_assemble_l2_block_duration_seconds_sum{role=~\"$role\", chain=\"$chain\", service=~\"$service\"}[$__rate_interval]) / rate(reth_morph_engine_assemble_l2_block_duration_seconds_count{role=~\"$role\", chain=\"$chain\", service=~\"$service\"}[$__rate_interval]) > 0",
+          "expr": "(sum by (service) (rate(reth_morph_engine_assemble_l2_block_duration_seconds_sum{role=~\"$role\", chain=\"$chain\", service=~\"$service\"}[$__rate_interval])) / sum by (service) (rate(reth_morph_engine_assemble_l2_block_duration_seconds_count{role=~\"$role\", chain=\"$chain\", service=~\"$service\"}[$__rate_interval]))) > 0",
           "legendFormat": "{{service}} avg"
         },
         {
-          "expr": "reth_morph_engine_assemble_l2_block_duration_seconds{role=~\"$role\", chain=\"$chain\", service=~\"$service\", quantile=\"$quantile\"} > 0",
+          "expr": "max by (service, quantile) (reth_morph_engine_assemble_l2_block_duration_seconds{role=~\"$role\", chain=\"$chain\", service=~\"$service\", quantile=\"$quantile\"}) > 0",
           "legendFormat": "{{service}} p{{quantile}}"
         }
       ]
@@ -1133,11 +1134,11 @@
       "type": "timeseries",
       "targets": [
         {
-          "expr": "rate(reth_morph_engine_validate_l2_block_duration_seconds_sum{role=~\"$role\", chain=\"$chain\", service=~\"$service\"}[$__rate_interval]) / rate(reth_morph_engine_validate_l2_block_duration_seconds_count{role=~\"$role\", chain=\"$chain\", service=~\"$service\"}[$__rate_interval]) > 0",
+          "expr": "(sum by (service) (rate(reth_morph_engine_validate_l2_block_duration_seconds_sum{role=~\"$role\", chain=\"$chain\", service=~\"$service\"}[$__rate_interval])) / sum by (service) (rate(reth_morph_engine_validate_l2_block_duration_seconds_count{role=~\"$role\", chain=\"$chain\", service=~\"$service\"}[$__rate_interval]))) > 0",
           "legendFormat": "{{service}} avg"
         },
         {
-          "expr": "reth_morph_engine_validate_l2_block_duration_seconds{role=~\"$role\", chain=\"$chain\", service=~\"$service\", quantile=\"$quantile\"} > 0",
+          "expr": "max by (service, quantile) (reth_morph_engine_validate_l2_block_duration_seconds{role=~\"$role\", chain=\"$chain\", service=~\"$service\", quantile=\"$quantile\"}) > 0",
           "legendFormat": "{{service}} p{{quantile}}"
         }
       ]
@@ -1188,19 +1189,19 @@
       "type": "timeseries",
       "targets": [
         {
-          "expr": "rate(reth_morph_engine_assemble_l2_block_failures_total{role=~\"$role\", chain=\"$chain\", service=~\"$service\"}[$__rate_interval])",
+          "expr": "sum by (service) (rate(reth_morph_engine_assemble_l2_block_failures_total{role=~\"$role\", chain=\"$chain\", service=~\"$service\"}[$__rate_interval]))",
           "legendFormat": "{{service}} assemble"
         },
         {
-          "expr": "rate(reth_morph_engine_validate_l2_block_failures_total{role=~\"$role\", chain=\"$chain\", service=~\"$service\"}[$__rate_interval])",
+          "expr": "sum by (service) (rate(reth_morph_engine_validate_l2_block_failures_total{role=~\"$role\", chain=\"$chain\", service=~\"$service\"}[$__rate_interval]))",
           "legendFormat": "{{service}} validate"
         },
         {
-          "expr": "rate(reth_morph_engine_new_l2_block_failures_total{role=~\"$role\", chain=\"$chain\", service=~\"$service\"}[$__rate_interval])",
+          "expr": "sum by (service) (rate(reth_morph_engine_new_l2_block_failures_total{role=~\"$role\", chain=\"$chain\", service=~\"$service\"}[$__rate_interval]))",
           "legendFormat": "{{service}} newL2Block"
         },
         {
-          "expr": "rate(reth_morph_engine_new_safe_l2_block_failures_total{role=~\"$role\", chain=\"$chain\", service=~\"$service\"}[$__rate_interval])",
+          "expr": "sum by (service) (rate(reth_morph_engine_new_safe_l2_block_failures_total{role=~\"$role\", chain=\"$chain\", service=~\"$service\"}[$__rate_interval]))",
           "legendFormat": "{{service}} newSafe"
         }
       ]
@@ -1305,7 +1306,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "rate(reth_consensus_engine_beacon_new_payload_messages{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+          "expr": "sum by (service) (rate(reth_consensus_engine_beacon_new_payload_messages{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
           "instant": false,
           "legendFormat": "{{service}} · newPayload",
           "range": true,
@@ -1317,7 +1318,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "rate(reth_consensus_engine_beacon_forkchoice_updated_messages{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+          "expr": "sum by (service) (rate(reth_consensus_engine_beacon_forkchoice_updated_messages{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
           "instant": false,
           "legendFormat": "{{service}} · forkchoiceUpdated",
           "range": true,
@@ -1377,7 +1378,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "rate(reth_consensus_engine_beacon_failed_new_payload_response_deliveries{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+          "expr": "sum by (service) (rate(reth_consensus_engine_beacon_failed_new_payload_response_deliveries{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
           "instant": false,
           "legendFormat": "{{service}} · newPayload",
           "range": true,
@@ -1389,7 +1390,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "rate(reth_consensus_engine_beacon_failed_forkchoice_updated_response_deliveries{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+          "expr": "sum by (service) (rate(reth_consensus_engine_beacon_failed_forkchoice_updated_response_deliveries{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
           "instant": false,
           "legendFormat": "{{service}} · forkchoiceUpdated",
           "range": true,
@@ -1449,7 +1450,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_consensus_engine_beacon_new_payload_forkchoice_updated_time_diff{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
+          "expr": "max by (service, role, quantile) (reth_consensus_engine_beacon_new_payload_forkchoice_updated_time_diff{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"})",
           "instant": false,
           "legendFormat": "{{service}} · {{role}} · p{{quantile}}",
           "range": true,
@@ -1509,7 +1510,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_consensus_engine_beacon_new_payload_latency{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
+          "expr": "max by (service, role, quantile) (reth_consensus_engine_beacon_new_payload_latency{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"})",
           "instant": false,
           "legendFormat": "{{service}} · {{role}} · p{{quantile}}",
           "range": true,
@@ -1569,7 +1570,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_consensus_engine_beacon_forkchoice_updated_latency{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
+          "expr": "max by (service, role, quantile) (reth_consensus_engine_beacon_forkchoice_updated_latency{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"})",
           "instant": false,
           "legendFormat": "{{service}} · {{role}} · p{{quantile}}",
           "range": true,
@@ -1640,11 +1641,11 @@
       "type": "timeseries",
       "targets": [
         {
-          "expr": "rate(reth_morph_payload_builder_payload_build_duration_seconds_sum{role=~\"$role\", chain=\"$chain\", service=~\"$service\"}[$__rate_interval]) / rate(reth_morph_payload_builder_payload_build_duration_seconds_count{role=~\"$role\", chain=\"$chain\", service=~\"$service\"}[$__rate_interval]) > 0",
+          "expr": "(sum by (service) (rate(reth_morph_payload_builder_payload_build_duration_seconds_sum{role=~\"$role\", chain=\"$chain\", service=~\"$service\"}[$__rate_interval])) / sum by (service) (rate(reth_morph_payload_builder_payload_build_duration_seconds_count{role=~\"$role\", chain=\"$chain\", service=~\"$service\"}[$__rate_interval]))) > 0",
           "legendFormat": "{{service}} avg"
         },
         {
-          "expr": "reth_morph_payload_builder_payload_build_duration_seconds{role=~\"$role\", chain=\"$chain\", service=~\"$service\", quantile=\"$quantile\"} > 0",
+          "expr": "max by (service, quantile) (reth_morph_payload_builder_payload_build_duration_seconds{role=~\"$role\", chain=\"$chain\", service=~\"$service\", quantile=\"$quantile\"}) > 0",
           "legendFormat": "{{service}} p{{quantile}}"
         }
       ]
@@ -1696,11 +1697,11 @@
       "type": "timeseries",
       "targets": [
         {
-          "expr": "rate(reth_morph_payload_builder_commit_txs_all_duration_seconds_sum{role=~\"$role\", chain=\"$chain\", service=~\"$service\"}[$__rate_interval]) / rate(reth_morph_payload_builder_commit_txs_all_duration_seconds_count{role=~\"$role\", chain=\"$chain\", service=~\"$service\"}[$__rate_interval]) > 0",
+          "expr": "(sum by (service) (rate(reth_morph_payload_builder_commit_txs_all_duration_seconds_sum{role=~\"$role\", chain=\"$chain\", service=~\"$service\"}[$__rate_interval])) / sum by (service) (rate(reth_morph_payload_builder_commit_txs_all_duration_seconds_count{role=~\"$role\", chain=\"$chain\", service=~\"$service\"}[$__rate_interval]))) > 0",
           "legendFormat": "{{service}} avg"
         },
         {
-          "expr": "reth_morph_payload_builder_commit_txs_all_duration_seconds{role=~\"$role\", chain=\"$chain\", service=~\"$service\", quantile=\"$quantile\"} > 0",
+          "expr": "max by (service, quantile) (reth_morph_payload_builder_commit_txs_all_duration_seconds{role=~\"$role\", chain=\"$chain\", service=~\"$service\", quantile=\"$quantile\"}) > 0",
           "legendFormat": "{{service}} p{{quantile}}"
         }
       ]
@@ -1752,11 +1753,11 @@
       "type": "timeseries",
       "targets": [
         {
-          "expr": "rate(reth_morph_payload_builder_commit_tx_apply_duration_seconds_sum{role=~\"$role\", chain=\"$chain\", service=~\"$service\"}[$__rate_interval]) / rate(reth_morph_payload_builder_commit_tx_apply_duration_seconds_count{role=~\"$role\", chain=\"$chain\", service=~\"$service\"}[$__rate_interval]) > 0",
+          "expr": "(sum by (service) (rate(reth_morph_payload_builder_commit_tx_apply_duration_seconds_sum{role=~\"$role\", chain=\"$chain\", service=~\"$service\"}[$__rate_interval])) / sum by (service) (rate(reth_morph_payload_builder_commit_tx_apply_duration_seconds_count{role=~\"$role\", chain=\"$chain\", service=~\"$service\"}[$__rate_interval]))) > 0",
           "legendFormat": "{{service}} avg"
         },
         {
-          "expr": "reth_morph_payload_builder_commit_tx_apply_duration_seconds{role=~\"$role\", chain=\"$chain\", service=~\"$service\", quantile=\"$quantile\"} > 0",
+          "expr": "max by (service, quantile) (reth_morph_payload_builder_commit_tx_apply_duration_seconds{role=~\"$role\", chain=\"$chain\", service=~\"$service\", quantile=\"$quantile\"}) > 0",
           "legendFormat": "{{service}} p{{quantile}}"
         }
       ]
@@ -1807,7 +1808,7 @@
       "type": "timeseries",
       "targets": [
         {
-          "expr": "reth_morph_payload_builder_block_transactions{role=~\"$role\", chain=\"$chain\", service=~\"$service\"} > 0",
+          "expr": "max by (service) (reth_morph_payload_builder_block_transactions{role=~\"$role\", chain=\"$chain\", service=~\"$service\"}) > 0",
           "legendFormat": "{{service}}"
         }
       ]
@@ -1861,7 +1862,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_payloads_active_jobs{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+          "expr": "max by (service) (reth_payloads_active_jobs{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
           "instant": false,
           "legendFormat": "{{service}}",
           "range": true,
@@ -1921,7 +1922,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_payloads_initiated_jobs{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+          "expr": "max by (service) (reth_payloads_initiated_jobs{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
           "instant": false,
           "legendFormat": "{{service}}",
           "range": true,
@@ -1981,7 +1982,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_payloads_failed_jobs{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+          "expr": "max by (service) (reth_payloads_failed_jobs{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
           "instant": false,
           "legendFormat": "{{service}}",
           "range": true,
@@ -2097,7 +2098,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "builder",
-          "expr": "reth_sync_block_validation_state_root_duration{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
+          "expr": "max by (service) (reth_sync_block_validation_state_root_duration{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) > 0",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
@@ -2113,7 +2114,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "builder",
-          "expr": "reth_sync_execution_execution_duration{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
+          "expr": "max by (service) (reth_sync_execution_execution_duration{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) > 0",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -2219,7 +2220,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "reth_sync_caching_account_cache_hits{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} / (reth_sync_caching_account_cache_hits{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} + reth_sync_caching_account_cache_misses{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
+          "expr": "max by (service) (reth_sync_caching_account_cache_hits{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} / (reth_sync_caching_account_cache_hits{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} + reth_sync_caching_account_cache_misses{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -2236,7 +2237,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "reth_sync_caching_storage_cache_hits{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} / (reth_sync_caching_storage_cache_hits{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} + reth_sync_caching_storage_cache_misses{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
+          "expr": "max by (service) (reth_sync_caching_storage_cache_hits{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} / (reth_sync_caching_storage_cache_hits{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} + reth_sync_caching_storage_cache_misses{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -2253,7 +2254,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "reth_sync_caching_code_cache_hits{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} / (reth_sync_caching_code_cache_hits{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} + reth_sync_caching_code_cache_misses{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
+          "expr": "max by (service) (reth_sync_caching_code_cache_hits{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} / (reth_sync_caching_code_cache_hits{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} + reth_sync_caching_code_cache_misses{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -2385,7 +2386,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "reth_sync_caching_precompile_cache_hits{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} / (reth_sync_caching_precompile_cache_hits{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} + reth_sync_caching_precompile_cache_misses{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
+          "expr": "max by (service) (reth_sync_caching_precompile_cache_hits{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} / (reth_sync_caching_precompile_cache_hits{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} + reth_sync_caching_precompile_cache_misses{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}))",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -2490,7 +2491,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_sparse_state_trie_multiproof_total_account_nodes{chain=\"$chain\", role=~\"$role\", service=~\"$service\",quantile=~\"(0|0.5|0.9|0.95|1)\"}",
+          "expr": "max by (service, quantile) (reth_sparse_state_trie_multiproof_total_account_nodes{chain=\"$chain\", role=~\"$role\", service=~\"$service\",quantile=~\"(0|0.5|0.9|0.95|1)\"})",
           "instant": false,
           "legendFormat": "{{service}} · Account {{quantile}} percentile",
           "range": true,
@@ -2591,7 +2592,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_sparse_state_trie_multiproof_total_storage_nodes{chain=\"$chain\", role=~\"$role\", service=~\"$service\",quantile=~\"(0|0.5|0.9|0.95|1)\"}",
+          "expr": "max by (service, quantile) (reth_sparse_state_trie_multiproof_total_storage_nodes{chain=\"$chain\", role=~\"$role\", service=~\"$service\",quantile=~\"(0|0.5|0.9|0.95|1)\"})",
           "instant": false,
           "legendFormat": "{{service}} · Storage {{quantile}} percentile",
           "range": true,
@@ -2694,7 +2695,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "reth_sync_block_validation_state_root_histogram{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
+          "expr": "max by (service, role, quantile) (reth_sync_block_validation_state_root_histogram{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"})",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
@@ -2756,7 +2757,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_tree_root_sparse_trie_account_cache_hits_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} / (reth_tree_root_sparse_trie_account_cache_hits_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} + reth_tree_root_sparse_trie_account_cache_misses_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
+          "expr": "max by (service, role) (reth_tree_root_sparse_trie_account_cache_hits_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} / (reth_tree_root_sparse_trie_account_cache_hits_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} + reth_tree_root_sparse_trie_account_cache_misses_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}))",
           "instant": false,
           "legendFormat": "{{service}} · {{role}} · hit %",
           "range": true,
@@ -2816,7 +2817,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_tree_root_sparse_trie_storage_cache_hits_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} / (reth_tree_root_sparse_trie_storage_cache_hits_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} + reth_tree_root_sparse_trie_storage_cache_misses_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
+          "expr": "max by (service, role) (reth_tree_root_sparse_trie_storage_cache_hits_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} / (reth_tree_root_sparse_trie_storage_cache_hits_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} + reth_tree_root_sparse_trie_storage_cache_misses_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}))",
           "instant": false,
           "legendFormat": "{{service}} · {{role}} · hit %",
           "range": true,
@@ -2876,7 +2877,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_trie_proof_task_account_worker_idle_time_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
+          "expr": "max by (service, role, quantile) (reth_trie_proof_task_account_worker_idle_time_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"})",
           "instant": false,
           "legendFormat": "{{service}} · {{role}} · p{{quantile}}",
           "range": true,
@@ -2936,7 +2937,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_trie_proof_task_storage_worker_idle_time_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
+          "expr": "max by (service, role, quantile) (reth_trie_proof_task_storage_worker_idle_time_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"})",
           "instant": false,
           "legendFormat": "{{service}} · {{role}} · p{{quantile}}",
           "range": true,
@@ -2996,7 +2997,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_tree_root_sparse_trie_idle_time_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
+          "expr": "max by (service, role, quantile) (reth_tree_root_sparse_trie_idle_time_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"})",
           "instant": false,
           "legendFormat": "{{service}} · {{role}} · p{{quantile}}",
           "range": true,
@@ -3056,7 +3057,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_tree_root_hashing_task_idle_time_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
+          "expr": "max by (service, role, quantile) (reth_tree_root_hashing_task_idle_time_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"})",
           "instant": false,
           "legendFormat": "{{service}} · {{role}} · p{{quantile}}",
           "range": true,
@@ -3188,7 +3189,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_sync_block_validation_deferred_trie_compute_duration{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
+          "expr": "max by (service, role, quantile) (reth_sync_block_validation_deferred_trie_compute_duration{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"})",
           "instant": false,
           "legendFormat": "{{service}} · {{role}} · p{{quantile}}",
           "range": true,
@@ -3261,7 +3262,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_morph_proofs_earliest_block{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+          "expr": "max by (service) (reth_morph_proofs_earliest_block{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
           "instant": false,
           "legendFormat": "{{service}} · earliest",
           "range": true,
@@ -3273,7 +3274,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_morph_proofs_latest_block{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+          "expr": "max by (service) (reth_morph_proofs_latest_block{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
           "instant": false,
           "legendFormat": "{{service}} · latest",
           "range": true,
@@ -3285,7 +3286,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_morph_proofs_latest_block{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} - reth_morph_proofs_earliest_block{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} + 1",
+          "expr": "max by (service) (reth_morph_proofs_latest_block{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} - reth_morph_proofs_earliest_block{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} + 1)",
           "instant": false,
           "legendFormat": "{{service}} · inclusive window",
           "range": true,
@@ -3297,7 +3298,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "clamp_min(reth_blockchain_tree_canonical_chain_height{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} - reth_morph_proofs_latest_block{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}, 0)",
+          "expr": "max by (service) (clamp_min(reth_blockchain_tree_canonical_chain_height{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} - reth_morph_proofs_latest_block{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}, 0))",
           "instant": false,
           "legendFormat": "{{service}} · canonical lag",
           "range": true,
@@ -3357,7 +3358,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_morph_proofs_block_total_duration_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
+          "expr": "max by (service, quantile) (reth_morph_proofs_block_total_duration_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"})",
           "instant": false,
           "legendFormat": "{{service}} · total p{{quantile}}",
           "range": true,
@@ -3369,7 +3370,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_morph_proofs_block_execution_duration_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
+          "expr": "max by (service, quantile) (reth_morph_proofs_block_execution_duration_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"})",
           "instant": false,
           "legendFormat": "{{service}} · execution p{{quantile}}",
           "range": true,
@@ -3381,7 +3382,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_morph_proofs_block_state_root_duration_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
+          "expr": "max by (service, quantile) (reth_morph_proofs_block_state_root_duration_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"})",
           "instant": false,
           "legendFormat": "{{service}} · state root p{{quantile}}",
           "range": true,
@@ -3393,7 +3394,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_morph_proofs_block_write_duration_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
+          "expr": "max by (service, quantile) (reth_morph_proofs_block_write_duration_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"})",
           "instant": false,
           "legendFormat": "{{service}} · write p{{quantile}}",
           "range": true,
@@ -3453,7 +3454,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "rate(reth_morph_proofs_account_trie_updates_written_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+          "expr": "sum by (service) (rate(reth_morph_proofs_account_trie_updates_written_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
           "instant": false,
           "legendFormat": "{{service}} · account trie updates",
           "range": true,
@@ -3465,7 +3466,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "rate(reth_morph_proofs_storage_trie_updates_written_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+          "expr": "sum by (service) (rate(reth_morph_proofs_storage_trie_updates_written_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
           "instant": false,
           "legendFormat": "{{service}} · storage trie updates",
           "range": true,
@@ -3477,7 +3478,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "rate(reth_morph_proofs_hashed_accounts_written_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+          "expr": "sum by (service) (rate(reth_morph_proofs_hashed_accounts_written_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
           "instant": false,
           "legendFormat": "{{service}} · hashed accounts",
           "range": true,
@@ -3489,7 +3490,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "rate(reth_morph_proofs_hashed_storages_written_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+          "expr": "sum by (service) (rate(reth_morph_proofs_hashed_storages_written_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
           "instant": false,
           "legendFormat": "{{service}} · hashed storages",
           "range": true,
@@ -3549,7 +3550,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "rate(reth_morph_proofs_prune_errors_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+          "expr": "sum by (service) (rate(reth_morph_proofs_prune_errors_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
           "instant": false,
           "legendFormat": "{{service}} · prune",
           "range": true,
@@ -3561,7 +3562,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "rate(reth_morph_proofs_unwind_errors_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+          "expr": "sum by (service) (rate(reth_morph_proofs_unwind_errors_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
           "instant": false,
           "legendFormat": "{{service}} · unwind",
           "range": true,
@@ -3765,7 +3766,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_morph_rpc_proofs_latency_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
+          "expr": "max by (service, role, method, quantile) (reth_morph_rpc_proofs_latency_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"})",
           "instant": false,
           "legendFormat": "{{service}} · {{role}} · {{method}} p{{quantile}}",
           "range": true,
@@ -3825,7 +3826,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_morph_proofs_pruner_total_duration_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"}",
+          "expr": "max by (service, role, quantile) (reth_morph_proofs_pruner_total_duration_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", quantile=\"$quantile\"})",
           "instant": false,
           "legendFormat": "{{service}} · {{role}} · p{{quantile}}",
           "range": true,
@@ -3885,7 +3886,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_morph_proofs_pruner_pruned_blocks{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+          "expr": "max by (service) (reth_morph_proofs_pruner_pruned_blocks{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
           "instant": false,
           "legendFormat": "{{service}} · pruned blocks",
           "range": true,
@@ -3897,7 +3898,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_morph_proofs_pruner_account_trie_updates_written{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+          "expr": "max by (service) (reth_morph_proofs_pruner_account_trie_updates_written{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
           "instant": false,
           "legendFormat": "{{service}} · account trie updates",
           "range": true,
@@ -3909,7 +3910,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_morph_proofs_pruner_storage_trie_updates_written{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+          "expr": "max by (service) (reth_morph_proofs_pruner_storage_trie_updates_written{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
           "instant": false,
           "legendFormat": "{{service}} · storage trie updates",
           "range": true,
@@ -3921,7 +3922,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_morph_proofs_pruner_hashed_accounts_written{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+          "expr": "max by (service) (reth_morph_proofs_pruner_hashed_accounts_written{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
           "instant": false,
           "legendFormat": "{{service}} · hashed accounts",
           "range": true,
@@ -3933,7 +3934,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "reth_morph_proofs_pruner_hashed_storages_written{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+          "expr": "max by (service) (reth_morph_proofs_pruner_hashed_storages_written{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
           "instant": false,
           "legendFormat": "{{service}} · hashed storages",
           "range": true,
@@ -4003,7 +4004,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "reth_exex_notifications_sent_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service, exex) (reth_exex_notifications_sent_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "instant": false,
               "legendFormat": "{{service}} · {{exex}}",
               "range": true,
@@ -4063,7 +4064,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "reth_exex_events_sent_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service, exex) (reth_exex_events_sent_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "instant": false,
               "legendFormat": "{{service}} · {{exex}}",
               "range": true,
@@ -4123,7 +4124,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "reth_exex_manager_current_capacity{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_exex_manager_current_capacity{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "instant": false,
               "legendFormat": "{{service}} · current",
               "range": true,
@@ -4135,7 +4136,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "max_over_time(reth_exex_manager_max_capacity{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[1h])",
+              "expr": "max by (service) (max_over_time(reth_exex_manager_max_capacity{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[1h]))",
               "instant": false,
               "legendFormat": "{{service}} · max",
               "range": true,
@@ -4195,7 +4196,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "reth_exex_manager_buffer_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_exex_manager_buffer_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "instant": false,
               "legendFormat": "{{service}}",
               "range": true,
@@ -4246,7 +4247,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "reth_exex_manager_num_exexs{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_exex_manager_num_exexs{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "instant": false,
               "legendFormat": "{{service}}",
               "range": true,
@@ -4306,7 +4307,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "reth_exex_wal_lowest_committed_block_height{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} and on (chain, role, service, instance) (reth_exex_wal_committed_blocks_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0)",
+              "expr": "max by (service) (reth_exex_wal_lowest_committed_block_height{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} and on (chain, role, service, instance) (reth_exex_wal_committed_blocks_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0))",
               "instant": false,
               "legendFormat": "{{service}} · lowest",
               "range": true,
@@ -4318,7 +4319,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "reth_exex_wal_highest_committed_block_height{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} and on (chain, role, service, instance) (reth_exex_wal_committed_blocks_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0)",
+              "expr": "max by (service) (reth_exex_wal_highest_committed_block_height{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} and on (chain, role, service, instance) (reth_exex_wal_committed_blocks_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0))",
               "instant": false,
               "legendFormat": "{{service}} · highest",
               "range": true,
@@ -4378,7 +4379,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "reth_exex_wal_committed_blocks_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_exex_wal_committed_blocks_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "instant": false,
               "legendFormat": "{{service}} · committed blocks",
               "range": true,
@@ -4390,7 +4391,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "reth_exex_wal_notifications_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_exex_wal_notifications_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "instant": false,
               "legendFormat": "{{service}} · notifications",
               "range": true,
@@ -4450,7 +4451,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "reth_exex_wal_size_bytes{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_exex_wal_size_bytes{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "instant": false,
               "legendFormat": "{{service}}",
               "range": true,
@@ -4566,7 +4567,7 @@
               },
               "editorMode": "code",
               "exemplar": false,
-              "expr": "avg by (service) (rate(reth_database_transaction_close_duration_seconds_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\", outcome=\"commit\"}[$__rate_interval]) / clamp_min(rate(reth_database_transaction_close_duration_seconds_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\", outcome=\"commit\"}[$__rate_interval]), 1))",
+              "expr": "(sum by (service) (rate(reth_database_transaction_close_duration_seconds_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\", outcome=\"commit\"}[$__rate_interval])) / (sum by (service) (rate(reth_database_transaction_close_duration_seconds_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\", outcome=\"commit\"}[$__rate_interval])) > 0)) or (0 * max by (service) (reth_database_transaction_close_duration_seconds_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\", outcome=\"commit\"}))",
               "format": "time_series",
               "instant": false,
               "legendFormat": "{{service}} · Commit time",
@@ -4657,7 +4658,7 @@
               },
               "editorMode": "code",
               "exemplar": false,
-              "expr": "avg by (service, quantile) (max_over_time(reth_database_transaction_close_duration_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", outcome=\"commit\"}[$__rate_interval]))",
+              "expr": "max by (service, quantile) (max_over_time(reth_database_transaction_close_duration_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\", outcome=\"commit\"}[$__rate_interval]))",
               "format": "time_series",
               "instant": false,
               "legendFormat": "{{service}} · {{quantile}}",
@@ -4758,7 +4759,7 @@
               },
               "editorMode": "code",
               "exemplar": false,
-              "expr": "sum by (service, outcome, mode) (rate(reth_database_transaction_open_duration_seconds_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\", outcome!=\"\"}[$__rate_interval]) / rate(reth_database_transaction_open_duration_seconds_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\", outcome!=\"\"}[$__rate_interval])) > 0",
+              "expr": "(sum by (service, outcome, mode) (rate(reth_database_transaction_open_duration_seconds_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\", outcome!=\"\"}[$__rate_interval])) / sum by (service, outcome, mode) (rate(reth_database_transaction_open_duration_seconds_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\", outcome!=\"\"}[$__rate_interval]))) > 0",
               "format": "time_series",
               "instant": false,
               "legendFormat": "{{service}} · {{mode}}, {{outcome}}",
@@ -4997,7 +4998,7 @@
               "disableTextWrap": false,
               "editorMode": "code",
               "exemplar": false,
-              "expr": "sum by (service) (reth_database_transaction_opened_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\", mode=\"read-write\"})",
+              "expr": "max by (service) (reth_database_transaction_opened_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\", mode=\"read-write\"})",
               "format": "time_series",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
@@ -5014,7 +5015,7 @@
               },
               "editorMode": "code",
               "exemplar": false,
-              "expr": "sum by (service) (reth_database_transaction_closed_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\", mode=\"read-write\"})",
+              "expr": "max by (service) (reth_database_transaction_closed_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\", mode=\"read-write\"})",
               "format": "time_series",
               "instant": false,
               "legendFormat": "{{service}} · Closed",
@@ -5163,7 +5164,7 @@
               "disableTextWrap": false,
               "editorMode": "builder",
               "exemplar": false,
-              "expr": "sum by (service) (reth_database_transaction_opened_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\", mode=\"read-only\"})",
+              "expr": "max by (service) (reth_database_transaction_opened_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\", mode=\"read-only\"})",
               "format": "time_series",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
@@ -5181,7 +5182,7 @@
               "disableTextWrap": false,
               "editorMode": "builder",
               "exemplar": false,
-              "expr": "sum by (service) (reth_database_transaction_closed_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\", mode=\"read-only\"})",
+              "expr": "max by (service) (reth_database_transaction_closed_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\", mode=\"read-only\"})",
               "format": "time_series",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
@@ -5270,11 +5271,12 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
+              "expr": "max by (service, table) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) > 0",
               "interval": "",
               "legendFormat": "{{service}} · {{table}}",
-              "range": true,
-              "refId": "A"
+              "range": false,
+              "refId": "A",
+              "instant": true
             }
           ],
           "title": "DB Tables",
@@ -5446,10 +5448,11 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "sum by (service, type) ( reth_db_table_pages{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} )",
+              "expr": "sum by (service, type) (max by (service, table, type) (reth_db_table_pages{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}))",
               "legendFormat": "{{service}} · {{type}}",
-              "range": true,
-              "refId": "A"
+              "range": false,
+              "refId": "A",
+              "instant": true
             }
           ],
           "title": "DB Pages",
@@ -5548,7 +5551,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum by (service) ( reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} )",
+              "expr": "sum by (service) (max by (service, table) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}))",
               "legendFormat": "{{service}}",
               "range": true,
               "refId": "A"
@@ -5649,7 +5652,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum(reth_db_freelist{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) by (service, job)",
+              "expr": "max by (service, job) (reth_db_freelist{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "legendFormat": "{{service}} · Pages ({{job}})",
               "range": true,
               "refId": "A"
@@ -5804,7 +5807,7 @@
               },
               "editorMode": "code",
               "exemplar": false,
-              "expr": "sort_desc(sum by (service, table) (reth_db_table_pages{chain=\"$chain\", role=~\"$role\", service=~\"$service\", type=\"overflow\"}) > 0)",
+              "expr": "sort_desc(max by (service, table) (reth_db_table_pages{chain=\"$chain\", role=~\"$role\", service=~\"$service\", type=\"overflow\"}) > 0)",
               "format": "table",
               "instant": true,
               "legendFormat": "{{service}}",
@@ -5900,11 +5903,12 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
+              "expr": "max by (service, segment) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) > 0",
               "interval": "",
               "legendFormat": "{{service}} · {{segment}}",
-              "range": true,
-              "refId": "A"
+              "range": false,
+              "refId": "A",
+              "instant": true
             }
           ],
           "title": "Static Files Segment Size",
@@ -6044,7 +6048,7 @@
               },
               "editorMode": "code",
               "exemplar": false,
-              "expr": "sum by (service, segment) (reth_static_files_segment_entries{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
+              "expr": "max by (service, segment) (reth_static_files_segment_entries{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "format": "table",
               "instant": true,
               "legendFormat": "{{service}}",
@@ -6209,7 +6213,7 @@
               },
               "editorMode": "code",
               "exemplar": false,
-              "expr": "sum by (service, segment) (reth_static_files_segment_files{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
+              "expr": "max by (service, segment) (reth_static_files_segment_files{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "format": "table",
               "instant": true,
               "legendFormat": "{{service}}",
@@ -6332,7 +6336,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum by (service) ( reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} )",
+              "expr": "sum by (service) (max by (service, segment) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}))",
               "legendFormat": "{{service}}",
               "range": true,
               "refId": "A"
@@ -6533,7 +6537,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_blockchain_tree_canonical_chain_height{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_blockchain_tree_canonical_chain_height{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "hide": false,
               "legendFormat": "{{service}} · Canonical chain height",
               "range": true,
@@ -6634,7 +6638,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_blockchain_tree_block_buffer_blocks{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_blockchain_tree_block_buffer_blocks{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "hide": false,
               "legendFormat": "{{service}} · Buffered blocks",
               "range": true,
@@ -6735,7 +6739,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "increase(reth_blockchain_tree_reorgs{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+              "expr": "sum by (service) (increase(reth_blockchain_tree_reorgs{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
               "instant": false,
               "legendFormat": "{{service}}",
               "range": true,
@@ -6837,7 +6841,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "reth_blockchain_tree_latest_reorg_depth{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_blockchain_tree_latest_reorg_depth{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "instant": false,
               "legendFormat": "{{service}}",
               "range": true,
@@ -6980,7 +6984,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "code",
-              "expr": "(sum by (service, transport) (reth_rpc_server_connections_connections_opened_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) - (sum by (service, transport) (reth_rpc_server_connections_connections_closed_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) or (0 * sum by (service, transport) (reth_rpc_server_connections_connections_opened_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})))) or label_replace(0 * reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}, \"transport\", \"http\", \"service\", \".*\")",
+              "expr": "max by (service, transport) (clamp_min(reth_rpc_server_connections_connections_opened_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} - (reth_rpc_server_connections_connections_closed_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} or (0 * reth_rpc_server_connections_connections_opened_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})), 0)) or label_replace(0 * max by (service) (reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}), \"transport\", \"http\", \"service\", \".*\")",
               "format": "time_series",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
@@ -7073,7 +7077,7 @@
               },
               "editorMode": "code",
               "exemplar": false,
-              "expr": "avg by (quantile) (max_over_time(reth_rpc_server_connections_request_time_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])) > 0",
+              "expr": "max by (quantile) (max_over_time(reth_rpc_server_connections_request_time_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])) > 0",
               "format": "time_series",
               "instant": false,
               "legendFormat": "__auto",
@@ -7265,7 +7269,7 @@
               },
               "editorMode": "code",
               "exemplar": false,
-              "expr": "avg by (quantile) (max_over_time(reth_rpc_server_calls_time_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])) > 0",
+              "expr": "max by (quantile) (max_over_time(reth_rpc_server_calls_time_seconds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])) > 0",
               "format": "time_series",
               "instant": false,
               "legendFormat": "{{quantile}}",
@@ -7404,7 +7408,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_rpc_eth_cache_cached_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\", cache=\"headers\"}",
+              "expr": "max by (service) (reth_rpc_eth_cache_cached_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\", cache=\"headers\"})",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "instant": false,
@@ -7420,7 +7424,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_rpc_eth_cache_queued_consumers_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\", cache=\"receipts\"}",
+              "expr": "max by (service) (reth_rpc_eth_cache_queued_consumers_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\", cache=\"receipts\"})",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -7437,7 +7441,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_rpc_eth_cache_queued_consumers_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\", cache=\"headers\"}",
+              "expr": "max by (service) (reth_rpc_eth_cache_queued_consumers_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\", cache=\"headers\"})",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -7454,7 +7458,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_rpc_eth_cache_queued_consumers_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\", cache=\"blocks\"}",
+              "expr": "max by (service) (reth_rpc_eth_cache_queued_consumers_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\", cache=\"blocks\"})",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -7471,7 +7475,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_rpc_eth_cache_memory_usage{chain=\"$chain\", role=~\"$role\", service=~\"$service\", cache=\"blocks\"}",
+              "expr": "max by (service) (reth_rpc_eth_cache_memory_usage{chain=\"$chain\", role=~\"$role\", service=~\"$service\", cache=\"blocks\"})",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -7488,7 +7492,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_rpc_eth_cache_cached_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\", cache=\"receipts\"}",
+              "expr": "max by (service) (reth_rpc_eth_cache_cached_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\", cache=\"receipts\"})",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -7505,7 +7509,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_rpc_eth_cache_memory_usage{chain=\"$chain\", role=~\"$role\", service=~\"$service\", cache=\"receipts\"}",
+              "expr": "max by (service) (reth_rpc_eth_cache_memory_usage{chain=\"$chain\", role=~\"$role\", service=~\"$service\", cache=\"receipts\"})",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -7522,7 +7526,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_rpc_eth_cache_cached_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\", cache=\"blocks\"}",
+              "expr": "max by (service) (reth_rpc_eth_cache_cached_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\", cache=\"blocks\"})",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -7845,7 +7849,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "reth_process_resident_memory_bytes{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_process_resident_memory_bytes{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "instant": false,
               "legendFormat": "{{service}}",
               "range": true,
@@ -7947,7 +7951,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "avg by (service) (rate(reth_process_cpu_seconds_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[1m]))",
+              "expr": "sum by (service) (rate(reth_process_cpu_seconds_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
               "instant": false,
               "legendFormat": "{{service}}",
               "range": true,
@@ -8049,7 +8053,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "instant": false,
               "legendFormat": "{{service}} · Open",
               "range": true,
@@ -8151,7 +8155,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "(reth_executor_spawn_critical_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} or (0 * reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})) - (reth_executor_spawn_finished_critical_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} or (0 * reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}))",
+              "expr": "max by (service) ((reth_executor_spawn_critical_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} or (0 * reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})) - (reth_executor_spawn_finished_critical_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} or (0 * reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})))",
               "hide": false,
               "instant": false,
               "legendFormat": "{{service}} · Tasks running",
@@ -8269,7 +8273,7 @@
               "disableTextWrap": false,
               "editorMode": "code",
               "exemplar": false,
-              "expr": "rate(reth_executor_spawn_regular_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]) or (0 * reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
+              "expr": "sum by (service) (rate(reth_executor_spawn_regular_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])) or (0 * max by (service) (reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}))",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -8285,7 +8289,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "(reth_executor_spawn_regular_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} or (0 * reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})) - (reth_executor_spawn_finished_regular_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} or (0 * reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}))",
+              "expr": "max by (service) ((reth_executor_spawn_regular_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} or (0 * reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})) - (reth_executor_spawn_finished_regular_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} or (0 * reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})))",
               "hide": false,
               "instant": false,
               "legendFormat": "{{service}} · Tasks running",
@@ -8403,7 +8407,7 @@
               "disableTextWrap": false,
               "editorMode": "code",
               "exemplar": false,
-              "expr": "rate(reth_executor_spawn_regular_blocking_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]) or (0 * reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
+              "expr": "sum by (service) (rate(reth_executor_spawn_regular_blocking_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])) or (0 * max by (service) (reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}))",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -8419,7 +8423,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "(reth_executor_spawn_regular_blocking_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} or (0 * reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})) - (reth_executor_spawn_finished_regular_blocking_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} or (0 * reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}))",
+              "expr": "max by (service) ((reth_executor_spawn_regular_blocking_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} or (0 * reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})) - (reth_executor_spawn_finished_regular_blocking_tasks_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} or (0 * reth_process_open_fds{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})))",
               "hide": false,
               "instant": false,
               "legendFormat": "{{service}} · Tasks running",
@@ -8521,7 +8525,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "rate(reth_pruner_duration_seconds_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]) / rate(reth_pruner_duration_seconds_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]) > 0",
+              "expr": "(sum by (service) (rate(reth_pruner_duration_seconds_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])) / sum by (service) (rate(reth_pruner_duration_seconds_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))) > 0",
               "instant": false,
               "legendFormat": "{{service}}",
               "range": true,
@@ -8580,7 +8584,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "reth_jemalloc_active{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_jemalloc_active{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "instant": false,
               "legendFormat": "{{service}} · active",
               "range": true,
@@ -8592,7 +8596,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "reth_jemalloc_allocated{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_jemalloc_allocated{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "instant": false,
               "legendFormat": "{{service}} · allocated",
               "range": true,
@@ -8604,7 +8608,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "reth_jemalloc_mapped{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_jemalloc_mapped{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "instant": false,
               "legendFormat": "{{service}} · mapped",
               "range": true,
@@ -8616,7 +8620,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "reth_jemalloc_metadata{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_jemalloc_metadata{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "instant": false,
               "legendFormat": "{{service}} · metadata",
               "range": true,
@@ -8628,7 +8632,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "reth_jemalloc_resident{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_jemalloc_resident{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "instant": false,
               "legendFormat": "{{service}} · resident",
               "range": true,
@@ -8640,7 +8644,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "reth_jemalloc_retained{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_jemalloc_retained{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "instant": false,
               "legendFormat": "{{service}} · retained",
               "range": true,
@@ -8700,7 +8704,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "rate(reth_pruner_segments_duration_seconds_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]) / rate(reth_pruner_segments_duration_seconds_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+              "expr": "sum by (service, segment) (rate(reth_pruner_segments_duration_seconds_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])) / sum by (service, segment) (rate(reth_pruner_segments_duration_seconds_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
               "instant": false,
               "legendFormat": "{{service}} · {{segment}}",
               "range": true,
@@ -8760,7 +8764,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "reth_pruner_segments_highest_pruned_block{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service, segment) (reth_pruner_segments_highest_pruned_block{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "instant": false,
               "legendFormat": "{{service}} · {{segment}}",
               "range": true,
@@ -8874,7 +8878,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_transaction_pool_basefee_pool_size_bytes{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
+              "expr": "max by (service) (reth_transaction_pool_basefee_pool_size_bytes{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) > 0",
               "legendFormat": "{{service}} · Base Fee Pool Size",
               "range": true,
               "refId": "A"
@@ -8885,7 +8889,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_transaction_pool_pending_pool_size_bytes{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
+              "expr": "max by (service) (reth_transaction_pool_pending_pool_size_bytes{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) > 0",
               "hide": false,
               "legendFormat": "{{service}} · Pending Pool Size",
               "range": true,
@@ -8897,7 +8901,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_transaction_pool_queued_pool_size_bytes{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
+              "expr": "max by (service) (reth_transaction_pool_queued_pool_size_bytes{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) > 0",
               "hide": false,
               "legendFormat": "{{service}} · Queued Pool Size",
               "range": true,
@@ -8909,7 +8913,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_transaction_pool_blob_pool_size_bytes{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
+              "expr": "max by (service) (reth_transaction_pool_blob_pool_size_bytes{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) > 0",
               "legendFormat": "{{service}} · Blob Pool Size",
               "range": true,
               "refId": "D"
@@ -9008,7 +9012,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_transaction_pool_dirty_accounts{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_transaction_pool_dirty_accounts{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "instant": false,
@@ -9024,7 +9028,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_transaction_pool_drift_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_transaction_pool_drift_count{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -9041,7 +9045,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_transaction_pool_reinserted_transactions{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_transaction_pool_reinserted_transactions{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -9058,7 +9062,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_transaction_pool_deleted_tracked_finalized_blobs{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
+              "expr": "max by (service) (reth_transaction_pool_deleted_tracked_finalized_blobs{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) > 0",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -9160,7 +9164,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_transaction_pool_basefee_pool_transactions{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
+              "expr": "max by (service) (reth_transaction_pool_basefee_pool_transactions{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) > 0",
               "legendFormat": "{{service}} · Base Fee Pool Transactions",
               "range": true,
               "refId": "A"
@@ -9171,7 +9175,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_transaction_pool_pending_pool_transactions{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
+              "expr": "max by (service) (reth_transaction_pool_pending_pool_transactions{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) > 0",
               "hide": false,
               "legendFormat": "{{service}} · Pending Pool Transactions",
               "range": true,
@@ -9183,7 +9187,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_transaction_pool_queued_pool_transactions{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
+              "expr": "max by (service) (reth_transaction_pool_queued_pool_transactions{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) > 0",
               "hide": false,
               "legendFormat": "{{service}} · Queued Pool Transactions",
               "range": true,
@@ -9195,7 +9199,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_transaction_pool_blob_pool_transactions{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
+              "expr": "max by (service) (reth_transaction_pool_blob_pool_transactions{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) > 0",
               "legendFormat": "{{service}} · Blob Pool Transactions",
               "range": true,
               "refId": "D"
@@ -9307,7 +9311,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "rate(reth_transaction_pool_inserted_transactions{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+              "expr": "sum by (service) (rate(reth_transaction_pool_inserted_transactions{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "legendFormat": "{{service}} · Inserted Transactions",
@@ -9322,7 +9326,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "rate(reth_transaction_pool_removed_transactions{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+              "expr": "sum by (service) (rate(reth_transaction_pool_removed_transactions{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -9338,7 +9342,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "rate(reth_transaction_pool_invalid_transactions{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+              "expr": "sum by (service) (rate(reth_transaction_pool_invalid_transactions{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -9354,7 +9358,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "rate(reth_network_bad_imports{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+              "expr": "sum by (service) (rate(reth_network_bad_imports{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -9456,7 +9460,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_network_pending_pool_imports{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_network_pending_pool_imports{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "hide": false,
               "legendFormat": "{{service}} · Transactions Pending Import",
               "range": true,
@@ -9580,7 +9584,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "rate(reth_network_pool_transactions_messages_sent_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+              "expr": "sum by (service) (rate(reth_network_pool_transactions_messages_sent_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
               "hide": false,
               "instant": false,
               "legendFormat": "{{service}} · Tx",
@@ -9593,7 +9597,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "rate(reth_network_pool_transactions_messages_received_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+              "expr": "sum by (service) (rate(reth_network_pool_transactions_messages_received_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
               "hide": false,
               "legendFormat": "{{service}} · Rx",
               "range": true,
@@ -9605,7 +9609,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "reth_network_pool_transactions_messages_sent_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} - reth_network_pool_transactions_messages_received_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_network_pool_transactions_messages_sent_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} - reth_network_pool_transactions_messages_received_total{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "hide": false,
               "legendFormat": "{{service}} · Messages in Channel",
               "range": true,
@@ -9705,7 +9709,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "rate(reth_network_queued_outgoing_messages{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+              "expr": "sum by (service) (rate(reth_network_queued_outgoing_messages{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "instant": false,
@@ -9807,7 +9811,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_transaction_pool_all_transactions_by_hash{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_transaction_pool_all_transactions_by_hash{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "instant": false,
@@ -9823,7 +9827,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_transaction_pool_all_transactions_by_id{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_transaction_pool_all_transactions_by_id{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -9840,7 +9844,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_transaction_pool_all_transactions_by_all_senders{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_transaction_pool_all_transactions_by_all_senders{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -9857,7 +9861,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_transaction_pool_blob_transactions_nonce_gaps{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
+              "expr": "max by (service) (reth_transaction_pool_blob_transactions_nonce_gaps{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) > 0",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -9961,7 +9965,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "rate(reth_network_total_outgoing_peer_messages_dropped{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+              "expr": "sum by (service) (rate(reth_network_total_outgoing_peer_messages_dropped{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "instant": false,
@@ -10064,7 +10068,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "rate(reth_network_occurrences_hashes_already_in_pool{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+              "expr": "sum by (service) (rate(reth_network_occurrences_hashes_already_in_pool{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -10081,7 +10085,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "rate(reth_network_occurrences_transactions_already_in_pool{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+              "expr": "sum by (service) (rate(reth_network_occurrences_transactions_already_in_pool{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -10183,7 +10187,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_network_inflight_transaction_requests{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_network_inflight_transaction_requests{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "hide": false,
               "legendFormat": "{{service}} · Inflight Transaction Requests",
               "range": true,
@@ -10283,7 +10287,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_network_acc_duration_poll_network_events{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_network_acc_duration_poll_network_events{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -10300,7 +10304,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_network_acc_duration_poll_transaction_events{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_network_acc_duration_poll_transaction_events{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -10318,7 +10322,7 @@
               "disableTextWrap": false,
               "editorMode": "builder",
               "exemplar": false,
-              "expr": "reth_network_acc_duration_poll_imported_transactions{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_network_acc_duration_poll_imported_transactions{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -10335,7 +10339,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_network_acc_duration_poll_pending_pool_imports{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_network_acc_duration_poll_pending_pool_imports{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -10352,7 +10356,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_network_acc_duration_poll_fetch_events{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_network_acc_duration_poll_fetch_events{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -10369,7 +10373,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_network_acc_duration_poll_commands{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_network_acc_duration_poll_commands{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -10386,7 +10390,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_network_acc_duration_fetch_pending_hashes{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_network_acc_duration_fetch_pending_hashes{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -10403,7 +10407,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_network_duration_poll_tx_manager{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_network_duration_poll_tx_manager{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -10506,7 +10510,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "code",
-              "expr": "reth_network_hashes_pending_fetch{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_network_hashes_pending_fetch{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "instant": false,
@@ -10522,7 +10526,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "code",
-              "expr": "reth_network_inflight_transaction_requests{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_network_inflight_transaction_requests{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -10538,7 +10542,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum by (service) (reth_network_hashes_inflight_transaction_requests{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) + sum by (service) (reth_network_hashes_pending_fetch{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
+              "expr": "max by (service) (reth_network_hashes_inflight_transaction_requests{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) + max by (service) (reth_network_hashes_pending_fetch{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "hide": false,
               "instant": false,
               "legendFormat": "{{service}} · Total Hashes in Transaction Fetcher",
@@ -10639,7 +10643,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_network_acc_duration_poll_network_handle{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_network_acc_duration_poll_network_handle{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -10656,7 +10660,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_network_acc_duration_poll_swarm{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_network_acc_duration_poll_swarm{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -10673,7 +10677,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_network_duration_poll_network_manager{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_network_duration_poll_network_manager{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -10777,7 +10781,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "rate(reth_network_occurrences_hash_already_seen_by_peer{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+              "expr": "sum by (service) (rate(reth_network_occurrences_hash_already_seen_by_peer{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -10794,7 +10798,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "rate(reth_network_occurrences_of_transaction_already_seen_by_peer{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+              "expr": "sum by (service) (rate(reth_network_occurrences_of_transaction_already_seen_by_peer{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -10898,7 +10902,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "code",
-              "expr": "reth_transaction_pool_total_legacy_transactions{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_transaction_pool_total_legacy_transactions{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -10915,7 +10919,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "code",
-              "expr": "reth_transaction_pool_total_eip2930_transactions{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_transaction_pool_total_eip2930_transactions{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -10932,7 +10936,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "code",
-              "expr": "reth_transaction_pool_total_eip1559_transactions{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_transaction_pool_total_eip1559_transactions{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -10949,7 +10953,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "code",
-              "expr": "reth_transaction_pool_total_eip4844_transactions{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_transaction_pool_total_eip4844_transactions{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -10966,7 +10970,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "code",
-              "expr": "reth_transaction_pool_total_eip7702_transactions{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_transaction_pool_total_eip7702_transactions{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -10983,7 +10987,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "code",
-              "expr": "reth_transaction_pool_total_other_transactions{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_transaction_pool_total_other_transactions{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -11087,7 +11091,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_network_duration_find_idle_fallback_peer_for_any_pending_hash{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_network_duration_find_idle_fallback_peer_for_any_pending_hash{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -11104,7 +11108,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "reth_network_duration_fill_request_from_hashes_pending_fetch{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_network_duration_fill_request_from_hashes_pending_fetch{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": true,
@@ -11208,7 +11212,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "rate(reth_network_transaction_fetcher_legacy_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+              "expr": "sum by (service) (rate(reth_network_transaction_fetcher_legacy_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -11225,7 +11229,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "rate(reth_network_transaction_fetcher_eip2930_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+              "expr": "sum by (service) (rate(reth_network_transaction_fetcher_eip2930_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -11242,7 +11246,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "rate(reth_network_transaction_fetcher_eip1559_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+              "expr": "sum by (service) (rate(reth_network_transaction_fetcher_eip1559_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -11259,7 +11263,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "rate(reth_network_transaction_fetcher_eip4844_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+              "expr": "sum by (service) (rate(reth_network_transaction_fetcher_eip4844_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -11276,7 +11280,7 @@
               },
               "disableTextWrap": false,
               "editorMode": "builder",
-              "expr": "rate(reth_network_transaction_fetcher_eip7702_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+              "expr": "sum by (service) (rate(reth_network_transaction_fetcher_eip7702_sum{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
               "fullMetaSearch": false,
               "hide": false,
               "includeNullMetadata": false,
@@ -11376,7 +11380,7 @@
             {
               "disableTextWrap": false,
               "editorMode": "code",
-              "expr": "reth_transaction_pool_pending_transactions_evicted{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
+              "expr": "max by (service) (reth_transaction_pool_pending_transactions_evicted{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) > 0",
               "fullMetaSearch": false,
               "includeNullMetadata": true,
               "legendFormat": "{{service}} · PendingPool",
@@ -11394,7 +11398,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "reth_transaction_pool_basefee_transactions_evicted{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
+              "expr": "max by (service) (reth_transaction_pool_basefee_transactions_evicted{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) > 0",
               "hide": false,
               "instant": false,
               "legendFormat": "{{service}} · BasefeePool",
@@ -11407,7 +11411,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "reth_transaction_pool_blob_transactions_evicted{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
+              "expr": "max by (service) (reth_transaction_pool_blob_transactions_evicted{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) > 0",
               "hide": false,
               "instant": false,
               "legendFormat": "{{service}} · BlobPool",
@@ -11420,7 +11424,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "reth_transaction_pool_queued_transactions_evicted{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
+              "expr": "max by (service) (reth_transaction_pool_queued_transactions_evicted{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) > 0",
               "hide": false,
               "instant": false,
               "legendFormat": "{{service}} · QueuedPool",
@@ -11533,7 +11537,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_network_tracked_peers{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_network_tracked_peers{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "legendFormat": "{{service}} · Tracked Peers",
               "range": true,
               "refId": "A"
@@ -11630,7 +11634,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_network_outgoing_connections{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_network_outgoing_connections{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "legendFormat": "{{service}} · Outgoing Connections",
               "range": true,
               "refId": "B"
@@ -11641,7 +11645,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_network_incoming_connections{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_network_incoming_connections{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "hide": false,
               "legendFormat": "{{service}} · Incoming Connections",
               "range": true,
@@ -11653,7 +11657,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_network_connected_peers{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_network_connected_peers{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "hide": false,
               "legendFormat": "{{service}} · Connected Peers",
               "range": true,
@@ -11756,7 +11760,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "rate(reth_p2pstream_disconnected_errors{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+              "expr": "sum by (service) (rate(reth_p2pstream_disconnected_errors{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
               "legendFormat": "{{service}} · P2P Stream Disconnected",
               "range": true,
               "refId": "A"
@@ -11767,7 +11771,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "rate(reth_network_pending_session_failures{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval])",
+              "expr": "sum by (service) (rate(reth_network_pending_session_failures{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}[$__rate_interval]))",
               "hide": false,
               "legendFormat": "{{service}} · Failed Pending Sessions",
               "range": true,
@@ -11831,10 +11835,11 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_network_useless_peer{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
+              "expr": "max by (service) (reth_network_useless_peer{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) > 0",
               "legendFormat": "{{service}} · UselessPeer",
-              "range": true,
-              "refId": "A"
+              "range": false,
+              "refId": "A",
+              "instant": true
             },
             {
               "datasource": {
@@ -11842,11 +11847,12 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_network_subprotocol_specific{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
+              "expr": "max by (service) (reth_network_subprotocol_specific{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) > 0",
               "hide": false,
               "legendFormat": "{{service}} · SubprotocolSpecific",
-              "range": true,
-              "refId": "B"
+              "range": false,
+              "refId": "B",
+              "instant": true
             },
             {
               "datasource": {
@@ -11854,11 +11860,12 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_network_already_connected{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
+              "expr": "max by (service) (reth_network_already_connected{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) > 0",
               "hide": false,
               "legendFormat": "{{service}} · AlreadyConnected",
-              "range": true,
-              "refId": "C"
+              "range": false,
+              "refId": "C",
+              "instant": true
             },
             {
               "datasource": {
@@ -11866,11 +11873,12 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_network_client_quitting{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
+              "expr": "max by (service) (reth_network_client_quitting{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) > 0",
               "hide": false,
               "legendFormat": "{{service}} · ClientQuitting",
-              "range": true,
-              "refId": "D"
+              "range": false,
+              "refId": "D",
+              "instant": true
             },
             {
               "datasource": {
@@ -11878,11 +11886,12 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_network_unexpected_identity{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
+              "expr": "max by (service) (reth_network_unexpected_identity{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) > 0",
               "hide": false,
               "legendFormat": "{{service}} · UnexpectedHandshakeIdentity",
-              "range": true,
-              "refId": "E"
+              "range": false,
+              "refId": "E",
+              "instant": true
             },
             {
               "datasource": {
@@ -11890,11 +11899,12 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_network_disconnect_requested{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
+              "expr": "max by (service) (reth_network_disconnect_requested{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) > 0",
               "hide": false,
               "legendFormat": "{{service}} · DisconnectRequested",
-              "range": true,
-              "refId": "F"
+              "range": false,
+              "refId": "F",
+              "instant": true
             },
             {
               "datasource": {
@@ -11902,11 +11912,12 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_network_null_node_identity{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
+              "expr": "max by (service) (reth_network_null_node_identity{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) > 0",
               "hide": false,
               "legendFormat": "{{service}} · NullNodeIdentity",
-              "range": true,
-              "refId": "G"
+              "range": false,
+              "refId": "G",
+              "instant": true
             },
             {
               "datasource": {
@@ -11914,11 +11925,12 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_network_tcp_subsystem_error{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
+              "expr": "max by (service) (reth_network_tcp_subsystem_error{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) > 0",
               "hide": false,
               "legendFormat": "{{service}} · TCPSubsystemError",
-              "range": true,
-              "refId": "H"
+              "range": false,
+              "refId": "H",
+              "instant": true
             },
             {
               "datasource": {
@@ -11926,11 +11938,12 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_network_incompatible{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
+              "expr": "max by (service) (reth_network_incompatible{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) > 0",
               "hide": false,
               "legendFormat": "{{service}} · IncompatibleP2PVersion",
-              "range": true,
-              "refId": "I"
+              "range": false,
+              "refId": "I",
+              "instant": true
             },
             {
               "datasource": {
@@ -11938,11 +11951,12 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_network_protocol_breach{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
+              "expr": "max by (service) (reth_network_protocol_breach{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) > 0",
               "hide": false,
               "legendFormat": "{{service}} · ProtocolBreach",
-              "range": true,
-              "refId": "J"
+              "range": false,
+              "refId": "J",
+              "instant": true
             },
             {
               "datasource": {
@@ -11950,11 +11964,12 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_network_too_many_peers{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} > 0",
+              "expr": "max by (service) (reth_network_too_many_peers{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) > 0",
               "hide": false,
               "legendFormat": "{{service}} · TooManyPeers",
-              "range": true,
-              "refId": "K"
+              "range": false,
+              "refId": "K",
+              "instant": true
             }
           ],
           "title": "P2P Peer Disconnect Reasons",
@@ -12049,7 +12064,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "builder",
-              "expr": "reth_network_total_dial_successes{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}",
+              "expr": "max by (service) (reth_network_total_dial_successes{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
               "legendFormat": "{{service}} · Total Dial Successes",
               "range": true,
               "refId": "A"
@@ -12298,7 +12313,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"PlainAccountState\"})",
+              "expr": "max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"PlainAccountState\"})",
               "instant": false,
               "interval": "10m",
               "legendFormat": "{{service}} · Account",
@@ -12311,7 +12326,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"PlainStorageState\"})",
+              "expr": "max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"PlainStorageState\"})",
               "hide": false,
               "instant": false,
               "interval": "10m",
@@ -12325,7 +12340,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Bytecodes\"})",
+              "expr": "max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Bytecodes\"})",
               "hide": false,
               "instant": false,
               "interval": "10m",
@@ -12339,7 +12354,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=~\"PlainAccountState|PlainStorageState|Bytecodes\"})",
+              "expr": "sum by (service) (max by (service, table) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=~\"PlainAccountState|PlainStorageState|Bytecodes\"}))",
               "hide": false,
               "instant": false,
               "interval": "10m",
@@ -12868,7 +12883,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Headers\"}) + sum by (service) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"headers\"})",
+              "expr": "max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Headers\"}) + max by (service) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"headers\"})",
               "instant": false,
               "interval": "10m",
               "legendFormat": "{{service}} · Headers",
@@ -12881,7 +12896,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Receipts\"}) + sum by (service) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"receipts\"})",
+              "expr": "max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Receipts\"}) + max by (service) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"receipts\"})",
               "hide": false,
               "instant": false,
               "interval": "10m",
@@ -12895,7 +12910,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Transactions\"}) + sum by (service) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"transactions\"})",
+              "expr": "max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Transactions\"}) + max by (service) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"transactions\"})",
               "hide": false,
               "instant": false,
               "interval": "10m",
@@ -12909,7 +12924,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Headers\"}) + sum by (service) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"headers\"}) + sum by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Receipts\"}) + sum by (service) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"receipts\"}) + sum by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Transactions\"}) + sum by (service) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"transactions\"})",
+              "expr": "max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Headers\"}) + max by (service) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"headers\"}) + max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Receipts\"}) + max by (service) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"receipts\"}) + max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Transactions\"}) + max by (service) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", segment=\"transactions\"})",
               "hide": false,
               "instant": false,
               "interval": "10m",
