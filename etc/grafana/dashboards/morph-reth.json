@@ -12042,7 +12042,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "description": "Rolling growth over the dashboard Interval: size(t) - size(t - Interval), per service. Empty where no data exists one Interval earlier. Series are collapsed with max by (service), so restarts that change instance/pod labels do not skew the result.",
+          "description": "Rolling growth over the dashboard Interval: size(t) - size(t - Interval), per service. Empty where no data exists one Interval earlier. Series are collapsed with max by (service), so restarts that change instance/pod labels do not skew the result. Account and Storage read HashedAccounts / HashedStorages, which every node writes. PlainAccountState / PlainStorageState are not written on storage v2 databases (the default for new nodes) and read 0 there.",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -12126,7 +12126,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"PlainAccountState\"}) - max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"PlainAccountState\"} offset $interval)",
+              "expr": "max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"HashedAccounts\"}) - max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"HashedAccounts\"} offset $interval)",
               "instant": false,
               "legendFormat": "{{service}} · Account",
               "range": true,
@@ -12138,7 +12138,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"PlainStorageState\"}) - max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"PlainStorageState\"} offset $interval)",
+              "expr": "max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"HashedStorages\"}) - max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"HashedStorages\"} offset $interval)",
               "hide": false,
               "instant": false,
               "legendFormat": "{{service}} · Storage",
@@ -12164,7 +12164,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "(max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"PlainAccountState\"}) + max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"PlainStorageState\"}) + max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Bytecodes\"})) - (max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"PlainAccountState\"} offset $interval) + max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"PlainStorageState\"} offset $interval) + max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Bytecodes\"} offset $interval))",
+              "expr": "(max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"HashedAccounts\"}) + max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"HashedStorages\"}) + max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Bytecodes\"})) - (max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"HashedAccounts\"} offset $interval) + max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"HashedStorages\"} offset $interval) + max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"Bytecodes\"} offset $interval))",
               "hide": false,
               "instant": false,
               "legendFormat": "{{service}} · Total",
@@ -12180,6 +12180,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
+          "description": "Account and Storage read HashedAccounts / HashedStorages, which every node writes. PlainAccountState / PlainStorageState are not written on storage v2 databases (the default for new nodes) and read 0 there.",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -12263,7 +12264,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"PlainAccountState\"})",
+              "expr": "max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"HashedAccounts\"})",
               "instant": false,
               "interval": "10m",
               "legendFormat": "{{service}} · Account",
@@ -12276,7 +12277,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"PlainStorageState\"})",
+              "expr": "max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"HashedStorages\"})",
               "hide": false,
               "instant": false,
               "interval": "10m",
@@ -12304,7 +12305,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum by (service) (max by (service, table) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=~\"PlainAccountState|PlainStorageState|Bytecodes\"}))",
+              "expr": "sum by (service) (max by (service, table) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=~\"HashedAccounts|HashedStorages|Bytecodes\"}))",
               "hide": false,
               "instant": false,
               "interval": "10m",
@@ -12321,7 +12322,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "description": "Rolling growth over the dashboard Interval: size(t) - size(t - Interval), per service. Empty where no data exists one Interval earlier. Series are collapsed with max by (service), so restarts that change instance/pod labels do not skew the result.",
+          "description": "Rolling growth over the dashboard Interval: size(t) - size(t - Interval), per service. Empty where no data exists one Interval earlier. Series are collapsed with max by (service), so restarts that change instance/pod labels do not skew the result. Reads HashedAccounts, which every node writes. PlainAccountState is not written on storage v2 databases (the default for new nodes) and reads 0 there.",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -12403,7 +12404,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"PlainAccountState\"}) - max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"PlainAccountState\"} offset $interval)",
+              "expr": "max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"HashedAccounts\"}) - max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"HashedAccounts\"} offset $interval)",
               "instant": false,
               "legendFormat": "{{service}}",
               "range": true,
@@ -12418,7 +12419,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "description": "Rolling growth over the dashboard Interval: size(t) - size(t - Interval), per service. Empty where no data exists one Interval earlier. Series are collapsed with max by (service), so restarts that change instance/pod labels do not skew the result.",
+          "description": "Rolling growth over the dashboard Interval: size(t) - size(t - Interval), per service. Empty where no data exists one Interval earlier. Series are collapsed with max by (service), so restarts that change instance/pod labels do not skew the result. Reads HashedStorages, which every node writes. PlainStorageState is not written on storage v2 databases (the default for new nodes) and reads 0 there.",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -12500,7 +12501,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"PlainStorageState\"}) - max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"PlainStorageState\"} offset $interval)",
+              "expr": "max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"HashedStorages\"}) - max by (service) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\", table=\"HashedStorages\"} offset $interval)",
               "instant": false,
               "legendFormat": "{{service}}",
               "range": true,
