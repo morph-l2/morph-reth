@@ -2330,32 +2330,7 @@
           "unit": "percentunit",
           "min": 0
         },
-        "overrides": [
-          {
-            "__systemRef": "hideSeriesFrom",
-            "matcher": {
-              "id": "byNames",
-              "options": {
-                "mode": "exclude",
-                "names": [
-                  "Precompile cache hits"
-                ],
-                "prefix": "All except:",
-                "readOnly": true
-              }
-            },
-            "properties": [
-              {
-                "id": "custom.hideFrom",
-                "value": {
-                  "legend": false,
-                  "tooltip": true,
-                  "viz": true
-                }
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
       "gridPos": {
         "h": 8,
@@ -6928,32 +6903,7 @@
               "unit": "short",
               "min": 0
             },
-            "overrides": [
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "http"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "HTTP"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "ws"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "WebSocket"
-                  }
-                ]
-              }
-            ]
+            "overrides": []
           },
           "gridPos": {
             "h": 8,
