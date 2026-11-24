@@ -302,7 +302,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Storage footprint and canonical height, one row per node. Replaces the previous four globally-summed stat panels and the narrow Header Height column.",
+      "description": "Storage footprint and canonical height, one row per node. Replaces the previous four globally-summed stat panels and the narrow Header Height column. Database is the MDBX tables, Freelist the free MDBX pages, RocksDB its tables plus WAL; Total is Database + Freelist + Static Files + RocksDB.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -400,6 +400,18 @@
           {
             "matcher": {
               "id": "byName",
+              "options": "RocksDB"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
               "options": "Total"
             },
             "properties": [
@@ -489,7 +501,7 @@
           },
           "editorMode": "code",
           "exemplar": false,
-          "expr": "sum by (service) (max by (service, table) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})) + max by (service) (reth_db_freelist{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} * reth_db_page_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) + sum by (service) (max by (service, segment) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}))",
+          "expr": "sum by (service) (max by (service, table) (reth_db_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})) + max by (service) (reth_db_freelist{chain=\"$chain\", role=~\"$role\", service=~\"$service\"} * reth_db_page_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) + sum by (service) (max by (service, segment) (reth_static_files_segment_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})) + ((sum by (service) (max by (service, table) (reth_rocksdb_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})) + max by (service) (reth_rocksdb_wal_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})) or (0 * max by (service) (reth_db_page_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})))",
           "format": "table",
           "instant": true,
           "legendFormat": "__auto",
@@ -509,6 +521,20 @@
           "legendFormat": "__auto",
           "range": false,
           "refId": "E"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "((sum by (service) (max by (service, table) (reth_rocksdb_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})) + max by (service) (reth_rocksdb_wal_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})) or (0 * max by (service) (reth_db_page_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})))",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "__auto",
+          "range": false,
+          "refId": "F"
         }
       ],
       "title": "Node Storage & Height",
@@ -538,7 +564,8 @@
               "Value #A": 2,
               "Value #B": 3,
               "Value #C": 4,
-              "Value #D": 5
+              "Value #F": 5,
+              "Value #D": 6
             },
             "renameByName": {
               "service": "Service",
@@ -546,7 +573,8 @@
               "Value #A": "Database",
               "Value #B": "Freelist",
               "Value #C": "Static Files",
-              "Value #D": "Total"
+              "Value #D": "Total",
+              "Value #F": "RocksDB"
             }
           }
         }
@@ -5438,7 +5466,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "description": "The size of the database over time",
+          "description": "The size of the MDBX database over time. On storage v2 nodes the history indices and the transaction hash lookups are kept in RocksDB instead; see RocksDB Growth.",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -6426,6 +6454,525 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
+          "description": "Current size of each RocksDB table (live SST files + memtables) and of the WAL, per service. On storage v2 nodes RocksDB holds AccountsHistory, StoragesHistory and TransactionHashNumbers; on older storage layouts these tables stay empty.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                }
+              },
+              "mappings": [],
+              "unit": "bytes"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 0,
+            "y": 319
+          },
+          "id": 340,
+          "options": {
+            "displayLabels": [
+              "name"
+            ],
+            "legend": {
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true,
+              "values": [
+                "value"
+              ]
+            },
+            "pieType": "pie",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "sort": "desc",
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "single",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "12.2.1",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "max by (service, table) (reth_rocksdb_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) > 0",
+              "interval": "",
+              "legendFormat": "{{service}} · {{table}}",
+              "range": false,
+              "refId": "A",
+              "instant": true
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "max by (service) (reth_rocksdb_wal_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"}) > 0",
+              "interval": "",
+              "legendFormat": "{{service}} · WAL",
+              "range": false,
+              "refId": "B",
+              "instant": true
+            }
+          ],
+          "title": "RocksDB Table Size",
+          "type": "piechart"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "description": "RocksDB's estimate of the number of keys in each table (estimate-num-keys). It is approximate, especially after deletes.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "custom": {
+                "align": "left",
+                "cellOptions": {
+                  "type": "auto"
+                },
+                "footer": {
+                  "reducers": []
+                },
+                "inspect": false
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": 0
+                  },
+                  {
+                    "color": "red",
+                    "value": 80
+                  }
+                ]
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Value"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "locale"
+                  },
+                  {
+                    "id": "displayName",
+                    "value": "Entries"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "table"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "Table"
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 8,
+            "y": 319
+          },
+          "id": 341,
+          "options": {
+            "cellHeight": "sm",
+            "showHeader": true
+          },
+          "pluginVersion": "12.2.1",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "exemplar": false,
+              "expr": "max by (service, table) (reth_rocksdb_table_entries{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
+              "format": "table",
+              "instant": true,
+              "legendFormat": "{{service}}",
+              "range": false,
+              "refId": "A"
+            }
+          ],
+          "transformations": [
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "Time": true
+                },
+                "indexByName": {
+                  "service": 0,
+                  "table": 1,
+                  "Value": 2
+                },
+                "renameByName": {
+                  "service": "Service",
+                  "table": "Table",
+                  "Value": "Entries"
+                }
+              }
+            }
+          ],
+          "title": "RocksDB Entries Per Table",
+          "type": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "description": "Live SST file size (on disk) and memtable size (in memory) of each RocksDB table. Their sum is the table size shown in the other RocksDB panels.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "custom": {
+                "align": "left",
+                "cellOptions": {
+                  "type": "auto"
+                },
+                "footer": {
+                  "reducers": []
+                },
+                "inspect": false
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": 0
+                  },
+                  {
+                    "color": "red",
+                    "value": 80
+                  }
+                ]
+              },
+              "unit": "bytes"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 16,
+            "y": 319
+          },
+          "id": 342,
+          "options": {
+            "cellHeight": "sm",
+            "showHeader": true
+          },
+          "pluginVersion": "12.2.1",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "exemplar": false,
+              "expr": "max by (service, table) (reth_rocksdb_sst_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
+              "format": "table",
+              "instant": true,
+              "legendFormat": "{{service}}",
+              "range": false,
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "exemplar": false,
+              "expr": "max by (service, table) (reth_rocksdb_memtable_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
+              "format": "table",
+              "instant": true,
+              "legendFormat": "{{service}}",
+              "range": false,
+              "refId": "B"
+            }
+          ],
+          "transformations": [
+            {
+              "id": "merge",
+              "options": {}
+            },
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "Time": true
+                },
+                "indexByName": {
+                  "service": 0,
+                  "table": 1,
+                  "Value #A": 2,
+                  "Value #B": 3
+                },
+                "renameByName": {
+                  "service": "Service",
+                  "table": "Table",
+                  "Value #A": "SST files",
+                  "Value #B": "Memtables"
+                }
+              }
+            }
+          ],
+          "title": "RocksDB Storage Breakdown",
+          "type": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "description": "Total RocksDB size per service over time: all tables (live SST files + memtables) plus the WAL. DB Growth covers MDBX and Static Files Growth the static files.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic-by-name"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "auto",
+                "showValues": false,
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": 0
+                  },
+                  {
+                    "color": "red",
+                    "value": 80
+                  }
+                ]
+              },
+              "unit": "bytes",
+              "min": 0
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 327
+          },
+          "id": 343,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "12.2.1",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (service) (max by (service, table) (reth_rocksdb_table_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})) + max by (service) (reth_rocksdb_wal_size{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
+              "legendFormat": "{{service}}",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "RocksDB Growth",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "description": "Bytes RocksDB estimates compaction still has to rewrite, per table (estimate-pending-compaction-bytes). A sustained rise means compaction is falling behind writes.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic-by-name"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "auto",
+                "showValues": false,
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": 0
+                  },
+                  {
+                    "color": "red",
+                    "value": 80
+                  }
+                ]
+              },
+              "unit": "bytes",
+              "min": 0
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 327
+          },
+          "id": 344,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "12.2.1",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "max by (service, table) (reth_rocksdb_pending_compaction_bytes{chain=\"$chain\", role=~\"$role\", service=~\"$service\"})",
+              "legendFormat": "{{service}} · {{table}}",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "RocksDB Pending Compaction",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
           "description": "The block number of the tip of the canonical chain from the blockchain tree.",
           "fieldConfig": {
             "defaults": {
@@ -6488,7 +7035,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 319
+            "y": 335
           },
           "id": 56,
           "options": {
@@ -6589,7 +7136,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 319
+            "y": 335
           },
           "id": 57,
           "options": {
@@ -6690,7 +7237,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 327
+            "y": 343
           },
           "id": 58,
           "options": {
@@ -6792,7 +7339,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 327
+            "y": 343
           },
           "id": 59,
           "options": {
