@@ -19,7 +19,8 @@ use alloy_consensus::transaction::TxHashRef;
 use alloy_evm::{
     Database, Evm, RecoveredTx,
     block::{
-        BlockExecutionError, BlockExecutionResult, BlockExecutor, ExecutableTx, GasOutput, TxResult,
+        BlockExecutionError, BlockExecutionResult, BlockExecutor, BlockValidationError,
+        ExecutableTx, GasOutput, TxResult,
     },
 };
 use alloy_primitives::{Address, U256};
@@ -219,11 +220,13 @@ where
             .gas_limit()
             .saturating_sub(self.gas_pool_used);
         if recovered.tx().gas_limit() > block_available_gas {
-            return Err(BlockExecutionError::msg(format!(
-                "transaction gas limit {} exceeds block available gas {}",
-                recovered.tx().gas_limit(),
-                block_available_gas
-            )));
+            return Err(
+                BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas {
+                    transaction_gas_limit: recovered.tx().gas_limit(),
+                    block_available_gas,
+                }
+                .into(),
+            );
         }
 
         // Clone the consensus tx and signer BEFORE transact (since we can't move out later).
@@ -324,5 +327,171 @@ where
 
     fn receipts(&self) -> &[Self::Receipt] {
         &self.receipts
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_consensus::{Signed, TxEip1559};
+    use alloy_evm::EvmEnv;
+    use alloy_primitives::{Bytes, Sealed, Signature, TxKind, address};
+    use morph_chainspec::MorphHardfork;
+    use morph_primitives::TxL1Msg;
+    use morph_revm::MorphBlockEnv;
+    use revm::{
+        context::{BlockEnv, CfgEnv},
+        database::{CacheDB, EmptyDB},
+        inspector::NoOpInspector,
+        state::AccountInfo,
+    };
+
+    const SENDER: Address = address!("00000000000000000000000000000000000000a1");
+    const RECIPIENT: Address = address!("00000000000000000000000000000000000000b2");
+
+    fn test_executor(block_gas_limit: u64) -> MorphBlockExecutor<CacheDB<EmptyDB>, NoOpInspector> {
+        let mut db = CacheDB::new(EmptyDB::default());
+        db.insert_account_info(
+            SENDER,
+            AccountInfo {
+                balance: U256::from(10_000_000_000_000_000u64),
+                ..Default::default()
+            },
+        );
+        let mut cfg_env = CfgEnv::new_with_spec(MorphHardfork::Celadon);
+        cfg_env.chain_id = 2818;
+        let evm_env = EvmEnv {
+            cfg_env,
+            block_env: MorphBlockEnv {
+                inner: BlockEnv {
+                    gas_limit: block_gas_limit,
+                    basefee: 1,
+                    ..Default::default()
+                },
+            },
+        };
+        let evm = MorphEvm::new(db, evm_env);
+        MorphBlockExecutor::new(evm, DefaultMorphReceiptBuilder)
+    }
+
+    fn eip1559_tx(nonce: u64, gas_limit: u64) -> Recovered<MorphTxEnvelope> {
+        let tx = TxEip1559 {
+            chain_id: 2818,
+            nonce,
+            gas_limit,
+            max_fee_per_gas: 10,
+            max_priority_fee_per_gas: 1,
+            to: TxKind::Call(RECIPIENT),
+            value: U256::ZERO,
+            ..Default::default()
+        };
+        let env = MorphTxEnvelope::Eip1559(Signed::new_unhashed(tx, Signature::test_signature()));
+        Recovered::new_unchecked(env, SENDER)
+    }
+
+    fn l1_msg_tx(queue_index: u64, gas_limit: u64) -> Recovered<MorphTxEnvelope> {
+        let tx = TxL1Msg {
+            queue_index,
+            gas_limit,
+            to: RECIPIENT,
+            value: U256::ZERO,
+            sender: SENDER,
+            input: Bytes::new(),
+        };
+        let env = MorphTxEnvelope::L1Msg(Sealed::new(tx));
+        Recovered::new_unchecked(env, SENDER)
+    }
+
+    #[test]
+    fn single_tx_exceeding_block_gas_limit_returns_validation_error() {
+        let mut executor = test_executor(50_000);
+        let tx = eip1559_tx(0, 50_001);
+
+        let err = executor
+            .execute_transaction(&tx)
+            .expect_err("tx exceeding block gas limit must fail");
+
+        assert!(
+            err.as_validation().is_some(),
+            "gas-pool overflow must be classified as a Validation error, got {err:?}"
+        );
+        assert!(
+            matches!(
+                err,
+                BlockExecutionError::Validation(
+                    BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas {
+                        transaction_gas_limit: 50_001,
+                        block_available_gas: 50_000,
+                    }
+                )
+            ),
+            "unexpected error variant: {err:?}"
+        );
+    }
+
+    #[test]
+    fn second_tx_exceeding_remaining_gas_pool_after_regular_tx_returns_validation_error() {
+        let mut executor = test_executor(50_000);
+        let tx0 = eip1559_tx(0, 21_000);
+        let gas_out = executor
+            .execute_transaction(&tx0)
+            .expect("first tx must succeed");
+        assert_eq!(gas_out.tx_gas_used(), 21_000);
+
+        let tx1 = eip1559_tx(1, 30_000);
+        let err = executor
+            .execute_transaction(&tx1)
+            .expect_err("second tx exceeding remaining gas pool must fail");
+
+        assert!(
+            err.as_validation().is_some(),
+            "gas-pool overflow must be classified as a Validation error, got {err:?}"
+        );
+        assert!(
+            matches!(
+                err,
+                BlockExecutionError::Validation(
+                    BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas {
+                        transaction_gas_limit: 30_000,
+                        block_available_gas: 29_000,
+                    }
+                )
+            ),
+            "unexpected error variant: {err:?}"
+        );
+    }
+
+    #[test]
+    fn second_tx_exceeding_remaining_gas_pool_after_l1_msg_returns_validation_error() {
+        let mut executor = test_executor(100_000);
+        // L1 message executes for 21_000 gas in receipts, but reserves its full
+        // 80_000 gas_limit from the block gas pool, leaving only 20_000 available.
+        let l1_tx = l1_msg_tx(0, 80_000);
+        let gas_out = executor
+            .execute_transaction(&l1_tx)
+            .expect("L1 message must succeed");
+        assert_eq!(gas_out.tx_gas_used(), 21_000);
+
+        let tx1 = eip1559_tx(0, 21_000);
+        let err = executor
+            .execute_transaction(&tx1)
+            .expect_err("tx exceeding remaining L1-adjusted gas pool must fail");
+
+        assert!(
+            err.as_validation().is_some(),
+            "gas-pool overflow must be classified as a Validation error, got {err:?}"
+        );
+        assert!(
+            matches!(
+                err,
+                BlockExecutionError::Validation(
+                    BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas {
+                        transaction_gas_limit: 21_000,
+                        block_available_gas: 20_000,
+                    }
+                )
+            ),
+            "unexpected error variant: {err:?}"
+        );
     }
 }
