@@ -1,14 +1,30 @@
 //! Morph transaction pool builder.
 
 use crate::MorphNode;
+use alloy_consensus::BlockHeader;
 use morph_evm::MorphEvmConfig;
 use morph_primitives;
 use morph_txpool::MorphTransactionValidator;
 use reth_node_api::FullNodeTypes;
 use reth_node_builder::components::{TxPoolBuilder, spawn_maintenance_tasks};
 use reth_node_builder::{BuilderContext, components::PoolBuilder};
+use reth_provider::BlockReaderIdExt;
 use reth_tracing::tracing::{debug, info};
 use reth_transaction_pool::{TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore};
+
+/// Resolves the initial block gas limit for the transaction pool validator from
+/// the latest canonical header, falling back to genesis only if no latest header exists.
+fn initial_block_gas_limit<Provider>(provider: &Provider, genesis_gas_limit: u64) -> u64
+where
+    Provider: BlockReaderIdExt,
+{
+    provider
+        .latest_header()
+        .ok()
+        .flatten()
+        .map(|header| header.gas_limit())
+        .unwrap_or(genesis_gas_limit)
+}
 
 /// Builder for Morph transaction pool.
 ///
@@ -45,6 +61,9 @@ where
         let morph_evm_config =
             MorphEvmConfig::new(ctx.chain_spec(), morph_evm::MorphEvmFactory::default());
 
+        let initial_gas_limit =
+            initial_block_gas_limit(ctx.provider(), ctx.chain_spec().inner.genesis().gas_limit);
+
         // Build the transaction validator with Morph-specific checks
         let validator = TransactionValidationTaskExecutor::eth_builder(
             ctx.provider().clone(),
@@ -54,7 +73,7 @@ where
         .with_local_transactions_config(pool_config.local_transactions_config.clone())
         .set_tx_fee_cap(ctx.config().rpc.rpc_tx_fee_cap)
         .with_max_tx_gas_limit(ctx.config().txpool.max_tx_gas_limit)
-        .set_block_gas_limit(ctx.chain_spec().inner.genesis().gas_limit)
+        .set_block_gas_limit(initial_gas_limit)
         .with_minimum_priority_fee(ctx.config().txpool.minimum_priority_fee)
         .with_additional_tasks(ctx.config().txpool.additional_validation_tasks)
         // Register MorphTx (0x7F) type for ERC20 gas payment
@@ -190,5 +209,11 @@ mod tests {
         // Test that the pool builder can be created with defaults
         let builder = MorphPoolBuilder::default();
         assert!(matches!(builder, MorphPoolBuilder));
+    }
+
+    #[test]
+    fn test_initial_block_gas_limit_falls_back_to_genesis_without_latest_header() {
+        let provider = reth_provider::noop::NoopProvider::default();
+        assert_eq!(initial_block_gas_limit(&provider, 30_000_000), 30_000_000);
     }
 }

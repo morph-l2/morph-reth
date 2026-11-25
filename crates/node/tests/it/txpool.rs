@@ -325,3 +325,45 @@ async fn morph_tx_v1_zero_eth_balance_rejected() -> eyre::Result<()> {
     );
     Ok(())
 }
+
+/// M-H02: A post-Viridian calldata-heavy transaction whose gas limit covers Morph's
+/// standard intrinsic gas (EIP-7623 disabled) but is below the EIP-7623 floor gas
+/// must be accepted by the node's txpool and mined into a block.
+#[tokio::test(flavor = "multi_thread")]
+async fn calldata_heavy_tx_below_eip7623_floor_accepted_and_mined() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+
+    // 1,024 non-zero calldata bytes:
+    // - standard intrinsic gas: 21_000 + 16 * 1_024 = 37_384
+    // - EIP-7623 floor gas:     21_000 + 40 * 1_024 = 61_960
+    use alloy_consensus::{SignableTransaction, TxEip1559};
+    use alloy_signer::SignerSync;
+    let tx = TxEip1559 {
+        chain_id: wallet.chain_id,
+        nonce: 0,
+        gas_limit: 40_000,
+        max_fee_per_gas: 20_000_000_000u128,
+        max_priority_fee_per_gas: 1_000_000_000u128,
+        to: TxKind::Call(Address::with_last_byte(0x42)),
+        value: U256::ZERO,
+        access_list: Default::default(),
+        input: Bytes::from(vec![0xab; 1_024]),
+    };
+    let sig = wallet
+        .inner
+        .sign_hash_sync(&tx.signature_hash())
+        .map_err(|e| eyre::eyre!("{e}"))?;
+    let envelope = MorphTxEnvelope::Eip1559(tx.into_signed(sig));
+    let raw: Bytes = envelope.encoded_2718().into();
+
+    node.rpc.inject_tx(raw).await?;
+    let payload = node.advance_block().await?;
+    assert_eq!(
+        payload.block().body().transactions.len(),
+        1,
+        "calldata-heavy tx below EIP-7623 floor must be accepted and mined"
+    );
+    Ok(())
+}

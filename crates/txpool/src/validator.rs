@@ -20,9 +20,17 @@ use parking_lot::RwLock;
 use reth_chainspec::ChainSpecProvider;
 use reth_evm::{ConfigureEvm, EvmFactory, EvmFactoryFor};
 use reth_primitives_traits::{
-    Block, BlockTy, GotExpected, HeaderTy, SealedBlock, transaction::error::InvalidTransactionError,
+    BlockTy, GotExpected, HeaderTy, SealedBlock, SealedHeader,
+    transaction::error::InvalidTransactionError,
 };
-use reth_revm::database::StateProviderDatabase;
+use reth_revm::{
+    database::StateProviderDatabase,
+    revm::{
+        context::{Cfg as _, CfgEnv},
+        context_interface::cfg::gas_params::Eip2780TxInfo,
+        primitives::hardfork::SpecId,
+    },
+};
 use reth_storage_api::{BlockReaderIdExt, StateProviderBox, StateProviderFactory};
 use reth_transaction_pool::{
     EthPoolTransaction, EthTransactionValidator, PoolTransaction, TransactionOrigin,
@@ -255,12 +263,9 @@ where
     /// Create a new [`MorphTransactionValidator`].
     pub fn new(inner: EthTransactionValidator<Client, Tx, Evm>) -> Self {
         let this = Self::with_block_info(inner, MorphL1BlockInfo::default());
-        if let Ok(Some(block)) = this
-            .inner
-            .client()
-            .block_by_number_or_tag(alloy_eips::BlockNumberOrTag::Latest)
-        {
-            this.update_l1_block_info(block.header());
+        if let Ok(Some(header)) = this.inner.client().latest_header() {
+            this.sync_inner_to_header(header.clone());
+            this.update_l1_block_info(header.header());
         }
 
         this
@@ -277,33 +282,92 @@ where
         }
     }
 
+    /// Synchronizes the inner [`EthTransactionValidator`]'s `block_gas_limit` and
+    /// `fork_tracker` with `header`.
+    ///
+    /// Upstream `EthTransactionValidator::on_new_head_block` only inspects the
+    /// block header, so wrapping the [`SealedHeader`] with an empty default body
+    /// refreshes inner limits and fork flags without loading a full block body.
+    fn sync_inner_to_header(&self, header: SealedHeader<HeaderTy<Evm::Primitives>>) {
+        let block =
+            SealedBlock::<BlockTy<Evm::Primitives>>::from_sealed_parts(header, Default::default());
+        self.inner.on_new_head_block(&block);
+    }
+
     /// Update the L1 block info for the given header.
     pub fn update_l1_block_info(&self, header: &HeaderTy<Evm::Primitives>) {
         match validation_state_for_header(self.client(), self.inner.evm_config(), header) {
             Ok(state) => *self.block_info.head.write() = Some(state.head),
             Err(err) => {
-                tracing::warn!(target: "morph::txpool", %err, "Failed to refresh fee-validation head")
+                // Clear any stale/orphaned head so `current_validation_state` falls back
+                // to `latest_header()` instead of staying pinned to an unreadable block.
+                *self.block_info.head.write() = None;
+                tracing::warn!(target: "morph::txpool", %err, "Failed to refresh fee-validation head");
             }
         }
     }
 
     /// Opens the state of the head last published through `on_new_head_block`.
     ///
-    /// Until a head is published, falls back to the provider's latest header without
-    /// publishing it, so it can never overwrite a newer canonical update.
+    /// If no head has been published yet, if the canonical tip has moved ahead
+    /// (for example after a `depth > max_update_depth` catch-up where upstream
+    /// maintenance skips `on_new_head_block`), or if the cached head's state is
+    /// no longer available (pruned or orphaned), falls back to the provider's
+    /// latest canonical header and refreshes the cached head and inner validator
+    /// without downgrading a newer concurrent `on_new_head_block`.
     fn current_validation_state(
         &self,
     ) -> Result<MorphValidationState, Box<dyn std::error::Error + Send + Sync>> {
-        let head = self.block_info.head.read().clone();
-        if let Some(head) = head {
-            let provider = self.client().state_by_block_hash(head.hash)?;
-            return Ok(MorphValidationState { head, provider });
+        let cached_head = self.block_info.head.read().clone();
+        let canonical_tip = self.client().chain_info().ok();
+
+        if let Some(ref head) = cached_head {
+            let matches_tip = canonical_tip
+                .as_ref()
+                .is_none_or(|tip| tip.best_hash == head.hash);
+            if matches_tip {
+                match self.client().state_by_block_hash(head.hash) {
+                    Ok(provider) => {
+                        return Ok(MorphValidationState {
+                            head: Arc::clone(head),
+                            provider,
+                        });
+                    }
+                    Err(err) => {
+                        tracing::debug!(
+                            target: "morph::txpool",
+                            cached_hash = %head.hash,
+                            cached_number = head.number,
+                            %err,
+                            "Cached validation head state unavailable; refreshing from latest header"
+                        );
+                    }
+                }
+            }
         }
-        let header = self
+
+        let latest = self
             .client()
             .latest_header()?
             .ok_or_else(|| std::io::Error::other("latest validation header is unavailable"))?;
-        validation_state_for_header(self.client(), self.inner.evm_config(), header.header())
+        let state =
+            validation_state_for_header(self.client(), self.inner.evm_config(), latest.header())?;
+
+        // Publish the refreshed head and sync `self.inner` together under the write lock
+        // only when no newer `on_new_head_block` raced ahead.
+        let mut guard = self.block_info.head.write();
+        let can_replace = match (guard.as_ref(), cached_head.as_ref()) {
+            (None, _) => true,
+            (Some(current), Some(seen)) if current.hash == seen.hash => true,
+            (Some(current), _) if current.number < state.head.number => true,
+            _ => false,
+        };
+        if can_replace {
+            self.sync_inner_to_header(latest);
+            *guard = Some(Arc::clone(&state.head));
+        }
+
+        Ok(state)
     }
 
     /// Validates a single transaction.
@@ -435,8 +499,45 @@ where
             }
         }
 
-        if let Err(err) = self.inner.validate_stateless(origin, &transaction) {
-            return TransactionValidationOutcome::Invalid(transaction, err);
+        match self.inner.validate_stateless(origin, &transaction) {
+            Ok(()) => {
+                // Upstream's `ensure_intrinsic_gas` uses `fork_tracker`, which falls back to
+                // `SpecId::MERGE` pre-Viridian (Morph genesis uses `shanghaiBlock: 0` rather
+                // than `shanghaiTime`) and therefore omits the EIP-3860 initcode word cost.
+                // Re-check against Morph's actual execution `cfg_env` so pre-Viridian
+                // contract creations still enforce initcode word gas.
+                if let Err(err) = ensure_morph_intrinsic_gas(&transaction, &head.evm_env.cfg_env) {
+                    return TransactionValidationOutcome::Invalid(transaction, err);
+                }
+            }
+            Err(InvalidPoolTransactionError::IntrinsicGasTooLow) => {
+                // Every stateless check in upstream `EthTransactionValidator::validate_stateless`
+                // prior to `ensure_intrinsic_gas` (tx type, EIP-2681 nonce, size limits,
+                // block/tx gas limits, fee caps, minimum priority fee, chain ID, and EIP-7702
+                // Prague/auth-list rules) has already passed. Upstream `ensure_intrinsic_gas`
+                // ignores `cfg_env.disable_eip7623` and rejects valid post-Viridian
+                // calldata-heavy txs below the EIP-7623 floor. Re-evaluate intrinsic gas
+                // against Morph's actual execution `cfg_env` (EIP-7623 disabled, EIP-3860 and
+                // EIP-7702 costs preserved).
+                if let Err(err) = ensure_morph_intrinsic_gas(&transaction, &head.evm_env.cfg_env) {
+                    return TransactionValidationOutcome::Invalid(transaction, err);
+                }
+                // Run the remaining applicable check after `ensure_intrinsic_gas` in upstream
+                // `validate_stateless` (EIP-4844 was already rejected above, and Morph does
+                // not attach `additional_stateless_validation`): `tx_gas_limit_cap`.
+                let tx_gas_limit_cap = self
+                    .inner
+                    .fork_tracker()
+                    .tx_gas_limit_cap
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                if tx_gas_limit_cap > 0 && transaction.gas_limit() > tx_gas_limit_cap {
+                    return TransactionValidationOutcome::Invalid(
+                        transaction,
+                        InvalidTransactionError::GasLimitTooHigh.into(),
+                    );
+                }
+            }
+            Err(err) => return TransactionValidationOutcome::Invalid(transaction, err),
         }
         let outcome = self
             .inner
@@ -603,9 +704,71 @@ where
     }
 
     fn on_new_head_block(&self, new_tip_block: &SealedBlock<Self::Block>) {
+        // Compute the new L1/EVM validation state outside the write lock, then publish
+        // `self.inner` and `self.block_info.head` together under the write lock so a
+        // concurrent `current_validation_state` fallback cannot race and downgrade
+        // `self.inner` to an older block.
+        let refreshed = validation_state_for_header(
+            self.client(),
+            self.inner.evm_config(),
+            new_tip_block.header(),
+        );
+        let mut guard = self.block_info.head.write();
         self.inner.on_new_head_block(new_tip_block);
-        self.update_l1_block_info(new_tip_block.header());
+        match refreshed {
+            Ok(state) => *guard = Some(state.head),
+            Err(err) => {
+                *guard = None;
+                tracing::warn!(target: "morph::txpool", %err, "Failed to refresh fee-validation head");
+            }
+        }
     }
+}
+
+/// Validates transaction intrinsic gas against Morph's actual execution `CfgEnv`,
+/// honoring `is_eip7623_disabled()` (EIP-7623 calldata floor gas is disabled on Morph)
+/// while preserving EIP-3860 initcode word cost (from genesis) and EIP-7702
+/// authorization-list cost.
+fn ensure_morph_intrinsic_gas<Tx: EthPoolTransaction>(
+    transaction: &Tx,
+    cfg: &CfgEnv<MorphHardfork>,
+) -> Result<(), InvalidPoolTransactionError> {
+    let spec: SpecId = (*cfg.spec()).into();
+    let eip2780 = cfg.is_amsterdam_eip2780_enabled().then(|| Eip2780TxInfo {
+        value: transaction.value(),
+        is_self_transfer: transaction.kind().to() == Some(&transaction.sender()),
+    });
+    let mut gas = cfg.gas_params().initial_tx_gas(
+        transaction.input(),
+        transaction.is_create(),
+        transaction
+            .access_list()
+            .map(|l| l.len())
+            .unwrap_or_default() as u64,
+        transaction
+            .access_list()
+            .map(|l| l.iter().map(|i| i.storage_keys.len()).sum::<usize>())
+            .unwrap_or_default() as u64,
+        transaction
+            .authorization_list()
+            .map(|l| l.len())
+            .unwrap_or_default() as u64,
+        eip2780,
+    );
+    if cfg.is_eip7623_disabled() {
+        gas.set_floor_gas(0);
+    }
+    if !cfg.is_amsterdam_eip8037_enabled() {
+        gas.set_initial_state_gas(0);
+    }
+
+    let gas_limit = transaction.gas_limit();
+    if gas_limit < gas.initial_total_gas()
+        || (spec.is_enabled_in(SpecId::PRAGUE) && gas_limit < gas.floor_gas())
+    {
+        return Err(InvalidPoolTransactionError::IntrinsicGasTooLow);
+    }
+    Ok(())
 }
 
 /// Maps a [`MorphTxValidationError`] onto the right validation outcome.
@@ -1385,5 +1548,1067 @@ mod tests {
             TransactionValidationOutcome::Invalid(_, InvalidPoolTransactionError::Overdraft { cost, balance })
                 if cost == U256::from(2_100_000) && balance == U256::from(300_000)
         ));
+    }
+
+    // -------------------------------------------------------------------------
+    // Audit fixes: M-H02, M-H05, M-M08
+    // -------------------------------------------------------------------------
+
+    /// M-H02: Post-Viridian calldata-heavy transactions (both standard EIP-1559 and
+    /// MorphTx 0x7F) where `standard_intrinsic <= gas_limit < eip7623_floor_gas` must
+    /// be accepted by `MorphTransactionValidator` without penalizing honest peers,
+    /// matching `MorphEvmConfig`'s `disable_eip7623 = true`.
+    #[test]
+    fn post_viridian_calldata_heavy_tx_accepted_without_eip7623_floor_gas() {
+        let signer = address!("0000000000000000000000000000000000000001");
+        let validator = token_fee_validator(
+            U256::from(10u128.pow(18)),
+            U256::from(100_000_000u64),
+            0,
+            Default::default(),
+        );
+        // Post-Emerald head (timestamp 1_767_765_600 >= viridianTime 1_762_149_600)
+        assert!(
+            validator.inner.fork_tracker().is_prague_activated(),
+            "Prague must remain active in fork_tracker for EIP-7702"
+        );
+
+        // 1,024 non-zero calldata bytes:
+        // - standard intrinsic gas: 21_000 + 16 * 1_024 = 37_384
+        // - EIP-7623 floor gas:     21_000 + 40 * 1_024 = 61_960
+        let calldata = Bytes::from(vec![0xab; 1_024]);
+        let gas_limit = 40_000u64;
+
+        // 1. Standard EIP-1559 transaction
+        let eip1559 = TxEip1559 {
+            chain_id: 2818,
+            nonce: 0,
+            gas_limit,
+            max_fee_per_gas: 100,
+            max_priority_fee_per_gas: 10,
+            to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
+            value: U256::ZERO,
+            access_list: Default::default(),
+            input: calldata.clone(),
+        };
+        let recovered = Recovered::new_unchecked(
+            MorphTxEnvelope::Eip1559(Signed::new_unhashed(eip1559, Signature::test_signature())),
+            signer,
+        );
+        let len = recovered.encode_2718_len();
+        let pooled_eip1559 = crate::MorphPooledTransaction::new(recovered, len);
+
+        // Confirm upstream `validate_stateless` would reject this tx under EIP-7623.
+        assert!(matches!(
+            validator
+                .inner
+                .validate_stateless(TransactionOrigin::External, &pooled_eip1559),
+            Err(InvalidPoolTransactionError::IntrinsicGasTooLow)
+        ));
+        let outcome = validator.validate_one(TransactionOrigin::External, pooled_eip1559);
+        assert!(
+            matches!(outcome, TransactionValidationOutcome::Valid { .. }),
+            "post-Viridian calldata-heavy EIP-1559 tx must be accepted: {outcome:?}"
+        );
+
+        // 2. MorphTx (0x7F) paying fees in ERC20 token
+        let morph_tx = TxMorph {
+            chain_id: 2818,
+            nonce: 0,
+            gas_limit,
+            max_fee_per_gas: 100,
+            max_priority_fee_per_gas: 10,
+            to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
+            value: U256::ZERO,
+            access_list: Default::default(),
+            version: 0,
+            fee_token_id: 1,
+            fee_limit: U256::ZERO,
+            reference: None,
+            memo: None,
+            authorization_list: Vec::new(),
+            input: calldata,
+        };
+        let recovered = Recovered::new_unchecked(
+            MorphTxEnvelope::Morph(Signed::new_unhashed(morph_tx, Signature::test_signature())),
+            signer,
+        );
+        let len = recovered.encode_2718_len();
+        let pooled_morph = crate::MorphPooledTransaction::new(recovered, len);
+
+        assert!(matches!(
+            validator
+                .inner
+                .validate_stateless(TransactionOrigin::External, &pooled_morph),
+            Err(InvalidPoolTransactionError::IntrinsicGasTooLow)
+        ));
+        let outcome = validator.validate_one(TransactionOrigin::External, pooled_morph);
+        assert!(
+            matches!(outcome, TransactionValidationOutcome::Valid { .. }),
+            "post-Viridian calldata-heavy MorphTx must be accepted: {outcome:?}"
+        );
+    }
+
+    /// M-H02: Transactions genuinely below Morph's execution intrinsic gas — including
+    /// standard calldata gas, EIP-3860 initcode word cost (both pre- and post-Viridian),
+    /// and EIP-7702 authorization-list cost (on both type 0x04 and MorphTx V2) — are
+    /// still rejected with `IntrinsicGasTooLow`, while other stateless errors keep
+    /// their exact classification.
+    #[test]
+    fn intrinsic_gas_enforces_standard_eip3860_and_eip7702_costs() {
+        use alloy_consensus::TxEip7702;
+        use alloy_eips::eip7702::{Authorization, SignedAuthorization};
+
+        let signer = address!("0000000000000000000000000000000000000001");
+        let make_eip1559 = |gas_limit: u64, to: TxKind, input: Bytes, chain_id: u64| {
+            let tx = TxEip1559 {
+                chain_id,
+                nonce: 0,
+                gas_limit,
+                max_fee_per_gas: 100,
+                max_priority_fee_per_gas: 10,
+                to,
+                value: U256::ZERO,
+                access_list: Default::default(),
+                input,
+            };
+            let recovered = Recovered::new_unchecked(
+                MorphTxEnvelope::Eip1559(Signed::new_unhashed(tx, Signature::test_signature())),
+                signer,
+            );
+            let len = recovered.encode_2718_len();
+            crate::MorphPooledTransaction::new(recovered, len)
+        };
+
+        // 1. Pre-Viridian EIP-3860 initcode word cost (genesis timestamp = 0, where
+        //    `fork_tracker.is_shanghai_activated()` is false because Morph genesis uses
+        //    `shanghaiBlock: 0`).
+        //    1,024 zero bytes initcode:
+        //    base(53_000) + calldata(4 * 1_024 = 4_096) + initcode_words(2 * 32 = 64) = 57_160.
+        let pre_client = new_mock_provider();
+        pre_client.add_account(signer, ExtendedAccount::new(0, U256::from(10u128.pow(18))));
+        let pre_validator = MorphTransactionValidator::new(
+            EthTransactionValidatorBuilder::new(
+                pre_client,
+                MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone()),
+            )
+            .disable_balance_check()
+            .build::<crate::MorphPooledTransaction, _>(InMemoryBlobStore::default()),
+        );
+        assert!(!pre_validator.inner.fork_tracker().is_shanghai_activated());
+
+        let initcode = Bytes::from(vec![0u8; 1_024]);
+        let outcome = pre_validator.validate_one(
+            TransactionOrigin::External,
+            make_eip1559(57_159, TxKind::Create, initcode.clone(), 2818),
+        );
+        assert!(
+            matches!(
+                outcome,
+                TransactionValidationOutcome::Invalid(
+                    _,
+                    InvalidPoolTransactionError::IntrinsicGasTooLow
+                )
+            ),
+            "pre-Viridian initcode missing EIP-3860 word cost must be rejected: {outcome:?}"
+        );
+        let outcome = pre_validator.validate_one(
+            TransactionOrigin::External,
+            make_eip1559(57_160, TxKind::Create, initcode.clone(), 2818),
+        );
+        assert!(
+            matches!(outcome, TransactionValidationOutcome::Valid { .. }),
+            "pre-Viridian initcode meeting EIP-3860 intrinsic gas must pass: {outcome:?}"
+        );
+
+        // 2. Post-Celadon validator (Viridian + Emerald + Jade + Celadon active)
+        let post_client = new_mock_provider();
+        let celadon_header = morph_primitives::MorphHeader::from(alloy_consensus::Header {
+            number: 1,
+            timestamp: 1_793_772_000, // celadonTime
+            gas_limit: 30_000_000,
+            base_fee_per_gas: Some(10),
+            ..Default::default()
+        });
+        post_client.add_block(
+            celadon_header.hash_slow(),
+            morph_primitives::Block {
+                header: celadon_header,
+                body: Default::default(),
+            },
+        );
+        post_client.add_account(signer, ExtendedAccount::new(0, U256::from(10u128.pow(18))));
+        let post_validator = MorphTransactionValidator::new(
+            EthTransactionValidatorBuilder::new(
+                post_client,
+                MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone()),
+            )
+            .disable_balance_check()
+            .with_custom_tx_type(morph_primitives::MORPH_TX_TYPE_ID)
+            .build::<crate::MorphPooledTransaction, _>(InMemoryBlobStore::default()),
+        );
+        assert!(post_validator.inner.fork_tracker().is_prague_activated());
+
+        // 2a. Below standard calldata intrinsic gas (21_000 + 16*1_024 = 37_384)
+        let calldata = Bytes::from(vec![0xff; 1_024]);
+        let outcome = post_validator.validate_one(
+            TransactionOrigin::External,
+            make_eip1559(
+                37_383,
+                TxKind::Call(address!("0000000000000000000000000000000000000002")),
+                calldata.clone(),
+                2818,
+            ),
+        );
+        assert!(matches!(
+            outcome,
+            TransactionValidationOutcome::Invalid(
+                _,
+                InvalidPoolTransactionError::IntrinsicGasTooLow
+            )
+        ));
+
+        // 2b. Post-Viridian EIP-3860 initcode word cost
+        let outcome = post_validator.validate_one(
+            TransactionOrigin::External,
+            make_eip1559(57_159, TxKind::Create, initcode.clone(), 2818),
+        );
+        assert!(matches!(
+            outcome,
+            TransactionValidationOutcome::Invalid(
+                _,
+                InvalidPoolTransactionError::IntrinsicGasTooLow
+            )
+        ));
+        let outcome = post_validator.validate_one(
+            TransactionOrigin::External,
+            make_eip1559(57_160, TxKind::Create, initcode, 2818),
+        );
+        assert!(matches!(
+            outcome,
+            TransactionValidationOutcome::Valid { .. }
+        ));
+
+        // 2c. EIP-7702 (type 0x04) authorization-list intrinsic gas:
+        //     base(21_000) + 2 * 25_000 = 71_000
+        let dummy_auth = SignedAuthorization::new_unchecked(
+            Authorization {
+                chain_id: U256::from(2818u64),
+                address: address!("0000000000000000000000000000000000000099"),
+                nonce: 0,
+            },
+            0,
+            U256::from(1u64),
+            U256::from(1u64),
+        );
+        let make_7702 = |gas_limit: u64, input: Bytes| {
+            let tx = TxEip7702 {
+                chain_id: 2818,
+                nonce: 0,
+                gas_limit,
+                max_fee_per_gas: 100,
+                max_priority_fee_per_gas: 10,
+                to: address!("0000000000000000000000000000000000000002"),
+                value: U256::ZERO,
+                access_list: Default::default(),
+                authorization_list: vec![dummy_auth.clone(), dummy_auth.clone()],
+                input,
+            };
+            let recovered = Recovered::new_unchecked(
+                MorphTxEnvelope::Eip7702(Signed::new_unhashed(tx, Signature::test_signature())),
+                signer,
+            );
+            let len = recovered.encode_2718_len();
+            crate::MorphPooledTransaction::new(recovered, len)
+        };
+        assert!(matches!(
+            post_validator
+                .validate_one(TransactionOrigin::External, make_7702(70_999, Bytes::new())),
+            TransactionValidationOutcome::Invalid(
+                _,
+                InvalidPoolTransactionError::IntrinsicGasTooLow
+            )
+        ));
+        assert!(matches!(
+            post_validator
+                .validate_one(TransactionOrigin::External, make_7702(71_000, Bytes::new())),
+            TransactionValidationOutcome::Valid { .. }
+        ));
+
+        // 2d. Post-Celadon MorphTx V2 with 1 auth + 2,048 non-zero bytes calldata:
+        //     standard = 21_000 + 25_000 + 16 * 2_048 = 78_768
+        //     EIP-7623 floor = 21_000 + 40 * 2_048 = 102_920
+        let make_morph_v2 = |gas_limit: u64| {
+            let tx = TxMorph {
+                chain_id: 2818,
+                nonce: 0,
+                gas_limit,
+                max_fee_per_gas: 100,
+                max_priority_fee_per_gas: 10,
+                to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
+                value: U256::ZERO,
+                access_list: Default::default(),
+                version: 2,
+                fee_token_id: 0,
+                fee_limit: U256::ZERO,
+                reference: None,
+                memo: None,
+                authorization_list: vec![dummy_auth.clone()],
+                input: Bytes::from(vec![0xab; 2_048]),
+            };
+            let recovered = Recovered::new_unchecked(
+                MorphTxEnvelope::Morph(Signed::new_unhashed(tx, Signature::test_signature())),
+                signer,
+            );
+            let len = recovered.encode_2718_len();
+            crate::MorphPooledTransaction::new(recovered, len)
+        };
+        assert!(matches!(
+            post_validator.validate_one(TransactionOrigin::External, make_morph_v2(78_767)),
+            TransactionValidationOutcome::Invalid(
+                _,
+                InvalidPoolTransactionError::IntrinsicGasTooLow
+            )
+        ));
+        assert!(matches!(
+            post_validator.validate_one(TransactionOrigin::External, make_morph_v2(80_000)),
+            TransactionValidationOutcome::Valid { .. }
+        ));
+
+        // 2e. Other stateless errors (e.g., wrong chain ID) keep their exact error variant.
+        let outcome = post_validator.validate_one(
+            TransactionOrigin::External,
+            make_eip1559(
+                40_000,
+                TxKind::Call(address!("0000000000000000000000000000000000000002")),
+                calldata,
+                999_999,
+            ),
+        );
+        assert!(matches!(
+            outcome,
+            TransactionValidationOutcome::Invalid(
+                _,
+                InvalidPoolTransactionError::Consensus(InvalidTransactionError::ChainIdMismatch)
+            )
+        ));
+    }
+
+    /// Test provider wrapping `MockEthProvider` with configurable pruned/unreadable block hashes
+    /// so M-H05 tests can simulate failed `state_by_block_hash` lookups on orphaned/pruned heads.
+    #[derive(Clone, Debug)]
+    struct PrunableMockProvider {
+        inner: MockEthProvider<MorphPrimitives, MorphChainSpec>,
+        pruned_hashes: Arc<parking_lot::Mutex<std::collections::HashSet<B256>>>,
+    }
+
+    impl PrunableMockProvider {
+        fn new(inner: MockEthProvider<MorphPrimitives, MorphChainSpec>) -> Self {
+            Self {
+                inner,
+                pruned_hashes: Arc::new(parking_lot::Mutex::new(Default::default())),
+            }
+        }
+
+        fn prune_hash(&self, hash: B256) {
+            self.pruned_hashes.lock().insert(hash);
+        }
+    }
+
+    impl ChainSpecProvider for PrunableMockProvider {
+        type ChainSpec = MorphChainSpec;
+
+        fn chain_spec(&self) -> Arc<Self::ChainSpec> {
+            self.inner.chain_spec()
+        }
+    }
+
+    impl reth_storage_api::BlockHashReader for PrunableMockProvider {
+        fn block_hash(&self, number: u64) -> reth_provider::ProviderResult<Option<B256>> {
+            self.inner.block_hash(number)
+        }
+
+        fn canonical_hashes_range(
+            &self,
+            start: alloy_primitives::BlockNumber,
+            end: alloy_primitives::BlockNumber,
+        ) -> reth_provider::ProviderResult<Vec<B256>> {
+            self.inner.canonical_hashes_range(start, end)
+        }
+    }
+
+    impl reth_storage_api::BlockNumReader for PrunableMockProvider {
+        fn chain_info(&self) -> reth_provider::ProviderResult<reth_chainspec::ChainInfo> {
+            self.inner.chain_info()
+        }
+
+        fn best_block_number(
+            &self,
+        ) -> reth_provider::ProviderResult<alloy_primitives::BlockNumber> {
+            self.inner.best_block_number()
+        }
+
+        fn last_block_number(
+            &self,
+        ) -> reth_provider::ProviderResult<alloy_primitives::BlockNumber> {
+            self.inner.last_block_number()
+        }
+
+        fn block_number(
+            &self,
+            hash: B256,
+        ) -> reth_provider::ProviderResult<Option<alloy_primitives::BlockNumber>> {
+            self.inner.block_number(hash)
+        }
+    }
+
+    impl reth_storage_api::BlockIdReader for PrunableMockProvider {
+        fn pending_block_num_hash(
+            &self,
+        ) -> reth_provider::ProviderResult<Option<alloy_eips::BlockNumHash>> {
+            self.inner.pending_block_num_hash()
+        }
+
+        fn safe_block_num_hash(
+            &self,
+        ) -> reth_provider::ProviderResult<Option<alloy_eips::BlockNumHash>> {
+            self.inner.safe_block_num_hash()
+        }
+
+        fn finalized_block_num_hash(
+            &self,
+        ) -> reth_provider::ProviderResult<Option<alloy_eips::BlockNumHash>> {
+            self.inner.finalized_block_num_hash()
+        }
+    }
+
+    impl reth_storage_api::HeaderProvider for PrunableMockProvider {
+        type Header = morph_primitives::MorphHeader;
+
+        fn header(
+            &self,
+            block_hash: alloy_primitives::BlockHash,
+        ) -> reth_provider::ProviderResult<Option<Self::Header>> {
+            self.inner.header(block_hash)
+        }
+
+        fn header_by_number(
+            &self,
+            num: u64,
+        ) -> reth_provider::ProviderResult<Option<Self::Header>> {
+            self.inner.header_by_number(num)
+        }
+
+        fn headers_range(
+            &self,
+            range: impl std::ops::RangeBounds<alloy_primitives::BlockNumber>,
+        ) -> reth_provider::ProviderResult<Vec<Self::Header>> {
+            self.inner.headers_range(range)
+        }
+
+        fn sealed_header(
+            &self,
+            number: alloy_primitives::BlockNumber,
+        ) -> reth_provider::ProviderResult<Option<SealedHeader<Self::Header>>> {
+            self.inner.sealed_header(number)
+        }
+
+        fn sealed_headers_while(
+            &self,
+            range: impl std::ops::RangeBounds<alloy_primitives::BlockNumber>,
+            predicate: impl FnMut(&SealedHeader<Self::Header>) -> bool,
+        ) -> reth_provider::ProviderResult<Vec<SealedHeader<Self::Header>>> {
+            self.inner.sealed_headers_while(range, predicate)
+        }
+    }
+
+    impl reth_storage_api::BlockBodyIndicesProvider for PrunableMockProvider {
+        fn block_body_indices(
+            &self,
+            num: u64,
+        ) -> reth_provider::ProviderResult<Option<reth_db_api::models::StoredBlockBodyIndices>>
+        {
+            self.inner.block_body_indices(num)
+        }
+
+        fn block_body_indices_range(
+            &self,
+            range: std::ops::RangeInclusive<alloy_primitives::BlockNumber>,
+        ) -> reth_provider::ProviderResult<Vec<reth_db_api::models::StoredBlockBodyIndices>>
+        {
+            self.inner.block_body_indices_range(range)
+        }
+    }
+
+    impl reth_storage_api::TransactionsProvider for PrunableMockProvider {
+        type Transaction = MorphTxEnvelope;
+
+        fn transaction_id(
+            &self,
+            tx_hash: alloy_primitives::TxHash,
+        ) -> reth_provider::ProviderResult<Option<alloy_primitives::TxNumber>> {
+            self.inner.transaction_id(tx_hash)
+        }
+
+        fn transaction_by_id(
+            &self,
+            id: alloy_primitives::TxNumber,
+        ) -> reth_provider::ProviderResult<Option<Self::Transaction>> {
+            self.inner.transaction_by_id(id)
+        }
+
+        fn transaction_by_id_unhashed(
+            &self,
+            id: alloy_primitives::TxNumber,
+        ) -> reth_provider::ProviderResult<Option<Self::Transaction>> {
+            self.inner.transaction_by_id_unhashed(id)
+        }
+
+        fn transaction_by_hash(
+            &self,
+            hash: alloy_primitives::TxHash,
+        ) -> reth_provider::ProviderResult<Option<Self::Transaction>> {
+            self.inner.transaction_by_hash(hash)
+        }
+
+        fn transaction_by_hash_with_meta(
+            &self,
+            hash: alloy_primitives::TxHash,
+        ) -> reth_provider::ProviderResult<
+            Option<(Self::Transaction, reth_primitives_traits::TransactionMeta)>,
+        > {
+            self.inner.transaction_by_hash_with_meta(hash)
+        }
+
+        fn transactions_by_block(
+            &self,
+            id: alloy_eips::BlockHashOrNumber,
+        ) -> reth_provider::ProviderResult<Option<Vec<Self::Transaction>>> {
+            self.inner.transactions_by_block(id)
+        }
+
+        fn transactions_by_block_range(
+            &self,
+            range: impl std::ops::RangeBounds<alloy_primitives::BlockNumber>,
+        ) -> reth_provider::ProviderResult<Vec<Vec<Self::Transaction>>> {
+            self.inner.transactions_by_block_range(range)
+        }
+
+        fn transactions_by_tx_range(
+            &self,
+            range: impl std::ops::RangeBounds<alloy_primitives::TxNumber>,
+        ) -> reth_provider::ProviderResult<Vec<Self::Transaction>> {
+            self.inner.transactions_by_tx_range(range)
+        }
+
+        fn senders_by_tx_range(
+            &self,
+            range: impl std::ops::RangeBounds<alloy_primitives::TxNumber>,
+        ) -> reth_provider::ProviderResult<Vec<Address>> {
+            self.inner.senders_by_tx_range(range)
+        }
+
+        fn transaction_sender(
+            &self,
+            id: alloy_primitives::TxNumber,
+        ) -> reth_provider::ProviderResult<Option<Address>> {
+            self.inner.transaction_sender(id)
+        }
+    }
+
+    impl reth_storage_api::ReceiptProvider for PrunableMockProvider {
+        type Receipt = morph_primitives::MorphReceipt;
+
+        fn receipt(
+            &self,
+            id: alloy_primitives::TxNumber,
+        ) -> reth_provider::ProviderResult<Option<Self::Receipt>> {
+            self.inner.receipt(id)
+        }
+
+        fn receipt_by_hash(
+            &self,
+            hash: alloy_primitives::TxHash,
+        ) -> reth_provider::ProviderResult<Option<Self::Receipt>> {
+            self.inner.receipt_by_hash(hash)
+        }
+
+        fn receipts_by_block(
+            &self,
+            block: alloy_eips::BlockHashOrNumber,
+        ) -> reth_provider::ProviderResult<Option<Vec<Self::Receipt>>> {
+            self.inner.receipts_by_block(block)
+        }
+
+        fn receipts_by_tx_range(
+            &self,
+            range: impl std::ops::RangeBounds<alloy_primitives::TxNumber>,
+        ) -> reth_provider::ProviderResult<Vec<Self::Receipt>> {
+            self.inner.receipts_by_tx_range(range)
+        }
+
+        fn receipts_by_block_range(
+            &self,
+            block_range: std::ops::RangeInclusive<alloy_primitives::BlockNumber>,
+        ) -> reth_provider::ProviderResult<Vec<Vec<Self::Receipt>>> {
+            self.inner.receipts_by_block_range(block_range)
+        }
+    }
+
+    impl reth_storage_api::ReceiptProviderIdExt for PrunableMockProvider {}
+
+    impl reth_storage_api::BlockReader for PrunableMockProvider {
+        type Block = morph_primitives::Block;
+
+        fn find_block_by_hash(
+            &self,
+            hash: B256,
+            source: reth_provider::BlockSource,
+        ) -> reth_provider::ProviderResult<Option<Self::Block>> {
+            self.inner.find_block_by_hash(hash, source)
+        }
+
+        fn block(
+            &self,
+            id: alloy_eips::BlockHashOrNumber,
+        ) -> reth_provider::ProviderResult<Option<Self::Block>> {
+            self.inner.block(id)
+        }
+
+        fn pending_block(
+            &self,
+        ) -> reth_provider::ProviderResult<
+            Option<reth_primitives_traits::RecoveredBlock<Self::Block>>,
+        > {
+            self.inner.pending_block()
+        }
+
+        fn pending_block_and_receipts(
+            &self,
+        ) -> reth_provider::ProviderResult<
+            Option<(
+                reth_primitives_traits::RecoveredBlock<Self::Block>,
+                Vec<Self::Receipt>,
+            )>,
+        > {
+            self.inner.pending_block_and_receipts()
+        }
+
+        fn recovered_block(
+            &self,
+            id: alloy_eips::BlockHashOrNumber,
+            transaction_kind: reth_provider::TransactionVariant,
+        ) -> reth_provider::ProviderResult<
+            Option<reth_primitives_traits::RecoveredBlock<Self::Block>>,
+        > {
+            self.inner.recovered_block(id, transaction_kind)
+        }
+
+        fn sealed_block_with_senders(
+            &self,
+            id: alloy_eips::BlockHashOrNumber,
+            transaction_kind: reth_provider::TransactionVariant,
+        ) -> reth_provider::ProviderResult<
+            Option<reth_primitives_traits::RecoveredBlock<Self::Block>>,
+        > {
+            self.inner.sealed_block_with_senders(id, transaction_kind)
+        }
+
+        fn block_range(
+            &self,
+            range: std::ops::RangeInclusive<alloy_primitives::BlockNumber>,
+        ) -> reth_provider::ProviderResult<Vec<Self::Block>> {
+            self.inner.block_range(range)
+        }
+
+        fn block_with_senders_range(
+            &self,
+            range: std::ops::RangeInclusive<alloy_primitives::BlockNumber>,
+        ) -> reth_provider::ProviderResult<Vec<reth_primitives_traits::RecoveredBlock<Self::Block>>>
+        {
+            self.inner.block_with_senders_range(range)
+        }
+
+        fn recovered_block_range(
+            &self,
+            range: std::ops::RangeInclusive<alloy_primitives::BlockNumber>,
+        ) -> reth_provider::ProviderResult<Vec<reth_primitives_traits::RecoveredBlock<Self::Block>>>
+        {
+            self.inner.recovered_block_range(range)
+        }
+
+        fn block_by_transaction_id(
+            &self,
+            id: alloy_primitives::TxNumber,
+        ) -> reth_provider::ProviderResult<Option<alloy_primitives::BlockNumber>> {
+            self.inner.block_by_transaction_id(id)
+        }
+    }
+
+    impl BlockReaderIdExt for PrunableMockProvider {
+        fn block_by_id(
+            &self,
+            id: alloy_eips::BlockId,
+        ) -> reth_provider::ProviderResult<Option<Self::Block>> {
+            self.inner.block_by_id(id)
+        }
+
+        fn header_by_number_or_tag(
+            &self,
+            id: alloy_eips::BlockNumberOrTag,
+        ) -> reth_provider::ProviderResult<Option<Self::Header>> {
+            self.inner.header_by_number_or_tag(id)
+        }
+
+        fn sealed_header_by_number_or_tag(
+            &self,
+            id: alloy_eips::BlockNumberOrTag,
+        ) -> reth_provider::ProviderResult<Option<SealedHeader<Self::Header>>> {
+            self.inner.sealed_header_by_number_or_tag(id)
+        }
+
+        fn sealed_header_by_id(
+            &self,
+            id: alloy_eips::BlockId,
+        ) -> reth_provider::ProviderResult<Option<SealedHeader<Self::Header>>> {
+            self.inner.sealed_header_by_id(id)
+        }
+
+        fn header_by_id(
+            &self,
+            id: alloy_eips::BlockId,
+        ) -> reth_provider::ProviderResult<Option<Self::Header>> {
+            self.inner.header_by_id(id)
+        }
+    }
+
+    impl StateProviderFactory for PrunableMockProvider {
+        fn latest(&self) -> reth_provider::ProviderResult<StateProviderBox> {
+            self.inner.latest()
+        }
+
+        fn state_by_block_number_or_tag(
+            &self,
+            number_or_tag: alloy_eips::BlockNumberOrTag,
+        ) -> reth_provider::ProviderResult<StateProviderBox> {
+            self.inner.state_by_block_number_or_tag(number_or_tag)
+        }
+
+        fn history_by_block_number(
+            &self,
+            block: alloy_primitives::BlockNumber,
+        ) -> reth_provider::ProviderResult<StateProviderBox> {
+            self.inner.history_by_block_number(block)
+        }
+
+        fn history_by_block_hash(
+            &self,
+            block: alloy_primitives::BlockHash,
+        ) -> reth_provider::ProviderResult<StateProviderBox> {
+            if self.pruned_hashes.lock().contains(&block) {
+                return Err(reth_provider::ProviderError::BlockHashNotFound(block));
+            }
+            self.inner.history_by_block_hash(block)
+        }
+
+        fn state_by_block_hash(
+            &self,
+            block: alloy_primitives::BlockHash,
+        ) -> reth_provider::ProviderResult<StateProviderBox> {
+            if self.pruned_hashes.lock().contains(&block) {
+                return Err(reth_provider::ProviderError::BlockHashNotFound(block));
+            }
+            self.inner.state_by_block_hash(block)
+        }
+
+        fn pending(&self) -> reth_provider::ProviderResult<StateProviderBox> {
+            self.inner.pending()
+        }
+
+        fn pending_state_by_hash(
+            &self,
+            block_hash: B256,
+        ) -> reth_provider::ProviderResult<Option<StateProviderBox>> {
+            self.inner.pending_state_by_hash(block_hash)
+        }
+
+        fn maybe_pending(&self) -> reth_provider::ProviderResult<Option<StateProviderBox>> {
+            self.inner.maybe_pending()
+        }
+    }
+
+    /// M-H05: A failed `update_l1_block_info` (e.g. transient/orphaned state lookup failure)
+    /// must clear the cached head rather than retaining a stale/orphaned block hash, and
+    /// subsequent validation must seamlessly fall back to `latest_header()` and refresh.
+    #[test]
+    fn failed_update_l1_block_info_clears_cached_head_and_falls_back_to_latest() {
+        let signer = address!("0000000000000000000000000000000000000001");
+        let base = new_mock_provider();
+        let header1 = morph_primitives::MorphHeader::from(alloy_consensus::Header {
+            number: 1,
+            timestamp: 1_767_765_600,
+            gas_limit: 30_000_000,
+            base_fee_per_gas: Some(10),
+            ..Default::default()
+        });
+        base.add_block(
+            header1.hash_slow(),
+            morph_primitives::Block {
+                header: header1.clone(),
+                body: Default::default(),
+            },
+        );
+        base.add_account(signer, ExtendedAccount::new(0, U256::from(10u128.pow(18))));
+
+        let client = PrunableMockProvider::new(base.clone());
+        let validator = MorphTransactionValidator::new(
+            EthTransactionValidatorBuilder::new(
+                client.clone(),
+                MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone()),
+            )
+            .disable_balance_check()
+            .build::<crate::MorphPooledTransaction, _>(InMemoryBlobStore::default()),
+        );
+        assert_eq!(validator.block_info().number(), 1);
+
+        // Simulate a transient/reorg failure while refreshing to an unreadable block 2.
+        let orphan_header = morph_primitives::MorphHeader::from(alloy_consensus::Header {
+            number: 2,
+            timestamp: 1_767_765_602,
+            gas_limit: 30_000_000,
+            base_fee_per_gas: Some(10),
+            ..Default::default()
+        });
+        client.prune_hash(orphan_header.hash_slow());
+        // Also prune old block 1 so staying pinned to block 1 would have caused total outage.
+        client.prune_hash(header1.hash_slow());
+
+        validator.update_l1_block_info(&orphan_header);
+        assert_eq!(
+            validator.block_info().number(),
+            0,
+            "failed update_l1_block_info must clear cached head to None"
+        );
+
+        // Publish canonical block 3 in provider without calling on_new_head_block.
+        let header3 = morph_primitives::MorphHeader::from(alloy_consensus::Header {
+            number: 3,
+            timestamp: 1_767_765_604,
+            gas_limit: 45_000_000,
+            base_fee_per_gas: Some(10),
+            ..Default::default()
+        });
+        base.add_block(
+            header3.hash_slow(),
+            morph_primitives::Block {
+                header: header3,
+                body: Default::default(),
+            },
+        );
+
+        let tx = TxEip1559 {
+            chain_id: 2818,
+            nonce: 0,
+            gas_limit: 40_000_000,
+            max_fee_per_gas: 100,
+            max_priority_fee_per_gas: 10,
+            to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
+            value: U256::ZERO,
+            access_list: Default::default(),
+            input: Bytes::new(),
+        };
+        let recovered = Recovered::new_unchecked(
+            MorphTxEnvelope::Eip1559(Signed::new_unhashed(tx, Signature::test_signature())),
+            signer,
+        );
+        let len = recovered.encode_2718_len();
+        let outcome = validator.validate_one(
+            TransactionOrigin::External,
+            crate::MorphPooledTransaction::new(recovered, len),
+        );
+        assert!(
+            matches!(outcome, TransactionValidationOutcome::Valid { .. }),
+            "validator must fall back to latest header (block 3, 45M gas): {outcome:?}"
+        );
+        assert_eq!(validator.block_info().number(), 3);
+        assert_eq!(validator.inner.block_gas_limit(), 45_000_000);
+    }
+
+    /// M-H05: When cached `head` lags behind canonical tip (e.g. `depth > 64` jump where
+    /// upstream maintenance skips `on_new_head_block`) OR points to a pruned block hash,
+    /// `current_validation_state` seamlessly refreshes both `MorphL1BlockInfo` and the
+    /// inner validator's `block_gas_limit` / `fork_tracker` to the latest canonical head.
+    #[test]
+    fn stale_or_pruned_cached_head_refreshes_to_latest_canonical_tip() {
+        let signer = address!("0000000000000000000000000000000000000001");
+
+        for prune_old_head in [false, true] {
+            let base = new_mock_provider();
+            // Start at pre-Viridian block 1 (timestamp 0, gas_limit 30M).
+            let header1 = morph_primitives::MorphHeader::from(alloy_consensus::Header {
+                number: 1,
+                timestamp: 0,
+                gas_limit: 30_000_000,
+                base_fee_per_gas: Some(10),
+                ..Default::default()
+            });
+            base.add_block(
+                header1.hash_slow(),
+                morph_primitives::Block {
+                    header: header1.clone(),
+                    body: Default::default(),
+                },
+            );
+            base.add_account(signer, ExtendedAccount::new(0, U256::from(10u128.pow(18))));
+
+            let client = PrunableMockProvider::new(base.clone());
+            let validator = MorphTransactionValidator::new(
+                EthTransactionValidatorBuilder::new(
+                    client.clone(),
+                    MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone()),
+                )
+                .disable_balance_check()
+                .with_custom_tx_type(morph_primitives::MORPH_TX_TYPE_ID)
+                .build::<crate::MorphPooledTransaction, _>(InMemoryBlobStore::default()),
+            );
+            assert_eq!(validator.block_info().number(), 1);
+            assert_eq!(validator.inner.block_gas_limit(), 30_000_000);
+            assert!(!validator.inner.fork_tracker().is_prague_activated());
+
+            // Simulate a depth > 64 canonical jump to block 100 (post-Celadon, 60M gas limit)
+            // WITHOUT invoking `on_new_head_block`.
+            let header100 = morph_primitives::MorphHeader::from(alloy_consensus::Header {
+                number: 100,
+                timestamp: 1_793_772_000, // celadonTime
+                gas_limit: 60_000_000,
+                base_fee_per_gas: Some(10),
+                ..Default::default()
+            });
+            base.add_block(
+                header100.hash_slow(),
+                morph_primitives::Block {
+                    header: header100,
+                    body: Default::default(),
+                },
+            );
+            if prune_old_head {
+                client.prune_hash(header1.hash_slow());
+            }
+
+            // A post-Celadon, 45M-gas MorphTx V2 (only valid after refreshing BOTH
+            // `block_info.head` to block 100 AND `inner.block_gas_limit` to 60M!).
+            let tx = TxMorph {
+                chain_id: 2818,
+                nonce: 0,
+                gas_limit: 45_000_000,
+                max_fee_per_gas: 100,
+                max_priority_fee_per_gas: 10,
+                to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
+                value: U256::ZERO,
+                access_list: Default::default(),
+                version: 2,
+                fee_token_id: 0,
+                fee_limit: U256::ZERO,
+                reference: None,
+                memo: None,
+                authorization_list: Vec::new(),
+                input: Bytes::new(),
+            };
+            let recovered = Recovered::new_unchecked(
+                MorphTxEnvelope::Morph(Signed::new_unhashed(tx, Signature::test_signature())),
+                signer,
+            );
+            let len = recovered.encode_2718_len();
+            let outcome = validator.validate_one(
+                TransactionOrigin::External,
+                crate::MorphPooledTransaction::new(recovered, len),
+            );
+            assert!(
+                matches!(outcome, TransactionValidationOutcome::Valid { .. }),
+                "prune_old_head={prune_old_head}: stale head must refresh to block 100: {outcome:?}"
+            );
+            assert_eq!(validator.block_info().number(), 100);
+            assert_eq!(validator.inner.block_gas_limit(), 60_000_000);
+            assert!(validator.inner.fork_tracker().is_prague_activated());
+        }
+    }
+
+    /// M-M08: A validator initialized when the latest canonical header has a higher
+    /// `gas_limit` than genesis (e.g. 60M vs 30M) must accept transactions with
+    /// `30M < gas_limit <= 60M` immediately on startup without waiting for `on_new_head_block`.
+    #[test]
+    fn validator_initializes_block_gas_limit_from_latest_header_above_genesis() {
+        let signer = address!("0000000000000000000000000000000000000001");
+        let client = new_mock_provider();
+        assert_eq!(MORPH_MAINNET.inner.genesis().gas_limit, 30_000_000);
+
+        let tip_header = morph_primitives::MorphHeader::from(alloy_consensus::Header {
+            number: 10,
+            timestamp: 1_767_765_600,
+            gas_limit: 60_000_000,
+            base_fee_per_gas: Some(10),
+            ..Default::default()
+        });
+        client.add_block(
+            tip_header.hash_slow(),
+            morph_primitives::Block {
+                header: tip_header,
+                body: Default::default(),
+            },
+        );
+        client.add_account(signer, ExtendedAccount::new(0, U256::from(10u128.pow(18))));
+
+        // Even when the inner builder starts with default/genesis 30M gas limit,
+        // `MorphTransactionValidator::new` syncs to the latest canonical header's 60M limit.
+        let validator = MorphTransactionValidator::new(
+            EthTransactionValidatorBuilder::new(
+                client,
+                MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone()),
+            )
+            .set_block_gas_limit(MORPH_MAINNET.inner.genesis().gas_limit)
+            .disable_balance_check()
+            .build::<crate::MorphPooledTransaction, _>(InMemoryBlobStore::default()),
+        );
+        assert_eq!(validator.inner.block_gas_limit(), 60_000_000);
+
+        let make_tx = |gas_limit: u64| {
+            let tx = TxEip1559 {
+                chain_id: 2818,
+                nonce: 0,
+                gas_limit,
+                max_fee_per_gas: 100,
+                max_priority_fee_per_gas: 10,
+                to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
+                value: U256::ZERO,
+                access_list: Default::default(),
+                input: Bytes::new(),
+            };
+            let recovered = Recovered::new_unchecked(
+                MorphTxEnvelope::Eip1559(Signed::new_unhashed(tx, Signature::test_signature())),
+                signer,
+            );
+            let len = recovered.encode_2718_len();
+            crate::MorphPooledTransaction::new(recovered, len)
+        };
+
+        // 45M is above genesis 30M and within tip 60M -> must be accepted immediately.
+        let outcome = validator.validate_one(TransactionOrigin::External, make_tx(45_000_000));
+        assert!(
+            matches!(outcome, TransactionValidationOutcome::Valid { .. }),
+            "45M gas tx must be accepted immediately at 60M tip: {outcome:?}"
+        );
+
+        // 60M + 1 exceeds tip 60M -> must be rejected with ExceedsGasLimit.
+        let outcome = validator.validate_one(TransactionOrigin::External, make_tx(60_000_001));
+        assert!(
+            matches!(
+                outcome,
+                TransactionValidationOutcome::Invalid(
+                    _,
+                    InvalidPoolTransactionError::ExceedsGasLimit(60_000_001, 60_000_000)
+                )
+            ),
+            "tx above 60M tip must fail with ExceedsGasLimit: {outcome:?}"
+        );
     }
 }
