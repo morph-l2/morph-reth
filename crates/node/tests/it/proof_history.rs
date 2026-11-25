@@ -27,7 +27,7 @@ use morph_payload_types::ExecutableL2Data;
 use morph_primitives::MorphHeader;
 use morph_proofs::{
     DEFAULT_PROOFS_HISTORY_WINDOW, InitializationJob, MdbxProofsStorage, MorphProofsStorage,
-    MorphProofsStore, ProofDbIdentity,
+    MorphProofsStore, ProofDbIdentity, RethTrieStorageLayout,
 };
 use morph_proofs_exex::MorphProofsExEx;
 use morph_rpc::{ProofsSyncStatus, eth::proofs::DEFAULT_MAX_MULTI_PROOF_TARGETS};
@@ -38,7 +38,7 @@ use reth_node_core::args::{DiscoveryArgs, NetworkArgs, RpcServerArgs};
 use reth_payload_primitives::BuiltPayload;
 use reth_provider::{
     AccountReader, BlockReaderIdExt, DBProvider, DatabaseProviderFactory, ReceiptProvider,
-    StateProviderFactory, providers::BlockchainProvider,
+    StateProviderFactory, StorageSettingsCache, providers::BlockchainProvider,
 };
 use reth_rpc_server_types::{RethRpcModule, RpcModuleSelection};
 use reth_tasks::Runtime;
@@ -77,6 +77,7 @@ struct LaunchOpts {
     verification_interval: u64,
     max_multi_proof_targets: usize,
     enable_debug_api: bool,
+    persist_immediately: bool,
 }
 
 impl Default for LaunchOpts {
@@ -89,6 +90,7 @@ impl Default for LaunchOpts {
             verification_interval: 0,
             max_multi_proof_targets: DEFAULT_MAX_MULTI_PROOF_TARGETS,
             enable_debug_api: true,
+            persist_immediately: false,
         }
     }
 }
@@ -178,7 +180,9 @@ async fn launch_node(
                 .provider()
                 .database_provider_ro()?
                 .disable_long_read_transaction_safety();
-            InitializationJob::new(exex_storage.clone(), provider.into_tx())
+            let trie_layout =
+                RethTrieStorageLayout::from_is_v2(provider.cached_storage_settings().is_v2());
+            InitializationJob::new(exex_storage.clone(), provider.into_tx(), trie_layout)
                 .run(head.number, head.hash)?;
 
             let exex = MorphProofsExEx::builder(ctx, exex_storage)
@@ -189,10 +193,17 @@ async fn launch_node(
             Ok(async move { exex.run().await })
         })
         .launch_with_fn(|builder| {
+            let mut tree_config =
+                reth_node_api::TreeConfig::default().with_cross_block_cache_size(1024 * 1024);
+            if opts.persist_immediately {
+                tree_config = tree_config
+                    .with_persistence_threshold(0)
+                    .with_memory_block_buffer_target(0);
+            }
             let launcher = EngineNodeLauncher::new(
                 builder.task_executor().clone(),
                 builder.config().datadir(),
-                reth_node_api::TreeConfig::default().with_cross_block_cache_size(1024 * 1024),
+                tree_config,
             );
             builder.launch_with(launcher)
         })
@@ -1055,6 +1066,7 @@ async fn proof_history_prune_updates_window_bounds() -> eyre::Result<()> {
     let mut env = setup(LaunchOpts {
         window: 2,
         prune_interval: Duration::from_millis(100),
+        persist_immediately: true,
         ..LaunchOpts::default()
     })
     .await?;
@@ -1442,6 +1454,7 @@ async fn proof_history_execution_witness_is_bounded_by_the_proof_window() -> eyr
     let mut env = setup(LaunchOpts {
         window: 2,
         prune_interval: Duration::from_millis(100),
+        persist_immediately: true,
         ..LaunchOpts::default()
     })
     .await?;

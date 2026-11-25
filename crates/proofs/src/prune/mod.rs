@@ -4,7 +4,7 @@ mod error;
 pub use error::{MorphProofStoragePrunerResult, PrunerError, PrunerOutput};
 
 mod pruner;
-pub use pruner::MorphProofStoragePruner;
+pub use pruner::{DEFAULT_PRUNE_BATCH_SIZE, MorphProofStoragePruner, persisted_canonical_head};
 
 mod metrics;
 

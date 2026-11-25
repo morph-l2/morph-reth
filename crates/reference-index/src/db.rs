@@ -11,6 +11,7 @@ use alloy_primitives::B256;
 use reth_db::{DatabaseEnv, mdbx::DatabaseArguments};
 use reth_db_api::{
     Database,
+    cursor::DbCursorRO,
     transaction::{DbTx, DbTxMut},
 };
 use std::{path::Path, sync::Arc};
@@ -191,6 +192,12 @@ impl ReferenceIndexDb {
         Ok(tx
             .get::<IndexedBlocks>(IndexedBlockKey { block_number })?
             .map(|value| value.0))
+    }
+
+    pub(crate) fn lowest_indexed_block_number(&self) -> Result<Option<u64>, ReferenceIndexError> {
+        let tx = self.tx()?;
+        let mut cursor = tx.cursor_read::<IndexedBlocks>()?;
+        Ok(cursor.first()?.map(|(key, _)| key.block_number))
     }
 }
 

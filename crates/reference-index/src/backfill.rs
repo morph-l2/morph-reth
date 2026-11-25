@@ -65,6 +65,13 @@ pub(crate) fn commit_canonical_batch(
                 block.number
             )));
         }
+        if offset > 0 && block.parent_hash != blocks[offset - 1].hash {
+            return Err(ReferenceIndexError::Other(eyre::eyre!(
+                "non-linked reference-index batch at block {expected}: parent hash {} does not match predecessor {}",
+                block.parent_hash,
+                blocks[offset - 1].hash
+            )));
+        }
     }
 
     let tx = db.tx_mut()?;
@@ -98,12 +105,21 @@ mod tests {
     use super::*;
     use alloy_primitives::B256;
 
-    fn block(number: u64) -> CanonicalBlock {
+    fn block_hash(number: u64) -> B256 {
         let mut hash = [0u8; 32];
         hash[24..].copy_from_slice(&number.to_be_bytes());
+        B256::from(hash)
+    }
+
+    fn block(number: u64) -> CanonicalBlock {
         CanonicalBlock {
             number,
-            hash: B256::from(hash),
+            hash: block_hash(number),
+            parent_hash: if number == 0 {
+                B256::ZERO
+            } else {
+                block_hash(number - 1)
+            },
             timestamp: number,
             transactions: Vec::new(),
         }

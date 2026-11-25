@@ -137,6 +137,13 @@ pub(crate) fn set_jade_first_block_number<Tx: DbTxMut>(
     Ok(())
 }
 
+pub(crate) fn clear_jade_first_block_number<Tx: DbTxMut>(
+    tx: &Tx,
+) -> Result<(), ReferenceIndexError> {
+    tx.delete::<IndexMeta>(IndexMetaKey::JadeFirstBlockNumber.into(), None)?;
+    Ok(())
+}
+
 /// Prune `IndexedBlocks` breadcrumbs strictly below `floor`.
 ///
 /// Only the `block_number -> block_hash` breadcrumbs consumed by reorg rewind

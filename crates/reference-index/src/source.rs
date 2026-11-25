@@ -16,6 +16,8 @@ pub struct CanonicalBlock {
     pub number: u64,
     /// Header hash observed for this canonical block.
     pub hash: B256,
+    /// Parent header hash observed for this canonical block.
+    pub parent_hash: B256,
     /// Header timestamp.
     pub timestamp: u64,
     /// Transactions in their canonical block order.
@@ -86,10 +88,12 @@ where
             .map(|block| {
                 let number = block.header.number();
                 let timestamp = block.header.timestamp();
+                let parent_hash = block.header.parent_hash();
                 let hash = block.header.hash_slow();
                 Ok(CanonicalBlock {
                     number,
                     hash,
+                    parent_hash,
                     timestamp,
                     transactions: block.body.transactions,
                 })

@@ -25,6 +25,17 @@ use crate::{
     MorphProofsTrieCursorFactory,
 };
 
+/// Computes the stored state root at `block_number` with an empty overlay.
+pub fn state_root_at<S>(
+    storage: &MorphProofsStorage<S>,
+    block_number: u64,
+) -> Result<B256, StateRootError>
+where
+    S: MorphProofsStore + Clone,
+{
+    StateRoot::overlay_root(storage, block_number, HashedPostState::default())
+}
+
 /// Build the trie + hashed cursor factories sharing one read transaction at the given block.
 const fn from_tx<'tx, 'db, S>(
     storage: &'db MorphProofsStorage<S>,
@@ -175,6 +186,18 @@ pub trait DatabaseStorageProof<'tx, S: MorphProofsStore + 'tx> {
         storage: HashedStorage,
     ) -> Result<StorageProof, StateProofError>;
 
+    /// Generates the storage proof for target slot while reusing an existing read transaction.
+    fn overlay_storage_proof_with_tx<'cursor>(
+        storage: &'tx MorphProofsStorage<S>,
+        tx: &'cursor <MorphProofsStorage<S> as MorphProofsStore>::Tx<'tx>,
+        block_number: u64,
+        address: Address,
+        slot: B256,
+        hashed_storage: HashedStorage,
+    ) -> Result<StorageProof, StateProofError>
+    where
+        'tx: 'cursor;
+
     /// Generates the storage multiproof for target slots based on [`TrieInput`].
     fn overlay_storage_multiproof(
         storage: &'tx MorphProofsStorage<S>,
@@ -183,6 +206,18 @@ pub trait DatabaseStorageProof<'tx, S: MorphProofsStore + 'tx> {
         slots: &[B256],
         storage: HashedStorage,
     ) -> Result<StorageMultiProof, StateProofError>;
+
+    /// Generates the storage multiproof for target slots while reusing an existing read transaction.
+    fn overlay_storage_multiproof_with_tx<'cursor>(
+        storage: &'tx MorphProofsStorage<S>,
+        tx: &'cursor <MorphProofsStorage<S> as MorphProofsStore>::Tx<'tx>,
+        block_number: u64,
+        address: Address,
+        slots: &[B256],
+        hashed_storage: HashedStorage,
+    ) -> Result<StorageMultiProof, StateProofError>
+    where
+        'tx: 'cursor;
 }
 
 impl<'tx, S> DatabaseStorageProof<'tx, S>
@@ -201,14 +236,35 @@ where
         slot: B256,
         hashed_storage: HashedStorage,
     ) -> Result<StorageProof, StateProofError> {
+        let tx = storage.ro_tx().map_err(Into::<DatabaseError>::into)?;
+        Self::overlay_storage_proof_with_tx(
+            storage,
+            &tx,
+            block_number,
+            address,
+            slot,
+            hashed_storage,
+        )
+    }
+
+    fn overlay_storage_proof_with_tx<'cursor>(
+        storage: &'tx MorphProofsStorage<S>,
+        tx: &'cursor <MorphProofsStorage<S> as MorphProofsStore>::Tx<'tx>,
+        block_number: u64,
+        address: Address,
+        slot: B256,
+        hashed_storage: HashedStorage,
+    ) -> Result<StorageProof, StateProofError>
+    where
+        'tx: 'cursor,
+    {
         let hashed_address = keccak256(address);
         let prefix_set = hashed_storage.construct_prefix_set();
         let state_sorted = HashedPostStateSorted::new(
             Default::default(),
             HashMap::from_iter([(hashed_address, hashed_storage.into_sorted())]),
         );
-        let tx = storage.ro_tx().map_err(Into::<DatabaseError>::into)?;
-        let (trie_factory, hashed_factory) = from_tx(storage, &tx, block_number);
+        let (trie_factory, hashed_factory) = from_tx(storage, tx, block_number);
         proof::StorageProof::new(trie_factory, hashed_factory.clone(), address)
             .with_hashed_cursor_factory(HashedPostStateCursorFactory::new(
                 hashed_factory,
@@ -225,6 +281,28 @@ where
         slots: &[B256],
         hashed_storage: HashedStorage,
     ) -> Result<StorageMultiProof, StateProofError> {
+        let tx = storage.ro_tx().map_err(Into::<DatabaseError>::into)?;
+        Self::overlay_storage_multiproof_with_tx(
+            storage,
+            &tx,
+            block_number,
+            address,
+            slots,
+            hashed_storage,
+        )
+    }
+
+    fn overlay_storage_multiproof_with_tx<'cursor>(
+        storage: &'tx MorphProofsStorage<S>,
+        tx: &'cursor <MorphProofsStorage<S> as MorphProofsStore>::Tx<'tx>,
+        block_number: u64,
+        address: Address,
+        slots: &[B256],
+        hashed_storage: HashedStorage,
+    ) -> Result<StorageMultiProof, StateProofError>
+    where
+        'tx: 'cursor,
+    {
         let hashed_address = keccak256(address);
         let targets = slots.iter().map(keccak256).collect();
         let prefix_set = hashed_storage.construct_prefix_set();
@@ -232,8 +310,7 @@ where
             Default::default(),
             HashMap::from_iter([(hashed_address, hashed_storage.into_sorted())]),
         );
-        let tx = storage.ro_tx().map_err(Into::<DatabaseError>::into)?;
-        let (trie_factory, hashed_factory) = from_tx(storage, &tx, block_number);
+        let (trie_factory, hashed_factory) = from_tx(storage, tx, block_number);
         proof::StorageProof::new(trie_factory, hashed_factory.clone(), address)
             .with_hashed_cursor_factory(HashedPostStateCursorFactory::new(
                 hashed_factory,
@@ -259,6 +336,17 @@ pub trait DatabaseStateRoot<'tx, S: MorphProofsStore + 'tx + Clone>: Sized {
         post_state: HashedPostState,
     ) -> Result<B256, StateRootError>;
 
+    /// Calculate the state root for this [`HashedPostState`] while reusing an existing read
+    /// transaction.
+    fn overlay_root_with_tx<'cursor>(
+        storage: &'tx MorphProofsStorage<S>,
+        tx: &'cursor <MorphProofsStorage<S> as MorphProofsStore>::Tx<'tx>,
+        block_number: u64,
+        post_state: HashedPostState,
+    ) -> Result<B256, StateRootError>
+    where
+        'tx: 'cursor;
+
     /// Calculates the state root for this [`HashedPostState`] and returns it alongside trie
     /// updates. See [`Self::overlay_root`] for more info.
     fn overlay_root_with_updates(
@@ -267,12 +355,33 @@ pub trait DatabaseStateRoot<'tx, S: MorphProofsStore + 'tx + Clone>: Sized {
         post_state: HashedPostState,
     ) -> Result<(B256, TrieUpdates), StateRootError>;
 
+    /// Calculates the state root and trie updates while reusing an existing read transaction.
+    fn overlay_root_with_updates_with_tx<'cursor>(
+        storage: &'tx MorphProofsStorage<S>,
+        tx: &'cursor <MorphProofsStorage<S> as MorphProofsStore>::Tx<'tx>,
+        block_number: u64,
+        post_state: HashedPostState,
+    ) -> Result<(B256, TrieUpdates), StateRootError>
+    where
+        'tx: 'cursor;
+
     /// Calculates the state root for provided [`HashedPostState`] using cached intermediate nodes.
     fn overlay_root_from_nodes(
         storage: &'tx MorphProofsStorage<S>,
         block_number: u64,
         input: TrieInput,
     ) -> Result<B256, StateRootError>;
+
+    /// Calculates the state root from cached intermediate nodes while reusing an existing read
+    /// transaction.
+    fn overlay_root_from_nodes_with_tx<'cursor>(
+        storage: &'tx MorphProofsStorage<S>,
+        tx: &'cursor <MorphProofsStorage<S> as MorphProofsStore>::Tx<'tx>,
+        block_number: u64,
+        input: TrieInput,
+    ) -> Result<B256, StateRootError>
+    where
+        'tx: 'cursor;
 
     /// Calculates the state root and trie updates for provided [`HashedPostState`] using
     /// cached intermediate nodes.
@@ -281,6 +390,17 @@ pub trait DatabaseStateRoot<'tx, S: MorphProofsStore + 'tx + Clone>: Sized {
         block_number: u64,
         input: TrieInput,
     ) -> Result<(B256, TrieUpdates), StateRootError>;
+
+    /// Calculates the state root and trie updates from cached intermediate nodes while reusing an
+    /// existing read transaction.
+    fn overlay_root_from_nodes_with_updates_with_tx<'cursor>(
+        storage: &'tx MorphProofsStorage<S>,
+        tx: &'cursor <MorphProofsStorage<S> as MorphProofsStore>::Tx<'tx>,
+        block_number: u64,
+        input: TrieInput,
+    ) -> Result<(B256, TrieUpdates), StateRootError>
+    where
+        'tx: 'cursor;
 }
 
 impl<'tx, S> DatabaseStateRoot<'tx, S>
@@ -296,10 +416,22 @@ where
         block_number: u64,
         post_state: HashedPostState,
     ) -> Result<B256, StateRootError> {
+        let tx = storage.ro_tx().map_err(Into::<DatabaseError>::into)?;
+        Self::overlay_root_with_tx(storage, &tx, block_number, post_state)
+    }
+
+    fn overlay_root_with_tx<'cursor>(
+        storage: &'tx MorphProofsStorage<S>,
+        tx: &'cursor <MorphProofsStorage<S> as MorphProofsStore>::Tx<'tx>,
+        block_number: u64,
+        post_state: HashedPostState,
+    ) -> Result<B256, StateRootError>
+    where
+        'tx: 'cursor,
+    {
         let prefix_sets = post_state.construct_prefix_sets().freeze();
         let state_sorted = post_state.into_sorted();
-        let tx = storage.ro_tx().map_err(Into::<DatabaseError>::into)?;
-        let (trie_factory, hashed_factory) = from_tx(storage, &tx, block_number);
+        let (trie_factory, hashed_factory) = from_tx(storage, tx, block_number);
         StateRoot::new(
             trie_factory,
             HashedPostStateCursorFactory::new(hashed_factory, &state_sorted),
@@ -313,10 +445,22 @@ where
         block_number: u64,
         post_state: HashedPostState,
     ) -> Result<(B256, TrieUpdates), StateRootError> {
+        let tx = storage.ro_tx().map_err(Into::<DatabaseError>::into)?;
+        Self::overlay_root_with_updates_with_tx(storage, &tx, block_number, post_state)
+    }
+
+    fn overlay_root_with_updates_with_tx<'cursor>(
+        storage: &'tx MorphProofsStorage<S>,
+        tx: &'cursor <MorphProofsStorage<S> as MorphProofsStore>::Tx<'tx>,
+        block_number: u64,
+        post_state: HashedPostState,
+    ) -> Result<(B256, TrieUpdates), StateRootError>
+    where
+        'tx: 'cursor,
+    {
         let prefix_sets = post_state.construct_prefix_sets().freeze();
         let state_sorted = post_state.into_sorted();
-        let tx = storage.ro_tx().map_err(Into::<DatabaseError>::into)?;
-        let (trie_factory, hashed_factory) = from_tx(storage, &tx, block_number);
+        let (trie_factory, hashed_factory) = from_tx(storage, tx, block_number);
         StateRoot::new(
             trie_factory,
             HashedPostStateCursorFactory::new(hashed_factory, &state_sorted),
@@ -330,10 +474,22 @@ where
         block_number: u64,
         input: TrieInput,
     ) -> Result<B256, StateRootError> {
+        let tx = storage.ro_tx().map_err(Into::<DatabaseError>::into)?;
+        Self::overlay_root_from_nodes_with_tx(storage, &tx, block_number, input)
+    }
+
+    fn overlay_root_from_nodes_with_tx<'cursor>(
+        storage: &'tx MorphProofsStorage<S>,
+        tx: &'cursor <MorphProofsStorage<S> as MorphProofsStore>::Tx<'tx>,
+        block_number: u64,
+        input: TrieInput,
+    ) -> Result<B256, StateRootError>
+    where
+        'tx: 'cursor,
+    {
         let state_sorted = input.state.into_sorted();
         let nodes_sorted = input.nodes.into_sorted();
-        let tx = storage.ro_tx().map_err(Into::<DatabaseError>::into)?;
-        let (trie_factory, hashed_factory) = from_tx(storage, &tx, block_number);
+        let (trie_factory, hashed_factory) = from_tx(storage, tx, block_number);
         StateRoot::new(
             InMemoryTrieCursorFactory::new(trie_factory, &nodes_sorted),
             HashedPostStateCursorFactory::new(hashed_factory, &state_sorted),
@@ -347,10 +503,22 @@ where
         block_number: u64,
         input: TrieInput,
     ) -> Result<(B256, TrieUpdates), StateRootError> {
+        let tx = storage.ro_tx().map_err(Into::<DatabaseError>::into)?;
+        Self::overlay_root_from_nodes_with_updates_with_tx(storage, &tx, block_number, input)
+    }
+
+    fn overlay_root_from_nodes_with_updates_with_tx<'cursor>(
+        storage: &'tx MorphProofsStorage<S>,
+        tx: &'cursor <MorphProofsStorage<S> as MorphProofsStore>::Tx<'tx>,
+        block_number: u64,
+        input: TrieInput,
+    ) -> Result<(B256, TrieUpdates), StateRootError>
+    where
+        'tx: 'cursor,
+    {
         let state_sorted = input.state.into_sorted();
         let nodes_sorted = input.nodes.into_sorted();
-        let tx = storage.ro_tx().map_err(Into::<DatabaseError>::into)?;
-        let (trie_factory, hashed_factory) = from_tx(storage, &tx, block_number);
+        let (trie_factory, hashed_factory) = from_tx(storage, tx, block_number);
         StateRoot::new(
             InMemoryTrieCursorFactory::new(trie_factory, &nodes_sorted),
             HashedPostStateCursorFactory::new(hashed_factory, &state_sorted),
@@ -369,6 +537,18 @@ pub trait DatabaseStorageRoot<'tx, S: MorphProofsStore + 'tx + Clone> {
         address: Address,
         hashed_storage: HashedStorage,
     ) -> Result<B256, StorageRootError>;
+
+    /// Calculates the storage root for provided [`HashedStorage`] while reusing an existing read
+    /// transaction.
+    fn overlay_root_with_tx<'cursor>(
+        storage: &'tx MorphProofsStorage<S>,
+        tx: &'cursor <MorphProofsStorage<S> as MorphProofsStore>::Tx<'tx>,
+        block_number: u64,
+        address: Address,
+        hashed_storage: HashedStorage,
+    ) -> Result<B256, StorageRootError>
+    where
+        'tx: 'cursor;
 }
 
 impl<'tx, S> DatabaseStorageRoot<'tx, S>
@@ -385,11 +565,24 @@ where
         address: Address,
         hashed_storage: HashedStorage,
     ) -> Result<B256, StorageRootError> {
+        let tx = storage.ro_tx().map_err(Into::<DatabaseError>::into)?;
+        Self::overlay_root_with_tx(storage, &tx, block_number, address, hashed_storage)
+    }
+
+    fn overlay_root_with_tx<'cursor>(
+        storage: &'tx MorphProofsStorage<S>,
+        tx: &'cursor <MorphProofsStorage<S> as MorphProofsStore>::Tx<'tx>,
+        block_number: u64,
+        address: Address,
+        hashed_storage: HashedStorage,
+    ) -> Result<B256, StorageRootError>
+    where
+        'tx: 'cursor,
+    {
         let prefix_set = hashed_storage.construct_prefix_set().freeze();
         let state_sorted =
             HashedPostState::from_hashed_storage(keccak256(address), hashed_storage).into_sorted();
-        let tx = storage.ro_tx().map_err(Into::<DatabaseError>::into)?;
-        let (trie_factory, hashed_factory) = from_tx(storage, &tx, block_number);
+        let (trie_factory, hashed_factory) = from_tx(storage, tx, block_number);
         StorageRoot::new(
             trie_factory,
             HashedPostStateCursorFactory::new(hashed_factory, &state_sorted),

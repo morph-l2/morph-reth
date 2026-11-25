@@ -6,10 +6,12 @@ use crate::{
     backfill::{commit_canonical_batch, resolve_jade_first_block},
     db::ReferenceIndexDb,
     reconcile::rollback_suffix,
+    writer::clear_jade_first_block_number,
 };
 use alloy_primitives::B256;
 use morph_primitives::MorphPrimitives;
 use reth_chain_state::{CanonStateNotification, CanonStateNotifications};
+use reth_db_api::transaction::DbTx;
 use reth_tasks::TaskExecutor;
 use std::{
     path::{Path, PathBuf},
@@ -167,12 +169,31 @@ impl<C: CanonicalChain> ReferenceIndexRuntime<C> {
         &self,
         db: &ReferenceIndexDb,
         jade_first_block: u64,
-        finalized: Option<u64>,
         head: crate::CanonicalTip,
     ) -> Result<(), ReferenceIndexError> {
         let Some(cursor) = db.indexed_to()? else {
             return Ok(());
         };
+
+        let lowest_retained = db.lowest_indexed_block_number()?.ok_or_else(|| {
+            ReferenceIndexError::CorruptMetadata(
+                "durable cursor exists without any IndexedBlocks entries",
+            )
+        })?;
+        if lowest_retained > cursor {
+            return Err(ReferenceIndexError::CorruptMetadata(
+                "lowest IndexedBlocks entry exceeds durable cursor",
+            ));
+        }
+
+        if head.number < lowest_retained {
+            self.handle.set_phase(ReferenceIndexPhase::Repairing);
+            self.handle.metrics().reorgs_total.increment(1);
+            if jade_first_block > 0 && lowest_retained <= jade_first_block {
+                return rollback_suffix(db, None, jade_first_block, DEFAULT_BACKFILL_BATCH_BLOCKS);
+            }
+            return Err(ReferenceIndexError::ManualRebuildRequired { jade_first_block });
+        }
 
         let candidate = cursor.min(head.number);
         let indexed_hash = db.indexed_block_hash(candidate)?.ok_or_else(|| {
@@ -189,15 +210,12 @@ impl<C: CanonicalChain> ReferenceIndexRuntime<C> {
 
         self.handle.set_phase(ReferenceIndexPhase::Repairing);
         self.handle.metrics().reorgs_total.increment(1);
-        // A finalized block can never be reorged, so the rewind never needs to
-        // go below it — bounding the scan (and the retained `IndexedBlocks`
-        // breadcrumbs) instead of walking all the way back to the Jade start.
-        // Without finality yet, fall back to `jade_first_block`.
-        let rewind_floor = finalized
-            .map_or(jade_first_block, |finalized| {
-                finalized.max(jade_first_block)
-            })
-            .min(candidate);
+        // Bound the rewind by the lowest retained `IndexedBlocks` breadcrumb
+        // (floored by `jade_first_block`) rather than live canonical `finalized`.
+        // An offline or `Deferred` node catching up across an already-finalized
+        // replacement chain still retains its unpruned breadcrumbs and can rewind
+        // cleanly to its common ancestor instead of requiring a manual rebuild.
+        let rewind_floor = lowest_retained.max(jade_first_block).min(candidate);
         let mut ancestor = None;
         let mut number = candidate;
         loop {
@@ -216,9 +234,24 @@ impl<C: CanonicalChain> ReferenceIndexRuntime<C> {
             number -= 1;
         }
 
-        let ancestor =
-            ancestor.ok_or(ReferenceIndexError::ManualRebuildRequired { jade_first_block })?;
-        rollback_suffix(db, Some(ancestor), DEFAULT_BACKFILL_BATCH_BLOCKS)
+        if let Some(ancestor) = ancestor {
+            return rollback_suffix(
+                db,
+                Some(ancestor),
+                jade_first_block,
+                DEFAULT_BACKFILL_BATCH_BLOCKS,
+            );
+        }
+
+        // Pre-finality reorg touching `jade_first_block` itself: if Jade did not
+        // activate at genesis and `jade_first_block` has not been pruned, roll back
+        // all post-Jade blocks and clear `IndexedTo` + `JadeFirstBlockNumber` so the
+        // caller re-resolves Jade activation against the replacement canonical chain.
+        if jade_first_block > 0 && lowest_retained <= jade_first_block {
+            return rollback_suffix(db, None, jade_first_block, DEFAULT_BACKFILL_BATCH_BLOCKS);
+        }
+
+        Err(ReferenceIndexError::ManualRebuildRequired { jade_first_block })
     }
 
     /// Perform one synchronous reconciliation/backfill turn.
@@ -241,6 +274,36 @@ impl<C: CanonicalChain> ReferenceIndexRuntime<C> {
         let db = self.open_db()?;
         let head = self.chain.head()?;
         if head.timestamp < self.config.jade_timestamp {
+            let has_indexed_cursor = db.indexed_to()?.is_some();
+            let has_jade_first = db.jade_first_block_number()?.is_some();
+            if defer && (has_indexed_cursor || has_jade_first) {
+                self.handle.metrics().lag_blocks.set(0.0);
+                self.handle.set_phase(ReferenceIndexPhase::Deferred);
+                return Ok(());
+            }
+            if has_indexed_cursor {
+                let jade_first_block = db.jade_first_block_number()?.ok_or_else(|| {
+                    ReferenceIndexError::CorruptMetadata(
+                        "durable cursor exists without JadeFirstBlockNumber",
+                    )
+                })?;
+                let lowest_retained = db.lowest_indexed_block_number()?.ok_or_else(|| {
+                    ReferenceIndexError::CorruptMetadata(
+                        "durable cursor exists without any IndexedBlocks entries",
+                    )
+                })?;
+                self.handle.set_phase(ReferenceIndexPhase::Repairing);
+                self.handle.metrics().reorgs_total.increment(1);
+                if jade_first_block > 0 && lowest_retained <= jade_first_block {
+                    rollback_suffix(&db, None, jade_first_block, DEFAULT_BACKFILL_BATCH_BLOCKS)?;
+                } else {
+                    return Err(ReferenceIndexError::ManualRebuildRequired { jade_first_block });
+                }
+            } else if has_jade_first {
+                let tx = db.tx_mut()?;
+                clear_jade_first_block_number(&tx)?;
+                tx.commit()?;
+            }
             self.handle.metrics().lag_blocks.set(0.0);
             self.handle.set_phase(ReferenceIndexPhase::PreJade);
             return Ok(());
@@ -255,20 +318,32 @@ impl<C: CanonicalChain> ReferenceIndexRuntime<C> {
             return Ok(());
         }
 
-        let jade_first_block = match db.jade_first_block_number()? {
-            Some(block) => block,
-            None => resolve_jade_first_block(&self.chain, head, self.config.jade_timestamp)?
+        if db.indexed_to()?.is_some() {
+            let stored_jade_first = db.jade_first_block_number()?.ok_or_else(|| {
+                ReferenceIndexError::CorruptMetadata(
+                    "durable cursor exists without JadeFirstBlockNumber",
+                )
+            })?;
+            self.reconcile_cursor(&db, stored_jade_first, head)?;
+        }
+
+        let cursor = db.indexed_to()?;
+        let jade_first_block = match (cursor, db.jade_first_block_number()?) {
+            (Some(_), Some(block)) => block,
+            (Some(_), None) => {
+                return Err(ReferenceIndexError::CorruptMetadata(
+                    "durable cursor exists without JadeFirstBlockNumber",
+                ));
+            }
+            (None, _) => resolve_jade_first_block(&self.chain, head, self.config.jade_timestamp)?
                 .ok_or_else(|| {
-                    ReferenceIndexError::Other(eyre::eyre!(
-                        "Jade is active at the canonical head but its first block was not found"
-                    ))
-                })?,
+                ReferenceIndexError::Other(eyre::eyre!(
+                    "Jade is active at the canonical head but its first block was not found"
+                ))
+            })?,
         };
         let finalized = self.chain.finalized_block_number()?;
-        self.reconcile_cursor(&db, jade_first_block, finalized, head)?;
-        let start = db
-            .indexed_to()?
-            .map_or(jade_first_block, |cursor| cursor.saturating_add(1));
+        let start = cursor.map_or(jade_first_block, |cursor| cursor.saturating_add(1));
         if start > head.number {
             self.handle.metrics().lag_blocks.set(0.0);
             self.handle.set_phase(ReferenceIndexPhase::Live);
@@ -287,10 +362,63 @@ impl<C: CanonicalChain> ReferenceIndexRuntime<C> {
                 blocks.len()
             )));
         }
+
+        // Verify batch parent linkage against the durable cursor (or Jade
+        // activation boundary for the initial batch) so a TOCTOU reorg between
+        // `reconcile_cursor` and `canonical_blocks` can never splice a new
+        // branch onto an orphaned indexed prefix.
+        if let Some(cursor) = cursor {
+            let indexed_cursor_hash = db.indexed_block_hash(cursor)?.ok_or_else(|| {
+                ReferenceIndexError::CorruptMetadata(
+                    "durable cursor is missing an IndexedBlocks hash",
+                )
+            })?;
+            if blocks[0].parent_hash != indexed_cursor_hash {
+                return Err(ReferenceIndexError::Other(eyre::eyre!(
+                    "canonical chain reorged before backfill batch at {start}: parent hash {} does not match indexed cursor {cursor} ({indexed_cursor_hash})",
+                    blocks[0].parent_hash
+                )));
+            }
+        } else {
+            if blocks[0].timestamp < self.config.jade_timestamp {
+                return Err(ReferenceIndexError::Other(eyre::eyre!(
+                    "canonical chain shifted Jade activation past block {start} while reading first batch"
+                )));
+            }
+            if start > 0 {
+                let prev = start - 1;
+                let prev_hash_before = self.chain.canonical_hash(prev)?;
+                let prev_timestamp = self.chain.block_timestamp(prev)?;
+                let prev_hash_after = self.chain.canonical_hash(prev)?;
+                if prev_hash_before != Some(blocks[0].parent_hash)
+                    || prev_hash_after != Some(blocks[0].parent_hash)
+                {
+                    return Err(ReferenceIndexError::Other(eyre::eyre!(
+                        "canonical predecessor {prev} changed while reading first Jade batch at {start}"
+                    )));
+                }
+                if prev_timestamp.is_none_or(|ts| ts >= self.config.jade_timestamp) {
+                    return Err(ReferenceIndexError::Other(eyre::eyre!(
+                        "canonical chain shifted Jade activation earlier than block {start} while reading first batch"
+                    )));
+                }
+            }
+        }
+
         for (offset, block) in blocks.iter().enumerate() {
             let expected_number = start + offset as u64;
+            if block.number != expected_number {
+                return Err(ReferenceIndexError::Other(eyre::eyre!(
+                    "canonical block changed while reading backfill batch at {expected_number}"
+                )));
+            }
+            if offset > 0 && block.parent_hash != blocks[offset - 1].hash {
+                return Err(ReferenceIndexError::Other(eyre::eyre!(
+                    "canonical parent hash mismatch inside backfill batch at {expected_number}"
+                )));
+            }
             let canonical_hash = self.chain.canonical_hash(expected_number)?;
-            if block.number != expected_number || canonical_hash != Some(block.hash) {
+            if canonical_hash != Some(block.hash) {
                 return Err(ReferenceIndexError::Other(eyre::eyre!(
                     "canonical block changed while reading backfill batch at {expected_number}"
                 )));
@@ -523,27 +651,88 @@ mod tests {
     struct TestChain {
         blocks: Arc<RwLock<Vec<CanonicalBlock>>>,
         finalized: Arc<RwLock<Option<u64>>>,
+        generation: Arc<RwLock<u8>>,
     }
 
     impl TestChain {
+        fn make_hash(number: u64, generation: u8) -> B256 {
+            let mut bytes = [0u8; 32];
+            bytes[0] = generation;
+            bytes[24..].copy_from_slice(&number.to_be_bytes());
+            B256::from(bytes)
+        }
+
         fn linear(count: u64, first_timestamp: u64) -> Self {
-            let blocks = (0..count)
-                .map(|number| CanonicalBlock {
+            let mut blocks = Vec::with_capacity(count as usize);
+            let mut parent_hash = B256::ZERO;
+            for number in 0..count {
+                let hash = Self::make_hash(number, 0);
+                blocks.push(CanonicalBlock {
                     number,
-                    hash: B256::with_last_byte(number as u8),
+                    hash,
+                    parent_hash,
                     timestamp: first_timestamp + number,
                     transactions: Vec::new(),
-                })
-                .collect();
+                });
+                parent_hash = hash;
+            }
             Self {
                 blocks: Arc::new(RwLock::new(blocks)),
                 finalized: Arc::new(RwLock::new(None)),
+                generation: Arc::new(RwLock::new(0)),
             }
         }
 
+        fn push_block(&self, timestamp: u64) {
+            let mut blocks = self.blocks.write();
+            let generation = *self.generation.read();
+            let number = blocks.len() as u64;
+            let parent_hash = blocks.last().map_or(B256::ZERO, |block| block.hash);
+            let hash = Self::make_hash(number, generation);
+            blocks.push(CanonicalBlock {
+                number,
+                hash,
+                parent_hash,
+                timestamp,
+                transactions: Vec::new(),
+            });
+        }
+
         fn replace_suffix(&self, from: u64) {
-            for block in self.blocks.write().iter_mut().skip(from as usize) {
-                block.hash = B256::repeat_byte(0x80 | block.number as u8);
+            let mut generation_guard = self.generation.write();
+            *generation_guard = generation_guard.wrapping_add(1).max(1);
+            let generation = *generation_guard;
+            let mut blocks = self.blocks.write();
+            let mut parent_hash = if from == 0 {
+                B256::ZERO
+            } else {
+                blocks[from as usize - 1].hash
+            };
+            for block in blocks.iter_mut().skip(from as usize) {
+                block.parent_hash = parent_hash;
+                block.hash = Self::make_hash(block.number, generation);
+                parent_hash = block.hash;
+            }
+        }
+
+        fn replace_suffix_with_timestamps(&self, from: u64, timestamps: &[u64]) {
+            let mut generation_guard = self.generation.write();
+            *generation_guard = generation_guard.wrapping_add(1).max(1);
+            let generation = *generation_guard;
+            let mut blocks = self.blocks.write();
+            blocks.truncate(from as usize);
+            let mut parent_hash = blocks.last().map_or(B256::ZERO, |block| block.hash);
+            for (offset, &timestamp) in timestamps.iter().enumerate() {
+                let number = from + offset as u64;
+                let hash = Self::make_hash(number, generation);
+                blocks.push(CanonicalBlock {
+                    number,
+                    hash,
+                    parent_hash,
+                    timestamp,
+                    transactions: Vec::new(),
+                });
+                parent_hash = hash;
             }
         }
 
@@ -722,7 +911,7 @@ mod tests {
     }
 
     #[test]
-    fn reorg_reaching_below_finalized_is_bounded_to_a_manual_rebuild() {
+    fn reorg_reaching_below_pruned_finalized_floor_requires_manual_rebuild() {
         let dir = tempfile::tempdir().unwrap();
         let chain = TestChain::linear(10, 200);
         let config = ReferenceIndexConfig::new(dir.path(), 2818, B256::ZERO, 200);
@@ -730,11 +919,19 @@ mod tests {
         runtime.synchronize_once(false).unwrap();
         assert_eq!(handle.phase(), ReferenceIndexPhase::Live);
 
-        // Finalize block 5, then diverge a range that reaches below it. A
-        // finalized block cannot legitimately reorg, so rather than scanning all
-        // the way back to the Jade start the rewind stops at finalized and
-        // surfaces a manual rebuild instead of silently repairing corruption.
+        // Finalize block 5 and commit one more block so breadcrumbs `0..=4` are
+        // pruned from `IndexedBlocks` (raising the retained rewind floor to 5).
         chain.set_finalized(5);
+        chain.push_block(210);
+        runtime.synchronize_once(false).unwrap();
+        assert_eq!(
+            handle.db().unwrap().lowest_indexed_block_number().unwrap(),
+            Some(5)
+        );
+
+        // Now diverge below the pruned finalized floor: the common ancestor is
+        // below retained breadcrumbs, so reconciliation must surface
+        // `ManualRebuildRequired` instead of silently repairing corruption.
         chain.replace_suffix(3);
         let error = runtime.synchronize_once(false).unwrap_err();
 
@@ -743,6 +940,48 @@ mod tests {
             ReferenceIndexError::ManualRebuildRequired { .. }
         ));
         assert_eq!(handle.phase(), ReferenceIndexPhase::Unavailable);
+    }
+
+    #[test]
+    fn offline_catchup_rewinds_across_live_finalized_when_breadcrumbs_retained() {
+        let dir = tempfile::tempdir().unwrap();
+        let chain = TestChain::linear(10, 200);
+        let config = ReferenceIndexConfig::new(dir.path(), 2818, B256::ZERO, 200);
+        let (mut runtime, handle) = ReferenceIndexRuntime::new(config, chain.clone());
+        // Node indexes blocks 0..=9 on an unfinalized fork, retaining all
+        // breadcrumbs `0..=9`.
+        runtime.synchronize_once(false).unwrap();
+        assert_eq!(handle.phase(), ReferenceIndexPhase::Live);
+        assert_eq!(
+            handle.db().unwrap().lowest_indexed_block_number().unwrap(),
+            Some(0)
+        );
+
+        // While the node was offline or `Deferred`, the canonical chain reorged
+        // from block 3 and finalized block 5 on the replacement branch.
+        chain.replace_suffix(3);
+        chain.set_finalized(5);
+        chain.push_block(210);
+
+        // Because breadcrumbs `0..=4` were never pruned in our local DB, the
+        // rewind floor is derived from retained breadcrumbs rather than live
+        // canonical `finalized`, allowing a clean recovery to ancestor 2.
+        runtime.synchronize_once(false).unwrap();
+        assert_eq!(handle.phase(), ReferenceIndexPhase::Live);
+        let db = handle.db().unwrap();
+        assert_eq!(db.indexed_to().unwrap(), Some(10));
+        assert_eq!(
+            db.indexed_block_hash(5).unwrap(),
+            chain.canonical_hash(5).unwrap()
+        );
+        assert_eq!(
+            db.indexed_block_hash(10).unwrap(),
+            chain.canonical_hash(10).unwrap()
+        );
+        // After committing the replacement chain past finalized=5, breadcrumbs
+        // strictly below 5 are pruned.
+        assert!(db.indexed_block_hash(4).unwrap().is_none());
+        assert!(db.indexed_block_hash(5).unwrap().is_some());
     }
 
     #[test]
@@ -866,5 +1105,354 @@ mod tests {
         assert_eq!(handle.phase(), ReferenceIndexPhase::Deferred);
         assert_eq!(handle.db().unwrap().indexed_to().unwrap(), None);
         assert_eq!(handle.db().unwrap().indexed_block_hash(0).unwrap(), None);
+    }
+
+    #[derive(Clone, Debug)]
+    struct ReorgOnBatchReadChain {
+        inner: TestChain,
+        reorg_from: u64,
+        triggered: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl CanonicalChain for ReorgOnBatchReadChain {
+        fn head(&self) -> Result<CanonicalTip, ReferenceIndexError> {
+            self.inner.head()
+        }
+
+        fn canonical_hash(&self, number: u64) -> Result<Option<B256>, ReferenceIndexError> {
+            self.inner.canonical_hash(number)
+        }
+
+        fn block_timestamp(&self, number: u64) -> Result<Option<u64>, ReferenceIndexError> {
+            self.inner.block_timestamp(number)
+        }
+
+        fn finalized_block_number(&self) -> Result<Option<u64>, ReferenceIndexError> {
+            self.inner.finalized_block_number()
+        }
+
+        fn canonical_blocks(
+            &self,
+            range: RangeInclusive<u64>,
+        ) -> Result<Vec<CanonicalBlock>, ReferenceIndexError> {
+            if !self
+                .triggered
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                // Simulate a TOCTOU reorg occurring strictly between
+                // `reconcile_cursor` and `canonical_blocks`.
+                self.inner.replace_suffix(self.reorg_from);
+            }
+            self.inner.canonical_blocks(range)
+        }
+    }
+
+    #[test]
+    fn toctou_reorg_between_reconcile_and_batch_read_aborts_without_splicing() {
+        let dir = tempfile::tempdir().unwrap();
+        let inner = TestChain::linear(5, 200);
+        let config = ReferenceIndexConfig::new(dir.path(), 2818, B256::ZERO, 200);
+        let chain = ReorgOnBatchReadChain {
+            inner: inner.clone(),
+            reorg_from: 3,
+            // Start armed=true for initial sync, then re-arm before the second turn.
+            triggered: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        };
+        let (mut runtime, handle) = ReferenceIndexRuntime::new(config, chain.clone());
+
+        runtime.synchronize_once(false).unwrap();
+        assert_eq!(handle.phase(), ReferenceIndexPhase::Live);
+        let original_block_4 = inner.canonical_hash(4).unwrap().unwrap();
+        assert_eq!(
+            handle.db().unwrap().indexed_block_hash(4).unwrap(),
+            Some(original_block_4)
+        );
+
+        // Append block 5 on the original chain and arm the TOCTOU reorg at block 3
+        // to fire right when `canonical_blocks(5..=5)` is invoked.
+        inner.push_block(205);
+        chain
+            .triggered
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+
+        let error = runtime.synchronize_once(false).unwrap_err();
+        assert!(
+            !error.requires_manual_rebuild(),
+            "TOCTOU reorg must abort as a transient error: {error}"
+        );
+        assert!(error.to_string().contains("parent hash"));
+        // Cursor must NOT have advanced with an orphaned splice at block 5.
+        assert_eq!(handle.db().unwrap().indexed_to().unwrap(), Some(4));
+        assert_eq!(handle.db().unwrap().indexed_block_hash(5).unwrap(), None);
+        assert_eq!(
+            handle.db().unwrap().indexed_block_hash(4).unwrap(),
+            Some(original_block_4)
+        );
+
+        // The next turn reconciles the reorg from block 3 and commits the true
+        // canonical suffix cleanly.
+        runtime.synchronize_once(false).unwrap();
+        assert_eq!(handle.phase(), ReferenceIndexPhase::Live);
+        let db = handle.db().unwrap();
+        assert_eq!(db.indexed_to().unwrap(), Some(5));
+        for n in 0..=5 {
+            assert_eq!(
+                db.indexed_block_hash(n).unwrap(),
+                inner.canonical_hash(n).unwrap()
+            );
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct BrokenParentLinkChain(TestChain);
+
+    impl CanonicalChain for BrokenParentLinkChain {
+        fn head(&self) -> Result<CanonicalTip, ReferenceIndexError> {
+            self.0.head()
+        }
+
+        fn canonical_hash(&self, number: u64) -> Result<Option<B256>, ReferenceIndexError> {
+            self.0.canonical_hash(number)
+        }
+
+        fn block_timestamp(&self, number: u64) -> Result<Option<u64>, ReferenceIndexError> {
+            self.0.block_timestamp(number)
+        }
+
+        fn finalized_block_number(&self) -> Result<Option<u64>, ReferenceIndexError> {
+            self.0.finalized_block_number()
+        }
+
+        fn canonical_blocks(
+            &self,
+            range: RangeInclusive<u64>,
+        ) -> Result<Vec<CanonicalBlock>, ReferenceIndexError> {
+            let mut blocks = self.0.canonical_blocks(range)?;
+            if blocks.len() >= 2 {
+                blocks[1].parent_hash = B256::repeat_byte(0xee);
+            }
+            Ok(blocks)
+        }
+    }
+
+    #[test]
+    fn non_linked_batch_is_rejected_without_committing() {
+        let dir = tempfile::tempdir().unwrap();
+        let chain = BrokenParentLinkChain(TestChain::linear(5, 200));
+        let config = ReferenceIndexConfig::new(dir.path(), 2818, B256::ZERO, 200);
+        let (mut runtime, handle) = ReferenceIndexRuntime::new(config, chain);
+
+        let error = runtime.synchronize_once(false).unwrap_err();
+        assert!(error.to_string().contains("parent hash mismatch"));
+        assert_eq!(handle.db().unwrap().indexed_to().unwrap(), None);
+    }
+
+    #[derive(Clone, Debug)]
+    struct ShiftJadeOnFirstBatchChain {
+        inner: TestChain,
+        triggered: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl CanonicalChain for ShiftJadeOnFirstBatchChain {
+        fn head(&self) -> Result<CanonicalTip, ReferenceIndexError> {
+            self.inner.head()
+        }
+
+        fn canonical_hash(&self, number: u64) -> Result<Option<B256>, ReferenceIndexError> {
+            self.inner.canonical_hash(number)
+        }
+
+        fn block_timestamp(&self, number: u64) -> Result<Option<u64>, ReferenceIndexError> {
+            self.inner.block_timestamp(number)
+        }
+
+        fn finalized_block_number(&self) -> Result<Option<u64>, ReferenceIndexError> {
+            self.inner.finalized_block_number()
+        }
+
+        fn canonical_blocks(
+            &self,
+            range: RangeInclusive<u64>,
+        ) -> Result<Vec<CanonicalBlock>, ReferenceIndexError> {
+            if !self
+                .triggered
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                // Shift Jade activation earlier (from block 5 to block 4) right
+                // before the first batch is read.
+                self.inner
+                    .replace_suffix_with_timestamps(4, &[205, 206, 207, 208, 209, 210]);
+            }
+            self.inner.canonical_blocks(range)
+        }
+    }
+
+    #[test]
+    fn first_jade_batch_aborts_if_activation_boundary_shifts_during_read() {
+        let dir = tempfile::tempdir().unwrap();
+        // Blocks 0..=9 have timestamps 200..=209; Jade activates at 205 (block 5).
+        let inner = TestChain::linear(10, 200);
+        let chain = ShiftJadeOnFirstBatchChain {
+            inner: inner.clone(),
+            triggered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let config = ReferenceIndexConfig::new(dir.path(), 2818, B256::ZERO, 205);
+        let (mut runtime, handle) = ReferenceIndexRuntime::new(config, chain);
+
+        let error = runtime.synchronize_once(false).unwrap_err();
+        assert!(!error.requires_manual_rebuild());
+        assert_eq!(handle.db().unwrap().indexed_to().unwrap(), None);
+        assert_eq!(
+            handle.db().unwrap().jade_first_block_number().unwrap(),
+            None
+        );
+
+        // Next turn resolves the new Jade activation block (4) and syncs cleanly.
+        runtime.synchronize_once(false).unwrap();
+        assert_eq!(handle.phase(), ReferenceIndexPhase::Live);
+        let db = handle.db().unwrap();
+        assert_eq!(db.jade_first_block_number().unwrap(), Some(4));
+        assert_eq!(db.indexed_to().unwrap(), Some(9));
+        for n in 4..=9 {
+            assert_eq!(
+                db.indexed_block_hash(n).unwrap(),
+                inner.canonical_hash(n).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn pre_finality_reorg_touching_jade_first_block_rolls_back_and_re_resolves() {
+        let dir = tempfile::tempdir().unwrap();
+        // Blocks 0..=9 have timestamps 200..=209; Jade activates at 205 (block 5).
+        let chain = TestChain::linear(10, 200);
+        let config = ReferenceIndexConfig::new(dir.path(), 2818, B256::ZERO, 205);
+        let (mut runtime, handle) = ReferenceIndexRuntime::new(config, chain.clone());
+
+        runtime.synchronize_once(false).unwrap();
+        assert_eq!(handle.phase(), ReferenceIndexPhase::Live);
+        assert_eq!(
+            handle.db().unwrap().jade_first_block_number().unwrap(),
+            Some(5)
+        );
+        assert_eq!(handle.db().unwrap().indexed_to().unwrap(), Some(9));
+
+        // Pre-finality reorg replaces blocks 3..=9 so Jade now activates earlier at block 3.
+        chain.replace_suffix_with_timestamps(3, &[205, 206, 207, 208, 209, 210, 211]);
+        runtime.synchronize_once(false).unwrap();
+        assert_eq!(handle.phase(), ReferenceIndexPhase::Live);
+        let db = handle.db().unwrap();
+        assert_eq!(db.jade_first_block_number().unwrap(), Some(3));
+        assert_eq!(db.indexed_to().unwrap(), Some(9));
+        for n in 3..=9 {
+            assert_eq!(
+                db.indexed_block_hash(n).unwrap(),
+                chain.canonical_hash(n).unwrap()
+            );
+        }
+
+        // Another pre-finality reorg shifts Jade later to block 7.
+        chain.replace_suffix_with_timestamps(3, &[201, 202, 203, 204, 205, 206, 207]);
+        runtime.synchronize_once(false).unwrap();
+        assert_eq!(handle.phase(), ReferenceIndexPhase::Live);
+        assert_eq!(db.jade_first_block_number().unwrap(), Some(7));
+        assert_eq!(db.indexed_to().unwrap(), Some(9));
+        for n in 3..=6 {
+            assert_eq!(db.indexed_block_hash(n).unwrap(), None);
+        }
+        for n in 7..=9 {
+            assert_eq!(
+                db.indexed_block_hash(n).unwrap(),
+                chain.canonical_hash(n).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn pre_finality_reorg_shorter_than_old_jade_first_block_recovers() {
+        let dir = tempfile::tempdir().unwrap();
+        // Blocks 0..=9 have timestamps 200..=209; Jade activates at 205 (block 5).
+        let chain = TestChain::linear(10, 200);
+        let config = ReferenceIndexConfig::new(dir.path(), 2818, B256::ZERO, 205);
+        let (mut runtime, handle) = ReferenceIndexRuntime::new(config, chain.clone());
+
+        runtime.synchronize_once(false).unwrap();
+        assert_eq!(
+            handle.db().unwrap().jade_first_block_number().unwrap(),
+            Some(5)
+        );
+        assert_eq!(handle.db().unwrap().indexed_to().unwrap(), Some(9));
+
+        // Replacement chain activates Jade at block 3 and currently ends at block 4
+        // (`head.number < old_jade_first_block`).
+        chain.replace_suffix_with_timestamps(3, &[205, 206]);
+        runtime.synchronize_once(false).unwrap();
+
+        assert_eq!(handle.phase(), ReferenceIndexPhase::Live);
+        let db = handle.db().unwrap();
+        assert_eq!(db.jade_first_block_number().unwrap(), Some(3));
+        assert_eq!(db.indexed_to().unwrap(), Some(4));
+        for n in 3..=4 {
+            assert_eq!(
+                db.indexed_block_hash(n).unwrap(),
+                chain.canonical_hash(n).unwrap()
+            );
+        }
+        for n in 5..=9 {
+            assert_eq!(db.indexed_block_hash(n).unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn pure_revert_back_to_pre_jade_rolls_back_and_allows_reactivation() {
+        let dir = tempfile::tempdir().unwrap();
+        // Blocks 0..=9 have timestamps 200..=209; Jade activates at 205 (block 5).
+        let chain = TestChain::linear(10, 200);
+        let config = ReferenceIndexConfig::new(dir.path(), 2818, B256::ZERO, 205);
+        let (mut runtime, handle) = ReferenceIndexRuntime::new(config, chain.clone());
+
+        runtime.synchronize_once(false).unwrap();
+        assert_eq!(handle.phase(), ReferenceIndexPhase::Live);
+        assert_eq!(
+            handle.db().unwrap().jade_first_block_number().unwrap(),
+            Some(5)
+        );
+        assert_eq!(handle.db().unwrap().indexed_to().unwrap(), Some(9));
+
+        // Pure revert back to block 4 (timestamp 204 < 205: PreJade).
+        chain.truncate(5);
+
+        // Deferred turn must not mutate the index DB.
+        runtime.synchronize_once(true).unwrap();
+        assert_eq!(handle.phase(), ReferenceIndexPhase::Deferred);
+        assert_eq!(handle.db().unwrap().indexed_to().unwrap(), Some(9));
+
+        // Normal reconciliation rolls back 5..=9 and clears both metadata keys.
+        runtime.synchronize_once(false).unwrap();
+        assert_eq!(handle.phase(), ReferenceIndexPhase::PreJade);
+        let db = handle.db().unwrap();
+        assert_eq!(db.indexed_to().unwrap(), None);
+        assert_eq!(db.jade_first_block_number().unwrap(), None);
+        for n in 5..=9 {
+            assert_eq!(db.indexed_block_hash(n).unwrap(), None);
+        }
+
+        // Chain later advances past Jade again at block 6 (with pre-Jade block 5).
+        chain.push_block(204);
+        chain.push_block(205);
+        chain.push_block(206);
+        runtime.synchronize_once(false).unwrap();
+        assert_eq!(handle.phase(), ReferenceIndexPhase::Live);
+        assert_eq!(db.jade_first_block_number().unwrap(), Some(6));
+        assert_eq!(db.indexed_to().unwrap(), Some(7));
+        assert_eq!(db.indexed_block_hash(5).unwrap(), None);
+        assert_eq!(
+            db.indexed_block_hash(6).unwrap(),
+            chain.canonical_hash(6).unwrap()
+        );
+        assert_eq!(
+            db.indexed_block_hash(7).unwrap(),
+            chain.canonical_hash(7).unwrap()
+        );
     }
 }
