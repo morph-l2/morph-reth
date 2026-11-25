@@ -1,17 +1,47 @@
 use std::cmp;
 
 use alloy_eips::{BlockNumHash, eip1898::BlockWithParent};
-use reth_provider::BlockHashReader;
+use reth_db::transaction::DbTx;
+use reth_provider::{BlockHashReader, DBProvider, DatabaseProviderFactory, ProviderError};
 use tokio::time::Instant;
 use tracing::{error, info, trace};
 
 use crate::{
-    MorphProofsStorage, MorphProofsStore, ProofHistoryMetrics,
+    MorphProofsStorage, MorphProofsStorageError, MorphProofsStore, ProofHistoryMetrics,
     prune::{
         error::{MorphProofStoragePrunerResult, PrunerError, PrunerOutput},
         metrics::PrunerMetrics,
     },
 };
+
+/// Default number of blocks pruned per MDBX write transaction.
+///
+/// Each batch is its own write tx, so the per-tx overhead (page allocation, freelist mgmt,
+/// fsync at commit) amortizes over this many blocks while keeping per-tx dirty-page sets
+/// and free-page reclamation lag bounded.
+pub const DEFAULT_PRUNE_BATCH_SIZE: u64 = 2000;
+
+/// Returns Reth's persisted canonical head block number, honoring any lagging
+/// `Finish.partial_state_trie` frontier so proof-history pruning never advances past blocks
+/// that Reth could discard on an unclean shutdown.
+pub fn persisted_canonical_head<P>(provider: &P) -> Result<u64, PrunerError>
+where
+    P: DatabaseProviderFactory,
+{
+    let db_provider = provider.database_provider_ro()?;
+    let checkpoint = db_provider
+        .tx_ref()
+        .get::<reth_db::tables::StageCheckpoints>("Finish".to_string())
+        .map_err(ProviderError::from)?;
+    Ok(checkpoint
+        .map(|checkpoint| {
+            checkpoint
+                .finish_stage_checkpoint()
+                .and_then(|finish| finish.partial_state_trie())
+                .unwrap_or(checkpoint.block_number)
+        })
+        .unwrap_or_default())
+}
 
 /// Prunes the proof storage by calling `prune_earliest_state` on the storage provider.
 #[derive(Debug)]
@@ -56,9 +86,13 @@ where
     P: MorphProofsStore,
     H: BlockHashReader,
 {
-    fn run_inner(&self) -> MorphProofStoragePrunerResult {
+    fn run_inner(
+        &self,
+        max_target_block: Option<u64>,
+        mut should_stop: impl FnMut() -> bool,
+    ) -> MorphProofStoragePrunerResult {
         let tx = self.provider.ro_tx()?;
-        let Some(((earliest_block, _), (latest_block, _))) = self
+        let Some(((earliest_block, _), (latest_block, latest_hash))) = self
             .provider
             .get_earliest_block_number_with_tx(&tx)?
             .zip(self.provider.get_latest_block_number_with_tx(&tx)?)
@@ -68,12 +102,16 @@ where
         };
         drop(tx);
 
-        let target_earliest_block = self.target_earliest_block(latest_block);
+        let mut target_earliest_block = self.target_earliest_block(latest_block);
+        if let Some(cap) = max_target_block {
+            target_earliest_block = target_earliest_block.min(cap);
+        }
         info!(
             target: "trie::pruner",
             earliest_block,
             latest_block,
             target_earliest_block,
+            max_target_block,
             retention_blocks = self.retention_blocks,
             prune_batch_size = self.prune_batch_size,
             "Calculated proof storage pruning target",
@@ -83,28 +121,72 @@ where
             return Ok(PrunerOutput::default());
         }
 
+        // Refuse to prune if the proof database's tip is not on the canonical chain: otherwise
+        // pruning would advance `EarliestBlock` and stamp canonical hashes over abandoned-fork
+        // state, making recovery via unwind impossible.
+        let canonical_latest = self.block_hash_reader.block_hash(latest_block)?;
+        if canonical_latest != Some(latest_hash) {
+            return Err(PrunerError::Storage(
+                MorphProofsStorageError::BlockHashMismatch {
+                    block_number: latest_block,
+                    stored_block_hash: latest_hash,
+                    expected_block_hash: canonical_latest.unwrap_or_default(),
+                },
+            ));
+        }
+
         info!(
             target: "trie::pruner",
             from_block = earliest_block,
             to_block = target_earliest_block,
             latest_block,
             retention_blocks = self.retention_blocks,
-           "Starting pruning proof storage",
+            "Starting pruning proof storage",
         );
 
         let mut current_earliest_block = earliest_block;
         let mut prune_output = PrunerOutput {
             start_block: earliest_block,
-            end_block: target_earliest_block,
+            end_block: earliest_block,
             ..Default::default()
         };
 
-        // Prune in batches
+        // Prune in batches, checking `should_stop` and re-verifying the retention window before
+        // each batch so pending reorgs interrupt promptly and concurrent unwinds can never shrink
+        // the window below `retention_blocks`.
         while current_earliest_block < target_earliest_block {
+            if should_stop() {
+                break;
+            }
+
+            let Some((latest_now, latest_hash_now)) = self.provider.get_latest_block_number()?
+            else {
+                break;
+            };
+            let mut safe_target = self.target_earliest_block(latest_now);
+            if let Some(cap) = max_target_block {
+                safe_target = safe_target.min(cap);
+            }
+            if current_earliest_block >= safe_target {
+                break;
+            }
+            if (latest_now, latest_hash_now) != (latest_block, latest_hash) {
+                let canonical_now = self.block_hash_reader.block_hash(latest_now)?;
+                if canonical_now != Some(latest_hash_now) {
+                    return Err(PrunerError::Storage(
+                        MorphProofsStorageError::BlockHashMismatch {
+                            block_number: latest_now,
+                            stored_block_hash: latest_hash_now,
+                            expected_block_hash: canonical_now.unwrap_or_default(),
+                        },
+                    ));
+                }
+            }
+
             // Calculate the end of this batch
             let batch_end_block = cmp::min(
                 current_earliest_block.saturating_add(self.prune_batch_size),
-                target_earliest_block,
+                target_earliest_block.min(safe_target),
             );
             info!(
                 target: "trie::pruner",
@@ -225,7 +307,22 @@ where
 
     /// Runs the pruner and returns failures to command-style callers.
     pub fn try_run(&self) -> MorphProofStoragePrunerResult {
-        let result = self.run_inner();
+        self.try_run_with_abort(None, || false)
+    }
+
+    /// Runs the pruner capped at `max_target_block` (e.g., Reth's persisted canonical head).
+    pub fn try_run_up_to(&self, max_target_block: Option<u64>) -> MorphProofStoragePrunerResult {
+        self.try_run_with_abort(max_target_block, || false)
+    }
+
+    /// Runs the pruner capped at `max_target_block`, stopping cleanly between batches whenever
+    /// `should_stop()` returns `true`.
+    pub fn try_run_with_abort(
+        &self,
+        max_target_block: Option<u64>,
+        should_stop: impl FnMut() -> bool,
+    ) -> MorphProofStoragePrunerResult {
+        let result = self.run_inner(max_target_block, should_stop);
         match &result {
             Ok(_) => {
                 if let Ok(Some((earliest, _))) = self.provider.get_earliest_block_number()
@@ -528,12 +625,16 @@ mod tests {
                     let mut block_hash_reader = MockBlockHashReader::new();
                     block_hash_reader
                         .expect_block_hash()
+                        .withf(move |block_num| *block_num == 5)
+                        .returning(move |_| Ok(Some(b256(5))));
+                    block_hash_reader
+                        .expect_block_hash()
                         .withf(move |block_num| *block_num == 4)
                         .returning(move |_| Ok(Some(b256(4))));
 
                     let pruner =
                         MorphProofStoragePruner::new(store.clone(), block_hash_reader, 1, 1000);
-                    let out = pruner.run_inner().expect("pruner ok");
+                    let out = pruner.run_inner(None, || false).expect("pruner ok");
                     assert_eq!(out.start_block, 0);
                     assert_eq!(
                         out.end_block, 4,
@@ -662,7 +763,7 @@ mod tests {
 
                     let block_hash_reader = MockBlockHashReader::new();
                     let pruner = MorphProofStoragePruner::new(store, block_hash_reader, 10, 1000);
-                    let out = pruner.run_inner().expect("ok");
+                    let out = pruner.run_inner(None, || false).expect("ok");
                     assert_eq!(
                         out,
                         PrunerOutput::default(),
@@ -689,7 +790,7 @@ mod tests {
 
                     let block_hash_reader = MockBlockHashReader::new();
                     let pruner = MorphProofStoragePruner::new(store, block_hash_reader, 1, 1000);
-                    let out = pruner.run_inner().expect("ok");
+                    let out = pruner.run_inner(None, || false).expect("ok");
                     assert_eq!(
                         out,
                         PrunerOutput::default(),
@@ -726,8 +827,94 @@ mod tests {
                     // Require retention_blocks=2 (or greater) so interval < retention_blocks
                     let block_hash_reader = MockBlockHashReader::new();
                     let pruner = MorphProofStoragePruner::new(store, block_hash_reader, 2, 1000);
-                    let out = pruner.run_inner().expect("ok");
+                    let out = pruner.run_inner(None, || false).expect("ok");
                     assert_eq!(out, PrunerOutput::default(), "no pruning should occur");
+                }
+
+                #[tokio::test]
+                async fn pruner_refuses_to_prune_off_fork_tip() {
+                    let dir = TempDir::new().unwrap();
+                    let store: MorphProofsStorage<Arc<$storage>> =
+                        MorphProofsStorage::from(Arc::new($storage::new(dir.path()).expect("env")));
+                    store.set_earliest_block_number(0, B256::ZERO).unwrap();
+
+                    let mut parent = B256::ZERO;
+                    for n in 1..=4 {
+                        store
+                            .store_trie_updates(block(n, parent), BlockStateDiff::default())
+                            .unwrap();
+                        parent = b256(n);
+                    }
+
+                    // Canonical chain disagrees on tip block 4's hash.
+                    let mut block_hash_reader = MockBlockHashReader::new();
+                    block_hash_reader
+                        .expect_block_hash()
+                        .withf(|block_num| *block_num == 4)
+                        .returning(|_| Ok(Some(B256::repeat_byte(0xFF))));
+
+                    let pruner =
+                        MorphProofStoragePruner::new(store.clone(), block_hash_reader, 1, 1000);
+                    let err = pruner.try_run().unwrap_err();
+                    assert!(matches!(
+                        err,
+                        PrunerError::Storage(MorphProofsStorageError::BlockHashMismatch {
+                            block_number: 4,
+                            ..
+                        })
+                    ));
+                    assert_eq!(
+                        store.get_earliest_block_number().unwrap(),
+                        Some((0, B256::ZERO))
+                    );
+                }
+
+                #[tokio::test]
+                async fn pruner_caps_target_at_max_target_block_and_respects_abort() {
+                    let dir = TempDir::new().unwrap();
+                    let store: MorphProofsStorage<Arc<$storage>> =
+                        MorphProofsStorage::from(Arc::new($storage::new(dir.path()).expect("env")));
+                    store.set_earliest_block_number(0, B256::ZERO).unwrap();
+
+                    let mut parent = B256::ZERO;
+                    for n in 1..=5 {
+                        store
+                            .store_trie_updates(block(n, parent), BlockStateDiff::default())
+                            .unwrap();
+                        parent = b256(n);
+                    }
+
+                    // Cap at persisted head = 2 (below unconstrained target 5 - 1 = 4) and stop
+                    // after the first 1-block batch.
+                    let mut block_hash_reader = MockBlockHashReader::new();
+                    block_hash_reader
+                        .expect_block_hash()
+                        .returning(|n| Ok(Some(b256(n))));
+
+                    let pruner =
+                        MorphProofStoragePruner::new(store.clone(), block_hash_reader, 1, 1);
+                    let mut polls = 0u32;
+                    let out = pruner
+                        .try_run_with_abort(Some(2), || {
+                            polls += 1;
+                            polls > 1
+                        })
+                        .unwrap();
+                    assert_eq!(out.start_block, 0);
+                    assert_eq!(out.end_block, 1);
+                    assert_eq!(
+                        store.get_earliest_block_number().unwrap(),
+                        Some((1, b256(1)))
+                    );
+
+                    // Completing without abort advances only to the persisted cap (2), not 4.
+                    let out = pruner.try_run_up_to(Some(2)).unwrap();
+                    assert_eq!(out.start_block, 1);
+                    assert_eq!(out.end_block, 2);
+                    assert_eq!(
+                        store.get_earliest_block_number().unwrap(),
+                        Some((2, b256(2)))
+                    );
                 }
             }
         };

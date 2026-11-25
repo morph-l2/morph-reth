@@ -8,14 +8,16 @@ use morph_chainspec::{MorphChainSpec, MorphChainSpecParser};
 use morph_node::MorphNode;
 use morph_proofs::{
     DEFAULT_PROOFS_HISTORY_WINDOW, InitializationJob, MdbxProofsStorage, MorphProofStoragePruner,
-    MorphProofsStorage, MorphProofsStore, ProofDbIdentity,
+    MorphProofsStorage, MorphProofsStore, ProofDbIdentity, RethTrieStorageLayout,
+    persisted_canonical_head, proof::state_root_at,
 };
 use reth_chainspec::EthChainSpec;
 use reth_cli_commands::common::{AccessRights, Environment, EnvironmentArgs};
 use reth_cli_runner::CliRunner;
 use reth_ethereum_cli::ExtendedCommand;
 use reth_provider::{
-    BlockNumReader, BlockReader, DBProvider, DatabaseProviderFactory, TransactionVariant,
+    BlockHashReader, BlockNumReader, BlockReader, DBProvider, DatabaseProviderFactory,
+    HeaderProvider, StorageSettingsCache, TransactionVariant,
 };
 use tracing::info;
 
@@ -92,6 +94,8 @@ impl InitCommand {
             return Ok(());
         }
 
+        let trie_layout =
+            RethTrieStorageLayout::from_is_v2(provider_factory.cached_storage_settings().is_v2());
         let provider = provider_factory
             .database_provider_ro()?
             .disable_long_read_transaction_safety();
@@ -101,10 +105,11 @@ impl InitCommand {
             path = %path.display(),
             block_number = chain_info.best_number,
             block_hash = ?chain_info.best_hash,
+            ?trie_layout,
             "Initializing proof history from canonical state"
         );
 
-        InitializationJob::new(storage, provider.into_tx())
+        InitializationJob::new(storage, provider.into_tx(), trie_layout)
             .run(chain_info.best_number, chain_info.best_hash)?;
 
         info!(target: "morph::proofs", "Proof history initialized");
@@ -152,9 +157,10 @@ impl PruneCommand {
             .unwrap_or_else(|| data_dir.data_dir().join("historical-proofs"));
         let storage = open_storage(&path, &self.env.chain)?;
 
+        let persisted_head = persisted_canonical_head(&provider_factory)?;
         let output =
             MorphProofStoragePruner::new(storage, provider_factory, self.window, self.batch_size)
-                .try_run()?;
+                .try_run_up_to(Some(persisted_head))?;
         info!(target: "morph::proofs", ?output, "Proof-history pruning completed");
         Ok(())
     }
@@ -186,7 +192,7 @@ impl UnwindCommand {
             .unwrap_or_else(|| data_dir.data_dir().join("historical-proofs"));
         let storage = open_storage(&path, &self.env.chain)?;
 
-        let (Some((earliest, _)), Some((latest, _))) = (
+        let (Some((earliest, earliest_hash)), Some((latest, _))) = (
             storage.get_earliest_block_number()?,
             storage.get_latest_block_number()?,
         ) else {
@@ -206,10 +212,44 @@ impl UnwindCommand {
         let block = provider_factory
             .recovered_block(self.target.into(), TransactionVariant::NoHash)?
             .ok_or_else(|| eyre::eyre!("canonical block {} not found", self.target))?;
+        let parent_number = self.target - 1;
+        let canonical_parent_hash = block.parent_hash();
+
+        // Verify that proof history at `target - 1` actually matches the canonical parent before
+        // stamping `canonical_parent_hash` onto `ProofWindow::LatestBlock`.
+        if let Some(stored_parent_hash) = storage.get_block_hash(parent_number)? {
+            if stored_parent_hash != canonical_parent_hash {
+                return Err(eyre::eyre!(
+                    "proof history at parent block {parent_number} ({stored_parent_hash}) does not match canonical parent ({canonical_parent_hash}); unwind to an earlier common ancestor or re-initialize"
+                ));
+            }
+        } else {
+            // Legacy proof DB without a `BlockHashes` row at `parent_number`: verify both the
+            // earliest anchor and the reconstructed state root at `parent_number`.
+            let canonical_earliest_hash = provider_factory.block_hash(earliest)?;
+            if canonical_earliest_hash != Some(earliest_hash) {
+                return Err(eyre::eyre!(
+                    "proof history earliest block {earliest} ({earliest_hash}) does not match canonical hash ({canonical_earliest_hash:?}); please re-initialize"
+                ));
+            }
+            let parent_header = provider_factory
+                .header_by_number(parent_number)?
+                .ok_or_else(|| eyre::eyre!("canonical header {parent_number} not found"))?;
+            let stored_state_root = state_root_at(&storage, parent_number)?;
+            if stored_state_root != parent_header.state_root() {
+                return Err(eyre::eyre!(
+                    "proof history state root at parent block {parent_number} ({stored_state_root}) does not match canonical state root ({}); unwind to an earlier common ancestor or re-initialize",
+                    parent_header.state_root()
+                ));
+            }
+        }
+
         info!(
             target: "morph::proofs",
             block_number = block.number(),
             block_hash = ?block.hash(),
+            parent_number,
+            parent_hash = ?canonical_parent_hash,
             "Unwinding proof history"
         );
         storage.unwind_history(block.block_with_parent())?;

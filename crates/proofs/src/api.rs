@@ -111,6 +111,9 @@ pub trait MorphProofsStore: Send + Sync + Debug {
     /// Get the latest block number and hash that has been stored
     fn get_latest_block_number(&self) -> MorphProofsStorageResult<Option<(u64, B256)>>;
 
+    /// Get the stored block hash for `block_number`, if recorded in the proof database.
+    fn get_block_hash(&self, block_number: u64) -> MorphProofsStorageResult<Option<B256>>;
+
     /// Get the earliest block number and hash visible to an existing read transaction.
     fn get_earliest_block_number_with_tx<'tx, 'db>(
         &self,

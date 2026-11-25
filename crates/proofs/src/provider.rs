@@ -149,16 +149,20 @@ impl<'a, Storage: MorphProofsStore + Clone> StateRootProvider
     for MorphProofsStateProviderRef<'a, Storage>
 {
     fn state_root(&self, state: HashedPostState) -> ProviderResult<B256> {
-        Ok(StateRoot::overlay_root(
+        let tx = self.ensure_tx()?;
+        Ok(StateRoot::overlay_root_with_tx(
             self.storage,
+            &tx,
             self.block_number,
             state,
         )?)
     }
 
     fn state_root_from_nodes(&self, input: TrieInput) -> ProviderResult<B256> {
-        Ok(StateRoot::overlay_root_from_nodes(
+        let tx = self.ensure_tx()?;
+        Ok(StateRoot::overlay_root_from_nodes_with_tx(
             self.storage,
+            &tx,
             self.block_number,
             input,
         )?)
@@ -168,8 +172,10 @@ impl<'a, Storage: MorphProofsStore + Clone> StateRootProvider
         &self,
         state: HashedPostState,
     ) -> ProviderResult<(B256, TrieUpdates)> {
-        Ok(StateRoot::overlay_root_with_updates(
+        let tx = self.ensure_tx()?;
+        Ok(StateRoot::overlay_root_with_updates_with_tx(
             self.storage,
+            &tx,
             self.block_number,
             state,
         )?)
@@ -179,8 +185,10 @@ impl<'a, Storage: MorphProofsStore + Clone> StateRootProvider
         &self,
         input: TrieInput,
     ) -> ProviderResult<(B256, TrieUpdates)> {
-        Ok(StateRoot::overlay_root_from_nodes_with_updates(
+        let tx = self.ensure_tx()?;
+        Ok(StateRoot::overlay_root_from_nodes_with_updates_with_tx(
             self.storage,
+            &tx,
             self.block_number,
             input,
         )?)
@@ -191,7 +199,8 @@ impl<'a, Storage: MorphProofsStore + Clone> StorageRootProvider
     for MorphProofsStateProviderRef<'a, Storage>
 {
     fn storage_root(&self, address: Address, storage: HashedStorage) -> ProviderResult<B256> {
-        StorageRoot::overlay_root(self.storage, self.block_number, address, storage)
+        let tx = self.ensure_tx()?;
+        StorageRoot::overlay_root_with_tx(self.storage, &tx, self.block_number, address, storage)
             .map_err(|err| ProviderError::Database(err.into()))
     }
 
@@ -201,8 +210,10 @@ impl<'a, Storage: MorphProofsStore + Clone> StorageRootProvider
         slot: B256,
         storage: HashedStorage,
     ) -> ProviderResult<StorageProof> {
-        proof::StorageProof::overlay_storage_proof(
+        let tx = self.ensure_tx()?;
+        proof::StorageProof::overlay_storage_proof_with_tx(
             self.storage,
+            &tx,
             self.block_number,
             address,
             slot,
@@ -217,8 +228,10 @@ impl<'a, Storage: MorphProofsStore + Clone> StorageRootProvider
         slots: &[B256],
         storage: HashedStorage,
     ) -> ProviderResult<StorageMultiProof> {
-        proof::StorageProof::overlay_storage_multiproof(
+        let tx = self.ensure_tx()?;
+        proof::StorageProof::overlay_storage_multiproof_with_tx(
             self.storage,
+            &tx,
             self.block_number,
             address,
             slots,
@@ -360,7 +373,7 @@ mod tests {
 
         assert_eq!(
             format!("{provider:?}"),
-            "MorphProofsStateProviderRef { storage: InMemoryProofsStorage { inner: RwLock { data: InMemoryStorageInner { account_branches: {}, storage_branches: {}, hashed_accounts: {}, hashed_storages: {}, trie_updates: {}, post_states: {}, earliest_block: None, anchor_block: None } } }, block_number: 42 }"
+            "MorphProofsStateProviderRef { storage: InMemoryProofsStorage { inner: RwLock { data: InMemoryStorageInner { account_branches: {}, storage_branches: {}, hashed_accounts: {}, hashed_storages: {}, trie_updates: {}, post_states: {}, earliest_block: None, anchor_block: None, block_hashes: {} } } }, block_number: 42 }"
         );
     }
 
@@ -397,5 +410,152 @@ mod tests {
             hashed_state.storages[&hashed_address].storage[&hashed_slot],
             U256::ZERO
         );
+    }
+
+    #[test]
+    fn state_and_storage_root_providers_reuse_pinned_tx_across_prune() {
+        use std::sync::Arc;
+
+        use alloy_eips::{NumHash, eip1898::BlockWithParent};
+
+        use crate::{BlockStateDiff, MdbxProofsStorage};
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(MdbxProofsStorage::new(dir.path()).unwrap());
+        let genesis_hash = B256::repeat_byte(0x01);
+        let address = Address::repeat_byte(0x22);
+        let hashed_address = keccak256(address);
+        let slot = B256::repeat_byte(0x33);
+        let hashed_slot = keccak256(slot);
+
+        let account_b0 = Account {
+            nonce: 1,
+            balance: U256::from(100),
+            bytecode_hash: None,
+        };
+        let state_b0 = HashedPostState::default()
+            .with_accounts([(hashed_address, Some(account_b0))])
+            .with_storages([(
+                hashed_address,
+                HashedStorage::from_iter([(hashed_slot, U256::from(10))]),
+            )]);
+        storage
+            .set_initial_state_anchor(BlockNumHash::new(0, genesis_hash))
+            .unwrap();
+        let (root_b0, updates_b0) =
+            StateRoot::overlay_root_with_updates(&storage, 0, state_b0).unwrap();
+        let storage_root_b0 = StorageRoot::overlay_root(
+            &storage,
+            0,
+            address,
+            HashedStorage::from_iter([(hashed_slot, U256::from(10))]),
+        )
+        .unwrap();
+        storage
+            .store_hashed_accounts(vec![(hashed_address, Some(account_b0))])
+            .unwrap();
+        storage
+            .store_hashed_storages(hashed_address, vec![(hashed_slot, U256::from(10))])
+            .unwrap();
+        storage
+            .store_account_branches(
+                updates_b0
+                    .account_nodes
+                    .into_iter()
+                    .map(|(p, n)| (p, Some(n)))
+                    .collect(),
+            )
+            .unwrap();
+        for (addr, st) in updates_b0.storage_tries {
+            storage
+                .store_storage_branches(
+                    addr,
+                    st.storage_nodes
+                        .into_iter()
+                        .map(|(p, n)| (p, Some(n)))
+                        .collect(),
+                )
+                .unwrap();
+        }
+        storage.commit_initial_state().unwrap();
+
+        // Commit block 1 mutating account & slot so pruning to block 1 deletes block 0 versions.
+        let account_b1 = Account {
+            nonce: 2,
+            balance: U256::from(999),
+            bytecode_hash: None,
+        };
+        let state_b1 = HashedPostState::default()
+            .with_accounts([(hashed_address, Some(account_b1))])
+            .with_storages([(
+                hashed_address,
+                HashedStorage::from_iter([(hashed_slot, U256::from(99))]),
+            )]);
+        let (root_b1, updates_b1) =
+            StateRoot::overlay_root_with_updates(&storage, 0, state_b1.clone()).unwrap();
+        assert_ne!(root_b0, root_b1);
+        let block_one =
+            BlockWithParent::new(genesis_hash, NumHash::new(1, B256::repeat_byte(0x02)));
+        storage
+            .store_trie_updates(
+                block_one,
+                BlockStateDiff {
+                    sorted_trie_updates: updates_b1.into_sorted(),
+                    sorted_post_state: state_b1.into_sorted(),
+                },
+            )
+            .unwrap();
+
+        // Pin a provider to block 0 before pruning advances `earliest` to block 1.
+        let pinned_tx = storage.ro_tx().unwrap();
+        let provider = MorphProofsStateProviderRef::new_with_tx(
+            Box::<NoopProvider>::default(),
+            &storage,
+            0,
+            pinned_tx,
+        );
+
+        storage.prune_earliest_state(block_one).unwrap();
+        assert_eq!(storage.get_earliest_block_number().unwrap().unwrap().0, 1);
+
+        // All 7 StateRootProvider + StorageRootProvider methods must observe block 0's snapshot.
+        assert_eq!(
+            provider.state_root(HashedPostState::default()).unwrap(),
+            root_b0
+        );
+        assert_eq!(
+            provider
+                .state_root_with_updates(HashedPostState::default())
+                .unwrap()
+                .0,
+            root_b0
+        );
+        assert_eq!(
+            provider
+                .state_root_from_nodes(TrieInput::default())
+                .unwrap(),
+            root_b0
+        );
+        assert_eq!(
+            provider
+                .state_root_from_nodes_with_updates(TrieInput::default())
+                .unwrap()
+                .0,
+            root_b0
+        );
+        assert_eq!(
+            provider
+                .storage_root(address, HashedStorage::default())
+                .unwrap(),
+            storage_root_b0
+        );
+        let storage_proof = provider
+            .storage_proof(address, slot, HashedStorage::default())
+            .unwrap();
+        assert_eq!(storage_proof.value, U256::from(10));
+        let storage_multiproof = provider
+            .storage_multiproof(address, &[slot], HashedStorage::default())
+            .unwrap();
+        assert_eq!(storage_multiproof.root, storage_root_b0);
     }
 }

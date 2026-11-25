@@ -14,7 +14,7 @@ pub use api::{
 };
 
 pub mod initialize;
-pub use initialize::InitializationJob;
+pub use initialize::{InitializationJob, RethTrieStorageLayout};
 
 /// Default proof-history retention window: 7 days at a one-second block time.
 pub const DEFAULT_PROOFS_HISTORY_WINDOW: u64 = 604_800;
@@ -59,6 +59,6 @@ pub use error::{MorphProofsStorageError, MorphProofsStorageResult};
 
 mod prune;
 pub use prune::{
-    MorphProofStoragePruner, MorphProofStoragePrunerResult, MorphProofStoragePrunerTask,
-    PrunerError, PrunerOutput,
+    DEFAULT_PRUNE_BATCH_SIZE, MorphProofStoragePruner, MorphProofStoragePrunerResult,
+    MorphProofStoragePrunerTask, PrunerError, PrunerOutput, persisted_canonical_head,
 };
