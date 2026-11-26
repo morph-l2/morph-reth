@@ -19,7 +19,13 @@ async fn peer_pool_reaches_node_before_first_block() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     // Built separately so they are not connected until the transaction is pending.
-    let (mut sequencers, wallet) = TestNodeBuilder::new().build().await?;
+    // Match production CLI defaults (`startup_sync_state_idle = false`) so the test
+    // exercises `MorphNetworkBuilder`'s start-up sync toggle rather than the E2E
+    // harness's `startup_sync_state_idle = true` shortcut.
+    let (mut sequencers, wallet) = TestNodeBuilder::new()
+        .with_startup_sync_state_idle(false)
+        .build()
+        .await?;
     let (mut rpcs, _) = TestNodeBuilder::new().build().await?;
     let mut sequencer = sequencers.pop().unwrap();
     let mut rpc = rpcs.pop().unwrap();

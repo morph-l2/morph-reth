@@ -3,9 +3,10 @@
 use crate::MorphEthApiError;
 use crate::eth::receipt::MorphReceiptConverter;
 use crate::types::{MorphRpcReceipt, MorphRpcTransaction, MorphTransactionRequest};
+use alloy_primitives::U256;
 use alloy_rpc_types_eth::Header as RpcHeader;
 use eyre::Result;
-use morph_chainspec::MorphChainSpec;
+use morph_chainspec::{MORPH_DEFAULT_PRIORITY_FEE, MorphChainSpec};
 use morph_evm::MorphEvmConfig;
 use morph_primitives::{MorphHeader, MorphPrimitives};
 use reth_node_api::{FullNodeComponents, NodeTypes};
@@ -14,7 +15,7 @@ use reth_provider::ChainSpecProvider;
 use reth_rpc::EthApi;
 use reth_rpc_convert::{RpcConvert, RpcConverter, RpcTypes};
 use reth_rpc_eth_api::{
-    EthApiTypes, RpcNodeCore, RpcNodeCoreExt,
+    EthApiTypes, FromEthApiError, RpcNodeCore, RpcNodeCoreExt,
     helpers::{
         EthApiSpec, EthBlocks, EthFees, EthState, EthSubscriptions, EthTransactions, LoadBlock,
         LoadFee, LoadPendingBlock, LoadState, LoadTransaction, SpawnBlocking, Trace,
@@ -256,6 +257,32 @@ where
     #[inline]
     fn fee_history_cache(&self) -> &FeeHistoryCache<reth_provider::ProviderHeader<N::Provider>> {
         self.inner.eth_api.fee_history_cache()
+    }
+
+    /// Suggests a priority fee using the single-sequencer L2 algorithm
+    /// ([`GasPriceOracle::op_suggest_tip_cap`]).
+    ///
+    /// Upstream `GasPriceOracle::suggest_tip_cap` pushes `U256::ZERO` for every empty block
+    /// and scans up to `2 * max_block_history` (2,048) blocks against a 1,024-entry LRU cache.
+    /// On Morph L2, where empty blocks are frequent, that caused `eth_maxPriorityFeePerGas` to
+    /// collapse to `0x0` (making `MORPH_DEFAULT_PRIORITY_FEE` dead code) and risked full LRU
+    /// thrashing on quiet networks. Inspecting only the latest block keeps suggestions O(1),
+    /// skips L1 message transactions, enforces the configured floor (defaulting to
+    /// [`MORPH_DEFAULT_PRIORITY_FEE`]), and scales up by 10% above the median tip when a block
+    /// reaches gas capacity.
+    async fn suggested_priority_fee(&self) -> Result<U256, Self::Error>
+    where
+        Self: 'static,
+    {
+        let min_suggested_fee = self
+            .gas_oracle()
+            .config()
+            .default_suggested_fee
+            .unwrap_or_else(|| U256::from(MORPH_DEFAULT_PRIORITY_FEE));
+        self.gas_oracle()
+            .op_suggest_tip_cap(min_suggested_fee)
+            .await
+            .map_err(Self::Error::from_eth_err)
     }
 }
 

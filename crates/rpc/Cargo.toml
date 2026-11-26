@@ -33,6 +33,7 @@ reth-rpc-server-types.workspace = true
 reth-metrics.workspace = true
 metrics.workspace = true
 reth-evm = { workspace = true, features = ["std", "witness"] }
+reth-execution-types.workspace = true
 reth-provider.workspace = true
 reth-storage-api.workspace = true
 reth-tasks.workspace = true
@@ -59,6 +60,7 @@ serde.workspace = true
 derive_more.workspace = true
 tokio.workspace = true
 evm2 = { workspace = true, features = ["std"] }
+evm2-inspectors = { workspace = true, features = ["std"] }
 
 # Error handling
 thiserror.workspace = true

@@ -27,7 +27,9 @@ use reth_primitives_traits::{
     BlockTy, GotExpected, HeaderTy, SealedBlock, SealedHeader,
     transaction::error::InvalidTransactionError,
 };
-use reth_storage_api::{BlockReaderIdExt, StateProvider as _, StateProviderBox, StateProviderFactory};
+use reth_storage_api::{
+    BlockReaderIdExt, StateProvider as _, StateProviderBox, StateProviderFactory,
+};
 use reth_transaction_pool::{
     EthPoolTransaction, EthTransactionValidator, PoolTransaction, TransactionOrigin,
     TransactionValidationOutcome, TransactionValidator, error::InvalidPoolTransactionError,
@@ -459,7 +461,9 @@ where
         // MorphTx payloads are rejected without paying for DB / account / authority reads.
         if is_morph_tx {
             let stateless_res = match transaction.consensus_ref().into_inner() {
-                MorphTxEnvelope::Morph(signed) => validate_morph_tx_stateless(signed.tx(), hardfork),
+                MorphTxEnvelope::Morph(signed) => {
+                    validate_morph_tx_stateless(signed.tx(), hardfork)
+                }
                 _ => Err(MorphTxError::InvalidTokenId),
             };
             if let Err(err) = stateless_res {
@@ -707,12 +711,7 @@ where
         transactions
             .into_iter()
             .map(|(origin, tx)| {
-                self.validate_one_with_snapshot(
-                    origin,
-                    tx,
-                    &snapshot,
-                    Some(&mut token_validator),
-                )
+                self.validate_one_with_snapshot(origin, tx, &snapshot, Some(&mut token_validator))
             })
             .collect()
     }
@@ -781,9 +780,10 @@ fn morph_tx_validation_outcome<Tx: EthPoolTransaction>(
     err: MorphTxValidationError<String>,
 ) -> TransactionValidationOutcome<Tx> {
     match err {
-        MorphTxValidationError::State(err) => {
-            TransactionValidationOutcome::Error(*transaction.hash(), Box::new(std::io::Error::other(err)))
-        }
+        MorphTxValidationError::State(err) => TransactionValidationOutcome::Error(
+            *transaction.hash(),
+            Box::new(std::io::Error::other(err)),
+        ),
         MorphTxValidationError::Invalid(err) => {
             TransactionValidationOutcome::Invalid(transaction, err.into())
         }
@@ -865,7 +865,10 @@ mod tests {
         let token_account = ExtendedAccount::new(0, U256::ZERO)
             .with_bytecode(Bytes::copy_from_slice(runtime))
             .extend_storage([(storage_key(token_balance_key(payer)), token_balance)]);
-        [(L2_TOKEN_REGISTRY_ADDRESS, registry), (token, token_account)]
+        [
+            (L2_TOKEN_REGISTRY_ADDRESS, registry),
+            (token, token_account),
+        ]
     }
 
     fn head_at(number: u64, timestamp: u64, gas_limit: u64) -> MorphHeader {
@@ -1044,13 +1047,15 @@ mod tests {
         client.add_account(SIGNER, ExtendedAccount::new(0, U256::ZERO));
 
         // Cap at 1_000_000 wei; tx budget is 21_000 * 100 = 2_100_000 wei > cap.
-        let validator =
-            validator_at_head(client, head_at(1, 2_000_000_000, 30_000_000), 1_000_000);
+        let validator = validator_at_head(client, head_at(1, 2_000_000_000, 30_000_000), 1_000_000);
         let tx = pooled_morph_tx(0, 1, 21_000, 100, U256::ZERO, U256::ZERO);
         let outcome = validator.validate_one(TransactionOrigin::Local, tx);
         assert!(matches!(
             outcome,
-            TransactionValidationOutcome::Invalid(_, InvalidPoolTransactionError::ExceedsFeeCap { .. })
+            TransactionValidationOutcome::Invalid(
+                _,
+                InvalidPoolTransactionError::ExceedsFeeCap { .. }
+            )
         ));
     }
 

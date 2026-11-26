@@ -221,6 +221,9 @@ pub struct TestNodeBuilder {
     desired_gas_limit: Option<u64>,
     debug_tip: Option<B256>,
     trusted_peer: Option<String>,
+    http_api: Option<RpcModuleSelection>,
+    minimal_protocol_basefee: u64,
+    startup_sync_state_idle: Option<bool>,
     morph_args: Option<MorphArgs>,
 }
 
@@ -248,6 +251,9 @@ impl TestNodeBuilder {
             desired_gas_limit: None,
             debug_tip: None,
             trusted_peer: None,
+            http_api: None,
+            minimal_protocol_basefee: morph_chainspec::MORPH_BASE_FEE,
+            startup_sync_state_idle: None,
             morph_args: None,
         }
     }
@@ -316,6 +322,62 @@ impl TestNodeBuilder {
         self
     }
 
+    /// Override an account's storage slot in the test genesis.
+    pub fn with_account_storage(mut self, address: Address, slot: U256, value: U256) -> Self {
+        let alloc = self
+            .genesis_json
+            .get_mut("alloc")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("test genesis alloc must be an object");
+        let address_lower = address.to_string().to_ascii_lowercase();
+        let key = alloc
+            .keys()
+            .find(|existing| existing.eq_ignore_ascii_case(&address_lower))
+            .cloned()
+            .unwrap_or(address_lower);
+        let entry = alloc
+            .entry(key)
+            .or_insert_with(|| serde_json::json!({ "balance": "0x0" }));
+        let entry = entry
+            .as_object_mut()
+            .expect("test genesis account entry must be an object");
+        let storage = entry
+            .entry("storage")
+            .or_insert_with(|| serde_json::json!({}));
+        let storage = storage
+            .as_object_mut()
+            .expect("test genesis account storage must be an object");
+        storage.insert(
+            format!("{slot:#066x}"),
+            serde_json::json!(format!("{value:#066x}")),
+        );
+        self
+    }
+
+    /// Override the configured HTTP RPC modules (`--http.api`).
+    pub fn with_http_api(mut self, http_api: RpcModuleSelection) -> Self {
+        self.http_api = Some(http_api);
+        self
+    }
+
+    /// Override the txpool minimal protocol base fee, as `--txpool.minimal-protocol-fee` would.
+    ///
+    /// Defaults to [`morph_chainspec::MORPH_BASE_FEE`] to match the `morph-reth` CLI.
+    pub fn with_minimal_protocol_basefee(mut self, fee: u64) -> Self {
+        self.minimal_protocol_basefee = fee;
+        self
+    }
+
+    /// Override `--debug.startup-sync-state-idle` on the test node.
+    ///
+    /// Upstream `reth-e2e-test-utils` defaults this to `true` in tests, whereas
+    /// production `morph-reth` defaults it to `false`. Set to `false` to exercise
+    /// the production start-up sync state.
+    pub fn with_startup_sync_state_idle(mut self, idle: bool) -> Self {
+        self.startup_sync_state_idle = Some(idle);
+        self
+    }
+
     /// Override the maximum pool-transaction payload bytes included in a block.
     ///
     /// Restricted to single-node setups.
@@ -345,8 +407,14 @@ impl TestNodeBuilder {
                     self.num_nodes
                 ));
             }
-            let (node, wallet) =
-                launch_test_node_with_args(Arc::new(chain_spec), self.is_dev, args).await?;
+            let (node, wallet) = launch_test_node_with_args(
+                Arc::new(chain_spec),
+                self.is_dev,
+                self.minimal_protocol_basefee,
+                args,
+                self.http_api,
+            )
+            .await?;
             return Ok((vec![node], wallet));
         }
 
@@ -356,6 +424,9 @@ impl TestNodeBuilder {
         let desired_gas_limit = self.desired_gas_limit;
         let debug_tip = self.debug_tip;
         let trusted_peer = self.trusted_peer;
+        let http_api = self.http_api;
+        let minimal_protocol_basefee = self.minimal_protocol_basefee;
+        let startup_sync_state_idle = self.startup_sync_state_idle;
         reth_e2e_test_utils::E2ETestSetupBuilder::<MorphNode>::new_with_attributes_generator(
             self.num_nodes,
             Arc::new(chain_spec),
@@ -364,8 +435,15 @@ impl TestNodeBuilder {
         .with_node_config_modifier(move |mut config| {
             config.builder.gas_limit = desired_gas_limit;
             config.debug.tip = debug_tip;
+            config.txpool.minimal_protocol_basefee = minimal_protocol_basefee;
+            if let Some(idle) = startup_sync_state_idle {
+                config.debug.startup_sync_state_idle = idle;
+            }
             if let Some(ref enode) = trusted_peer {
                 config.network.trusted_peers = vec![enode.parse().expect("valid trusted enode")];
+            }
+            if let Some(ref http_api) = http_api {
+                config.rpc.http_api = Some(http_api.clone());
             }
             config.set_dev(is_dev)
         })
@@ -384,7 +462,9 @@ impl TestNodeBuilder {
 async fn launch_test_node_with_args(
     chain_spec: Arc<morph_chainspec::MorphChainSpec>,
     is_dev: bool,
+    minimal_protocol_basefee: u64,
     args: MorphArgs,
+    http_api: Option<RpcModuleSelection>,
 ) -> eyre::Result<(MorphTestNode, Wallet)> {
     use reth_chainspec::EthChainSpec;
 
@@ -396,16 +476,17 @@ async fn launch_test_node_with_args(
         },
         ..NetworkArgs::default()
     };
-    let node_config = NodeConfig::new(chain_spec.clone())
+    let mut node_config = NodeConfig::new(chain_spec.clone())
         .with_network(network)
         .with_unused_ports()
         .with_rpc(
             RpcServerArgs::default()
                 .with_unused_ports()
                 .with_http()
-                .with_http_api(RpcModuleSelection::All),
+                .with_http_api(http_api.unwrap_or(RpcModuleSelection::All)),
         )
         .set_dev(is_dev);
+    node_config.txpool.minimal_protocol_basefee = minimal_protocol_basefee;
     let node = MorphNode::new(args);
     let tree_config = TreeConfig::default().with_cross_block_cache_size(1024 * 1024);
     let span = span!(Level::INFO, "node", idx = 0);

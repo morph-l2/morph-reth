@@ -89,7 +89,7 @@ use crate::block::DefaultMorphReceiptBuilder;
 pub use crate::block::{MorphBlockExecutor, MorphTxResult, morph_invalid_tx_error};
 use morph_chainspec::MorphChainSpec;
 
-pub use morph_revm::{MorphBlockEnv, MorphEvmEnv, MorphEvmTypes};
+pub use morph_revm::{MorphBlockEnv, MorphEvmEnv, MorphEvmTypes, MorphInvalidTransaction};
 
 /// Morph EVM configuration and block executor factory.
 ///

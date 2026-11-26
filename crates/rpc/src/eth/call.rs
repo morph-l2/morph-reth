@@ -1,4 +1,4 @@
-//! Morph `eth_call` / `eth_estimateGas` overrides.
+//! Morph `eth_call` / `eth_estimateGas` / `eth_simulateV1` overrides.
 //!
 //! [`Call::caller_gas_allowance`] is overridden so `eth_estimateGas` caps
 //! gas by `balance − value − l1_fee` (ETH path) or the fee token balance
@@ -16,42 +16,66 @@
 //! 3. Retry at `max_gas_limit` on revert / gas-too-high whenever
 //!    `highest_gas_limit < max_gas_limit`, covering EIP-1559 and MorphTx
 //!    requests whose legacy `gasPrice` field is absent.
+//!
+//! [`EthCall::simulate_v1`] is overridden so `eth_simulateV1` disables fee
+//! charging (including Morph's non-zero L1 data fee) when `validation: false`
+//! and passes each transaction's real EIP-2718 encoding when `validation: true`
+//! so Curie `commit + blob` (and pre-Curie calldata) L1 fees are accurately
+//! charged and validated.
 
 use crate::MorphEthApiError;
 use crate::eth::{MorphEthApi, MorphNodeCore};
+use alloy_consensus::BlockHeader;
+use alloy_eips::eip2718::{Encodable2718, WithEncoded};
 use alloy_network::TransactionBuilder;
-use alloy_primitives::{Address, TxKind, U256, U512};
-use alloy_rpc_types_eth::state::EvmOverrides;
+use alloy_primitives::{Address, B256, TxKind, U256, U512};
+use alloy_rpc_types_eth::{
+    BlockId,
+    simulate::{SimBlock, SimulatePayload, SimulatedBlock},
+    state::EvmOverrides,
+};
 use evm2::{
     EvmFeatures, TxResult,
-    evm::{CacheDB, Db},
-    interpreter::InstrStop,
+    bytecode::Bytecode,
+    evm::{AccountInfo, CacheDB, Db},
+    interpreter::{InstrStop, Word},
     registry::HandlerError,
 };
+use evm2_inspectors::transfer::TransferInspector;
 use morph_chainspec::{MorphChainSpec, MorphHardforks};
 use morph_revm::{L1BlockInfo, MorphEvmEnv, MorphTxExt, TokenFeeInfo};
-use reth_chainspec::MIN_TRANSACTION_GAS;
-use reth_errors::ProviderError;
+use reth_chainspec::{EthChainSpec, EthereumHardforks, MIN_TRANSACTION_GAS};
+use reth_errors::{ProviderError, RethError};
 use reth_evm::{
-    ConfigureEvm, Database, Evm, EvmEnv, EvmEnvFor, EvmTypesFor, TransactionEnvMut, TxEnvFor,
+    BlockExecutionError, BundleState, ConfigureEvm, Database, Evm, EvmEnv, EvmEnvFor, EvmTypesFor,
+    TransactionEnvMut, TxEnvFor,
     database::StateProviderDatabase,
+    execute::{
+        BlockBuilder, BlockBuilderOutcome, BlockExecutor, BlockTransactionResult,
+        map_database_error,
+    },
 };
+use reth_execution_types::BundleSource;
+use reth_primitives_traits::NodePrimitives;
 use reth_provider::ChainSpecProvider;
 use reth_rpc_convert::{RpcConvert, RpcTxReq};
 use reth_rpc_eth_api::{
-    AsEthApiError, EthApiTypes, FromEthApiError, FromEvmError, IntoEthApiError, RpcNodeCore,
+    AsEthApiError, EthApiTypes, FromEthApiError, FromEvmError, IntoEthApiError, RpcBlock,
+    RpcNodeCore,
     helpers::{
-        Call, EthCall,
+        Call, EthCall, LoadBlock, LoadPendingBlock, SpawnBlocking,
+        call::SimulatedBlocksResult,
         estimate::{EstimateCall, update_estimated_gas_range},
     },
 };
 use reth_rpc_eth_types::{
     EthApiError, RpcInvalidTransactionError,
-    cache::db::{apply_block_overrides, apply_state_overrides},
+    cache::db::{apply_block_overrides, apply_state_overrides, apply_state_overrides_with_state},
     error::api::{FromEvmHalt, FromRevert},
+    simulate::{self, EthSimulateError, SimulatedState},
 };
 use reth_rpc_server_types::constants::gas_oracle::{CALL_STIPEND_GAS, ESTIMATE_GAS_ERROR_RATIO};
-use reth_storage_api::EvmStateProvider;
+use reth_storage_api::{EvmStateProvider, StateProvider, noop::NoopProvider};
 use reth_tasks::cancel::is_cancelled;
 use tracing::trace;
 
@@ -63,6 +87,396 @@ where
         reth_rpc_convert::RpcConvert<Primitives = N::Primitives, Error = EthApiError, Evm = N::Evm>,
     MorphEthApiError: reth_rpc_eth_types::error::FromEvmError<N::Evm>,
 {
+    async fn simulate_v1(
+        &self,
+        payload: SimulatePayload<RpcTxReq<<Self::RpcConvert as RpcConvert>::Network>>,
+        block: Option<BlockId>,
+    ) -> SimulatedBlocksResult<Self::NetworkTypes, Self::Error> {
+        if payload.block_state_calls.len() > self.max_simulate_blocks() as usize {
+            return Err(EthApiError::other(EthSimulateError::TooManyBlocks).into());
+        }
+
+        let block = block.unwrap_or_default();
+
+        let SimulatePayload {
+            block_state_calls,
+            trace_transfers,
+            validation,
+            return_full_transactions,
+        } = payload;
+
+        if block_state_calls.is_empty() {
+            return Err(EthApiError::InvalidParams(String::from("calls are empty.")).into());
+        }
+
+        let permit = self
+            .acquire_owned_blocking_io()
+            .await
+            .map_err(|_| EthApiError::InternalEthError)?;
+
+        let base_block = self
+            .recovered_block(block)
+            .await?
+            .ok_or_else(|| EthApiError::other(EthSimulateError::BlockNotFound { block }))?;
+        let parent = base_block.sealed_header().clone();
+        let max_simulate_blocks = self.max_simulate_blocks();
+        let state_at = if block.is_pending() {
+            block
+        } else {
+            parent.hash().into()
+        };
+
+        self.spawn_with_state_at_block(state_at, move |this, db| {
+            let _permit = permit;
+            let state_provider = db.db.into_inner().into_inner().0;
+            let mut db = CacheDB::new(Db::new(StateProviderDatabase::new(
+                (&state_provider).into_evm_state_provider(),
+            )));
+            let mut parent = parent;
+            let mut simulation_state = this
+                .compute_state_root_for_eth_simulate()
+                .then(SimulatedState::default);
+
+            let chain_id = this.provider().chain_spec().chain_id();
+
+            let block_state_calls = simulate::sanitize_chain(
+                block_state_calls,
+                &parent,
+                chain_id,
+                max_simulate_blocks,
+            )?;
+
+            let mut blocks: Vec<SimulatedBlock<RpcBlock<Self::NetworkTypes>>> =
+                Vec::with_capacity(block_state_calls.len());
+
+            let call_gas_limit = this.call_gas_limit();
+            let mut remaining_call_gas_limit = (call_gas_limit > 0).then_some(call_gas_limit);
+
+            for block in block_state_calls {
+                let SimBlock {
+                    block_overrides,
+                    state_overrides,
+                    calls,
+                } = block;
+
+                let attributes = this
+                    .pending_env_builder()
+                    .pending_env_attributes(&parent, block_overrides.as_ref())
+                    .map_err(Self::Error::from_eth_err)?;
+
+                let mut evm_env = this
+                    .evm_config()
+                    .next_evm_env(&parent, &attributes)
+                    .map_err(RethError::other)
+                    .map_err(Self::Error::from_eth_err)?;
+
+                // Always disable EIP-3607
+                evm_env.version_mut().features.remove(EvmFeatures::EIP3607);
+
+                if !validation || !evm_env.version().feature(EvmFeatures::EIP8037) {
+                    evm_env.version_mut().tx_gas_limit_cap = u64::MAX;
+                }
+
+                if !validation {
+                    // If not explicitly required, disable nonce check, basefee check, and
+                    // fee charging (including Morph's non-zero L1 data fee and token fees)
+                    // so zero-balance callers succeed and no phantom fees are debited/credited.
+                    evm_env
+                        .version_mut()
+                        .features
+                        .remove(EvmFeatures::NONCE_CHECK);
+                    evm_env
+                        .version_mut()
+                        .features
+                        .remove(EvmFeatures::BASE_FEE_CHECK);
+                    evm_env
+                        .version_mut()
+                        .features
+                        .remove(EvmFeatures::FEE_CHARGE);
+                    evm_env.block_env_mut().basefee = U256::ZERO;
+                }
+
+                evm_env.block_env_mut().prevrandao = U256::ZERO;
+                if !this
+                    .provider()
+                    .chain_spec()
+                    .is_paris_active_at_block(evm_env.block_env().number.to())
+                {
+                    evm_env.block_env_mut().difficulty = parent.difficulty();
+                }
+
+                if let Some(block_overrides) = block_overrides {
+                    if let Some(gas_limit_override) = block_overrides.gas_limit
+                        && gas_limit_override > evm_env.block_env().gas_limit.to::<u64>()
+                        && gas_limit_override > this.call_gas_limit()
+                    {
+                        return Err(EthApiError::other(EthSimulateError::GasLimitReached).into());
+                    }
+                    apply_block_overrides(block_overrides, &mut db, &mut evm_env);
+                }
+                if let Some(ref state_overrides) = state_overrides {
+                    let mut changes = simulation_state.as_ref().map(|_| BundleState::default());
+                    apply_state_overrides_with_state(
+                        state_overrides.clone(),
+                        &mut db,
+                        changes.as_mut(),
+                    )
+                    .map_err(Self::Error::from_eth_err)?;
+                    if let Some(simulation_state) = simulation_state.as_mut()
+                        && let Some(changes) = changes
+                    {
+                        simulation_state
+                            .extend(&state_provider, &changes)
+                            .map_err(Self::Error::from_eth_err)?;
+                    }
+                }
+
+                let chain_id = evm_env.chain_id();
+                let build_bal = this
+                    .provider()
+                    .chain_spec()
+                    .is_amsterdam_active_at_timestamp(evm_env.block_env().timestamp.to::<u64>());
+
+                let ctx = this
+                    .evm_config()
+                    .context_for_next_block(&parent, attributes)
+                    .map_err(RethError::other)
+                    .map_err(Self::Error::from_eth_err)?;
+                let map_err = |e: EthApiError| -> Self::Error {
+                    match e.as_simulate_error() {
+                        Some(sim_err) => Self::Error::from_eth_err(EthApiError::other(sim_err)),
+                        None => Self::Error::from_eth_err(e),
+                    }
+                };
+
+                // EIP-7708 already emits transfer logs: https://eips.ethereum.org/EIPS/eip-7708
+                let trace_transfers =
+                    trace_transfers && !evm_env.version().feature(EvmFeatures::EIP7708);
+                let mut evm = this.evm_config().evm_with_env(&mut db, evm_env.clone());
+                if trace_transfers {
+                    evm.set_inspector(TransferInspector::new(false).with_logs(true));
+                }
+                let mut builder = this
+                    .evm_config()
+                    .create_block_builder(evm, evm_env, &parent, ctx);
+                if build_bal {
+                    builder.executor_mut().enable_block_access_list_builder();
+                }
+
+                if let Some(ref state_overrides) = state_overrides {
+                    simulate::apply_precompile_overrides(state_overrides, builder.evm_mut())
+                        .map_err(|e| Self::Error::from_eth_err(EthApiError::other(e)))?;
+                }
+
+                let (result, results) = execute_simulated_transactions(
+                    builder,
+                    &*state_provider,
+                    calls,
+                    &mut remaining_call_gas_limit,
+                    chain_id,
+                    validation,
+                    simulation_state.as_mut(),
+                    this.converter(),
+                )
+                .map_err(map_err)?;
+
+                db.commit_source(&BundleSource(&result.execution_state));
+                let simulated_header = result.block.clone_sealed_header();
+                db.insert_block_hash(
+                    &U256::from(simulated_header.number()),
+                    &simulated_header.hash(),
+                );
+                parent = simulated_header;
+
+                let block =
+                    simulate::build_simulated_block::<Self::Error, _, EvmTypesFor<Self::Evm>>(
+                        result.block,
+                        results,
+                        return_full_transactions.into(),
+                        this.converter(),
+                    )?;
+
+                blocks.push(block);
+            }
+
+            Ok(blocks)
+        })
+        .await
+    }
+}
+
+/// Adapter exposing [`Evm::account_info`] as a [`Database`] for [`simulate::resolve_transaction`].
+struct EvmAccountDb<'a, E>(&'a mut E);
+
+impl<E: Evm> Database for EvmAccountDb<'_, E> {
+    type Error = BlockExecutionError;
+
+    fn get_account(&mut self, address: &Address) -> Result<Option<AccountInfo>, Self::Error> {
+        self.0.account_info(address)
+    }
+
+    fn get_code_by_hash(&mut self, code_hash: &B256) -> Result<Bytecode, Self::Error> {
+        self.0
+            .state_db_mut()
+            .get_code_by_hash(code_hash)
+            .map_err(map_database_error)
+    }
+
+    fn get_storage(&mut self, address: &Address, key: &Word) -> Result<Word, Self::Error> {
+        self.0
+            .state_db_mut()
+            .get_storage(address, key)
+            .map_err(map_database_error)
+    }
+
+    fn get_block_hash(&mut self, number: &Word) -> Result<B256, Self::Error> {
+        self.0
+            .state_db_mut()
+            .get_block_hash(number)
+            .map_err(map_database_error)
+    }
+}
+
+/// Executes simulated transactions, matching upstream `reth_rpc_eth_types::simulate::execute_transactions`
+/// while preserving each transaction's real EIP-2718 encoding when `validation == true` so Morph charges
+/// full Curie `commit + blob` (or pre-Curie calldata) L1 data fees.
+#[expect(clippy::too_many_arguments, clippy::type_complexity)]
+fn execute_simulated_transactions<S, T, EvmTypes>(
+    mut builder: S,
+    state_provider: impl StateProvider,
+    calls: Vec<RpcTxReq<T::Network>>,
+    remaining_call_gas_limit: &mut Option<u64>,
+    chain_id: u64,
+    validation: bool,
+    simulation_state: Option<&mut SimulatedState>,
+    converter: &T,
+) -> Result<(BlockBuilderOutcome<S::Primitives>, Vec<TxResult<EvmTypes>>), EthApiError>
+where
+    S: BlockBuilder<
+            Primitives: NodePrimitives<SignedTx: Encodable2718>,
+            Executor: BlockExecutor<Evm: Evm<EvmTypes = EvmTypes>>,
+        >,
+    T: RpcConvert<Primitives = S::Primitives>,
+    EvmTypes: evm2::EvmTypes,
+{
+    if is_cancelled() {
+        return Err(EthApiError::InternalEthError);
+    }
+    builder.apply_pre_execution_changes()?;
+
+    let mut results = Vec::with_capacity(calls.len());
+    let mut cumulative_tx_gas_used: u64 = 0;
+    let mut block_regular_gas_used: u64 = 0;
+    let mut block_state_gas_used: u64 = 0;
+    let block_gas_limit = builder.evm_env().block_env().gas_limit.to::<u64>();
+    let is_amsterdam = builder.evm_env().version().feature(EvmFeatures::EIP8037);
+    let tx_gas_limit_cap = builder.evm_env().version().tx_gas_limit_cap;
+    for mut call in calls {
+        if is_cancelled() {
+            return Err(EthApiError::InternalEthError);
+        }
+        let block_gas_remaining = if is_amsterdam {
+            let regular_available_gas = block_gas_limit.saturating_sub(block_regular_gas_used);
+            let state_available_gas = block_gas_limit.saturating_sub(block_state_gas_used);
+            if regular_available_gas >= tx_gas_limit_cap {
+                state_available_gas
+            } else {
+                regular_available_gas.min(state_available_gas)
+            }
+        } else {
+            block_gas_limit.saturating_sub(cumulative_tx_gas_used)
+        };
+        let mut default_gas_limit = block_gas_remaining;
+
+        if let Some(gas_limit) = call.as_ref().gas_limit()
+            && gas_limit > block_gas_remaining
+        {
+            return Err(EthApiError::other(EthSimulateError::BlockGasLimitExceeded));
+        }
+
+        if let Some(remaining_call_gas_limit) = *remaining_call_gas_limit {
+            if let Some(gas_limit) = call.as_ref().gas_limit() {
+                if gas_limit > remaining_call_gas_limit {
+                    call.as_mut().set_gas_limit(remaining_call_gas_limit);
+                }
+            } else {
+                default_gas_limit = default_gas_limit.min(remaining_call_gas_limit);
+            }
+        }
+
+        let block_base_fee = builder.evm_env().block_base_fee();
+        let disable_nonce_check = !builder
+            .evm_env()
+            .version()
+            .feature(EvmFeatures::NONCE_CHECK);
+        let mut account_db = EvmAccountDb(builder.evm_mut());
+        let tx = simulate::resolve_transaction(
+            call,
+            default_gas_limit,
+            block_base_fee,
+            chain_id,
+            disable_nonce_check,
+            &mut account_db,
+            converter,
+        )?;
+        // When `validation == true`, pass the real EIP-2718 encoding so Morph's L1
+        // fee calculation charges the full commit + blob (Curie) or calldata
+        // (pre-Curie) fee. When `validation == false`, fee charging is disabled
+        // (`!EvmFeatures::FEE_CHARGE`), so an empty envelope avoids wasted encoding.
+        let encoded = if validation {
+            tx.encoded_2718().into()
+        } else {
+            Default::default()
+        };
+        let tx = WithEncoded::new(encoded, tx);
+
+        let mut tx_regular_gas_used = 0;
+        let gas_output = builder.execute_transaction_with_result_closure(tx, |output| {
+            let output = &output.result().result;
+            tx_regular_gas_used = output.execution_gas_spent();
+            results.push(output.clone())
+        })?;
+
+        // The transfer tracer keeps the transaction's logs, with the synthetic transfer logs
+        // among them, outside the EVM's own logs.
+        // SAFETY: `TransferInspector` has no lifetime parameters.
+        if let Some(logs) = unsafe {
+            builder
+                .evm_mut()
+                .with_inspector(|inspector: &mut TransferInspector| inspector.take_logs())
+        } && let Some(result) = results.last_mut()
+        {
+            result.logs = logs;
+        }
+
+        let gas_used = gas_output.tx_gas_used();
+        if let Some(remaining_call_gas_limit) = remaining_call_gas_limit.as_mut() {
+            if gas_used > *remaining_call_gas_limit {
+                return Err(EthApiError::other(EthSimulateError::GasLimitReached));
+            }
+            *remaining_call_gas_limit -= gas_used;
+        }
+
+        cumulative_tx_gas_used = cumulative_tx_gas_used.saturating_add(gas_used);
+        block_regular_gas_used = block_regular_gas_used.saturating_add(tx_regular_gas_used);
+        block_state_gas_used = block_state_gas_used.saturating_add(gas_output.state_gas_used());
+    }
+
+    let result = if let Some(simulation_state) = simulation_state {
+        builder.finish_with_state_root(&state_provider, |output| {
+            simulation_state
+                .extend(&state_provider, &output.state)
+                .map_err(BlockExecutionError::other)?;
+            state_provider
+                .state_root_with_updates(simulation_state.hashed_state().clone())
+                .map(Some)
+                .map_err(BlockExecutionError::other)
+        })?
+    } else {
+        builder.finish(NoopProvider::default(), None)?
+    };
+
+    Ok((result, results))
 }
 
 impl<N, Rpc> EstimateCall for MorphEthApi<N, Rpc>

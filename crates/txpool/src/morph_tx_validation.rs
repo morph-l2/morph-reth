@@ -262,10 +262,7 @@ pub(crate) mod tests {
     }
 
     /// Registry storage entries for an active 1:1 call-mode fee token (`balance_slot == 0`).
-    pub(crate) fn call_mode_registry_storage(
-        token_id: u16,
-        token: Address,
-    ) -> [(U256, U256); 5] {
+    pub(crate) fn call_mode_registry_storage(token_id: u16, token: Address) -> [(U256, U256); 5] {
         let mut key = [0u8; 32];
         key[30..32].copy_from_slice(&token_id.to_be_bytes());
         let base = compute_mapping_slot(U256::from(151), &key);
@@ -472,7 +469,10 @@ pub(crate) mod tests {
         let mut db = EmptyDB::default();
 
         let err = validate_morph_tx(&mut db, &input).unwrap_err();
-        assert_eq!(err, MorphTxValidationError::Invalid(MorphTxError::InvalidTokenId));
+        assert_eq!(
+            err,
+            MorphTxValidationError::Invalid(MorphTxError::InvalidTokenId)
+        );
     }
 
     #[test]
@@ -560,7 +560,8 @@ pub(crate) mod tests {
         assert_eq!(
             err,
             MorphTxValidationError::Invalid(MorphTxError::ForkNotActive {
-                reason: "MorphTx version 2 is not yet active (celadon fork not reached)".to_string(),
+                reason: "MorphTx version 2 is not yet active (celadon fork not reached)"
+                    .to_string(),
             })
         );
 

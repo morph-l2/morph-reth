@@ -507,7 +507,12 @@ mod tests {
         }
     }
 
-    fn token_fee_tx(nonce: u64, token_id: u16, value: U256, gas_limit: u64) -> MorphPooledTransaction {
+    fn token_fee_tx(
+        nonce: u64,
+        token_id: u16,
+        value: U256,
+        gas_limit: u64,
+    ) -> MorphPooledTransaction {
         let tx = TxMorph {
             chain_id: 2818,
             nonce,
@@ -520,13 +525,19 @@ mod tests {
             fee_limit: U256::ZERO,
             ..Default::default()
         };
-        let envelope = MorphTxEnvelope::Morph(Signed::new_unhashed(tx, Signature::test_signature()));
+        let envelope =
+            MorphTxEnvelope::Morph(Signed::new_unhashed(tx, Signature::test_signature()));
         let recovered = Recovered::new_unchecked(envelope, SIGNER);
         let len = recovered.encode_2718_len();
         MorphPooledTransaction::new(recovered, len)
     }
 
-    fn legacy_tx(nonce: u64, gas_limit: u64, gas_price: u128, value: U256) -> MorphPooledTransaction {
+    fn legacy_tx(
+        nonce: u64,
+        gas_limit: u64,
+        gas_price: u128,
+        value: U256,
+    ) -> MorphPooledTransaction {
         let tx = TxLegacy {
             chain_id: Some(2818),
             nonce,
@@ -536,7 +547,8 @@ mod tests {
             value,
             input: Bytes::new(),
         };
-        let envelope = MorphTxEnvelope::Legacy(Signed::new_unhashed(tx, Signature::test_signature()));
+        let envelope =
+            MorphTxEnvelope::Legacy(Signed::new_unhashed(tx, Signature::test_signature()));
         let recovered = Recovered::new_unchecked(envelope, SIGNER);
         let len = recovered.encode_2718_len();
         MorphPooledTransaction::new(recovered, len)
@@ -561,11 +573,14 @@ mod tests {
         }
         db.insert_account_info(
             &token,
-            AccountInfo::default().with_code(Bytecode::new_legacy(Bytes::from_static(
-                BALANCE_OF_RUNTIME,
-            ))),
+            AccountInfo::default()
+                .with_code(Bytecode::new_legacy(Bytes::from_static(BALANCE_OF_RUNTIME))),
         );
-        db.insert_account_storage(&token, &token_balance_key(SIGNER), &U256::from(token_balance));
+        db.insert_account_storage(
+            &token,
+            &token_balance_key(SIGNER),
+            &U256::from(token_balance),
+        );
     }
 
     #[test]
@@ -750,7 +765,7 @@ mod tests {
         let p_initial = make_provider(3 * TX_TOKEN_BUDGET, &head0);
         let validator = crate::MorphTransactionValidator::new(
             EthTransactionValidatorBuilder::new(
-                p_initial.clone(),
+                p_initial,
                 MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone()),
             )
             .disable_balance_check()
@@ -784,7 +799,8 @@ mod tests {
         // At judged block (head0) balance dropped to 0, but at canonical head (head1) balance
         // recovered to 1*budget: tx0 must be removed, tx1 must survive parked in queued!
         struct TwoBlockSource {
-            states: HashMap<B256, MockEthProvider<MorphPrimitives, morph_chainspec::MorphChainSpec>>,
+            states:
+                HashMap<B256, MockEthProvider<MorphPrimitives, morph_chainspec::MorphChainSpec>>,
             head: SealedHeader<MorphHeader>,
         }
         impl FeeStateSource<MorphPrimitives> for TwoBlockSource {
@@ -813,7 +829,7 @@ mod tests {
         };
 
         let sealed_block0 = reth_primitives_traits::RecoveredBlock::new_unhashed(
-            morph_primitives::Block::new(head0.clone(), Default::default()),
+            morph_primitives::Block::new(head0, Default::default()),
             Vec::new(),
         );
         let chain = Arc::new(reth_provider::Chain::new(
@@ -847,13 +863,20 @@ mod tests {
         }
         impl Database for CountingDb {
             type Error = std::convert::Infallible;
-            fn get_account(&mut self, address: &Address) -> Result<Option<AccountInfo>, Self::Error> {
+            fn get_account(
+                &mut self,
+                address: &Address,
+            ) -> Result<Option<AccountInfo>, Self::Error> {
                 Ok(DynDatabase::get_account(&mut self.inner, address).unwrap())
             }
             fn get_code_by_hash(&mut self, code_hash: &B256) -> Result<Bytecode, Self::Error> {
                 Ok(DynDatabase::get_code_by_hash(&mut self.inner, code_hash).unwrap())
             }
-            fn get_storage(&mut self, address: &Address, index: &U256) -> Result<U256, Self::Error> {
+            fn get_storage(
+                &mut self,
+                address: &Address,
+                index: &U256,
+            ) -> Result<U256, Self::Error> {
                 *self.reads.entry(*address).or_default() += 1;
                 Ok(DynDatabase::get_storage(&mut self.inner, address, index).unwrap())
             }

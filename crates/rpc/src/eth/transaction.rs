@@ -13,7 +13,7 @@ use reth_rpc_convert::{
 };
 use reth_rpc_eth_types::EthApiError;
 
-use morph_primitives::{MorphTxEnvelope, TxMorph};
+use morph_primitives::{MorphTxEnvelope, TxMorph, transaction::morph_transaction::MAX_MEMO_LENGTH};
 use morph_revm::{MorphAuthorization, MorphEvmEnv, MorphTxEnv};
 use reth_evm::EvmEnv;
 
@@ -130,6 +130,18 @@ impl TryIntoTxEnv<Recovered<MorphTxEnv>, MorphEvmEnv> for MorphTransactionReques
             || is_nonzero_reference(reference.as_ref())
             || memo.as_ref().is_some_and(|m| !m.is_empty());
 
+        // Match geth's `ToMessage` / `DoEstimateGas`: when `maxFeePerGas` is omitted and
+        // `maxPriorityFeePerGas` is explicitly `0` (with no legacy `gasPrice`), treat the
+        // request as zero-priced — identical to omitting both or passing `(0, 0)` — rather
+        // than letting `normalize_transaction_request` price it at `base_fee + 0` and
+        // reject zero-balance callers with `insufficient funds for l1 fee`.
+        if inner.gas_price.is_none()
+            && inner.max_fee_per_gas.is_none()
+            && inner.max_priority_fee_per_gas == Some(0)
+        {
+            inner.max_fee_per_gas = Some(0);
+        }
+
         let tx_type = inner.minimal_tx_type();
         let fees = normalize_transaction_request(&mut inner, evm_env).map_err(EthApiError::from)?;
         let kind = inner.to.unwrap_or(TxKind::Create);
@@ -178,13 +190,26 @@ impl TryIntoTxEnv<Recovered<MorphTxEnv>, MorphEvmEnv> for MorphTransactionReques
             ..Default::default()
         };
         if is_morph_tx {
-            tx_env.fee_token_id = match fee_token_id {
+            let parsed_fee_token_id = match fee_token_id {
                 Some(id) => Some(
                     u16::try_from(id.to::<u64>())
                         .map_err(|_| EthApiError::InvalidParams("invalid token".to_string()))?,
                 ),
                 None => None,
             };
+            if memo.as_ref().is_some_and(|m| m.len() > MAX_MEMO_LENGTH) {
+                return Err(EthApiError::InvalidParams(
+                    "memo exceeds maximum length of 64 bytes".to_string(),
+                ));
+            }
+            if parsed_fee_token_id.unwrap_or(0) == 0
+                && fee_limit.is_some_and(|limit| limit > U256::ZERO)
+            {
+                return Err(EthApiError::InvalidParams(
+                    "MorphTx cannot have FeeLimit when FeeTokenID is 0".to_string(),
+                ));
+            }
+            tx_env.fee_token_id = parsed_fee_token_id;
             tx_env.fee_limit = fee_limit;
             tx_env.reference = reference;
             tx_env.memo = memo;
@@ -1652,5 +1677,106 @@ mod tests {
         // = min(500_000_000, 3_000_000_000 - 1_000_000_000) + 1_000_000_000
         // = 500_000_000 + 1_000_000_000 = 1_500_000_000
         assert_eq!(rpc_tx.effective_gas_price, Some(1_500_000_000));
+    }
+
+    #[test]
+    fn try_into_tx_env_zero_tip_without_max_fee_is_zero_priced() {
+        let evm_env = create_evm_env(true);
+
+        // Omitting `maxFeePerGas` while passing `maxPriorityFeePerGas: 0` must produce
+        // a zero-priced EIP-1559 TxEnv (matching geth's `ToMessage` / `DoEstimateGas`).
+        let req = MorphTransactionRequest {
+            inner: TransactionRequest {
+                from: Some(address!("0000000000000000000000000000000000000001")),
+                to: Some(address!("0000000000000000000000000000000000000002").into()),
+                max_priority_fee_per_gas: Some(0),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let tx_env = req.try_into_tx_env(&evm_env).unwrap();
+        assert_eq!(tx_env.gas_price, 0);
+        assert_eq!(tx_env.gas_priority_fee, Some(0));
+
+        // Explicit positive `maxFeePerGas` with `maxPriorityFeePerGas: 0` must keep the cap.
+        let req_with_cap = MorphTransactionRequest {
+            inner: TransactionRequest {
+                from: Some(address!("0000000000000000000000000000000000000001")),
+                to: Some(address!("0000000000000000000000000000000000000002").into()),
+                max_fee_per_gas: Some(2_000_000_000),
+                max_priority_fee_per_gas: Some(0),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let tx_env_with_cap = req_with_cap.try_into_tx_env(&evm_env).unwrap();
+        assert_eq!(tx_env_with_cap.gas_price, 2_000_000_000);
+        assert_eq!(tx_env_with_cap.gas_priority_fee, Some(0));
+    }
+
+    #[test]
+    fn try_into_tx_env_rejects_oversized_morph_tx_memo() {
+        let evm_env = create_evm_env(true);
+
+        // Exactly MAX_MEMO_LENGTH (64) bytes is accepted.
+        let ok_req = MorphTransactionRequest {
+            inner: create_morph_transaction_request(),
+            fee_token_id: None,
+            fee_limit: None,
+            reference: None,
+            memo: Some(Bytes::from(vec![0xaa; MAX_MEMO_LENGTH])),
+        };
+        assert!(ok_req.try_into_tx_env(&evm_env).is_ok());
+
+        // MAX_MEMO_LENGTH + 1 (65) bytes is rejected.
+        let bad_req = MorphTransactionRequest {
+            inner: create_morph_transaction_request(),
+            fee_token_id: None,
+            fee_limit: None,
+            reference: None,
+            memo: Some(Bytes::from(vec![0xaa; MAX_MEMO_LENGTH + 1])),
+        };
+        let err = bad_req.try_into_tx_env(&evm_env).unwrap_err();
+        match err {
+            EthApiError::InvalidParams(msg) => {
+                assert!(msg.contains("64 bytes"), "unexpected error: {msg}");
+            }
+            other => panic!("expected InvalidParams, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn try_into_tx_env_rejects_fee_limit_with_zero_fee_token_id() {
+        let evm_env = create_evm_env(true);
+
+        for fee_token_id in [None, Some(U64::ZERO)] {
+            let bad_req = MorphTransactionRequest {
+                inner: create_morph_transaction_request(),
+                fee_token_id,
+                fee_limit: Some(U256::from(100)),
+                reference: Some(B256::repeat_byte(0x11)),
+                memo: None,
+            };
+            let err = bad_req.try_into_tx_env(&evm_env).unwrap_err();
+            match err {
+                EthApiError::InvalidParams(msg) => {
+                    assert!(
+                        msg.contains("FeeLimit") && msg.contains("FeeTokenID"),
+                        "unexpected error: {msg}"
+                    );
+                }
+                other => panic!("expected InvalidParams, got {other:?}"),
+            }
+        }
+
+        // Zero fee_limit with fee_token_id == 0 is permitted.
+        let ok_req = MorphTransactionRequest {
+            inner: create_morph_transaction_request(),
+            fee_token_id: Some(U64::ZERO),
+            fee_limit: Some(U256::ZERO),
+            reference: Some(B256::repeat_byte(0x11)),
+            memo: None,
+        };
+        assert!(ok_req.try_into_tx_env(&evm_env).is_ok());
     }
 }

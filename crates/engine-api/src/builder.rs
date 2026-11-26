@@ -50,6 +50,14 @@ pub struct RealMorphL2EngineApi<Provider> {
     /// Tracks L1-derived finalized block tags for FCU updates.
     block_tag_tracker: Arc<BlockTagTracker>,
 
+    /// Serializes payload builds to prevent concurrent deterministic `PayloadId`
+    /// collisions in reth's `PayloadBuilderService`.
+    build_lock: tokio::sync::Mutex<()>,
+
+    /// Serializes forkchoice and block-tag updates across `import_l2_block_via_engine`
+    /// and `set_block_tags` so tag updates cannot race concurrent reorgs.
+    fcu_lock: tokio::sync::Mutex<()>,
+
     /// Prometheus metrics for custom Morph L2 Engine API endpoints and chain head health.
     metrics: MorphEngineApiMetrics,
 }
@@ -138,13 +146,18 @@ fn payload_timestamp(
         }
         // Derivation rebuilds a block already committed to L1 and must reproduce it exactly.
         Some(timestamp) => timestamp,
-        None => std::cmp::max(
-            parent_timestamp + 1,
-            std::time::SystemTime::now()
+        None => {
+            let earliest = if emerald_active {
+                parent_timestamp
+            } else {
+                parent_timestamp + 1
+            };
+            let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
-                .as_secs(),
-        ),
+                .as_secs();
+            now.max(earliest)
+        }
     }
 }
 
@@ -163,6 +176,8 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
             chain_spec,
             engine_handle,
             block_tag_tracker,
+            build_lock: tokio::sync::Mutex::new(()),
+            fcu_lock: tokio::sync::Mutex::new(()),
             metrics: MorphEngineApiMetrics::default(),
         }
     }
@@ -352,6 +367,23 @@ where
                 return Ok(GenericResponse { success: false });
             }
         };
+
+        // 2b. Validate `next_l1_message_index` before calling `new_payload`: the field is not
+        //     covered by the block hash, so an `AlreadySeen` hit in the engine tree would
+        //     otherwise return `Valid` without re-running `validate_payload`.
+        if let Err(err) = self.validate_next_l1_message_index(payload.block.as_ref()) {
+            tracing::warn!(
+                target: "morph::engine",
+                block_hash = %data.hash,
+                error = %err,
+                "invalid next_l1_message_index during validate_l2_block"
+            );
+            self.metrics.validate_l2_block_failures_total.increment(1);
+            self.metrics
+                .validate_l2_block_duration_seconds
+                .record(validate_started.elapsed());
+            return Ok(GenericResponse { success: false });
+        }
 
         let status = match self.engine_handle.new_payload(payload).await {
             Ok(status) => status,
@@ -624,42 +656,93 @@ where
         safe_block_hash: B256,
         finalized_block_hash: B256,
     ) -> EngineApiResult<()> {
-        // Match geth's SetBlockTags: look up the header by hash and call set_finalized /
-        // set_safe on the provider directly, skipping zero hashes. This avoids a full
-        // FCU round-trip through the async engine pipeline for what is purely a tag
-        // update, and correctly skips the update when the caller passes B256::ZERO.
-        //
-        // Order matters: set safe FIRST, then finalized. The Ethereum invariant
-        // `finalized.number <= safe.number` must hold at every observable point
-        // for an RPC reader. Updating finalized first and then safe leaves a
-        // window between the two writes where `eth_getBlockByNumber("finalized")`
-        // returns the new value but `eth_getBlockByNumber("safe")` returns the
-        // stale older value — a transient `finalized > safe` violation. Updating
-        // safe first keeps the invariant satisfied throughout (finalized stays
-        // at its older, smaller value while safe advances).
+        if safe_block_hash == B256::ZERO && finalized_block_hash == B256::ZERO {
+            return Ok(());
+        }
+
+        // Serialize tag updates against forkchoice imports so a concurrent reorg cannot
+        // invalidate a resolved hash or advance the canonical head mid-call.
+        let _fcu_guard = self.fcu_lock.lock().await;
+
         let safe = if safe_block_hash != B256::ZERO {
-            Some(self.resolve_block_tag(safe_block_hash, "safe")?)
+            Some(self.resolve_canonical_block_tag(safe_block_hash, "safe")?)
         } else {
             None
         };
         let finalized = if finalized_block_hash != B256::ZERO {
-            Some(self.resolve_block_tag(finalized_block_hash, "finalized")?)
+            Some(self.resolve_canonical_block_tag(finalized_block_hash, "finalized")?)
         } else {
             None
         };
-        if safe.is_none() && finalized.is_none() {
-            return Ok(());
-        }
 
         let canonical_head = self.current_head()?;
+        let existing_safe = self
+            .provider
+            .safe_block_number()
+            .map_err(|e| MorphEngineApiError::Database(e.to_string()))?;
+        let existing_finalized = self
+            .provider
+            .finalized_block_number()
+            .map_err(|e| MorphEngineApiError::Database(e.to_string()))?;
+
         validate_resolved_block_tags(
             safe.as_ref().map(|header| header.number()),
             finalized.as_ref().map(|header| header.number()),
+            existing_safe,
+            existing_finalized,
             canonical_head.number,
         )?;
 
-        if let Some(sealed) = safe {
-            self.provider.set_safe(sealed);
+        // Route tag updates through reth's engine tree FCU without pre-mutating
+        // `CanonicalInMemoryState`. In reth's `update_finalized_block` / `update_safe_block`,
+        // `B256::ZERO` is a no-op (preserving the other tag), while a non-zero change schedules
+        // MDBX persistence (`save_safe_block_number` / `save_finalized_block_number`), updates
+        // `CanonicalInMemoryState`, and updates finalized/safe height metrics.
+        //
+        // When both tags are supplied, apply `safe` before `finalized` so concurrent RPC
+        // readers never observe a transient `finalized > safe` window.
+        if safe.is_some() && finalized.is_some() {
+            let safe_fcu = alloy_rpc_types_engine::ForkchoiceState {
+                head_block_hash: canonical_head.hash,
+                safe_block_hash,
+                finalized_block_hash: B256::ZERO,
+            };
+            self.provider.on_forkchoice_update_received(&safe_fcu);
+            let safe_res = self
+                .engine_handle
+                .fork_choice_updated(safe_fcu, None)
+                .await
+                .map_err(|e| MorphEngineApiError::ExecutionFailed(e.to_string()))?;
+            ensure_payload_status_valid(&safe_res.payload_status, "forkchoiceUpdated")?;
+
+            let finalized_fcu = alloy_rpc_types_engine::ForkchoiceState {
+                head_block_hash: canonical_head.hash,
+                safe_block_hash: B256::ZERO,
+                finalized_block_hash,
+            };
+            self.provider.on_forkchoice_update_received(&finalized_fcu);
+            let finalized_res = self
+                .engine_handle
+                .fork_choice_updated(finalized_fcu, None)
+                .await
+                .map_err(|e| MorphEngineApiError::ExecutionFailed(e.to_string()))?;
+            ensure_payload_status_valid(&finalized_res.payload_status, "forkchoiceUpdated")?;
+        } else {
+            let forkchoice = alloy_rpc_types_engine::ForkchoiceState {
+                head_block_hash: canonical_head.hash,
+                safe_block_hash,
+                finalized_block_hash,
+            };
+            self.provider.on_forkchoice_update_received(&forkchoice);
+            let fcu_res = self
+                .engine_handle
+                .fork_choice_updated(forkchoice, None)
+                .await
+                .map_err(|e| MorphEngineApiError::ExecutionFailed(e.to_string()))?;
+            ensure_payload_status_valid(&fcu_res.payload_status, "forkchoiceUpdated")?;
+        }
+
+        if safe.is_some() {
             tracing::info!(
                 target: "morph::engine",
                 hash = %safe_block_hash,
@@ -667,8 +750,11 @@ where
             );
         }
 
-        if let Some(sealed) = finalized {
-            self.provider.set_finalized(sealed);
+        if finalized.is_some() {
+            // Cache the L1-derived finalized hash only after FCU succeeds; when
+            // `finalized_block_hash == B256::ZERO`, leave any previously cached hash intact.
+            self.block_tag_tracker
+                .record_finalized_hash(Some(finalized_block_hash));
             tracing::info!(
                 target: "morph::engine",
                 hash = %finalized_block_hash,
@@ -676,38 +762,41 @@ where
             );
         }
 
-        // Cache the L1-derived finalized hash so subsequent FCU calls can forward it.
-        // Safe is not cached: FCU safe is supplied by each import caller, and the
-        // RPC-visible safe tag can also be advanced by set_block_tags.
-        self.block_tag_tracker
-            .record_finalized_hash(if finalized_block_hash != B256::ZERO {
-                Some(finalized_block_hash)
-            } else {
-                None
-            });
-
         Ok(())
     }
 }
 
 impl<Provider> RealMorphL2EngineApi<Provider> {
-    /// Looks up a sealed header by hash.
+    /// Looks up a sealed header by hash and verifies that it belongs to the current
+    /// canonical chain.
     ///
-    /// Used by `set_block_tags` to validate both tag updates before mutating provider state.
-    fn resolve_block_tag(
+    /// Used by `set_block_tags` to validate both tag updates before mutating state.
+    fn resolve_canonical_block_tag(
         &self,
         hash: B256,
         tag_name: &str,
     ) -> EngineApiResult<SealedHeader<MorphHeader>>
     where
-        Provider: HeaderProvider<Header = MorphHeader>,
+        Provider: HeaderProvider<Header = MorphHeader> + BlockNumReader,
     {
-        self.provider
+        let header = self
+            .provider
             .sealed_header_by_hash(hash)
             .map_err(|e| MorphEngineApiError::Internal(e.to_string()))?
             .ok_or_else(|| {
                 MorphEngineApiError::Internal(format!("{tag_name} block {hash} not found"))
-            })
+            })?;
+        let canonical_hash = self
+            .provider
+            .block_hash(header.number())
+            .map_err(|e| MorphEngineApiError::Database(e.to_string()))?;
+        if canonical_hash != Some(header.hash()) {
+            return Err(MorphEngineApiError::ValidationFailed(format!(
+                "{tag_name} block {hash} (number {}) is not canonical",
+                header.number()
+            )));
+        }
+        Ok(header)
     }
 
     async fn build_l2_payload(
@@ -727,6 +816,10 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
             + Sync
             + 'static,
     {
+        // Serialize builds so overlapping requests with identical `(parent, timestamp, txs)`
+        // never collide on the deterministic `PayloadId` in reth's `PayloadBuilderService`.
+        let _build_guard = self.build_lock.lock().await;
+
         tracing::debug!(
             target: "morph::engine",
             block_number = params.number,
@@ -850,6 +943,75 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
             })
     }
 
+    /// Validates the unhashed `next_l1_message_index` header field against the parent header
+    /// and the block's leading L1 messages before calling `engine_handle.new_payload`.
+    ///
+    /// Because `next_l1_msg_index` is not part of the block hash, reth's `AlreadySeen`
+    /// short-circuit would otherwise return `Valid` for a tampered `next_l1_message_index`
+    /// whenever the block hash is already in `tree_state` (e.g., pre-inserted by
+    /// `assembleL2Block`) or in the DB. Checking it here rejects the tampered request
+    /// without invoking `new_payload` (so `invalid_headers` is never poisoned).
+    fn validate_next_l1_message_index(&self, block: &SealedBlock<Block>) -> EngineApiResult<()>
+    where
+        Provider: HeaderProvider<Header = MorphHeader>,
+    {
+        let Some(parent) = self
+            .provider
+            .sealed_header_by_hash(block.parent_hash())
+            .map_err(|e| MorphEngineApiError::Database(e.to_string()))?
+        else {
+            return Ok(());
+        };
+
+        let mut expected = parent.next_l1_msg_index;
+        let mut first_l1_msg = true;
+        for tx in block.body().transactions() {
+            if !tx.is_l1_msg() {
+                break;
+            }
+            let Some(queue_index) = tx.queue_index() else {
+                // Malformed L1 message is committed by the block hash; let the engine
+                // validator reject and cache it.
+                return Ok(());
+            };
+            if first_l1_msg {
+                first_l1_msg = false;
+                if queue_index < parent.next_l1_msg_index {
+                    // Cross-block L1 replay is committed by the block hash; let the engine
+                    // validator reject and cache it with `L1MessagesNotInOrder`.
+                    return Ok(());
+                }
+            }
+            expected = match queue_index.checked_add(1) {
+                Some(next) => next,
+                None => {
+                    return Err(MorphEngineApiError::ValidationFailed(format!(
+                        "invalid block.NextL1MsgIndex: expected {}, got {}",
+                        u64::MAX,
+                        block.header().next_l1_msg_index
+                    )));
+                }
+            };
+        }
+
+        let actual = block.header().next_l1_msg_index;
+        let is_jade = self
+            .chain_spec
+            .is_jade_active_at_timestamp(block.header().timestamp());
+        let invalid = if is_jade {
+            actual != expected
+        } else {
+            actual < expected
+        };
+        if invalid {
+            return Err(MorphEngineApiError::ValidationFailed(format!(
+                "invalid block.NextL1MsgIndex: expected {expected}, got {actual}"
+            )));
+        }
+
+        Ok(())
+    }
+
     async fn import_l2_block_via_engine(
         &self,
         data: ExecutableL2Data,
@@ -861,6 +1023,7 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
             + CanonChainTracker<Header = MorphHeader>,
     {
         let (payload, header) = self.execution_payload_from_executable_data(&data)?;
+        self.validate_next_l1_message_index(payload.block.as_ref())?;
 
         let payload_status = self
             .engine_handle
@@ -868,6 +1031,10 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
             .await
             .map_err(|e| MorphEngineApiError::ExecutionFailed(e.to_string()))?;
         ensure_payload_status_valid(&payload_status, "newPayload")?;
+
+        // Serialize FCU against `set_block_tags` so tag updates see a stable canonical head
+        // and this FCU observes any newly recorded L1 finalized hash.
+        let _fcu_guard = self.fcu_lock.lock().await;
 
         // FCU safe/finalized must be canonical ancestors. Unsafe imports pass safe zero;
         // new_safe_l2_block passes the imported block itself, never a cached old safe.
@@ -1036,6 +1203,8 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
 fn validate_resolved_block_tags(
     safe_number: Option<u64>,
     finalized_number: Option<u64>,
+    existing_safe_number: Option<u64>,
+    existing_finalized_number: Option<u64>,
     canonical_head_number: u64,
 ) -> EngineApiResult<()> {
     if let Some(safe_number) = safe_number
@@ -1054,7 +1223,10 @@ fn validate_resolved_block_tags(
         )));
     }
 
-    if let (Some(safe_number), Some(finalized_number)) = (safe_number, finalized_number)
+    let effective_safe = safe_number.or(existing_safe_number);
+    let effective_finalized = finalized_number.or(existing_finalized_number);
+
+    if let (Some(safe_number), Some(finalized_number)) = (effective_safe, effective_finalized)
         && finalized_number > safe_number
     {
         return Err(MorphEngineApiError::ValidationFailed(format!(
@@ -1356,7 +1528,7 @@ mod tests {
 
     #[test]
     fn test_validate_resolved_block_tags_rejects_finalized_after_safe() {
-        let err = validate_resolved_block_tags(Some(10), Some(11), 11).unwrap_err();
+        let err = validate_resolved_block_tags(Some(10), Some(11), None, None, 11).unwrap_err();
         match err {
             MorphEngineApiError::ValidationFailed(msg) => {
                 assert!(msg.contains("finalized block number 11 exceeds safe block number 10"));
@@ -1367,13 +1539,39 @@ mod tests {
 
     #[test]
     fn test_validate_resolved_block_tags_rejects_safe_after_canonical_head() {
-        let err = validate_resolved_block_tags(Some(12), Some(11), 11).unwrap_err();
+        let err = validate_resolved_block_tags(Some(12), Some(11), None, None, 11).unwrap_err();
         match err {
             MorphEngineApiError::ValidationFailed(msg) => {
                 assert!(msg.contains("safe block number 12 exceeds canonical head number 11"));
             }
             other => panic!("unexpected error: {other}"),
         }
+    }
+
+    #[test]
+    fn test_validate_resolved_block_tags_enforces_partial_update_ordering() {
+        // Updating finalized only past existing safe must fail.
+        let err = validate_resolved_block_tags(None, Some(11), Some(10), Some(8), 12).unwrap_err();
+        match err {
+            MorphEngineApiError::ValidationFailed(msg) => {
+                assert!(msg.contains("finalized block number 11 exceeds safe block number 10"));
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+
+        // Updating safe only below existing finalized must fail.
+        let err = validate_resolved_block_tags(Some(7), None, Some(10), Some(8), 12).unwrap_err();
+        match err {
+            MorphEngineApiError::ValidationFailed(msg) => {
+                assert!(msg.contains("finalized block number 8 exceeds safe block number 7"));
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+
+        // Partial updates preserving effective_finalized <= effective_safe <= head succeed.
+        assert!(validate_resolved_block_tags(None, Some(10), Some(10), Some(8), 12).is_ok());
+        assert!(validate_resolved_block_tags(Some(12), None, Some(10), Some(8), 12).is_ok());
+        assert!(validate_resolved_block_tags(None, Some(5), None, None, 12).is_ok());
     }
 
     // =========================================================================
@@ -1486,8 +1684,14 @@ mod tests {
     fn test_payload_timestamp_defaults_after_parent() {
         // Ahead of the wall clock, so the parent decides the default.
         let parent_timestamp = 20_000_000_000;
+        // From Emerald on, default timestamp may share parent_timestamp.
         assert_eq!(
             payload_timestamp(None, parent_timestamp, true, TxPoolPolicy::Include),
+            parent_timestamp
+        );
+        // Before Emerald, default timestamp must be strictly after parent_timestamp.
+        assert_eq!(
+            payload_timestamp(None, parent_timestamp, false, TxPoolPolicy::Include),
             parent_timestamp + 1
         );
     }

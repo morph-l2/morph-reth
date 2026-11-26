@@ -350,6 +350,15 @@ fn validate_morph_tx_authorization_list(host: &MorphEvm<'_>, tx: &MorphTxEnv) ->
         return Ok(());
     }
 
+    // Enforce the Celadon hardfork gate for MorphTx V2 during real execution
+    // (including V2 with an empty authorization list). When fee charging is
+    // disabled (`eth_call` / `eth_estimateGas` simulation), preserve pre-Celadon
+    // Prague simulation compatibility (matching morph-geth `transaction_args.go:234`).
+    let hardfork = host.config_spec_id();
+    if host.feature(EvmFeatures::FEE_CHARGE) && !hardfork.is_celadon() {
+        return Err(MorphInvalidTransaction::Eip7702NotSupported.into());
+    }
+
     if tx.authorization_list.is_empty() {
         return Ok(());
     }
@@ -470,11 +479,15 @@ fn deduct_eth_fee(
     tx: &MorphTxEnv,
     caller: Address,
 ) -> HandlerResult<ChargedFee> {
-    let l1_data_fee = l1_data_fee(host, tx)?;
+    let fee_charge = host.feature(EvmFeatures::FEE_CHARGE);
+    let l1_data_fee = if fee_charge {
+        l1_data_fee(host, tx)?
+    } else {
+        U256::ZERO
+    };
     validate_sender(host, caller, tx.nonce)?;
 
     let basefee = host.block().basefee.saturating_to::<u128>();
-    let fee_charge = host.feature(EvmFeatures::FEE_CHARGE);
     let balance_check = host.feature(EvmFeatures::BALANCE_CHECK);
 
     let mut sender = host.state_mut().account(&caller)?;
@@ -3651,5 +3664,259 @@ mod refund_rounding_tests {
         .expect("U256 refund must succeed");
 
         assert_eq!(token_balance(&mut evm, CALLER), expected_refund);
+    }
+
+    /// Post-Curie simulation (`!EvmFeatures::FEE_CHARGE`) must credit 0 ETH to
+    /// the beneficiary / FeeVault even when L1 oracle fees and gas price are
+    /// non-zero, and must not touch the beneficiary account in the state diff.
+    #[test]
+    fn disable_fee_charge_credits_zero_eth_to_beneficiary_post_curie() {
+        use crate::l1block::{
+            GPO_BLOB_SCALAR_SLOT, GPO_COMMIT_SCALAR_SLOT, GPO_IS_CURIE_SLOT, GPO_L1_BASE_FEE_SLOT,
+            GPO_L1_BLOB_BASE_FEE_SLOT, L1_GAS_PRICE_ORACLE_ADDRESS,
+        };
+
+        let caller = address!("1000000000000000000000000000000000000011");
+        let recipient = address!("2000000000000000000000000000000000000022");
+        let fee_vault = address!("530000000000000000000000000000000000000a");
+        let initial_caller_balance = U256::from(10_000_000_000_000_000u128);
+        let initial_vault_balance = U256::from(1_000u64);
+        let transfer_value = U256::from(123_456u64);
+        let gas_price = 2_000_000_000u128; // 2 gwei
+        let rlp_bytes = Bytes::from(vec![0xab; 256]);
+
+        let build_db = || {
+            let mut db = InMemoryDB::default();
+            db.insert_account_info(
+                &caller,
+                AccountInfo::default().with_balance(initial_caller_balance),
+            );
+            db.insert_account_info(
+                &fee_vault,
+                AccountInfo::default().with_balance(initial_vault_balance),
+            );
+            db.insert_account_info(&L1_GAS_PRICE_ORACLE_ADDRESS, AccountInfo::default());
+            db.insert_account_storage(
+                &L1_GAS_PRICE_ORACLE_ADDRESS,
+                &GPO_L1_BASE_FEE_SLOT,
+                &U256::from(10_000_000_000u64),
+            );
+            db.insert_account_storage(
+                &L1_GAS_PRICE_ORACLE_ADDRESS,
+                &GPO_L1_BLOB_BASE_FEE_SLOT,
+                &U256::from(5_000_000_000u64),
+            );
+            db.insert_account_storage(
+                &L1_GAS_PRICE_ORACLE_ADDRESS,
+                &GPO_COMMIT_SCALAR_SLOT,
+                &U256::from(230_760_020_821u64),
+            );
+            db.insert_account_storage(
+                &L1_GAS_PRICE_ORACLE_ADDRESS,
+                &GPO_BLOB_SCALAR_SLOT,
+                &U256::from(417_565_260u64),
+            );
+            db.insert_account_storage(
+                &L1_GAS_PRICE_ORACLE_ADDRESS,
+                &GPO_IS_CURIE_SLOT,
+                &U256::from(1u64),
+            );
+            db
+        };
+
+        let block = MorphBlockEnv {
+            beneficiary: fee_vault,
+            basefee: U256::from(1_000_000u64),
+            gas_limit: U256::from(30_000_000u64),
+            ..Default::default()
+        };
+
+        let make_tx = || MorphTxEnv {
+            tx_type: EIP1559_TX_TYPE,
+            chain_id: Some(1),
+            kind: TxKind::Call(recipient),
+            gas_limit: 50_000,
+            gas_price,
+            gas_priority_fee: Some(gas_price),
+            value: transfer_value,
+            data: Bytes::from(vec![0xaa; 64]),
+            rlp_bytes: Some(rlp_bytes.clone()),
+            ..Default::default()
+        };
+
+        // 1. With `FEE_CHARGE` disabled: beneficiary receives 0 ETH (and is not touched),
+        //    caller pays only `transfer_value`, and `l1_data_fee` is 0.
+        let mut sim_env = morph_evm_env(MorphHardfork::Celadon, 1, 30_000_000, block);
+        sim_env.version.features.remove(EvmFeatures::FEE_CHARGE);
+        let mut sim_evm = morph_evm(build_db(), sim_env);
+        let sim_tx = Recovered::new_unchecked(make_tx(), caller);
+        let sim_exec = sim_evm.transact(&sim_tx).expect("sim tx must succeed");
+        assert!(sim_exec.result().status);
+        assert_eq!(sim_exec.result().ext.l1_data_fee, U256::ZERO);
+        let sim_detached = sim_exec.detach();
+        assert!(
+            sim_detached
+                .pending_state
+                .account_changes()
+                .all(|change| change.address != fee_vault),
+            "FeeVault must not be credited or touched when FEE_CHARGE is disabled"
+        );
+        let caller_balance_after = sim_detached
+            .pending_state
+            .account_changes()
+            .find(|change| change.address == caller)
+            .expect("caller must be in state diff")
+            .current
+            .expect("caller account must exist")
+            .balance;
+        assert_eq!(
+            caller_balance_after,
+            initial_caller_balance - transfer_value,
+            "caller must only pay tx.value, not L1 or L2 fees"
+        );
+        let recipient_balance_after = sim_detached
+            .pending_state
+            .account_changes()
+            .find(|change| change.address == recipient)
+            .expect("recipient must be in state diff")
+            .current
+            .expect("recipient account must exist")
+            .balance;
+        assert_eq!(recipient_balance_after, transfer_value);
+
+        // 2. Sanity contrast: with `FEE_CHARGE` enabled, FeeVault receives exact
+        //    `execution_fee + l1_data_fee`.
+        let mut real_evm = morph_evm(
+            build_db(),
+            morph_evm_env(MorphHardfork::Celadon, 1, 30_000_000, block),
+        );
+        let real_tx = Recovered::new_unchecked(make_tx(), caller);
+        let real_exec = real_evm
+            .transact(&real_tx)
+            .expect("real tx must succeed")
+            .detach();
+        assert!(real_exec.result.status);
+        let expected_l1_fee = real_exec.result.ext.l1_data_fee;
+        assert!(expected_l1_fee > U256::ZERO);
+        let expected_exec_fee = U256::from(gas_price) * U256::from(real_exec.result.tx_gas_used());
+        let vault_after = real_exec
+            .pending_state
+            .account_changes()
+            .find(|change| change.address == fee_vault)
+            .expect("FeeVault must be credited when FEE_CHARGE is enabled")
+            .current
+            .expect("FeeVault account must exist")
+            .balance;
+        assert_eq!(
+            vault_after,
+            initial_vault_balance + expected_exec_fee + expected_l1_fee
+        );
+    }
+
+    /// Regression for PR #240 (M-H10): MorphTx V2 (even with an empty authorization list)
+    /// must be rejected before Celadon during real execution (`FEE_CHARGE` enabled), while
+    /// simulation (`!FEE_CHARGE`) preserves pre-Celadon Prague compatibility.
+    #[test]
+    fn validate_env_gates_morph_tx_v2_on_celadon_during_execution_only() {
+        let v2_tx = MorphTxEnv {
+            tx_type: MORPH_TX_TYPE_ID,
+            chain_id: Some(1),
+            kind: TxKind::Call(address!("2000000000000000000000000000000000000022")),
+            gas_limit: 50_000,
+            gas_price: 100,
+            gas_priority_fee: Some(10),
+            version: Some(MORPH_TX_VERSION_2),
+            ..Default::default()
+        };
+
+        // Pre-Celadon (Jade) with FEE_CHARGE enabled -> rejected.
+        let jade_evm = morph_evm(
+            InMemoryDB::default(),
+            morph_evm_env(MorphHardfork::Jade, 1, 30_000_000, block()),
+        );
+        let err = validate_env(&jade_evm, &v2_tx)
+            .expect_err("pre-Celadon execution must reject MorphTx V2");
+        assert_eq!(
+            err.external_ref::<MorphInvalidTransaction>(),
+            Some(&MorphInvalidTransaction::Eip7702NotSupported)
+        );
+
+        // Pre-Celadon (Jade) with FEE_CHARGE disabled (simulation) -> allowed.
+        let mut jade_sim_env = morph_evm_env(MorphHardfork::Jade, 1, 30_000_000, block());
+        jade_sim_env
+            .version
+            .features
+            .remove(EvmFeatures::FEE_CHARGE);
+        let jade_sim_evm = morph_evm(InMemoryDB::default(), jade_sim_env);
+        assert!(
+            validate_env(&jade_sim_evm, &v2_tx).is_ok(),
+            "pre-Celadon simulation should allow MorphTx V2"
+        );
+
+        // Celadon with FEE_CHARGE enabled -> allowed.
+        let celadon_evm = morph_evm(
+            InMemoryDB::default(),
+            morph_evm_env(MorphHardfork::Celadon, 1, 30_000_000, block()),
+        );
+        assert!(validate_env(&celadon_evm, &v2_tx).is_ok());
+    }
+
+    /// Regression for PR #244: `validate_env` for MorphTx enforces `BASE_FEE_CHECK` and
+    /// `PRIORITY_FEE_CHECK` independently of `FEE_CHARGE`.
+    #[test]
+    fn validate_env_morph_tx_honors_base_fee_and_priority_fee_flags() {
+        let block_with_basefee = MorphBlockEnv {
+            basefee: U256::from(100u64),
+            gas_limit: U256::from(30_000_000u64),
+            ..Default::default()
+        };
+
+        // Case 1: max_fee < base_fee rejected even when FEE_CHARGE is disabled,
+        // and accepted only when BASE_FEE_CHECK is disabled.
+        let low_max_fee_tx = MorphTxEnv {
+            tx_type: MORPH_TX_TYPE_ID,
+            chain_id: Some(1),
+            kind: TxKind::Call(address!("2000000000000000000000000000000000000022")),
+            gas_limit: 50_000,
+            gas_price: 50,
+            gas_priority_fee: Some(10),
+            fee_token_id: Some(FEE_TOKEN_ID),
+            ..Default::default()
+        };
+        let mut sim_env = morph_evm_env(MorphHardfork::Celadon, 1, 30_000_000, block_with_basefee);
+        sim_env.version.features.remove(EvmFeatures::FEE_CHARGE);
+        let sim_evm = morph_evm(InMemoryDB::default(), sim_env.clone());
+        assert!(
+            validate_env(&sim_evm, &low_max_fee_tx).is_err(),
+            "BASE_FEE_CHECK must still reject low max_fee even when FEE_CHARGE is disabled"
+        );
+        sim_env.version.features.remove(EvmFeatures::BASE_FEE_CHECK);
+        let no_base_fee_evm = morph_evm(InMemoryDB::default(), sim_env);
+        assert!(validate_env(&no_base_fee_evm, &low_max_fee_tx).is_ok());
+
+        // Case 2: priority_fee > max_fee rejected even when BASE_FEE_CHECK & FEE_CHARGE are disabled,
+        // and accepted only when PRIORITY_FEE_CHECK is disabled.
+        let high_tip_tx = MorphTxEnv {
+            tx_type: MORPH_TX_TYPE_ID,
+            chain_id: Some(1),
+            kind: TxKind::Call(address!("2000000000000000000000000000000000000022")),
+            gas_limit: 50_000,
+            gas_price: 100,
+            gas_priority_fee: Some(200),
+            fee_token_id: Some(FEE_TOKEN_ID),
+            ..Default::default()
+        };
+        let mut env = morph_evm_env(MorphHardfork::Celadon, 1, 30_000_000, block_with_basefee);
+        env.version
+            .features
+            .remove(EvmFeatures::FEE_CHARGE | EvmFeatures::BASE_FEE_CHECK);
+        let evm_with_prio_check = morph_evm(InMemoryDB::default(), env.clone());
+        assert!(
+            validate_env(&evm_with_prio_check, &high_tip_tx).is_err(),
+            "PRIORITY_FEE_CHECK must reject priority_fee > max_fee"
+        );
+        env.version.features.remove(EvmFeatures::PRIORITY_FEE_CHECK);
+        let evm_no_prio_check = morph_evm(InMemoryDB::default(), env);
+        assert!(validate_env(&evm_no_prio_check, &high_tip_tx).is_ok());
     }
 }
