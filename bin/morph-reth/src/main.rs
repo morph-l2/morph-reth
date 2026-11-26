@@ -19,7 +19,9 @@ static MALLOC_CONF: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:19\0";
 
 use alloy_primitives::U256;
 use clap::Parser;
-use morph_chainspec::{MORPH_DEFAULT_PRIORITY_FEE, MorphChainSpec, MorphChainSpecParser};
+use morph_chainspec::{
+    MORPH_BASE_FEE, MORPH_DEFAULT_PRIORITY_FEE, MorphChainSpec, MorphChainSpecParser,
+};
 use morph_consensus::MorphConsensus;
 use morph_evm::{MorphEvmConfig, evm::MorphEvmFactory};
 use morph_node::{MorphAddOns, MorphArgs, MorphNode};
@@ -30,12 +32,31 @@ use reth_chainspec::EthChainSpec;
 use reth_cli_util::sigsegv_handler;
 use reth_ethereum_cli::{Cli, Commands};
 use reth_node_builder::Node;
+use reth_node_core::args::{DefaultTxPoolValues, TxPoolArgs};
 use reth_rpc_server_types::DefaultRpcModuleValidator;
 use std::sync::Arc;
 use tracing::info;
 
 fn morph_default_suggested_fee() -> U256 {
     U256::from_limbs([MORPH_DEFAULT_PRIORITY_FEE, 0, 0, 0])
+}
+
+/// Set Morph's default txpool minimum protocol base fee before CLI parsing.
+///
+/// Morph fixes L2 `baseFee` at `MORPH_BASE_FEE` (0.001 Gwei = 1_000_000 wei),
+/// so transactions with `maxFeePerGas < MORPH_BASE_FEE` can never be included
+/// in a block. Raising the default from Ethereum L1's 7 wei prevents them from
+/// parking indefinitely in `basefee_pool` and inflating `eth_getTransactionCount("pending")`,
+/// while still allowing operators to override via `--txpool.minimal-protocol-fee`.
+fn init_morph_txpool_defaults() {
+    let _ = DefaultTxPoolValues::default()
+        .with_minimal_protocol_basefee(MORPH_BASE_FEE)
+        .try_init();
+    debug_assert_eq!(
+        TxPoolArgs::default().minimal_protocol_basefee,
+        MORPH_BASE_FEE,
+        "txpool defaults must be initialized before CLI parsing"
+    );
 }
 
 fn apply_morph_cli_defaults(
@@ -54,6 +75,10 @@ fn main() {
     // Override reth's default version info with morph-reth's own version,
     // commit SHA, and build timestamp. Must be called before CLI parsing.
     morph_node::version::init_version_metadata();
+
+    // Override reth's default minimal protocol base fee (7 wei on Ethereum L1)
+    // with Morph's fixed base fee (0.001 Gwei). Must be called before CLI parsing.
+    init_morph_txpool_defaults();
 
     // Install signal handler for segmentation faults
     sigsegv_handler::install();
@@ -178,10 +203,14 @@ mod tests {
     type MorphCli =
         Cli<MorphChainSpecParser, MorphArgs, DefaultRpcModuleValidator, MorphSubcommand>;
 
+    fn parse_cli(args: impl IntoIterator<Item = &'static str>) -> MorphCli {
+        init_morph_txpool_defaults();
+        MorphCli::try_parse_from(args).expect("CLI arguments must parse")
+    }
+
     #[test]
     fn parses_top_level_proofs_command() {
-        let cli = MorphCli::try_parse_from(["morph-reth", "proofs", "init", "--chain", "hoodi"])
-            .expect("top-level proofs command must parse");
+        let cli = parse_cli(["morph-reth", "proofs", "init", "--chain", "hoodi"]);
         assert!(matches!(
             cli.command,
             Commands::Ext(MorphSubcommand::Proofs(_))
@@ -190,12 +219,41 @@ mod tests {
 
     #[test]
     fn disabled_mode_keeps_reth_historical_overlay_off() {
-        let cli = MorphCli::try_parse_from(["morph-reth", "node", "--chain", "hoodi"])
-            .expect("node command must parse");
+        let cli = parse_cli(["morph-reth", "node", "--chain", "hoodi"]);
         let Commands::Node(command) = cli.command else {
             panic!("expected node command")
         };
         assert!(!command.ext.proofs_history);
         assert_eq!(command.rpc.rpc_eth_proof_window, 0);
+    }
+
+    #[test]
+    fn default_minimal_protocol_fee_matches_morph_base_fee() {
+        let cli = parse_cli(["morph-reth", "node", "--chain", "hoodi"]);
+        let Commands::Node(command) = cli.command else {
+            panic!("expected node command")
+        };
+        assert_eq!(command.txpool.minimal_protocol_basefee, MORPH_BASE_FEE);
+    }
+
+    #[test]
+    fn minimal_protocol_fee_cli_flag_overrides_default() {
+        for expected in [0u64, 7, 2_000_000] {
+            let value = expected.to_string();
+            init_morph_txpool_defaults();
+            let cli = MorphCli::try_parse_from([
+                "morph-reth",
+                "node",
+                "--chain",
+                "hoodi",
+                "--txpool.minimal-protocol-fee",
+                value.as_str(),
+            ])
+            .expect("node command with --txpool.minimal-protocol-fee must parse");
+            let Commands::Node(command) = cli.command else {
+                panic!("expected node command")
+            };
+            assert_eq!(command.txpool.minimal_protocol_basefee, expected);
+        }
     }
 }
