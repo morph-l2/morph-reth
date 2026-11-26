@@ -4,13 +4,14 @@ use alloy_consensus::{BlockHeader, Sealable, transaction::TxHashRef};
 use alloy_primitives::B256;
 use jsonrpsee::core::client::ClientT;
 use morph_node::test_utils::{TestNodeBuilder, make_transfer_tx};
-use morph_payload_types::{AssembleL2BlockParams, GenericResponse};
+use morph_payload_types::{AssembleL2BlockParams, AssembleL2BlockV2Params, GenericResponse};
 use morph_primitives::MorphHeader;
 use reth_payload_primitives::BuiltPayload;
-use reth_provider::{AccountReader, StateProviderFactory};
+use reth_provider::{AccountReader, BlockIdReader, StateProviderFactory};
 
 use super::helpers::{
-    assemble_l2_block, build_block_no_submit, canonical_snapshot, head_timestamp, import_l2_block,
+    LOCAL_POLL_BUDGET, POLL_INTERVAL, assemble_l2_block, assemble_l2_block_v2,
+    build_block_no_submit, canonical_snapshot, head_timestamp, import_l2_block,
     payload_with_receipts_root, wait_until_evicted, wait_until_pooled,
 };
 
@@ -177,6 +178,163 @@ async fn corrupted_next_l1_msg_index_does_not_poison_the_honest_block() -> eyre:
         canonical_snapshot(&follower)?.hash,
         honest.hash,
         "the honest block must become the follower's head"
+    );
+
+    Ok(())
+}
+
+/// M-H07: Even when a non-empty block hash is already in `tree_state` (pre-inserted by
+/// `assembleL2BlockV2`, so reth's `on_new_payload` would short-circuit on `AlreadySeen`),
+/// tampering with the unhashed `next_l1_message_index` must be rejected by
+/// `engine_validateL2Block`, `engine_newL2Block`, and `engine_newL2BlockV2` without
+/// poisoning `invalid_headers` for the honest block.
+#[tokio::test(flavor = "multi_thread")]
+async fn tampered_next_l1_msg_index_rejected_when_block_already_seen() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let node = nodes.pop().expect("one node requested");
+
+    let raw_tx = make_transfer_tx(wallet.chain_id, wallet.inner.clone(), wallet.inner_nonce).await;
+    let tx_hash = node.rpc.inject_tx(raw_tx).await?;
+    wait_until_pooled(&node, tx_hash).await?;
+
+    let before = canonical_snapshot(&node)?;
+    let honest = assemble_l2_block_v2(
+        &node,
+        AssembleL2BlockV2Params {
+            parent_hash: before.hash,
+            transactions: vec![],
+            timestamp: Some(head_timestamp(&node)? + 1),
+        },
+    )
+    .await?;
+    assert_eq!(honest.transactions.len(), 1);
+
+    // Wait until the engine tree has pre-inserted the non-empty block so `AlreadySeen`
+    // is guaranteed to be armed in `tree_state`.
+    let deadline = tokio::time::Instant::now() + LOCAL_POLL_BUDGET;
+    loop {
+        if node
+            .inner
+            .provider
+            .pending_block_num_hash()?
+            .map(|p| p.hash)
+            == Some(honest.hash)
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "precondition: non-empty candidate was not pre-inserted into tree_state"
+        );
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+
+    let mut tampered = honest.clone();
+    tampered.next_l1_message_index += 1;
+
+    let client = node.auth_server_handle().http_client();
+
+    let validation: GenericResponse = client
+        .request("engine_validateL2Block", (tampered.clone(),))
+        .await?;
+    assert!(
+        !validation.success,
+        "engine_validateL2Block must reject tampered next_l1_message_index on AlreadySeen block"
+    );
+
+    let err_v1 = client
+        .request::<(), _>("engine_newL2Block", (tampered.clone(),))
+        .await
+        .expect_err("engine_newL2Block must reject tampered next_l1_message_index")
+        .to_string();
+    assert!(
+        err_v1.contains("invalid block.NextL1MsgIndex"),
+        "unexpected engine_newL2Block error: {err_v1}"
+    );
+
+    let err_v2 = import_l2_block(&node, tampered)
+        .await
+        .expect_err("engine_newL2BlockV2 must reject tampered next_l1_message_index")
+        .to_string();
+    assert!(
+        err_v2.contains("invalid block.NextL1MsgIndex"),
+        "unexpected engine_newL2BlockV2 error: {err_v2}"
+    );
+
+    assert_eq!(
+        canonical_snapshot(&node)?,
+        before,
+        "rejected tampered requests must leave canonical chain unchanged"
+    );
+
+    // The honest copy sharing the same block hash must still import cleanly.
+    let imported = import_l2_block(&node, honest.clone()).await?;
+    assert_eq!(imported.hash_slow(), honest.hash);
+    assert_eq!(canonical_snapshot(&node)?.hash, honest.hash);
+
+    Ok(())
+}
+
+/// M-H07: A locally built non-empty block that violates consensus (e.g., future timestamp)
+/// must be rejected by `on_inserted_executed_block` so it is NOT pre-inserted into
+/// `tree_state` and cannot subsequently bypass validation via `AlreadySeen`.
+#[tokio::test(flavor = "multi_thread")]
+async fn pre_inserted_consensus_invalid_block_is_rejected_and_not_cached() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let node = nodes.pop().expect("one node requested");
+
+    let raw_tx = make_transfer_tx(wallet.chain_id, wallet.inner.clone(), wallet.inner_nonce).await;
+    let tx_hash = node.rpc.inject_tx(raw_tx).await?;
+    wait_until_pooled(&node, tx_hash).await?;
+
+    let before = canonical_snapshot(&node)?;
+    let future_timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        + 3600;
+
+    let future_block = assemble_l2_block_v2(
+        &node,
+        AssembleL2BlockV2Params {
+            parent_hash: before.hash,
+            transactions: vec![],
+            timestamp: Some(future_timestamp),
+        },
+    )
+    .await?;
+    assert_eq!(
+        future_block.transactions.len(),
+        1,
+        "precondition: block must be non-empty so InsertExecutedBlock is emitted"
+    );
+
+    // Give the async engine tree task ample time to process InsertExecutedBlock;
+    // `on_inserted_executed_block` must reject the future-timestamp header.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert_eq!(
+        node.inner.provider.pending_block_num_hash()?,
+        None,
+        "consensus-invalid future block must not be pre-inserted into tree_state"
+    );
+
+    // Importing it must fail consensus validation rather than hitting AlreadySeen.
+    let err = import_l2_block(&node, future_block)
+        .await
+        .expect_err("future-timestamp block must be rejected on import")
+        .to_string();
+    assert!(
+        err.to_lowercase().contains("future"),
+        "expected future-timestamp consensus rejection, got: {err}"
+    );
+    assert_eq!(
+        canonical_snapshot(&node)?,
+        before,
+        "canonical state must remain unchanged after rejecting future block"
     );
 
     Ok(())

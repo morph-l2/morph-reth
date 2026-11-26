@@ -51,6 +51,8 @@ tracing.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+morph-txpool.workspace = true
+reth-trie-common.workspace = true
 
 [features]
 default = []
