@@ -278,10 +278,15 @@ where
         validation::validate_env::<_, Self::Error>(evm.ctx())?;
 
         // MorphTx maps to `TransactionType::Custom`, so revm's standard path
-        // does not enforce EIP-1559 fee-cap rules. Those rules are independent
-        // of which asset ultimately pays the fee, matching Morph geth's preCheck.
-        if evm.ctx_ref().tx().is_morph_tx() && !evm.ctx_ref().cfg().is_fee_charge_disabled() {
-            let base_fee = Some(evm.ctx_ref().block().basefee() as u128);
+        // does not enforce EIP-1559 fee-cap rules. Match upstream revm's
+        // `Eip1559` branch: gate base-fee checks on `is_base_fee_check_disabled()`
+        // and priority-fee checks on `is_priority_fee_check_disabled()`,
+        // independent of `is_fee_charge_disabled()`.
+        if evm.ctx_ref().tx().is_morph_tx() {
+            let cfg = evm.ctx_ref().cfg();
+            let base_fee = (!cfg.is_base_fee_check_disabled())
+                .then(|| evm.ctx_ref().block().basefee() as u128);
+            let disable_priority_fee_check = cfg.is_priority_fee_check_disabled();
             validation::validate_priority_fee_tx(
                 evm.ctx_ref().tx().max_fee_per_gas(),
                 evm.ctx_ref()
@@ -289,7 +294,7 @@ where
                     .max_priority_fee_per_gas()
                     .unwrap_or_default(),
                 base_fee,
-                evm.ctx_ref().cfg().is_priority_fee_check_disabled(),
+                disable_priority_fee_check,
             )?;
         }
 
@@ -1683,6 +1688,93 @@ mod tests {
                 InvalidTransaction::GasPriceLessThanBasefee
             ))
         ));
+    }
+
+    #[test]
+    fn validate_env_morph_tx_honors_base_fee_and_priority_fee_flags() {
+        let make_evm = |disable_fee_charge: bool,
+                        disable_base_fee: bool,
+                        disable_priority_fee_check: bool,
+                        max_fee: u128,
+                        max_tip: u128| {
+            let mut evm = MorphEvm::new(
+                MorphContext::new(CacheDB::new(EmptyDB::default()), MorphHardfork::default()),
+                NoOpInspector,
+            );
+            evm.cfg.disable_fee_charge = disable_fee_charge;
+            evm.cfg.disable_base_fee = disable_base_fee;
+            evm.cfg.disable_priority_fee_check = disable_priority_fee_check;
+            evm.block = MorphBlockEnv {
+                inner: BlockEnv {
+                    basefee: 100,
+                    ..Default::default()
+                },
+            };
+            evm.tx = MorphTxEnv {
+                inner: TxEnv {
+                    tx_type: MORPH_TX_TYPE_ID,
+                    gas_limit: 21_000,
+                    gas_price: max_fee,
+                    gas_priority_fee: Some(max_tip),
+                    kind: TxKind::Call(Address::ZERO),
+                    ..Default::default()
+                },
+                fee_token_id: Some(1),
+                ..Default::default()
+            };
+            evm
+        };
+
+        // 1. `disable_fee_charge = true` must NOT disable priority-fee or base-fee checks.
+        let mut evm = make_evm(true, false, false, 100, 200);
+        assert!(matches!(
+            validate_env_of(&mut evm),
+            Err(EVMError::Transaction(
+                MorphInvalidTransaction::EthInvalidTransaction(
+                    InvalidTransaction::PriorityFeeGreaterThanMaxFee
+                )
+            ))
+        ));
+
+        let mut evm = make_evm(true, false, false, 50, 10);
+        assert!(matches!(
+            validate_env_of(&mut evm),
+            Err(EVMError::Transaction(
+                MorphInvalidTransaction::EthInvalidTransaction(
+                    InvalidTransaction::GasPriceLessThanBasefee
+                )
+            ))
+        ));
+
+        let mut evm = make_evm(true, false, false, 100, 50);
+        assert!(validate_env_of(&mut evm).is_ok());
+
+        // 2. `disable_base_fee = true` skips base-fee check independently of `disable_fee_charge`,
+        //    while still enforcing `max_priority_fee <= max_fee`.
+        for disable_fee_charge in [false, true] {
+            let mut evm = make_evm(disable_fee_charge, true, false, 0, 0);
+            assert!(
+                validate_env_of(&mut evm).is_ok(),
+                "disable_fee_charge={disable_fee_charge}: base fee check must be skipped"
+            );
+
+            let mut evm = make_evm(disable_fee_charge, true, false, 100, 200);
+            assert!(
+                matches!(
+                    validate_env_of(&mut evm),
+                    Err(EVMError::Transaction(
+                        MorphInvalidTransaction::EthInvalidTransaction(
+                            InvalidTransaction::PriorityFeeGreaterThanMaxFee
+                        )
+                    ))
+                ),
+                "disable_fee_charge={disable_fee_charge}: priority fee > max fee must still reject"
+            );
+        }
+
+        // 3. `disable_priority_fee_check = true` allows `max_priority_fee > max_fee`.
+        let mut evm = make_evm(true, true, true, 100, 200);
+        assert!(validate_env_of(&mut evm).is_ok());
     }
 
     // =========================================================================

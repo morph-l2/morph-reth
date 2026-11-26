@@ -35,6 +35,7 @@ thiserror.workspace = true
 [dev-dependencies]
 eyre.workspace = true
 alloy-primitives = { workspace = true, features = ["rand"] }
+revm = { workspace = true, features = ["optional_no_base_fee", "optional_priority_fee_check"] }
 
 [features]
 reth = ["dep:reth-storage-api"]
