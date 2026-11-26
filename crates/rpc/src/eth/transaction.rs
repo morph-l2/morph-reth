@@ -138,11 +138,31 @@ impl TryIntoTxEnv<Recovered<MorphTxEnv>, MorphEvmEnv> for MorphTransactionReques
         }
         let caller = inner.from.unwrap_or_default();
 
+        // Keep `max_fee_per_gas` in `MorphTxEnv::gas_price` for dynamic-fee requests so
+        // `caller_gas_allowance`, `encode_for_l1_fee`, and balance checks enforce the
+        // worst-case fee cap, while `MorphTxEnv::effective_gas_price_at(base_fee)` still
+        // derives the effective gas price for the GASPRICE opcode and fee settlement.
+        let (gas_price, gas_priority_fee) = if matches!(tx_type, TxType::Legacy | TxType::Eip2930) {
+            (
+                fees.gas_price.saturating_to(),
+                fees.max_priority_fee_per_gas.map(|fee| fee.saturating_to()),
+            )
+        } else {
+            (
+                inner
+                    .max_fee_per_gas
+                    .unwrap_or_else(|| fees.gas_price.saturating_to()),
+                inner
+                    .max_priority_fee_per_gas
+                    .or_else(|| fees.max_priority_fee_per_gas.map(|fee| fee.saturating_to())),
+            )
+        };
+
         let mut tx_env = MorphTxEnv {
             tx_type: tx_type.into(),
             gas_limit: inner.gas.unwrap_or_default(),
-            gas_price: fees.gas_price.saturating_to(),
-            gas_priority_fee: fees.max_priority_fee_per_gas.map(|fee| fee.saturating_to()),
+            gas_price,
+            gas_priority_fee,
             kind,
             value: inner.value.unwrap_or_default(),
             data: inner.input.into_input().unwrap_or_default(),
@@ -664,6 +684,53 @@ mod tests {
         };
         assert_eq!(signed.tx().max_fee_per_gas, 1_000_000_000);
         assert_eq!(signed.tx().max_priority_fee_per_gas, 1_000_000_000);
+    }
+
+    #[test]
+    fn eip1559_and_morph_tx_env_preserve_max_fee_per_gas() {
+        let block_env = MorphBlockEnv {
+            number: U256::from(1),
+            timestamp: U256::from(1234567890),
+            gas_limit: U256::from(30_000_000u64),
+            basefee: U256::from(1_000_000u64), // 0.001 Gwei
+            ..Default::default()
+        };
+        let evm_env = morph_evm_env(MorphHardfork::default(), 2818, 30_000_000, block_env);
+
+        for (priority_fee, fee_token_id) in [
+            (Some(0u128), None),
+            (None, None),
+            (Some(5_000_000u128), None),
+            (Some(0u128), Some(U64::from(1))),
+        ] {
+            let req = MorphTransactionRequest {
+                inner: TransactionRequest {
+                    gas_price: None,
+                    max_fee_per_gas: Some(100_000_000_000), // 100 Gwei >> baseFee
+                    max_priority_fee_per_gas: priority_fee,
+                    ..create_basic_transaction_request()
+                },
+                fee_token_id,
+                ..Default::default()
+            };
+
+            let recovered = req.try_into_tx_env(&evm_env).unwrap();
+            let tx_env = recovered.inner();
+            assert_eq!(
+                tx_env.gas_price, 100_000_000_000,
+                "MorphTxEnv::gas_price must preserve max_fee_per_gas"
+            );
+            assert_eq!(
+                tx_env.gas_priority_fee,
+                Some(priority_fee.unwrap_or(0)),
+                "dynamic-fee priority fee must be preserved (or default to 0)"
+            );
+            assert_eq!(
+                tx_env.effective_gas_price_at(1_000_000),
+                1_000_000 + priority_fee.unwrap_or(0),
+                "effective_gas_price_at must still compute min(max_fee, base_fee + tip)"
+            );
+        }
     }
 
     #[test]

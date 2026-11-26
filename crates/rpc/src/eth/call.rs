@@ -5,21 +5,55 @@
 //! (MorphTx `fee_token_id > 0`). `eth_call` and `eth_createAccessList`
 //! are detected by the block gas limit check being disabled and keep the
 //! plain ETH allowance, without the L1-fee extension.
+//!
+//! [`EstimateCall::estimate_gas_with`] is also overridden to fix three
+//! upstream estimation defects:
+//! 1. Cap balance allowance using `tx_env.gas_price` (`maxFeePerGas` for
+//!    dynamic-fee requests) instead of `effective_gas_price`.
+//! 2. Guard the `is_basic_transfer` 21,000-gas shortcut with
+//!    `highest_gas_limit >= MIN_TRANSACTION_GAS` so sub-21k allowances or
+//!    explicit `gas < 21_000` cannot bypass the cap.
+//! 3. Retry at `max_gas_limit` on revert / gas-too-high whenever
+//!    `highest_gas_limit < max_gas_limit`, covering EIP-1559 and MorphTx
+//!    requests whose legacy `gasPrice` field is absent.
 
 use crate::MorphEthApiError;
 use crate::eth::{MorphEthApi, MorphNodeCore};
-use alloy_primitives::{Address, U256, U512};
-use evm2::{EvmFeatures, registry::HandlerError};
+use alloy_network::TransactionBuilder;
+use alloy_primitives::{Address, TxKind, U256, U512};
+use alloy_rpc_types_eth::state::EvmOverrides;
+use evm2::{
+    EvmFeatures, TxResult,
+    evm::{CacheDB, Db},
+    interpreter::InstrStop,
+    registry::HandlerError,
+};
 use morph_chainspec::{MorphChainSpec, MorphHardforks};
 use morph_revm::{L1BlockInfo, MorphEvmEnv, MorphTxExt, TokenFeeInfo};
+use reth_chainspec::MIN_TRANSACTION_GAS;
 use reth_errors::ProviderError;
-use reth_evm::{Database, EvmEnv, EvmEnvFor, TxEnvFor};
-use reth_provider::ChainSpecProvider;
-use reth_rpc_eth_api::{
-    EthApiTypes, RpcNodeCore,
-    helpers::{Call, EthCall, estimate::EstimateCall},
+use reth_evm::{
+    ConfigureEvm, Database, Evm, EvmEnv, EvmEnvFor, EvmTypesFor, TransactionEnvMut, TxEnvFor,
+    database::StateProviderDatabase,
 };
-use reth_rpc_eth_types::EthApiError;
+use reth_provider::ChainSpecProvider;
+use reth_rpc_convert::{RpcConvert, RpcTxReq};
+use reth_rpc_eth_api::{
+    AsEthApiError, EthApiTypes, FromEthApiError, FromEvmError, IntoEthApiError, RpcNodeCore,
+    helpers::{
+        Call, EthCall,
+        estimate::{EstimateCall, update_estimated_gas_range},
+    },
+};
+use reth_rpc_eth_types::{
+    EthApiError, RpcInvalidTransactionError,
+    cache::db::{apply_block_overrides, apply_state_overrides},
+    error::api::{FromEvmHalt, FromRevert},
+};
+use reth_rpc_server_types::constants::gas_oracle::{CALL_STIPEND_GAS, ESTIMATE_GAS_ERROR_RATIO};
+use reth_storage_api::EvmStateProvider;
+use reth_tasks::cancel::is_cancelled;
+use tracing::trace;
 
 impl<N, Rpc> EthCall for MorphEthApi<N, Rpc>
 where
@@ -39,6 +73,214 @@ where
         reth_rpc_convert::RpcConvert<Primitives = N::Primitives, Error = EthApiError, Evm = N::Evm>,
     MorphEthApiError: reth_rpc_eth_types::error::FromEvmError<N::Evm>,
 {
+    fn estimate_gas_with<S>(
+        &self,
+        mut evm_env: EvmEnvFor<Self::Evm>,
+        mut request: RpcTxReq<<Self::RpcConvert as RpcConvert>::Network>,
+        state: S,
+        overrides: EvmOverrides,
+    ) -> Result<U256, Self::Error>
+    where
+        S: EvmStateProvider,
+    {
+        evm_env.version_mut().features.remove(EvmFeatures::EIP3607);
+        evm_env
+            .version_mut()
+            .features
+            .remove(EvmFeatures::BASE_FEE_CHECK);
+        evm_env.version_mut().features.remove(
+            EvmFeatures::FEE_CHARGE | EvmFeatures::BALANCE_CHECK | EvmFeatures::BALANCE_TOP_UP,
+        );
+
+        request.as_mut().take_nonce();
+
+        let tx_request_gas_limit = request.as_ref().gas_limit();
+
+        let mut db = CacheDB::new(Db::new(StateProviderDatabase::new(state)));
+
+        if let Some(block_overrides) = overrides.block {
+            apply_block_overrides(*block_overrides, &mut db, &mut evm_env);
+        }
+
+        if let Some(state_override) = overrides.state {
+            apply_state_overrides(state_override, &mut db).map_err(Self::Error::from_eth_err)?;
+        }
+
+        let block_gas_limit = evm_env.block_env().gas_limit.to::<u64>();
+        let mut max_gas_limit = evm_env.version().tx_gas_caps().0.min(block_gas_limit);
+
+        let gas_cap = self.call_gas_limit();
+        if gas_cap != 0 {
+            max_gas_limit = max_gas_limit.min(gas_cap);
+        }
+
+        let mut highest_gas_limit = tx_request_gas_limit
+            .unwrap_or(max_gas_limit)
+            .min(max_gas_limit);
+
+        let is_basic_transfer = if request
+            .as_ref()
+            .input()
+            .is_none_or(|input| input.is_empty())
+            && let Some(TxKind::Call(to)) = request.as_ref().kind()
+        {
+            match db.get_account(&to) {
+                Ok(Some(account)) => account.is_empty_code_hash(),
+                Ok(None) => true,
+                Err(_) => false,
+            }
+        } else {
+            false
+        };
+
+        let mut tx_env = self.create_txn_env(&evm_env, request, &mut db)?;
+
+        // Cap by caller balance whenever the worst-case fee cap (`gas_price` for legacy,
+        // `maxFeePerGas` for EIP-1559/EIP-7702/MorphTx) is non-zero.
+        if tx_env.gas_price > 0 {
+            let allowance = self.caller_gas_allowance(&mut db, &evm_env, &tx_env)?;
+            highest_gas_limit = highest_gas_limit.min(allowance);
+        }
+
+        let gas_constrained = highest_gas_limit < max_gas_limit;
+
+        trace!(
+            target: "rpc::eth::estimate",
+            ?tx_env,
+            gas_limit = highest_gas_limit,
+            is_basic_transfer,
+            "Starting gas estimation"
+        );
+
+        let mut evm = self.evm_config().evm_with_env(&mut db, evm_env);
+        let mut execute = move |gas_limit| {
+            tx_env.inner_mut().set_gas_limit(gas_limit);
+            evm.transact_result(&tx_env)
+                .map_err(<Self::Error as FromEvmError<Self::Evm>>::from_evm_err)
+        };
+
+        // Only short-circuit basic transfers when the capped gas budget actually
+        // covers MIN_TRANSACTION_GAS (21,000); otherwise fall through so the cap
+        // reports `GasRequiredExceedsAllowance`.
+        if is_basic_transfer
+            && highest_gas_limit >= MIN_TRANSACTION_GAS
+            && let Ok(res) = execute(MIN_TRANSACTION_GAS)
+            && res.status
+        {
+            return Ok(U256::from(res.tx_gas_used()));
+        }
+
+        let mut res = match execute(highest_gas_limit) {
+            Err(err) if err.is_gas_too_high() && gas_constrained => {
+                let retry = execute(max_gas_limit)?;
+                return map_out_of_gas_result::<_, EvmTypesFor<Self::Evm>>(
+                    retry,
+                    highest_gas_limit,
+                );
+            }
+            Err(err) if err.is_gas_too_low() => {
+                return Err(RpcInvalidTransactionError::GasRequiredExceedsAllowance {
+                    gas_limit: highest_gas_limit,
+                }
+                .into_eth_err());
+            }
+            ethres => ethres?,
+        };
+
+        let gas_refund = if res.status {
+            res.final_refunded()
+        } else if res.stop == InstrStop::Revert {
+            // Whenever `highest_gas_limit` was constrained below `max_gas_limit`
+            // (whether by explicit `gas`, Legacy `gasPrice`, or EIP-1559/MorphTx
+            // `maxFeePerGas` balance capping), retry with `max_gas_limit` to
+            // distinguish inner-call out-of-gas reverts from genuine contract reverts.
+            return if gas_constrained {
+                let retry = execute(max_gas_limit)?;
+                map_out_of_gas_result::<_, EvmTypesFor<Self::Evm>>(retry, highest_gas_limit)
+            } else {
+                Err(Self::Error::from_revert(res.output))
+            };
+        } else {
+            return Err(Self::Error::from_evm_halt(res.stop, highest_gas_limit));
+        };
+
+        let mut gas_used = res.tx_gas_used();
+        let mut lowest_gas_limit = gas_used.saturating_sub(1);
+
+        let optimistic_gas_limit = (gas_used + gas_refund + CALL_STIPEND_GAS) * 64 / 63;
+        if optimistic_gas_limit < highest_gas_limit {
+            res = execute(optimistic_gas_limit)?;
+            gas_used = res.tx_gas_used();
+            update_estimated_gas_range::<EvmTypesFor<Self::Evm>>(
+                res,
+                optimistic_gas_limit,
+                &mut highest_gas_limit,
+                &mut lowest_gas_limit,
+            )?;
+        }
+
+        let mut mid_gas_limit = std::cmp::min(
+            gas_used * 3,
+            ((highest_gas_limit as u128 + lowest_gas_limit as u128) / 2) as u64,
+        );
+
+        trace!(
+            target: "rpc::eth::estimate",
+            ?highest_gas_limit,
+            ?lowest_gas_limit,
+            ?mid_gas_limit,
+            "Starting binary search for gas"
+        );
+
+        while lowest_gas_limit + 1 < highest_gas_limit {
+            let ratio = (highest_gas_limit - lowest_gas_limit) as f64 / (highest_gas_limit as f64);
+            if ratio < ESTIMATE_GAS_ERROR_RATIO {
+                break;
+            }
+
+            if is_cancelled() {
+                return Err(EthApiError::InternalEthError.into());
+            }
+
+            match execute(mid_gas_limit) {
+                Err(err) if err.is_gas_too_high() => {
+                    highest_gas_limit = mid_gas_limit;
+                }
+                Err(err) if err.is_gas_too_low() => {
+                    lowest_gas_limit = mid_gas_limit;
+                }
+                ethres => {
+                    update_estimated_gas_range::<EvmTypesFor<Self::Evm>>(
+                        ethres?,
+                        mid_gas_limit,
+                        &mut highest_gas_limit,
+                        &mut lowest_gas_limit,
+                    )?;
+                }
+            }
+
+            mid_gas_limit = ((highest_gas_limit as u128 + lowest_gas_limit as u128) / 2) as u64;
+        }
+
+        Ok(U256::from(highest_gas_limit))
+    }
+}
+
+fn map_out_of_gas_result<Error, EvmTypes>(
+    result: TxResult<EvmTypes>,
+    requested_gas_limit: u64,
+) -> Result<U256, Error>
+where
+    Error: FromEvmHalt<InstrStop> + FromRevert + FromEthApiError,
+    EvmTypes: evm2::EvmTypes,
+{
+    if result.status {
+        Err(RpcInvalidTransactionError::BasicOutOfGas(requested_gas_limit).into_eth_err())
+    } else if result.stop == InstrStop::Revert {
+        Err(Error::from_revert(result.output))
+    } else {
+        Err(Error::from_evm_halt(result.stop, requested_gas_limit))
+    }
 }
 
 impl<N, Rpc> Call for MorphEthApi<N, Rpc>

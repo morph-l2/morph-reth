@@ -1310,3 +1310,252 @@ async fn native_get_proof_and_get_multi_proof_succeed_on_latest() -> eyre::Resul
 
     Ok(())
 }
+
+/// `eth_estimateGas` caps caller gas allowance using `maxFeePerGas` (not `effective_gas_price`).
+///
+/// With Morph's 0.001 Gwei `baseFee`, a request with `maxFeePerGas = 100 Gwei` and
+/// `maxPriorityFeePerGas = 0` has `effective_gas_price = 0.001 Gwei` (100,000x smaller).
+/// A sender holding 0.0001 ETH can only afford <= 1,000 gas at 100 Gwei (< 21,000), so
+/// estimation must reject instead of returning 21,000.
+#[tokio::test(flavor = "multi_thread")]
+async fn estimate_gas_caps_eip1559_allowance_by_max_fee_per_gas() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+    advance_chain(1, &mut node, wallet_to_arc(wallet)).await?;
+
+    let client = node
+        .rpc_client()
+        .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
+
+    let sender = Address::random();
+    let recipient = Address::random();
+    // 0.0001 ETH = 100_000_000_000_000 wei:
+    // - at 100 Gwei maxFeePerGas: affords <= 1,000 gas (< 21,000) -> must fail
+    // - at 1 Gwei maxFeePerGas: affords ~100,000 gas (>= 21,000) -> must succeed
+    let state_overrides = serde_json::json!({
+        sender.to_string(): { "balance": "0x5af3107a4000" }
+    });
+
+    let high_max_fee_req = serde_json::json!({
+        "from": sender,
+        "to": recipient,
+        "value": "0x0",
+        "maxFeePerGas": "0x174876e800",        // 100 Gwei
+        "maxPriorityFeePerGas": "0x0",         // 0 tip -> effective = baseFee (0.001 Gwei)
+    });
+    let err = client
+        .request::<Value, _>(
+            "eth_estimateGas",
+            (high_max_fee_req, "latest", state_overrides.clone()),
+        )
+        .await
+        .expect_err("allowance must use maxFeePerGas, not effective_gas_price")
+        .to_string();
+    assert!(
+        err.contains("gas required exceeds allowance"),
+        "expected gas allowance error, got: {err}"
+    );
+
+    let affordable_req = serde_json::json!({
+        "from": sender,
+        "to": recipient,
+        "value": "0x0",
+        "maxFeePerGas": "0x3b9aca00",          // 1 Gwei
+        "maxPriorityFeePerGas": "0x0",
+    });
+    let gas: U256 = client
+        .request(
+            "eth_estimateGas",
+            (affordable_req, "latest", state_overrides),
+        )
+        .await?;
+    assert_eq!(gas, U256::from(21_000u64));
+
+    Ok(())
+}
+
+/// `eth_estimateGas` must not short-circuit basic transfers to 21,000 gas when either
+/// an explicit `gas` limit or the caller's balance allowance is below 21,000.
+#[tokio::test(flavor = "multi_thread")]
+async fn estimate_gas_basic_transfer_respects_cap_below_21k() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+    let rich_sender = wallet.inner.address();
+    advance_chain(1, &mut node, wallet_to_arc(wallet)).await?;
+
+    let client = node
+        .rpc_client()
+        .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
+
+    let recipient = Address::random();
+
+    // 1. Explicit gas < 21_000 must fail instead of returning 21_000.
+    let explicit_low_gas = serde_json::json!({
+        "from": rich_sender,
+        "to": recipient,
+        "value": "0x0",
+        "gas": "0x2710", // 10,000 < 21,000
+    });
+    let err = client
+        .request::<Value, _>("eth_estimateGas", (explicit_low_gas,))
+        .await
+        .expect_err("explicit gas < 21,000 must not short-circuit to 21,000")
+        .to_string();
+    assert!(
+        err.contains("gas required exceeds allowance (10000)"),
+        "expected allowance error for gas 10000, got: {err}"
+    );
+
+    // 2. Balance allowance in (0, 21_000) must also fail instead of returning 21,000.
+    let limited_sender = Address::random();
+    let state_overrides = serde_json::json!({
+        limited_sender.to_string(): { "balance": "0x5af3107a4000" } // 0.0001 ETH
+    });
+    let low_allowance_req = serde_json::json!({
+        "from": limited_sender,
+        "to": recipient,
+        "value": "0x0",
+        "gasPrice": "0x2540be400", // 10 Gwei -> allowance <= 10,000 < 21,000
+    });
+    let err = client
+        .request::<Value, _>(
+            "eth_estimateGas",
+            (low_allowance_req, "latest", state_overrides),
+        )
+        .await
+        .expect_err("balance allowance < 21,000 must not short-circuit to 21,000")
+        .to_string();
+    assert!(
+        err.contains("gas required exceeds allowance"),
+        "expected allowance error, got: {err}"
+    );
+
+    Ok(())
+}
+
+/// EIP-1559 `eth_estimateGas` requests whose execution reverts because balance capping
+/// starves the call of gas must report an out-of-gas error rather than `execution reverted`,
+/// while genuine unconditional reverts still report `execution reverted`.
+#[tokio::test(flavor = "multi_thread")]
+async fn estimate_gas_eip1559_inner_oog_revert_reports_out_of_gas() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+    use super::helpers::init_code_for;
+    use morph_node::test_utils::make_deploy_tx;
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+    let chain_id = wallet.chain_id;
+    let rich_sender = wallet.inner.address();
+
+    // Runtime 1: reverts if remaining `GAS < 65,536`, otherwise `STOP`.
+    //   0x00: PUSH3 0x010000 (65536)
+    //   0x04: GAS
+    //   0x05: LT               (remaining < 65536)
+    //   0x06: PUSH1 0x0a
+    //   0x08: JUMPI
+    //   0x09: STOP
+    //   0x0a: JUMPDEST
+    //   0x0b: PUSH0 PUSH0 REVERT
+    const GAS_GATED_REVERT_RUNTIME: &[u8] = &[
+        0x62, 0x01, 0x00, 0x00, 0x5a, 0x10, 0x60, 0x0a, 0x57, 0x00, 0x5b, 0x5f, 0x5f, 0xfd,
+    ];
+    // Runtime 2: always reverts (`PUSH0 PUSH0 REVERT`).
+    const ALWAYS_REVERT_RUNTIME: &[u8] = &[0x5f, 0x5f, 0xfd];
+
+    let deploy_gated = make_deploy_tx(
+        chain_id,
+        wallet.inner.clone(),
+        0,
+        init_code_for(GAS_GATED_REVERT_RUNTIME),
+    )?;
+    let deploy_always = make_deploy_tx(
+        chain_id,
+        wallet.inner.clone(),
+        1,
+        init_code_for(ALWAYS_REVERT_RUNTIME),
+    )?;
+    node.rpc.inject_tx(deploy_gated).await?;
+    node.rpc.inject_tx(deploy_always).await?;
+    node.advance_block().await?;
+
+    let gas_gated_contract = Address::create(&rich_sender, 0);
+    let always_revert_contract = Address::create(&rich_sender, 1);
+
+    let client = node
+        .rpc_client()
+        .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
+
+    // Sender with 0.005 ETH (5e15 wei) at maxFeePerGas = 100 Gwei (1e11 wei) ->
+    // allowance is ~50,000 gas (>= 21,000 intrinsic, < 86,536 required to pass GAS check).
+    let limited_sender = Address::random();
+    let state_overrides = serde_json::json!({
+        limited_sender.to_string(): { "balance": "0x11c37937e08000" } // 0.005 ETH
+    });
+
+    // 1. EIP-1559 request (no legacy `gasPrice`, no explicit `gas`) starved by balance cap
+    //    must retry at `max_gas_limit` and report out-of-gas, NOT `execution reverted`.
+    let starved_req = serde_json::json!({
+        "from": limited_sender,
+        "to": gas_gated_contract,
+        "data": "0x",
+        "maxFeePerGas": "0x174876e800", // 100 Gwei
+        "maxPriorityFeePerGas": "0x0",
+    });
+    let err = client
+        .request::<Value, _>(
+            "eth_estimateGas",
+            (starved_req, "latest", state_overrides.clone()),
+        )
+        .await
+        .expect_err("balance-starved EIP-1559 call must fail")
+        .to_string();
+    assert!(
+        err.contains("out of gas") || err.contains("gas required exceeds"),
+        "expected out-of-gas diagnostic instead of execution reverted, got: {err}"
+    );
+    assert!(
+        !err.contains("execution reverted"),
+        "gas-starved EIP-1559 call must not be misreported as execution reverted: {err}"
+    );
+
+    // 2. Same contract with a well-funded sender succeeds.
+    let funded_req = serde_json::json!({
+        "from": rich_sender,
+        "to": gas_gated_contract,
+        "data": "0x",
+        "maxFeePerGas": "0x174876e800",
+        "maxPriorityFeePerGas": "0x0",
+    });
+    let gas: U256 = client.request("eth_estimateGas", (funded_req,)).await?;
+    assert!(
+        gas >= U256::from(86_536u64),
+        "funded call must estimate enough gas to clear the 65,536 threshold, got {gas}"
+    );
+
+    // 3. Genuine unconditional revert still reports `execution reverted` even when gas-constrained.
+    let always_revert_req = serde_json::json!({
+        "from": limited_sender,
+        "to": always_revert_contract,
+        "data": "0x",
+        "maxFeePerGas": "0x174876e800",
+        "maxPriorityFeePerGas": "0x0",
+    });
+    let err = client
+        .request::<Value, _>(
+            "eth_estimateGas",
+            (always_revert_req, "latest", state_overrides),
+        )
+        .await
+        .expect_err("unconditional revert must fail")
+        .to_string();
+    assert!(
+        err.contains("execution reverted"),
+        "genuine contract revert must still report execution reverted, got: {err}"
+    );
+
+    Ok(())
+}
