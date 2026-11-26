@@ -2,7 +2,7 @@
 
 use crate::{
     CanonicalChain, DEFAULT_BACKFILL_BATCH_BLOCKS, LIVE_LAG_SLO, ReferenceIndexError,
-    ReferenceIndexHandle, ReferenceIndexPhase,
+    ReferenceIndexHandle, ReferenceIndexPhase, ReferenceIndexProgress,
     backfill::{commit_canonical_batch, resolve_jade_first_block},
     db::ReferenceIndexDb,
     reconcile::rollback_suffix,
@@ -15,9 +15,12 @@ use std::{
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
-use tokio::sync::broadcast::{
-    Receiver,
-    error::{RecvError, TryRecvError},
+use tokio::sync::{
+    broadcast::{
+        Receiver,
+        error::{RecvError, TryRecvError},
+    },
+    watch,
 };
 use tokio::time::MissedTickBehavior;
 use tracing::{debug, info, warn};
@@ -134,20 +137,53 @@ pub struct ReferenceIndexRuntime<C> {
     config: ReferenceIndexConfig,
     chain: C,
     handle: ReferenceIndexHandle,
+    progress_tx: watch::Sender<ReferenceIndexProgress>,
 }
 
 impl<C: CanonicalChain> ReferenceIndexRuntime<C> {
     /// Create a single-writer runtime and its cloneable RPC query handle.
     pub fn new(config: ReferenceIndexConfig, chain: C) -> (Self, ReferenceIndexHandle) {
-        let handle = ReferenceIndexHandle::new(config.jade_timestamp);
+        let (handle, progress_tx) = ReferenceIndexHandle::new_with_progress(config.jade_timestamp);
         (
             Self {
                 config,
                 chain,
                 handle: handle.clone(),
+                progress_tx,
             },
             handle,
         )
+    }
+
+    fn publish_progress(&self, phase: ReferenceIndexPhase, indexed_to: Option<u64>) {
+        self.handle.set_phase(phase);
+        let _ = self.progress_tx.send(ReferenceIndexProgress {
+            phase,
+            indexed_to,
+            unavailable: phase == ReferenceIndexPhase::Unavailable,
+        });
+    }
+
+    fn set_phase(&self, phase: ReferenceIndexPhase) {
+        let current = *self.progress_tx.borrow();
+        let changed = current.phase != phase;
+        self.handle.set_phase(phase);
+        if changed {
+            let _ = self.progress_tx.send(ReferenceIndexProgress {
+                phase,
+                indexed_to: current.indexed_to,
+                unavailable: phase == ReferenceIndexPhase::Unavailable,
+            });
+        }
+    }
+
+    fn set_indexed_to(&self, indexed_to: Option<u64>) {
+        let phase = self.handle.phase();
+        let _ = self.progress_tx.send(ReferenceIndexProgress {
+            phase,
+            indexed_to,
+            unavailable: phase == ReferenceIndexPhase::Unavailable,
+        });
     }
 
     fn open_db(&self) -> Result<ReferenceIndexDb, ReferenceIndexError> {
@@ -159,7 +195,9 @@ impl<C: CanonicalChain> ReferenceIndexRuntime<C> {
             self.config.chain_id,
             self.config.genesis_hash,
         )?;
+        let indexed_to = db.indexed_to()?;
         self.handle.install_db(db.clone());
+        self.set_indexed_to(indexed_to);
         Ok(db)
     }
 
@@ -187,7 +225,7 @@ impl<C: CanonicalChain> ReferenceIndexRuntime<C> {
             return Ok(());
         }
 
-        self.handle.set_phase(ReferenceIndexPhase::Repairing);
+        self.set_phase(ReferenceIndexPhase::Repairing);
         self.handle.metrics().reorgs_total.increment(1);
         // A finalized block can never be reorged, so the rewind never needs to
         // go below it — bounding the scan (and the retained `IndexedBlocks`
@@ -218,7 +256,9 @@ impl<C: CanonicalChain> ReferenceIndexRuntime<C> {
 
         let ancestor =
             ancestor.ok_or(ReferenceIndexError::ManualRebuildRequired { jade_first_block })?;
-        rollback_suffix(db, Some(ancestor), DEFAULT_BACKFILL_BATCH_BLOCKS)
+        rollback_suffix(db, Some(ancestor), DEFAULT_BACKFILL_BATCH_BLOCKS)?;
+        self.set_indexed_to(Some(ancestor));
+        Ok(())
     }
 
     /// Perform one synchronous reconciliation/backfill turn.
@@ -231,7 +271,7 @@ impl<C: CanonicalChain> ReferenceIndexRuntime<C> {
             // cursor-vs-tip comparison surface `IndexBehind` — which tells clients
             // to retry — instead of `IndexUnavailable`, which tells them to stop.
             if error.requires_manual_rebuild() {
-                self.handle.set_phase(ReferenceIndexPhase::Unavailable);
+                self.set_phase(ReferenceIndexPhase::Unavailable);
             }
         }
         result
@@ -242,16 +282,16 @@ impl<C: CanonicalChain> ReferenceIndexRuntime<C> {
         let head = self.chain.head()?;
         if head.timestamp < self.config.jade_timestamp {
             self.handle.metrics().lag_blocks.set(0.0);
-            self.handle.set_phase(ReferenceIndexPhase::PreJade);
+            self.set_phase(ReferenceIndexPhase::PreJade);
             return Ok(());
         }
         if defer {
-            let indexed_to = db.indexed_to()?.unwrap_or_default();
+            let indexed_to = db.indexed_to()?;
             self.handle
                 .metrics()
                 .lag_blocks
-                .set(head.number.saturating_sub(indexed_to) as f64);
-            self.handle.set_phase(ReferenceIndexPhase::Deferred);
+                .set(head.number.saturating_sub(indexed_to.unwrap_or_default()) as f64);
+            self.publish_progress(ReferenceIndexPhase::Deferred, indexed_to);
             return Ok(());
         }
 
@@ -266,16 +306,15 @@ impl<C: CanonicalChain> ReferenceIndexRuntime<C> {
         };
         let finalized = self.chain.finalized_block_number()?;
         self.reconcile_cursor(&db, jade_first_block, finalized, head)?;
-        let start = db
-            .indexed_to()?
-            .map_or(jade_first_block, |cursor| cursor.saturating_add(1));
+        let indexed_to = db.indexed_to()?;
+        let start = indexed_to.map_or(jade_first_block, |cursor| cursor.saturating_add(1));
         if start > head.number {
             self.handle.metrics().lag_blocks.set(0.0);
-            self.handle.set_phase(ReferenceIndexPhase::Live);
+            self.publish_progress(ReferenceIndexPhase::Live, indexed_to);
             return Ok(());
         }
 
-        self.handle.set_phase(ReferenceIndexPhase::Backfill);
+        self.publish_progress(ReferenceIndexPhase::Backfill, indexed_to);
         let end = start
             .saturating_add(DEFAULT_BACKFILL_BATCH_BLOCKS - 1)
             .min(head.number);
@@ -304,13 +343,16 @@ impl<C: CanonicalChain> ReferenceIndexRuntime<C> {
         if lag > LIVE_LAG_SLO {
             debug!(target: TARGET, lag, slo = LIVE_LAG_SLO, "reference index remains behind its live-lag SLO");
         }
-        if end == current_head.number
+        let next_phase = if end == current_head.number
             && blocks
                 .last()
                 .is_some_and(|block| block.hash == current_head.hash)
         {
-            self.handle.set_phase(ReferenceIndexPhase::Live);
-        }
+            ReferenceIndexPhase::Live
+        } else {
+            ReferenceIndexPhase::Backfill
+        };
+        self.publish_progress(next_phase, Some(end));
         Ok(())
     }
 
@@ -866,5 +908,64 @@ mod tests {
         assert_eq!(handle.phase(), ReferenceIndexPhase::Deferred);
         assert_eq!(handle.db().unwrap().indexed_to().unwrap(), None);
         assert_eq!(handle.db().unwrap().indexed_block_hash(0).unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn watch_progress_notifies_on_commit_phase_transition_unavailable_and_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let chain = TestChain::linear(10, 200);
+        let config = ReferenceIndexConfig::new(dir.path(), 2818, B256::ZERO, 200);
+        let (mut runtime, handle) = ReferenceIndexRuntime::new(config, chain.clone());
+        let mut rx = handle.subscribe_progress();
+
+        assert_eq!(
+            *rx.borrow(),
+            ReferenceIndexProgress {
+                phase: ReferenceIndexPhase::Opening,
+                indexed_to: None,
+                unavailable: false,
+            }
+        );
+
+        // Initial backfill + live commit notifies watchers with cursor height.
+        runtime.synchronize_once(false).unwrap();
+        rx.changed().await.unwrap();
+        assert_eq!(
+            *rx.borrow(),
+            ReferenceIndexProgress {
+                phase: ReferenceIndexPhase::Live,
+                indexed_to: Some(9),
+                unavailable: false,
+            }
+        );
+
+        // Transition to Deferred notifies watchers while preserving cursor height.
+        runtime.synchronize_once(true).unwrap();
+        rx.changed().await.unwrap();
+        assert_eq!(
+            *rx.borrow(),
+            ReferenceIndexProgress {
+                phase: ReferenceIndexPhase::Deferred,
+                indexed_to: Some(9),
+                unavailable: false,
+            }
+        );
+
+        // Unrecoverable reorg notifies watchers with Unavailable.
+        chain.replace_suffix(0);
+        let _ = runtime.synchronize_once(false).unwrap_err();
+        rx.changed().await.unwrap();
+        assert_eq!(
+            *rx.borrow(),
+            ReferenceIndexProgress {
+                phase: ReferenceIndexPhase::Unavailable,
+                indexed_to: Some(9),
+                unavailable: true,
+            }
+        );
+
+        // Dropping the runtime drops the exclusive watch sender and wakes waiters immediately.
+        drop(runtime);
+        assert!(rx.changed().await.is_err());
     }
 }

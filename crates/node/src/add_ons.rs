@@ -267,13 +267,18 @@ where
                     .merge_if_module_configured(RethRpcModule::Eth, eth_config_handler.into_rpc())
                     .map_err(|e| eyre::eyre!("Failed to register eth_config handler: {}", e))?;
 
-                // The namespace remains registered while the index catches up; handlers return
-                // a structured unavailable/behind error until the durable cursor is live.
-                tracing::debug!(target: "morph::node", "Registering morph_ RPC namespace");
+                // Expose `morph_` only on transports where `morph` (or `all`) is configured,
+                // matching morph-geth's explicit `morph` module namespace rather than exposing it
+                // by default. While enabled, handlers return a structured unavailable/behind error
+                // until the durable cursor is live.
+                tracing::debug!(target: "morph::node", "Registering morph_ RPC namespace on configured transports");
                 modules
-                    .merge_configured(reference_rpc_handler.into_rpc())
+                    .merge_if_module_configured(
+                        RethRpcModule::Other("morph".into()),
+                        reference_rpc_handler.into_rpc(),
+                    )
                     .map_err(|e| eyre::eyre!("Failed to register morph_ RPC: {}", e))?;
-                tracing::info!(target: "morph::node", "morph_ RPC namespace registered");
+                tracing::info!(target: "morph::node", "morph_ RPC namespace registered for configured transports");
 
                 // Create and register Morph L2 Engine API
                 tracing::debug!(target: "morph::node", "Registering Morph L2 Engine API");
