@@ -234,6 +234,15 @@ where
         evm: &mut Self::Evm,
         exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
     ) -> Result<(), Self::Error> {
+        // Mirror upstream `revm_handler::post_execution::reward_beneficiary`:
+        // when fee charging is disabled (e.g. `eth_call`, `eth_estimateGas`,
+        // `eth_simulateV1` with `validation: false`, `debug_traceCall`), the
+        // caller was never charged for gas or L1 data fees so no reward may be
+        // credited to the beneficiary / FeeVault.
+        if evm.ctx_ref().cfg().is_fee_charge_disabled() {
+            return Ok(());
+        }
+
         // Reuse the L1 data fee cached during validate_and_deduct_eth_fee /
         // validate_and_deduct_token_fee, avoiding a redundant calculate_tx_l1_cost call.
         // Read before ctx().all_mut() borrows evm.
@@ -443,24 +452,29 @@ where
         &self,
         evm: &mut MorphEvm<DB, I>,
     ) -> Result<(), EVMError<DB::Error, MorphInvalidTransaction>> {
-        let hardfork = *evm.ctx_ref().cfg().spec();
+        let is_fee_charge_disabled = evm.ctx_ref().cfg().is_fee_charge_disabled();
+        let l1_data_fee = if is_fee_charge_disabled {
+            U256::ZERO
+        } else {
+            let hardfork = *evm.ctx_ref().cfg().spec();
 
-        // Fetch L1 block info from the L1 Gas Price Oracle contract per-tx.
-        // Must NOT use a per-block cache because the oracle can be updated by a
-        // regular transaction (from the external gas-oracle service) within the
-        // same block.  Subsequent user txs must see the updated fee parameters,
-        // matching go-ethereum's per-tx L1BlockInfo read.
-        let l1_block_info = L1BlockInfo::try_fetch(evm.ctx_mut().db_mut(), hardfork)?;
+            // Fetch L1 block info from the L1 Gas Price Oracle contract per-tx.
+            // Must NOT use a per-block cache because the oracle can be updated by a
+            // regular transaction (from the external gas-oracle service) within the
+            // same block.  Subsequent user txs must see the updated fee parameters,
+            // matching go-ethereum's per-tx L1BlockInfo read.
+            let l1_block_info = L1BlockInfo::try_fetch(evm.ctx_mut().db_mut(), hardfork)?;
 
-        let rlp_bytes = evm
-            .ctx_ref()
-            .tx()
-            .rlp_bytes
-            .as_ref()
-            .map(|b| b.as_ref())
-            .unwrap_or_default();
+            let rlp_bytes = evm
+                .ctx_ref()
+                .tx()
+                .rlp_bytes
+                .as_ref()
+                .map(|b| b.as_ref())
+                .unwrap_or_default();
 
-        let l1_data_fee = l1_block_info.calculate_tx_l1_cost(rlp_bytes, hardfork);
+            l1_block_info.calculate_tx_l1_cost(rlp_bytes, hardfork)
+        };
         evm.cached_l1_data_fee = l1_data_fee;
 
         let (block, tx, cfg, journal, _, _) = evm.ctx().all_mut();
@@ -2481,6 +2495,170 @@ mod tests {
         let new_balance =
             calculate_caller_fee_with_l1_cost(balance, tx, block, cfg, l1_data_fee).unwrap();
         assert_eq!(new_balance, balance);
+    }
+
+    /// Post-Curie simulation (`disable_fee_charge = true`) must credit 0 ETH to
+    /// the beneficiary / FeeVault even when L1 oracle fees and gas price are
+    /// non-zero, and must not touch the beneficiary account in the state diff.
+    #[test]
+    fn disable_fee_charge_credits_zero_eth_to_beneficiary_post_curie() {
+        use crate::l1block::{
+            GPO_BLOB_SCALAR_SLOT, GPO_COMMIT_SCALAR_SLOT, GPO_IS_CURIE_SLOT, GPO_L1_BASE_FEE_SLOT,
+            GPO_L1_BLOB_BASE_FEE_SLOT, L1_GAS_PRICE_ORACLE_ADDRESS,
+        };
+
+        let caller = address!("1000000000000000000000000000000000000011");
+        let recipient = address!("2000000000000000000000000000000000000022");
+        let fee_vault = address!("530000000000000000000000000000000000000a");
+        let initial_caller_balance = U256::from(10_000_000_000_000_000u128);
+        let initial_vault_balance = U256::from(1_000u64);
+        let transfer_value = U256::from(123_456u64);
+        let gas_price = 2_000_000_000u128; // 2 gwei
+        let rlp_bytes = Bytes::from(vec![0xab; 256]);
+
+        let build_db = || {
+            let mut db = CacheDB::new(EmptyDB::default());
+            db.insert_account_info(
+                caller,
+                AccountInfo {
+                    balance: initial_caller_balance,
+                    ..Default::default()
+                },
+            );
+            db.insert_account_info(
+                fee_vault,
+                AccountInfo {
+                    balance: initial_vault_balance,
+                    ..Default::default()
+                },
+            );
+            db.insert_account_info(L1_GAS_PRICE_ORACLE_ADDRESS, AccountInfo::default());
+            db.insert_account_storage(
+                L1_GAS_PRICE_ORACLE_ADDRESS,
+                GPO_L1_BASE_FEE_SLOT,
+                U256::from(10_000_000_000u64), // 10 gwei
+            )
+            .unwrap();
+            db.insert_account_storage(
+                L1_GAS_PRICE_ORACLE_ADDRESS,
+                GPO_L1_BLOB_BASE_FEE_SLOT,
+                U256::from(5_000_000_000u64), // 5 gwei
+            )
+            .unwrap();
+            db.insert_account_storage(
+                L1_GAS_PRICE_ORACLE_ADDRESS,
+                GPO_COMMIT_SCALAR_SLOT,
+                U256::from(230_760_020_821u64),
+            )
+            .unwrap();
+            db.insert_account_storage(
+                L1_GAS_PRICE_ORACLE_ADDRESS,
+                GPO_BLOB_SCALAR_SLOT,
+                U256::from(417_565_260u64),
+            )
+            .unwrap();
+            db.insert_account_storage(
+                L1_GAS_PRICE_ORACLE_ADDRESS,
+                GPO_IS_CURIE_SLOT,
+                U256::from(1u64),
+            )
+            .unwrap();
+            db
+        };
+
+        let make_tx = |value: U256| MorphTxEnv {
+            inner: TxEnv {
+                caller,
+                kind: TxKind::Call(recipient),
+                gas_limit: 50_000,
+                gas_price,
+                gas_priority_fee: Some(gas_price),
+                value,
+                data: Bytes::from(vec![0xaa; 64]),
+                ..Default::default()
+            },
+            rlp_bytes: Some(rlp_bytes.clone()),
+            ..Default::default()
+        };
+
+        // 1. With `disable_fee_charge = true`: beneficiary receives 0 ETH (and is not even
+        //    touched in the returned state diff), caller only pays `value`, and cached L1 fee is 0.
+        let mut sim_evm = MorphEvm::new(
+            MorphContext::new(build_db(), MorphHardfork::Celadon),
+            NoOpInspector,
+        );
+        sim_evm.block.inner.beneficiary = fee_vault;
+        sim_evm.block.inner.basefee = 1_000_000;
+        sim_evm.cfg.disable_fee_charge = true;
+
+        let sim_res = sim_evm.transact(make_tx(transfer_value)).unwrap();
+        assert!(sim_res.result.is_success());
+        assert_eq!(sim_evm.cached_l1_data_fee(), U256::ZERO);
+        assert!(
+            !sim_res.state.contains_key(&fee_vault),
+            "FeeVault must not be credited or touched when disable_fee_charge is true"
+        );
+        assert_eq!(
+            sim_res.state.get(&caller).unwrap().info.balance,
+            initial_caller_balance - transfer_value,
+            "caller must only pay tx.value, not L1 or L2 fees"
+        );
+        assert_eq!(
+            sim_res.state.get(&recipient).unwrap().info.balance,
+            transfer_value
+        );
+
+        // 2. Direct `reward_beneficiary` guard: even if `cached_l1_data_fee` were populated
+        //    directly, `reward_beneficiary` must still skip crediting FeeVault when
+        //    `disable_fee_charge = true`.
+        let mut direct_evm = MorphEvm::new(
+            MorphContext::new(build_db(), MorphHardfork::Celadon),
+            NoOpInspector,
+        );
+        direct_evm.block.inner.beneficiary = fee_vault;
+        direct_evm.block.inner.basefee = 1_000_000;
+        direct_evm.cfg.disable_fee_charge = true;
+        direct_evm.tx = make_tx(U256::ZERO);
+        direct_evm.cached_l1_data_fee = U256::from(999_999u64);
+        let mut frame_result = revm::handler::FrameResult::Call(revm::interpreter::CallOutcome {
+            result: revm::interpreter::InterpreterResult::new(
+                revm::interpreter::InstructionResult::Stop,
+                Bytes::new(),
+                Gas::new(21_000),
+            ),
+            memory_offset: 0..0,
+            was_precompile_called: false,
+            precompile_call_logs: Vec::new(),
+            charged_new_account_state_gas: false,
+        });
+        <MorphEvmHandler<_, _> as Handler>::reward_beneficiary(
+            &MorphEvmHandler::default(),
+            &mut direct_evm,
+            &mut frame_result,
+        )
+        .unwrap();
+        assert!(
+            !direct_evm.ctx.journal_mut().state.contains_key(&fee_vault),
+            "reward_beneficiary must return early without crediting beneficiary when fee charge is disabled"
+        );
+
+        // 3. Sanity contrast: with `disable_fee_charge = false`, FeeVault receives exact
+        //    `execution_fee + l1_data_fee`.
+        let mut real_evm = MorphEvm::new(
+            MorphContext::new(build_db(), MorphHardfork::Celadon),
+            NoOpInspector,
+        );
+        real_evm.block.inner.beneficiary = fee_vault;
+        real_evm.block.inner.basefee = 1_000_000;
+        let real_res = real_evm.transact(make_tx(transfer_value)).unwrap();
+        assert!(real_res.result.is_success());
+        let expected_l1_fee = real_evm.cached_l1_data_fee();
+        assert!(expected_l1_fee > U256::ZERO);
+        let expected_exec_fee = U256::from(gas_price) * U256::from(real_res.result.tx_gas_used());
+        assert_eq!(
+            real_res.state.get(&fee_vault).unwrap().info.balance,
+            initial_vault_balance + expected_exec_fee + expected_l1_fee
+        );
     }
 
     #[test]

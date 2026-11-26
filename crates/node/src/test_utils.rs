@@ -282,6 +282,38 @@ impl TestNodeBuilder {
         self
     }
 
+    /// Override a storage slot for an account in the test genesis.
+    pub fn with_account_storage(mut self, address: Address, slot: U256, value: U256) -> Self {
+        let alloc = self
+            .genesis_json
+            .get_mut("alloc")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("test genesis alloc must be an object");
+        let address_lower = address.to_string().to_ascii_lowercase();
+        let key = alloc
+            .keys()
+            .find(|existing| existing.eq_ignore_ascii_case(&address_lower))
+            .cloned()
+            .unwrap_or(address_lower);
+        let entry = alloc
+            .entry(key)
+            .or_insert_with(|| serde_json::json!({ "balance": "0x0" }));
+        let entry = entry
+            .as_object_mut()
+            .expect("test genesis account entry must be an object");
+        let storage = entry
+            .entry("storage")
+            .or_insert_with(|| serde_json::json!({}));
+        let storage = storage
+            .as_object_mut()
+            .expect("test genesis account storage must be an object");
+        storage.insert(
+            format!("{slot:#066x}"),
+            serde_json::json!(format!("{value:#066x}")),
+        );
+        self
+    }
+
     /// Set the number of nodes to start.
     ///
     /// When `num_nodes > 1`, all nodes are interconnected via a simulated P2P network.

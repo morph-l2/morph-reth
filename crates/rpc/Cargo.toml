@@ -42,7 +42,7 @@ reth-transaction-pool.workspace = true
 
 # Alloy
 alloy-consensus.workspace = true
-alloy-evm.workspace = true
+alloy-evm = { workspace = true, features = ["overrides", "call-util"] }
 alloy-primitives.workspace = true
 alloy-rpc-types-debug.workspace = true
 alloy-rpc-types-eth.workspace = true
@@ -59,6 +59,7 @@ serde.workspace = true
 derive_more.workspace = true
 tokio.workspace = true
 revm.workspace = true
+revm-inspectors.workspace = true
 
 # Error handling
 thiserror.workspace = true
