@@ -131,6 +131,18 @@ impl<Spec> TryIntoTxEnv<MorphTxEnv, Spec, MorphBlockEnv> for MorphTransactionReq
             || is_nonzero_reference(reference.as_ref())
             || memo.as_ref().is_some_and(|m| !m.is_empty());
 
+        // Match geth's `ToMessage` / `DoEstimateGas`: when `maxFeePerGas` is omitted and
+        // `maxPriorityFeePerGas` is explicitly `0` (with no legacy `gasPrice`), treat the
+        // request as zero-priced — identical to omitting both or passing `(0, 0)` — rather
+        // than letting `alloy-evm`'s `CallFees::ensure_fees` price it at `base_fee + 0` and
+        // reject zero-balance callers with `insufficient funds for l1 fee`.
+        if inner.gas_price.is_none()
+            && inner.max_fee_per_gas.is_none()
+            && inner.max_priority_fee_per_gas == Some(0)
+        {
+            inner.max_fee_per_gas = Some(0);
+        }
+
         let inner_tx_env = inner.try_into_tx_env(evm_env).map_err(EthApiError::from)?;
 
         let mut tx_env = MorphTxEnv::new(inner_tx_env);
@@ -1559,5 +1571,97 @@ mod tests {
         // = min(500_000_000, 3_000_000_000 - 1_000_000_000) + 1_000_000_000
         // = 500_000_000 + 1_000_000_000 = 1_500_000_000
         assert_eq!(rpc_tx.effective_gas_price, Some(1_500_000_000));
+    }
+
+    #[test]
+    fn try_into_tx_env_zero_tip_without_max_fee_is_zero_priced() {
+        let evm_env = create_evm_env(true);
+
+        // Omitting `maxFeePerGas` while passing `maxPriorityFeePerGas: 0` must produce
+        // a zero-priced EIP-1559 TxEnv (matching geth's `ToMessage` / `DoEstimateGas`).
+        let req = MorphTransactionRequest {
+            inner: TransactionRequest {
+                from: Some(address!("0000000000000000000000000000000000000001")),
+                to: Some(address!("0000000000000000000000000000000000000002").into()),
+                gas_price: None,
+                max_fee_per_gas: None,
+                max_priority_fee_per_gas: Some(0),
+                ..Default::default()
+            },
+            fee_token_id: None,
+            fee_limit: None,
+            reference: None,
+            memo: None,
+        };
+        let tx_env = req
+            .try_into_tx_env(&evm_env)
+            .expect("zero tip without maxFeePerGas must succeed");
+        assert_eq!(tx_env.inner.tx_type, 2);
+        assert_eq!(tx_env.inner.gas_price, 0);
+        assert_eq!(tx_env.inner.gas_priority_fee, Some(0));
+
+        // Explicit non-zero `maxFeePerGas` with `maxPriorityFeePerGas: 0` must keep
+        // non-zero pricing (`min(max_fee, base_fee + 0) == base_fee`).
+        let explicit_max_fee = MorphTransactionRequest {
+            inner: TransactionRequest {
+                from: Some(address!("0000000000000000000000000000000000000001")),
+                to: Some(address!("0000000000000000000000000000000000000002").into()),
+                gas_price: None,
+                max_fee_per_gas: Some(2_000_000_000),
+                max_priority_fee_per_gas: Some(0),
+                ..Default::default()
+            },
+            fee_token_id: None,
+            fee_limit: None,
+            reference: None,
+            memo: None,
+        };
+        let tx_env = explicit_max_fee
+            .try_into_tx_env(&evm_env)
+            .expect("explicit maxFeePerGas with zero tip must succeed");
+        assert_eq!(tx_env.inner.gas_price, 1_000_000_000);
+        assert_eq!(tx_env.inner.gas_priority_fee, Some(0));
+
+        // Non-zero `maxPriorityFeePerGas` without `maxFeePerGas` must remain priced at
+        // `base_fee + tip`.
+        let nonzero_tip = MorphTransactionRequest {
+            inner: TransactionRequest {
+                from: Some(address!("0000000000000000000000000000000000000001")),
+                to: Some(address!("0000000000000000000000000000000000000002").into()),
+                gas_price: None,
+                max_fee_per_gas: None,
+                max_priority_fee_per_gas: Some(5),
+                ..Default::default()
+            },
+            fee_token_id: None,
+            fee_limit: None,
+            reference: None,
+            memo: None,
+        };
+        let tx_env = nonzero_tip
+            .try_into_tx_env(&evm_env)
+            .expect("non-zero tip without maxFeePerGas must succeed");
+        assert_eq!(tx_env.inner.gas_price, 1_000_000_005);
+        assert_eq!(tx_env.inner.gas_priority_fee, Some(5));
+
+        // Conflicting legacy `gasPrice` + `maxPriorityFeePerGas: 0` must still error.
+        let conflicting = MorphTransactionRequest {
+            inner: TransactionRequest {
+                from: Some(address!("0000000000000000000000000000000000000001")),
+                to: Some(address!("0000000000000000000000000000000000000002").into()),
+                gas_price: Some(1_000_000_000),
+                max_fee_per_gas: None,
+                max_priority_fee_per_gas: Some(0),
+                ..Default::default()
+            },
+            fee_token_id: None,
+            fee_limit: None,
+            reference: None,
+            memo: None,
+        };
+        assert!(
+            conflicting.try_into_tx_env(&evm_env).is_err(),
+            "conflicting gasPrice and maxPriorityFeePerGas must still be rejected"
+        );
     }
 }
