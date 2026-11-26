@@ -23,7 +23,7 @@ mod tables;
 mod types;
 mod writer;
 
-pub use reader::{ReferenceIndexHandle, ReferenceIndexPhase};
+pub use reader::{ReferenceIndexHandle, ReferenceIndexPhase, ReferenceIndexProgress};
 pub use runtime::{ReferenceIndexConfig, ReferenceIndexRuntime};
 pub use source::{CanonicalBlock, CanonicalChain};
 pub use types::{

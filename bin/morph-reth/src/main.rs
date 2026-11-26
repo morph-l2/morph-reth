@@ -30,16 +30,40 @@ use reth_chainspec::EthChainSpec;
 use reth_cli_util::sigsegv_handler;
 use reth_ethereum_cli::{Cli, Commands};
 use reth_node_builder::Node;
-use reth_rpc_server_types::DefaultRpcModuleValidator;
-use std::sync::Arc;
+use reth_rpc_server_types::{RethRpcModule, RpcModuleSelection, RpcModuleValidator};
+use std::{str::FromStr, sync::Arc};
 use tracing::info;
+
+/// Morph RPC module validator: accepts all standard Reth RPC modules plus the
+/// Morph-specific `morph` namespace while rejecting any other unknown module name.
+#[derive(Debug, Clone, Copy, Default)]
+struct MorphRpcModuleValidator;
+
+impl RpcModuleValidator for MorphRpcModuleValidator {
+    fn parse_selection(s: &str) -> Result<RpcModuleSelection, String> {
+        let selection = RpcModuleSelection::from_str(s)
+            .map_err(|e| format!("Failed to parse RPC modules: {e}"))?;
+
+        if let RpcModuleSelection::Selection(modules) = &selection {
+            for module in modules {
+                if let RethRpcModule::Other(name) = module
+                    && name != "morph"
+                {
+                    return Err(format!("Unknown RPC module: '{name}'"));
+                }
+            }
+        }
+
+        Ok(selection)
+    }
+}
 
 fn morph_default_suggested_fee() -> U256 {
     U256::from_limbs([MORPH_DEFAULT_PRIORITY_FEE, 0, 0, 0])
 }
 
 fn apply_morph_cli_defaults(
-    cli: &mut Cli<MorphChainSpecParser, MorphArgs, DefaultRpcModuleValidator, MorphSubcommand>,
+    cli: &mut Cli<MorphChainSpecParser, MorphArgs, MorphRpcModuleValidator, MorphSubcommand>,
 ) {
     if let Commands::Node(command) = &mut cli.command {
         command
@@ -74,7 +98,7 @@ fn main() {
     };
 
     let mut cli =
-        Cli::<MorphChainSpecParser, MorphArgs, DefaultRpcModuleValidator, MorphSubcommand>::parse();
+        Cli::<MorphChainSpecParser, MorphArgs, MorphRpcModuleValidator, MorphSubcommand>::parse();
     apply_morph_cli_defaults(&mut cli);
 
     // Run the node
@@ -175,8 +199,7 @@ fn main() {
 mod tests {
     use super::*;
 
-    type MorphCli =
-        Cli<MorphChainSpecParser, MorphArgs, DefaultRpcModuleValidator, MorphSubcommand>;
+    type MorphCli = Cli<MorphChainSpecParser, MorphArgs, MorphRpcModuleValidator, MorphSubcommand>;
 
     #[test]
     fn parses_top_level_proofs_command() {
@@ -197,5 +220,74 @@ mod tests {
         };
         assert!(!command.ext.proofs_history);
         assert_eq!(command.rpc.rpc_eth_proof_window, 0);
+    }
+
+    #[test]
+    fn cli_rpc_module_validator_accepts_morph_on_http_ws_and_all() {
+        let cli = MorphCli::try_parse_from([
+            "morph-reth",
+            "node",
+            "--chain",
+            "hoodi",
+            "--http",
+            "--http.api",
+            "eth,morph",
+            "--ws",
+            "--ws.api",
+            "eth,morph",
+        ])
+        .expect("CLI with eth,morph modules must parse");
+        let Commands::Node(command) = cli.command else {
+            panic!("expected node command")
+        };
+
+        let http_api = command.rpc.http_api.as_ref().expect("http.api set");
+        let ws_api = command.rpc.ws_api.as_ref().expect("ws.api set");
+        assert!(http_api.contains(&RethRpcModule::Other("morph".into())));
+        assert!(ws_api.contains(&RethRpcModule::Other("morph".into())));
+        assert!(MorphRpcModuleValidator::validate_selection(http_api, "http.api").is_ok());
+        assert!(MorphRpcModuleValidator::validate_selection(ws_api, "ws.api").is_ok());
+
+        let all_cli = MorphCli::try_parse_from([
+            "morph-reth",
+            "node",
+            "--chain",
+            "hoodi",
+            "--http",
+            "--http.api",
+            "all",
+        ])
+        .expect("CLI with all modules must parse");
+        let Commands::Node(all_cmd) = all_cli.command else {
+            panic!("expected node command")
+        };
+        let all_api = all_cmd.rpc.http_api.as_ref().expect("http.api set");
+        assert!(all_api.contains(&RethRpcModule::Other("morph".into())));
+        assert!(MorphRpcModuleValidator::validate_selection(all_api, "http.api").is_ok());
+    }
+
+    #[test]
+    fn cli_rpc_module_validator_rejects_unknown_module_names() {
+        let cli = MorphCli::try_parse_from([
+            "morph-reth",
+            "node",
+            "--chain",
+            "hoodi",
+            "--http",
+            "--http.api",
+            "eth,unknown",
+        ])
+        .expect("clap parses unknown module as Other before validator runs");
+        let Commands::Node(command) = cli.command else {
+            panic!("expected node command")
+        };
+
+        let http_api = command.rpc.http_api.as_ref().expect("http.api set");
+        let err = MorphRpcModuleValidator::validate_selection(http_api, "http.api")
+            .expect_err("unknown RPC module must be rejected by MorphRpcModuleValidator");
+        assert!(
+            err.contains("Unknown RPC module: 'unknown'"),
+            "unexpected validation error: {err}"
+        );
     }
 }

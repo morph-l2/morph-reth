@@ -41,9 +41,12 @@ pub trait MorphRpc {
     /// non-recoverable index error makes the runtime unavailable. A repair in
     /// progress is reported as `"reference index is behind"`.
     ///
-    /// Marked `blocking` because the handler runs synchronous MDBX reads.
-    #[method(name = "getTransactionHashesByReference", blocking)]
-    fn get_transaction_hashes_by_reference(
+    /// Runs asynchronously: each MDBX/provider read executes on Tokio's
+    /// blocking pool, while any bounded steady-state catch-up wait parks on
+    /// the index runtime's `watch` progress channel without holding a blocking
+    /// thread or polling MDBX.
+    #[method(name = "getTransactionHashesByReference")]
+    async fn get_transaction_hashes_by_reference(
         &self,
         args: ReferenceQueryArgs,
     ) -> RpcResult<Vec<ReferenceTransactionResult>>;
