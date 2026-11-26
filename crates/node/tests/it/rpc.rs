@@ -1681,34 +1681,48 @@ async fn simulate_v1_validation_true_charges_full_curie_l1_and_l2_fees() -> eyre
     let max_fee_per_gas = 2_000_000_000u128; // 2 gwei
     let max_priority_fee_per_gas = 1_000_000_000u128; // 1 gwei
 
-    // Build the exact simulated EIP-1559 envelope (`Signature(0, 0, false)`) that
-    // `resolve_transaction` / `TryIntoSimTx` produces so we know its exact EIP-2718 length.
-    let sim_sig = alloy_primitives::Signature::new(U256::ZERO, U256::ZERO, false);
-    let expected_eth_envelope = MorphTxEnvelope::Eip1559(
-        alloy_consensus::TxEip1559 {
-            chain_id,
-            nonce: 0,
-            gas_limit,
-            max_fee_per_gas,
-            max_priority_fee_per_gas,
-            to: TxKind::Call(recipient),
-            value: U256::ZERO,
-            access_list: Default::default(),
-            input: calldata.clone(),
-        }
-        .into_signed(sim_sig),
+    // Build the simulated EIP-1559 envelope with both the 3-byte zero signature
+    // (`TryIntoSimTx`) and the full 64-byte placeholder signature (`U256::MAX, U256::MAX, true`)
+    // used for L1 fee sizing.
+    let zero_sig = alloy_primitives::Signature::new(U256::ZERO, U256::ZERO, false);
+    let placeholder_sig = alloy_primitives::Signature::new(U256::MAX, U256::MAX, true);
+    let tx_inner = alloy_consensus::TxEip1559 {
+        chain_id,
+        nonce: 0,
+        gas_limit,
+        max_fee_per_gas,
+        max_priority_fee_per_gas,
+        to: TxKind::Call(recipient),
+        value: U256::ZERO,
+        access_list: Default::default(),
+        input: calldata.clone(),
+    };
+    let zero_sig_len = MorphTxEnvelope::Eip1559(tx_inner.clone().into_signed(zero_sig))
+        .encoded_2718()
+        .len() as u128;
+    let encoded_len = MorphTxEnvelope::Eip1559(tx_inner.into_signed(placeholder_sig))
+        .encoded_2718()
+        .len() as u128;
+    assert_eq!(
+        encoded_len,
+        zero_sig_len + 64,
+        "placeholder signature must add exactly 64 bytes for L1 fee sizing"
     );
-    let encoded_len = expected_eth_envelope.encoded_2718().len() as u128;
     let commit_only_l1_fee =
         U256::from((COMMIT_SCALAR * u128::from(L1_BASE_FEE)) / L1_FEE_PRECISION);
+    let zero_sig_l1_fee = U256::from(
+        (COMMIT_SCALAR * u128::from(L1_BASE_FEE)
+            + BLOB_SCALAR * zero_sig_len * u128::from(L1_BLOB_BASE_FEE))
+            / L1_FEE_PRECISION,
+    );
     let full_l1_fee = U256::from(
         (COMMIT_SCALAR * u128::from(L1_BASE_FEE)
             + BLOB_SCALAR * encoded_len * u128::from(L1_BLOB_BASE_FEE))
             / L1_FEE_PRECISION,
     );
     assert!(
-        full_l1_fee > commit_only_l1_fee * U256::from(2u64),
-        "calldata blob fee must significantly exceed commit-only fee"
+        full_l1_fee > zero_sig_l1_fee && zero_sig_l1_fee > commit_only_l1_fee * U256::from(2u64),
+        "placeholder-signature Curie blob fee must strictly exceed zero-signature and commit-only fees"
     );
 
     let l2_max_fee = U256::from(gas_limit) * U256::from(max_fee_per_gas);
@@ -1721,10 +1735,10 @@ async fn simulate_v1_validation_true_charges_full_curie_l1_and_l2_fees() -> eyre
         "input": calldata.to_string(),
     });
 
-    // (1) Balance covers L2 + commit-only L1 fee (+ half the blob fee), NOT full Curie L1 fee:
-    //     must fail with insufficient funds (-38014). Under the old empty-RLP bug this passed!
-    let insufficient_balance =
-        l2_max_fee + commit_only_l1_fee + (full_l1_fee - commit_only_l1_fee) / U256::from(2u64);
+    // (1) Balance covers L2 + zero-signature L1 fee (which omits the 64B placeholder
+    //     signature bytes), NOT full placeholder-signature Curie L1 fee: must fail
+    //     with insufficient funds (-38014).
+    let insufficient_balance = l2_max_fee + zero_sig_l1_fee;
     let fail_payload = serde_json::json!({
         "blockStateCalls": [{
             "stateOverrides": {
@@ -1739,15 +1753,18 @@ async fn simulate_v1_validation_true_charges_full_curie_l1_and_l2_fees() -> eyre
     let err = client
         .request::<Value, _>("eth_simulateV1", (fail_payload, "latest"))
         .await
-        .expect_err("validation=true must reject when balance omits Curie blob L1 fee");
+        .expect_err(
+            "validation=true must reject when balance omits 64B placeholder signature L1 fee",
+        );
     let err_str = err.to_string();
     assert!(
         err_str.contains("insufficient funds") || err_str.contains("-38014"),
         "expected insufficient funds error, got: {err_str}"
     );
 
-    // (2) Balance covers exact `l2_max_fee + full_l1_fee`: must succeed and deduct exact
-    //     `l2_used_fee + full_l1_fee` from sender and credit the same amount to FeeVault.
+    // (2) Balance covers exact `l2_max_fee + full_l1_fee`: must succeed, charge exact
+    //     `l2_used_fee + full_l1_fee` to sender and FeeVault, AND with
+    //     `returnFullTransactions: true` keep zero `r`/`s`/`v` on the returned tx.
     let exact_budget = l2_max_fee + full_l1_fee;
     let pass_payload = serde_json::json!({
         "blockStateCalls": [{
@@ -1775,6 +1792,7 @@ async fn simulate_v1_validation_true_charges_full_curie_l1_and_l2_fees() -> eyre
             ],
         }],
         "validation": true,
+        "returnFullTransactions": true,
     });
     let blocks: Value = client
         .request("eth_simulateV1", (pass_payload, "latest"))
@@ -1783,6 +1801,16 @@ async fn simulate_v1_validation_true_charges_full_curie_l1_and_l2_fees() -> eyre
     let calls = block["calls"].as_array().expect("calls array");
     assert_eq!(calls[0]["status"].as_str(), Some("0x1"));
     assert_eq!(calls[1]["status"].as_str(), Some("0x1"));
+
+    // Returned full transaction must keep zero r/s/v per the eth_simulateV1 spec.
+    let txs = block["transactions"]
+        .as_array()
+        .expect("full transactions array");
+    assert_eq!(txs.len(), 2);
+    assert_eq!(txs[0]["r"].as_str(), Some("0x0"));
+    assert_eq!(txs[0]["s"].as_str(), Some("0x0"));
+    assert_eq!(txs[0]["v"].as_str(), Some("0x0"));
+    assert_eq!(txs[0]["yParity"].as_str(), Some("0x0"));
 
     let block_base_fee = u128::from_str_radix(
         block["baseFeePerGas"]
@@ -1874,6 +1902,135 @@ async fn simulate_v1_validation_true_charges_full_curie_l1_and_l2_fees() -> eyre
                 == Some(transfer_topic)
         }),
         "validated call-mode token-fee MorphTx must emit ERC-20 Transfer fee logs: {logs:?}"
+    );
+
+    Ok(())
+}
+
+/// `eth_simulateV1(validation: true)` with legacy `gasPrice` + `feeTokenID` on a
+/// zero-ETH / funded-token caller must execute as a token-fee MorphTx (`0x7f`)
+/// rather than silently degrading into a Legacy ETH transaction.
+#[tokio::test(flavor = "multi_thread")]
+async fn simulate_v1_validation_true_legacy_gas_price_with_fee_token_id_executes_morph_tx()
+-> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    const L1_ORACLE: Address =
+        alloy_primitives::address!("530000000000000000000000000000000000000f");
+    const TEST_TOKEN: Address =
+        alloy_primitives::address!("5300000000000000000000000000000000000022");
+    const L1_BASE_FEE: u64 = 10_000_000_000; // 10 gwei
+    const L1_BLOB_BASE_FEE: u64 = 10_000_000_000; // 10 gwei
+
+    let (mut nodes, wallet) = TestNodeBuilder::new()
+        .with_account_storage(L1_ORACLE, U256::from(1u64), U256::from(L1_BASE_FEE))
+        .with_account_storage(L1_ORACLE, U256::from(6u64), U256::from(L1_BLOB_BASE_FEE))
+        .build()
+        .await?;
+    let mut node = nodes.pop().unwrap();
+    let token_holder = wallet.inner.address();
+    advance_chain(1, &mut node, wallet_to_arc(wallet)).await?;
+
+    let client = node
+        .rpc_client()
+        .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
+
+    let initial_token_hex: String = client
+        .request(
+            "eth_call",
+            (
+                serde_json::json!({
+                    "to": TEST_TOKEN,
+                    "input": encode_balance_of(token_holder),
+                }),
+                "latest",
+            ),
+        )
+        .await?;
+    let initial_token_balance = decode_u256_word(&initial_token_hex);
+    assert!(
+        initial_token_balance > U256::ZERO,
+        "genesis token holder must have non-zero fee token balance"
+    );
+
+    let recipient = Address::random();
+    let gas_limit = 50_000u64;
+    let gas_price = 2_000_000_000u128; // 2 gwei
+    let calldata = Bytes::from(vec![0xcd; 128]);
+
+    // Zero out `token_holder`'s ETH balance via `stateOverrides` so a Legacy ETH
+    // fallback would fail immediately with insufficient ETH, while preserving its
+    // ERC-20 token balance in `TEST_TOKEN`.
+    let payload = serde_json::json!({
+        "blockStateCalls": [{
+            "stateOverrides": {
+                token_holder.to_string(): {
+                    "balance": "0x0",
+                },
+            },
+            "calls": [
+                {
+                    "from": token_holder,
+                    "to": recipient,
+                    "gas": format!("{gas_limit:#x}"),
+                    "gasPrice": format!("{gas_price:#x}"),
+                    "feeTokenID": format!("{TEST_TOKEN_ID:#x}"),
+                    "input": calldata.to_string(),
+                },
+                {
+                    "from": token_holder,
+                    "to": TEST_TOKEN,
+                    "gas": "0x186a0",
+                    "gasPrice": format!("{gas_price:#x}"),
+                    "feeTokenID": format!("{TEST_TOKEN_ID:#x}"),
+                    "input": encode_balance_of(token_holder),
+                },
+            ],
+        }],
+        "validation": true,
+        "returnFullTransactions": true,
+    });
+
+    let blocks: Value = client
+        .request("eth_simulateV1", (payload, "latest"))
+        .await?;
+    let block = &blocks[0];
+    let calls = block["calls"].as_array().expect("calls array");
+    assert_eq!(calls[0]["status"].as_str(), Some("0x1"));
+    assert_eq!(calls[1]["status"].as_str(), Some("0x1"));
+
+    // Returned full transaction must be a MorphTx (`0x7f`) with `feeTokenID = 1`
+    // and zero `r`/`s`/`v` signature fields.
+    let txs = block["transactions"]
+        .as_array()
+        .expect("full transactions array");
+    assert_eq!(txs[0]["type"].as_str(), Some("0x7f"));
+    assert_eq!(txs[0]["feeTokenID"].as_str(), Some("0x1"));
+    assert_eq!(txs[0]["r"].as_str(), Some("0x0"));
+    assert_eq!(txs[0]["s"].as_str(), Some("0x0"));
+    assert_eq!(txs[0]["v"].as_str(), Some("0x0"));
+    assert_eq!(txs[0]["yParity"].as_str(), Some("0x0"));
+
+    // ERC-20 `Transfer` fee log emitted on Call 0.
+    let transfer_topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+    let logs = calls[0]["logs"].as_array().expect("logs array");
+    assert!(
+        logs.iter().any(|log| {
+            log["topics"]
+                .as_array()
+                .and_then(|t| t.first())
+                .and_then(Value::as_str)
+                == Some(transfer_topic)
+        }),
+        "gasPrice + feeTokenID MorphTx must emit ERC-20 Transfer fee logs: {logs:?}"
+    );
+
+    // Token balance observed during Call 1 must have decreased from Call 0's fee deduction
+    // (and Call 1's own upfront deduction).
+    let token_balance_after = decode_u256_word(calls[1]["returnData"].as_str().unwrap());
+    assert!(
+        token_balance_after < initial_token_balance,
+        "token fees must be deducted from ERC-20 balance: before={initial_token_balance}, after={token_balance_after}"
     );
 
     Ok(())

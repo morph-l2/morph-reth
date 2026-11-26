@@ -8,13 +8,14 @@
 //!   that fee-token callers are left uncapped for the handler.
 //! - [`EthCall::simulate_v1`] is overridden so `eth_simulateV1` disables fee
 //!   charging (including Morph's non-zero L1 data fee) when `validation: false`
-//!   and passes each transaction's real EIP-2718 encoding when `validation: true`
-//!   so Curie `commit + blob` (and pre-Curie calldata) L1 fees are accurately
-//!   charged and validated.
+//!   and encodes a copy of each simulated transaction with a full-size
+//!   placeholder signature when `validation: true` so Curie `commit + blob`
+//!   (and pre-Curie calldata) L1 fees are accurately charged and validated
+//!   without mutating the zero signature returned to callers.
 
 use crate::MorphEthApiError;
 use crate::eth::{MorphEthApi, MorphNodeCore};
-use alloy_consensus::BlockHeader;
+use alloy_consensus::{BlockHeader, Signed};
 use alloy_eips::eip2718::{Encodable2718, WithEncoded};
 use alloy_evm::{
     block::TxResult,
@@ -22,12 +23,13 @@ use alloy_evm::{
     overrides::{OverrideBlockHashes, apply_block_overrides, apply_state_overrides},
 };
 use alloy_network::TransactionBuilder;
-use alloy_primitives::{B256, U256};
+use alloy_primitives::{B256, Bytes, Signature, U256};
 use alloy_rpc_types_eth::{
     BlockId,
     simulate::{SimBlock, SimulatePayload, SimulatedBlock},
 };
 use morph_chainspec::{MorphChainSpec, MorphHardforks};
+use morph_primitives::{MorphPrimitives, MorphTxEnvelope};
 use morph_revm::{L1BlockInfo, MorphTxExt, TokenFeeInfo};
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
 use reth_errors::RethError;
@@ -284,13 +286,56 @@ where
     }
 }
 
+/// Encodes a simulated transaction with a full-size placeholder signature for L1
+/// data fee sizing, without mutating the transaction itself.
+///
+/// `TryIntoSimTx` attaches `Signature::new(U256::ZERO, U256::ZERO, false)` (3 RLP
+/// bytes instead of 67 bytes) so `returnFullTransactions: true` exposes zero
+/// `r`/`s`/`v` per the Ethereum `eth_simulateV1` spec. Encoding that zero signature
+/// directly underestimates post-Curie blob fees by 64 bytes (and pre-Curie calldata
+/// gas by 64 non-zero bytes). Using the same 64-byte `0xff` + `yParity = 1`
+/// placeholder as [`morph_revm::MorphTxEnv::encode_for_l1_fee`] matches real signed
+/// transactions and `eth_estimateGas` while keeping `tx`'s zero signature intact.
+fn encode_simulated_tx_for_l1_fee(tx: &MorphTxEnvelope) -> Bytes {
+    let placeholder_sig = Signature::new(U256::MAX, U256::MAX, true);
+    let envelope = match tx {
+        MorphTxEnvelope::Legacy(signed) => MorphTxEnvelope::Legacy(Signed::new_unchecked(
+            signed.tx().clone(),
+            placeholder_sig,
+            B256::ZERO,
+        )),
+        MorphTxEnvelope::Eip2930(signed) => MorphTxEnvelope::Eip2930(Signed::new_unchecked(
+            signed.tx().clone(),
+            placeholder_sig,
+            B256::ZERO,
+        )),
+        MorphTxEnvelope::Eip1559(signed) => MorphTxEnvelope::Eip1559(Signed::new_unchecked(
+            signed.tx().clone(),
+            placeholder_sig,
+            B256::ZERO,
+        )),
+        MorphTxEnvelope::Eip7702(signed) => MorphTxEnvelope::Eip7702(Signed::new_unchecked(
+            signed.tx().clone(),
+            placeholder_sig,
+            B256::ZERO,
+        )),
+        MorphTxEnvelope::Morph(signed) => MorphTxEnvelope::Morph(Signed::new_unchecked(
+            signed.tx().clone(),
+            placeholder_sig,
+            B256::ZERO,
+        )),
+        MorphTxEnvelope::L1Msg(_) => return tx.encoded_2718().into(),
+    };
+    envelope.encoded_2718().into()
+}
+
 /// Morph-aware equivalent of [`simulate::execute_transactions`].
 ///
 /// Mirrors upstream `eth_simulateV1` block execution, gas-cap accounting, and
-/// state-root handling, while wrapping resolved transactions with their real
-/// EIP-2718 encoding when `validation == true` so Morph's L1 data fee charges
-/// the full Curie `commit + blob` (or pre-Curie calldata) cost instead of
-/// treating transactions as 0-byte envelopes.
+/// state-root handling, while wrapping resolved transactions with a full-size
+/// placeholder-signature EIP-2718 encoding when `validation == true` so Morph's
+/// L1 data fee charges the full Curie `commit + blob` (or pre-Curie calldata)
+/// cost without mutating the zero signature stored on `tx`.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn execute_simulated_transactions<S, T>(
     mut builder: S,
@@ -309,7 +354,10 @@ fn execute_simulated_transactions<S, T>(
     EthApiError,
 >
 where
-    S: BlockBuilder<Executor: BlockExecutor<Evm: Evm<DB: Database<Error: Into<EthApiError>>>>>,
+    S: BlockBuilder<
+            Primitives = MorphPrimitives,
+            Executor: BlockExecutor<Evm: Evm<DB: Database<Error: Into<EthApiError>>>>,
+        >,
     T: RpcConvert<Primitives = S::Primitives>,
 {
     builder.apply_pre_execution_changes()?;
@@ -368,12 +416,16 @@ where
             builder.evm_mut().db_mut(),
             converter,
         )?;
-        // When `validation == true`, pass the real EIP-2718 encoding so Morph's L1
-        // fee calculation charges the full commit + blob (Curie) or calldata
-        // (pre-Curie) fee. When `validation == false`, `disable_fee_charge` skips
-        // L1 fee charging entirely, so an empty envelope avoids wasted encoding.
+        // When `validation == true`, encode a copy of `tx` with a full-size
+        // placeholder signature (`r = s = U256::MAX, yParity = true`, matching
+        // `MorphTxEnv::encode_for_l1_fee`) so Morph's L1 fee calculation charges
+        // the full commit + blob (Curie) or calldata (pre-Curie) fee without
+        // mutating `tx`'s zero signature (`returnFullTransactions: true` keeps
+        // zero `r`/`s`/`v` per the Ethereum `eth_simulateV1` spec). When
+        // `validation == false`, `disable_fee_charge` skips L1 fee charging
+        // entirely, so an empty envelope avoids wasted encoding.
         let encoded = if validation {
-            tx.encoded_2718().into()
+            encode_simulated_tx_for_l1_fee(tx.inner())
         } else {
             Default::default()
         };
@@ -992,6 +1044,243 @@ mod tests {
         assert_eq!(
             token_amount_to_eth(U256::from(10u64), &info),
             Some(U256::from(3u64))
+        );
+    }
+
+    /// `encode_simulated_tx_for_l1_fee` must re-encode every signed `MorphTxEnvelope`
+    /// variant with the 64-byte `0xff` + `yParity = 1` placeholder signature (adding
+    /// 64 bytes vs `TryIntoSimTx`'s zero signature when the outer RLP header width is
+    /// unchanged), match `MorphTxEnv::encode_for_l1_fee` for EIP-1559 / EIP-7702 /
+    /// MorphTx, fall back to `encoded_2718` for `L1Msg`, and leave `tx`'s original
+    /// zero signature untouched.
+    #[test]
+    fn encode_simulated_tx_for_l1_fee_uses_full_placeholder_sig_without_mutating_tx() {
+        use alloy_consensus::{
+            Signed, Transaction as _, TxEip1559, TxEip2930, TxEip7702, TxLegacy,
+        };
+        use alloy_eips::{
+            eip2718::Decodable2718,
+            eip7702::{Authorization, SignedAuthorization},
+        };
+        use alloy_primitives::{Address, Sealed, TxKind, address};
+        use morph_primitives::{
+            TxL1Msg, TxMorph,
+            transaction::morph_transaction::{MORPH_TX_VERSION_1, MORPH_TX_VERSION_2},
+        };
+        use morph_revm::MorphTxEnv;
+
+        let chain_id = 2818u64;
+        let signer = address!("0000000000000000000000000000000000000001");
+        let to = address!("0000000000000000000000000000000000000002");
+        // 64 bytes of calldata keeps both zero-sig and placeholder-sig RLP payload
+        // lengths inside `[56, 255]` so the outer RLP list header is 2 bytes for both
+        // and the length delta is exactly +64 bytes.
+        let input = Bytes::from(vec![0xab; 64]);
+        let zero_sig = Signature::new(U256::ZERO, U256::ZERO, false);
+        let placeholder_sig = Signature::new(U256::MAX, U256::MAX, true);
+        let auth: SignedAuthorization = Authorization {
+            chain_id: U256::from(chain_id),
+            address: address!("0000000000000000000000000000000000000042"),
+            nonce: 1,
+        }
+        .into_signed(Signature::new(U256::from(1u64), U256::from(2u64), true));
+
+        let signed_cases: Vec<(&str, MorphTxEnvelope, bool)> = vec![
+            (
+                "legacy",
+                MorphTxEnvelope::Legacy(Signed::new_unchecked(
+                    TxLegacy {
+                        chain_id: Some(chain_id),
+                        nonce: 7,
+                        gas_price: 2_000_000_000,
+                        gas_limit: 50_000,
+                        to: TxKind::Call(to),
+                        value: U256::from(1u64),
+                        input: input.clone(),
+                    },
+                    zero_sig,
+                    B256::ZERO,
+                )),
+                false,
+            ),
+            (
+                "eip2930",
+                MorphTxEnvelope::Eip2930(Signed::new_unchecked(
+                    TxEip2930 {
+                        chain_id,
+                        nonce: 7,
+                        gas_price: 2_000_000_000,
+                        gas_limit: 50_000,
+                        to: TxKind::Call(to),
+                        value: U256::from(1u64),
+                        access_list: Default::default(),
+                        input: input.clone(),
+                    },
+                    zero_sig,
+                    B256::ZERO,
+                )),
+                false,
+            ),
+            (
+                "eip1559",
+                MorphTxEnvelope::Eip1559(Signed::new_unchecked(
+                    TxEip1559 {
+                        chain_id,
+                        nonce: 7,
+                        gas_limit: 50_000,
+                        max_fee_per_gas: 2_000_000_000,
+                        max_priority_fee_per_gas: 1_000_000_000,
+                        to: TxKind::Call(to),
+                        value: U256::from(1u64),
+                        access_list: Default::default(),
+                        input: input.clone(),
+                    },
+                    zero_sig,
+                    B256::ZERO,
+                )),
+                true,
+            ),
+            (
+                "eip7702",
+                MorphTxEnvelope::Eip7702(Signed::new_unchecked(
+                    TxEip7702 {
+                        chain_id,
+                        nonce: 7,
+                        gas_limit: 80_000,
+                        max_fee_per_gas: 2_000_000_000,
+                        max_priority_fee_per_gas: 1_000_000_000,
+                        to,
+                        value: U256::ZERO,
+                        access_list: Default::default(),
+                        authorization_list: vec![auth.clone()],
+                        input: input.clone(),
+                    },
+                    zero_sig,
+                    B256::ZERO,
+                )),
+                true,
+            ),
+            (
+                "morph_v1",
+                MorphTxEnvelope::Morph(Signed::new_unchecked(
+                    TxMorph {
+                        chain_id,
+                        nonce: 7,
+                        gas_limit: 50_000,
+                        max_fee_per_gas: 2_000_000_000,
+                        max_priority_fee_per_gas: 1_000_000_000,
+                        to: TxKind::Call(to),
+                        value: U256::ZERO,
+                        access_list: Default::default(),
+                        input: input.clone(),
+                        fee_token_id: 1,
+                        fee_limit: U256::from(10_000u64),
+                        version: MORPH_TX_VERSION_1,
+                        reference: Some(B256::repeat_byte(0x11)),
+                        memo: Some(Bytes::from_static(b"sim")),
+                        authorization_list: vec![],
+                    },
+                    zero_sig,
+                    B256::ZERO,
+                )),
+                true,
+            ),
+            (
+                "morph_v2",
+                MorphTxEnvelope::Morph(Signed::new_unchecked(
+                    TxMorph {
+                        chain_id,
+                        nonce: 7,
+                        gas_limit: 80_000,
+                        max_fee_per_gas: 2_000_000_000,
+                        max_priority_fee_per_gas: 1_000_000_000,
+                        to: TxKind::Call(to),
+                        value: U256::ZERO,
+                        access_list: Default::default(),
+                        input: input.clone(),
+                        fee_token_id: 1,
+                        fee_limit: U256::from(10_000u64),
+                        version: MORPH_TX_VERSION_2,
+                        reference: None,
+                        memo: None,
+                        authorization_list: vec![auth],
+                    },
+                    zero_sig,
+                    B256::ZERO,
+                )),
+                true,
+            ),
+        ];
+
+        for (label, tx, compare_tx_env) in signed_cases {
+            let zero_encoded = tx.encoded_2718();
+            let sized_encoded = encode_simulated_tx_for_l1_fee(&tx);
+
+            // Exactly +64 bytes (r and s expand from 1 byte 0x80 each to 33 bytes each).
+            assert_eq!(
+                sized_encoded.len(),
+                zero_encoded.len() + 64,
+                "{label}: expected +64 byte delta vs zero signature"
+            );
+
+            // Re-decoded envelope carries the exact placeholder signature.
+            let decoded = MorphTxEnvelope::decode_2718(&mut sized_encoded.as_ref())
+                .expect("placeholder encoding must decode cleanly");
+            let sig = match &decoded {
+                MorphTxEnvelope::Legacy(s) => s.signature(),
+                MorphTxEnvelope::Eip2930(s) => s.signature(),
+                MorphTxEnvelope::Eip1559(s) => s.signature(),
+                MorphTxEnvelope::Eip7702(s) => s.signature(),
+                MorphTxEnvelope::Morph(s) => s.signature(),
+                MorphTxEnvelope::L1Msg(_) => unreachable!(),
+            };
+            assert_eq!(
+                *sig, placeholder_sig,
+                "{label}: decoded signature must match placeholder"
+            );
+
+            // Original `tx` must still hold its zero signature untouched.
+            let orig_sig = match &tx {
+                MorphTxEnvelope::Legacy(s) => s.signature(),
+                MorphTxEnvelope::Eip2930(s) => s.signature(),
+                MorphTxEnvelope::Eip1559(s) => s.signature(),
+                MorphTxEnvelope::Eip7702(s) => s.signature(),
+                MorphTxEnvelope::Morph(s) => s.signature(),
+                MorphTxEnvelope::L1Msg(_) => unreachable!(),
+            };
+            assert_eq!(
+                *orig_sig, zero_sig,
+                "{label}: original tx signature must not be mutated"
+            );
+
+            // EIP-1559, EIP-7702, and Morph envelopes match `MorphTxEnv::encode_for_l1_fee`
+            // byte-for-byte (EIP-7702/MorphV2 authorization signatures differ only if recovered,
+            // and here `from_recovered_tx` keeps the signed auths or replaces with placeholder).
+            if compare_tx_env && tx.authorization_list().is_none_or(<[_]>::is_empty) {
+                let env_encoded =
+                    MorphTxEnv::from_recovered_tx(&tx, signer).encode_for_l1_fee(chain_id);
+                assert_eq!(
+                    sized_encoded, env_encoded,
+                    "{label}: must match MorphTxEnv::encode_for_l1_fee byte-for-byte"
+                );
+            }
+        }
+
+        // `L1Msg` has no signature and falls back to `encoded_2718`.
+        let l1_msg = MorphTxEnvelope::L1Msg(Sealed::new_unchecked(
+            TxL1Msg {
+                queue_index: 1,
+                gas_limit: 50_000,
+                to,
+                value: U256::ZERO,
+                input,
+                sender: Address::ZERO,
+            },
+            B256::ZERO,
+        ));
+        assert_eq!(
+            encode_simulated_tx_for_l1_fee(&l1_msg),
+            Bytes::from(l1_msg.encoded_2718())
         );
     }
 }
