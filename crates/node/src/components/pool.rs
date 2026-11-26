@@ -1,12 +1,14 @@
 //! Morph transaction pool builder.
 
 use crate::MorphNode;
+use alloy_consensus::BlockHeader;
 use morph_evm::MorphEvmConfig;
 use morph_primitives;
 use morph_txpool::MorphTransactionValidator;
 use reth_node_api::FullNodeTypes;
 use reth_node_builder::components::{TxPoolBuilder, spawn_maintenance_tasks};
 use reth_node_builder::{BuilderContext, components::PoolBuilder};
+use reth_provider::{BlockNumReader, HeaderProvider};
 use reth_tracing::tracing::{debug, info};
 use reth_transaction_pool::{TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore};
 
@@ -36,7 +38,20 @@ where
         ctx: &BuilderContext<Node>,
         _evm_config: Evm,
     ) -> eyre::Result<Self::Pool> {
-        let pool_config = ctx.pool_config();
+        let mut pool_config = ctx.pool_config();
+
+        // Initialize both the pool's and validator's block gas limit from the current
+        // canonical tip (falling back to genesis on a fresh DB) so transactions with gas
+        // above Ethereum's default 30M are not rejected during the startup window before
+        // the first `set_block_info` update.
+        let tip_gas_limit = ctx
+            .provider()
+            .best_block_number()
+            .ok()
+            .and_then(|num| ctx.provider().header_by_number(num).ok().flatten())
+            .map(|header| header.gas_limit())
+            .unwrap_or_else(|| ctx.chain_spec().inner.genesis().gas_limit);
+        pool_config.gas_limit = tip_gas_limit;
 
         // Use in-memory blob store (Morph doesn't support EIP-4844 blobs)
         let blob_store = InMemoryBlobStore::default();
@@ -54,7 +69,7 @@ where
         .with_local_transactions_config(pool_config.local_transactions_config.clone())
         .set_tx_fee_cap(ctx.config().rpc.rpc_tx_fee_cap)
         .with_max_tx_gas_limit(ctx.config().txpool.max_tx_gas_limit)
-        .set_block_gas_limit(ctx.chain_spec().inner.genesis().gas_limit)
+        .set_block_gas_limit(tip_gas_limit)
         .with_minimum_priority_fee(ctx.config().txpool.minimum_priority_fee)
         .with_additional_tasks(ctx.config().txpool.additional_validation_tasks)
         // Register MorphTx (0x7F) type for ERC20 gas payment

@@ -7,7 +7,7 @@
 use alloy_primitives::{Address, U256};
 use morph_chainspec::hardfork::MorphHardfork;
 use morph_primitives::{
-    MorphTxEnvelope,
+    MorphTxEnvelope, TxMorph,
     transaction::morph_transaction::{MORPH_TX_VERSION_1, MORPH_TX_VERSION_2},
 };
 use morph_revm::{MorphEvmEnv, TokenFeeInfo};
@@ -68,6 +68,41 @@ pub fn validate_morph_tx<DB: Database>(
     })
 }
 
+/// Validates stateless MorphTx fork gates and structural invariants without any DB access.
+///
+/// Called early in [`MorphTransactionValidator`](crate::MorphTransactionValidator) before
+/// state lookups, and again inside [`validate_morph_tx_with`] so background revalidation
+/// enforces the exact same rules.
+pub(crate) fn validate_morph_tx_stateless(
+    morph_tx: &TxMorph,
+    hardfork: MorphHardfork,
+) -> Result<(), MorphTxError> {
+    if !hardfork.is_jade() && morph_tx.version == MORPH_TX_VERSION_1 {
+        return Err(MorphTxError::ForkNotActive {
+            reason: "MorphTx version 1 is not yet active (jade fork not reached)".to_string(),
+        });
+    }
+
+    // V2 (EIP-7702 authorization list) is gated on Celadon. The list itself is
+    // validated by `TxMorph::validate` below (V0/V1 must not carry one, a
+    // non-empty V2 list forbids CREATE; an empty V2 list is allowed); authority
+    // tracking and delegated-sender limits come from the upstream validator,
+    // which reads the list through `Transaction::authorization_list`.
+    if !hardfork.is_celadon() && morph_tx.version == MORPH_TX_VERSION_2 {
+        return Err(MorphTxError::ForkNotActive {
+            reason: "MorphTx version 2 is not yet active (celadon fork not reached)".to_string(),
+        });
+    }
+
+    if let Err(reason) = morph_tx.validate() {
+        return Err(MorphTxError::InvalidFormat {
+            reason: reason.to_string(),
+        });
+    }
+
+    Ok(())
+}
+
 /// Validates a MorphTx transaction using a caller-supplied fee-token resolver.
 ///
 /// Structural rules, ETH `value` coverage, and `fee_token_id == 0` ETH-fee checks run before
@@ -83,28 +118,7 @@ pub(crate) fn validate_morph_tx_with(
         _ => return Err(MorphTxError::InvalidTokenId),
     };
 
-    if !input.hardfork.is_jade() && morph_tx.version == MORPH_TX_VERSION_1 {
-        return Err(MorphTxError::InvalidFormat {
-            reason: "MorphTx version 1 is not yet active (jade fork not reached)".to_string(),
-        });
-    }
-
-    // V2 (EIP-7702 authorization list) is gated on Celadon. The list itself is
-    // validated by `TxMorph::validate` below (V0/V1 must not carry one, a
-    // non-empty V2 list forbids CREATE; an empty V2 list is allowed); authority
-    // tracking and delegated-sender limits come from the upstream validator,
-    // which reads the list through `Transaction::authorization_list`.
-    if !input.hardfork.is_celadon() && morph_tx.version == MORPH_TX_VERSION_2 {
-        return Err(MorphTxError::InvalidFormat {
-            reason: "MorphTx version 2 is not yet active (celadon fork not reached)".to_string(),
-        });
-    }
-
-    if let Err(reason) = morph_tx.validate() {
-        return Err(MorphTxError::InvalidFormat {
-            reason: reason.to_string(),
-        });
-    }
+    validate_morph_tx_stateless(morph_tx, input.hardfork)?;
 
     let tx_value = morph_tx.value;
     if tx_value > input.eth_balance {
@@ -512,7 +526,7 @@ mod tests {
         let err = validate_morph_tx(&mut db, &input).unwrap_err();
         assert_eq!(
             err,
-            MorphTxError::InvalidFormat {
+            MorphTxError::ForkNotActive {
                 reason: "MorphTx version 2 is not yet active (celadon fork not reached)"
                     .to_string(),
             }
@@ -555,7 +569,7 @@ mod tests {
         let err = validate_morph_tx(&mut db, &input).unwrap_err();
         assert_eq!(
             err,
-            MorphTxError::InvalidFormat {
+            MorphTxError::ForkNotActive {
                 reason: "MorphTx version 2 is not yet active (celadon fork not reached)"
                     .to_string(),
             }

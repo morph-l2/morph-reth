@@ -1559,3 +1559,80 @@ async fn estimate_gas_eip1559_inner_oog_revert_reports_out_of_gas() -> eyre::Res
 
     Ok(())
 }
+
+/// `eth_sendRawTransactionSync` (EIP-7966) returns error code `4` with `data: "0x<txHash>"`
+/// on timeout, and returns the transaction receipt once a block includes the transaction.
+#[tokio::test(flavor = "multi_thread")]
+async fn send_raw_transaction_sync_timeout_includes_tx_hash_data_and_returns_receipt()
+-> eyre::Result<()> {
+    use alloy_primitives::TxHash;
+    use jsonrpsee::core::ClientError;
+    use morph_node::test_utils::make_transfer_tx;
+    use reth_transaction_pool::TransactionPool;
+
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+
+    let client = node
+        .rpc_client()
+        .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
+
+    // 1. Submit nonce=0 with a short timeout and no block produced -> EIP-7966 timeout
+    //    with error code 4 and `error.data == "0x<txHash>"`.
+    let raw_tx0 = make_transfer_tx(wallet.chain_id, wallet.inner.clone(), 0).await;
+    let timeout_res: Result<Value, ClientError> = client
+        .request("eth_sendRawTransactionSync", (raw_tx0, 100u64))
+        .await;
+    let err = timeout_res.expect_err("sync submit without a block must time out");
+    let ClientError::Call(err_obj) = err else {
+        panic!("expected JSON-RPC Call error, got: {err:?}");
+    };
+    assert_eq!(
+        err_obj.code(),
+        4,
+        "EIP-7966 timeout must return JSON-RPC error code 4, got: {err_obj:?}"
+    );
+    let data = err_obj
+        .data()
+        .expect("EIP-7966 timeout must include tx hash in error.data");
+    let timed_out_hash: TxHash =
+        serde_json::from_str(data.get()).expect("error.data must be a 32-byte hex tx hash");
+
+    // Advance block to confirm nonce=0 and verify the hash reported in timeout error.data matches.
+    let payload0 = node.advance_block().await?;
+    assert_eq!(payload0.block().body().transactions.len(), 1);
+    let receipt0: Value = client
+        .request("eth_getTransactionReceipt", (timed_out_hash,))
+        .await?;
+    assert_eq!(
+        receipt0["transactionHash"].as_str(),
+        Some(timed_out_hash.to_string().as_str())
+    );
+
+    // 2. Submit nonce=1 via `eth_sendRawTransactionSync` while advancing a block -> returns receipt.
+    let raw_tx1 = make_transfer_tx(wallet.chain_id, wallet.inner.clone(), 1).await;
+    let sync_client = client.clone();
+    let sync_task = tokio::spawn(async move {
+        sync_client
+            .request::<Value, _>("eth_sendRawTransactionSync", (raw_tx1, 10_000u64))
+            .await
+    });
+
+    // Wait briefly until tx1 enters the pool, then seal the block.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while node.inner.pool.pool_size().total == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "tx1 did not enter pool in time"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    node.advance_block().await?;
+
+    let receipt1 = sync_task.await??;
+    assert_eq!(receipt1["status"].as_str(), Some("0x1"));
+
+    Ok(())
+}

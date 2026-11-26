@@ -350,6 +350,78 @@ where
         .await
         .map_err(Into::into)
     }
+
+    fn send_raw_transaction_sync(
+        &self,
+        tx: alloy_primitives::Bytes,
+        timeout_ms: Option<u64>,
+    ) -> impl std::future::Future<
+        Output = Result<reth_rpc_eth_api::RpcReceipt<Self::NetworkTypes>, Self::Error>,
+    > + Send
+    where
+        Self: reth_rpc_eth_api::helpers::LoadReceipt,
+    {
+        let this = self.clone();
+        let configured_timeout = self.send_raw_transaction_sync_timeout();
+        let timeout_duration = timeout_ms
+            .filter(|timeout_ms| *timeout_ms > 0)
+            .map(Duration::from_millis)
+            .map(|timeout| timeout.min(configured_timeout))
+            .unwrap_or(configured_timeout);
+        async move {
+            use futures::StreamExt;
+            use reth_chain_state::CanonStateSubscriptions;
+            use reth_rpc_eth_types::block::convert_transaction_receipt;
+
+            let mut stream = this.provider().canonical_state_stream();
+            let hash = EthTransactions::send_raw_transaction(&this, tx).await?;
+
+            // DB receipt fallback right after submission (covers fast inclusion or
+            // already-committed notifications before the stream is polled).
+            if let Some(receipt) = this.transaction_receipt(hash).await? {
+                return Ok(receipt);
+            }
+
+            let receipt_res = tokio::time::timeout(timeout_duration, async {
+                while let Some(notification) = stream.next().await {
+                    let chain = notification.committed();
+                    if let Some((block, tx, receipt, all_receipts)) =
+                        chain.find_transaction_and_receipt_by_hash(hash)
+                        && let Some(receipt) = convert_transaction_receipt(
+                            block,
+                            all_receipts,
+                            tx,
+                            receipt,
+                            this.converter(),
+                        )
+                        .transpose()?
+                    {
+                        return Ok(Some(receipt));
+                    }
+                }
+                Ok::<_, Self::Error>(None)
+            })
+            .await;
+
+            match receipt_res {
+                Ok(Ok(Some(receipt))) => return Ok(receipt),
+                Ok(Err(err)) => return Err(err),
+                Ok(Ok(None)) | Err(_) => {}
+            }
+
+            // Final DB receipt fallback before returning the EIP-7966 timeout error.
+            if let Some(receipt) = this.transaction_receipt(hash).await? {
+                return Ok(receipt);
+            }
+
+            Err(reth_rpc_eth_api::FromEthApiError::from_eth_err(
+                EthApiError::TransactionConfirmationTimeout {
+                    hash,
+                    duration: timeout_duration,
+                },
+            ))
+        }
+    }
 }
 
 impl<N, Rpc> EthSubscriptions for MorphEthApi<N, Rpc>

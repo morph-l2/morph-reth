@@ -1,6 +1,7 @@
 //! Error types for Morph RPC
 
 use alloy_primitives::B256;
+use alloy_rpc_types_eth::error::EthRpcErrorCode;
 use evm2::interpreter::InstrStop;
 use reth_errors::ProviderError;
 use reth_evm::BlockExecutionError;
@@ -96,6 +97,13 @@ impl MorphEthApiError {
 impl From<MorphEthApiError> for jsonrpsee::types::ErrorObject<'static> {
     fn from(err: MorphEthApiError) -> Self {
         match err {
+            MorphEthApiError::Eth(
+                ref e @ EthApiError::TransactionConfirmationTimeout { hash, .. },
+            ) => jsonrpsee::types::ErrorObject::owned(
+                EthRpcErrorCode::TransactionConfirmationTimeout.code(),
+                e.to_string(),
+                Some(hash),
+            ),
             MorphEthApiError::Eth(e) => e.into(),
             MorphEthApiError::BlockNotFound => {
                 jsonrpsee::types::ErrorObject::owned(-32001, "Block not found", None::<()>)
@@ -250,6 +258,23 @@ mod tests {
             MorphEthApiError::Provider("provider fail".to_string()).to_string(),
             "provider error: provider fail"
         );
+    }
+
+    #[test]
+    fn confirmation_timeout_error_includes_code_4_and_tx_hash_data() {
+        let hash = B256::repeat_byte(0xab);
+        let err = MorphEthApiError::Eth(EthApiError::TransactionConfirmationTimeout {
+            hash,
+            duration: std::time::Duration::from_secs(2),
+        });
+        let obj: jsonrpsee::types::ErrorObject<'static> = err.into();
+        assert_eq!(obj.code(), 4);
+        assert!(obj.message().contains(&hash.to_string()));
+        let data = obj
+            .data()
+            .expect("EIP-7966 timeout error must carry tx hash in error.data");
+        let parsed: B256 = serde_json::from_str(data.get()).expect("error.data must be a hex hash");
+        assert_eq!(parsed, hash);
     }
 
     #[test]

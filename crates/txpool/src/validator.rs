@@ -405,7 +405,9 @@ where
             );
         }
 
-        // Reject EIP-7702 transactions before Viridian hardfork (PRAGUE)
+        // Reject EIP-7702 transactions before Viridian hardfork (PRAGUE).
+        // Use `ForkNotActive` (`is_bad_transaction() == false`) so a peer one block ahead
+        // across the fork boundary is not penalized.
         if transaction.is_eip7702()
             && !self
                 .chain_spec()
@@ -413,7 +415,11 @@ where
         {
             return TransactionValidationOutcome::Invalid(
                 transaction,
-                InvalidTransactionError::TxTypeNotSupported.into(),
+                MorphTxError::ForkNotActive {
+                    reason: "EIP-7702 transactions are not yet active (viridian fork not reached)"
+                        .to_string(),
+                }
+                .into(),
             );
         }
 
@@ -429,8 +435,29 @@ where
         {
             return TransactionValidationOutcome::Invalid(
                 transaction,
-                InvalidTransactionError::TxTypeNotSupported.into(),
+                MorphTxError::ForkNotActive {
+                    reason: "MorphTx type is not yet active (emerald fork not reached)".to_string(),
+                }
+                .into(),
             );
+        }
+
+        // Run stateless MorphTx fork gates (Jade V1 / Celadon V2) and structural checks
+        // (`TxMorph::validate`) BEFORE `inner.validate_one_with_state` so malformed or
+        // pre-fork MorphTx payloads are rejected without paying for DB / account / authority reads.
+        if is_morph_tx {
+            let hardfork = self
+                .chain_spec()
+                .morph_hardfork_at(self.block_number(), self.block_timestamp());
+            let stateless_res = match transaction.consensus_ref().into_inner() {
+                MorphTxEnvelope::Morph(signed) => {
+                    crate::morph_tx_validation::validate_morph_tx_stateless(signed.tx(), hardfork)
+                }
+                _ => Err(MorphTxError::InvalidTokenId),
+            };
+            if let Err(err) = stateless_res {
+                return TransactionValidationOutcome::Invalid(transaction, err.into());
+            }
         }
 
         // EIP-3860: enforce max initcode size on contract-creation transactions.
@@ -1265,5 +1292,171 @@ mod tests {
             res.token_info.unwrap().balance,
             U256::from(2818 + HEAD_TIMESTAMP)
         );
+    }
+
+    #[test]
+    fn fork_not_active_rejections_do_not_penalize_peers() {
+        use alloy_consensus::TxEip7702;
+        use alloy_primitives::TxHash;
+        use reth_transaction_pool::error::PoolError;
+
+        let client = new_mock_provider();
+        let signer = address!("0000000000000000000000000000000000000001");
+        let morph_evm_config = MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone());
+        let eth_validator: EthTransactionValidator<
+            MockEthProvider<MorphPrimitives, MorphChainSpec>,
+            crate::MorphPooledTransaction,
+            MorphEvmConfig,
+        > = EthTransactionValidatorBuilder::new(client, morph_evm_config)
+            .with_custom_tx_type(morph_primitives::MORPH_TX_TYPE_ID)
+            .disable_balance_check()
+            .no_eip4844()
+            .build::<crate::MorphPooledTransaction, _>(InMemoryBlobStore::default());
+        let validator = MorphTransactionValidator::new(eth_validator);
+
+        // Pre-Viridian EIP-7702 (timestamp 0)
+        validator
+            .block_info
+            .update(L1BlockInfo::default(), 0, 1, Some(1));
+        let tx_7702 = MorphTxEnvelope::Eip7702(Signed::new_unchecked(
+            TxEip7702 {
+                chain_id: 2818,
+                nonce: 0,
+                gas_limit: 21_000,
+                max_fee_per_gas: 1_000_000,
+                max_priority_fee_per_gas: 0,
+                to: address!("0000000000000000000000000000000000000002"),
+                value: U256::ZERO,
+                access_list: Default::default(),
+                authorization_list: Vec::new(),
+                input: Default::default(),
+            },
+            Signature::test_signature(),
+            B256::ZERO,
+        ));
+        let pooled_7702 =
+            crate::MorphPooledTransaction::new(Recovered::new_unchecked(tx_7702, signer), 100);
+        match validator.validate_one(TransactionOrigin::External, pooled_7702) {
+            TransactionValidationOutcome::Invalid(_, err) => {
+                assert!(err.to_string().contains("not yet active"));
+                assert!(
+                    !PoolError::new(TxHash::ZERO, err).is_bad_transaction(),
+                    "pre-Viridian EIP-7702 must not penalize peers"
+                );
+            }
+            other => panic!("expected Invalid(ForkNotActive), got {other:?}"),
+        }
+
+        // Pre-Emerald MorphTx (timestamp 0)
+        let make_morph = |version: u8| {
+            let tx = TxMorph {
+                chain_id: 2818,
+                nonce: 0,
+                gas_limit: 21_000,
+                max_fee_per_gas: 1_000_000,
+                max_priority_fee_per_gas: 0,
+                to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
+                value: U256::ZERO,
+                access_list: Default::default(),
+                version,
+                fee_token_id: 1,
+                fee_limit: U256::ZERO,
+                reference: None,
+                memo: None,
+                authorization_list: Vec::new(),
+                input: Default::default(),
+            };
+            let env = MorphTxEnvelope::Morph(Signed::new_unchecked(
+                tx,
+                Signature::test_signature(),
+                B256::ZERO,
+            ));
+            crate::MorphPooledTransaction::new(Recovered::new_unchecked(env, signer), 100)
+        };
+
+        match validator.validate_one(TransactionOrigin::External, make_morph(0)) {
+            TransactionValidationOutcome::Invalid(_, err) => {
+                assert!(err.to_string().contains("not yet active"));
+                assert!(
+                    !PoolError::new(TxHash::ZERO, err).is_bad_transaction(),
+                    "pre-Emerald MorphTx must not penalize peers"
+                );
+            }
+            other => panic!("expected Invalid(ForkNotActive), got {other:?}"),
+        }
+
+        // Post-Emerald, pre-Jade MorphTx V1 (Emerald timestamp = 1_767_765_600)
+        validator
+            .block_info
+            .update(L1BlockInfo::default(), 1_767_765_600, 10, Some(1));
+        match validator.validate_one(TransactionOrigin::External, make_morph(1)) {
+            TransactionValidationOutcome::Invalid(_, err) => {
+                assert!(err.to_string().contains("not yet active"));
+                assert!(
+                    !PoolError::new(TxHash::ZERO, err).is_bad_transaction(),
+                    "pre-Jade MorphTx V1 must not penalize peers"
+                );
+            }
+            other => panic!("expected Invalid(ForkNotActive), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn malformed_morph_tx_rejected_before_stateful_validation() {
+        let client = new_mock_provider();
+        let signer = address!("0000000000000000000000000000000000000001");
+        // Intentionally give signer nonce=10 so inner stateful check would fail with NonceTooLow
+        // if it ran before our stateless `TxMorph::validate()`.
+        client.add_account(signer, ExtendedAccount::new(10, U256::ZERO));
+
+        let morph_evm_config = MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone());
+        let eth_validator: EthTransactionValidator<
+            MockEthProvider<MorphPrimitives, MorphChainSpec>,
+            crate::MorphPooledTransaction,
+            MorphEvmConfig,
+        > = EthTransactionValidatorBuilder::new(client, morph_evm_config)
+            .with_custom_tx_type(morph_primitives::MORPH_TX_TYPE_ID)
+            .disable_balance_check()
+            .no_eip4844()
+            .build::<crate::MorphPooledTransaction, _>(InMemoryBlobStore::default());
+        let validator = MorphTransactionValidator::new(eth_validator);
+        // Active through Jade so V1 is enabled.
+        validator
+            .block_info
+            .update(L1BlockInfo::default(), u64::MAX - 1, 100, Some(1));
+
+        let malformed = TxMorph {
+            chain_id: 2818,
+            nonce: 0, // < on-chain nonce 10
+            gas_limit: 21_000,
+            max_fee_per_gas: 1_000_000,
+            max_priority_fee_per_gas: 0,
+            to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
+            value: U256::ZERO,
+            access_list: Default::default(),
+            version: 1,
+            fee_token_id: 0,
+            fee_limit: U256::from(1u64), // invalid: fee_token_id == 0 with fee_limit > 0
+            reference: None,
+            memo: None,
+            authorization_list: Vec::new(),
+            input: Default::default(),
+        };
+        let env = MorphTxEnvelope::Morph(Signed::new_unchecked(
+            malformed,
+            Signature::test_signature(),
+            B256::ZERO,
+        ));
+        let pooled = crate::MorphPooledTransaction::new(Recovered::new_unchecked(env, signer), 100);
+
+        match validator.validate_one(TransactionOrigin::External, pooled) {
+            TransactionValidationOutcome::Invalid(_, err) => {
+                assert!(
+                    err.to_string().contains("invalid MorphTx format"),
+                    "stateless MorphTx format check must fire before stateful nonce check, got: {err}"
+                );
+            }
+            other => panic!("expected InvalidFormat before stateful check, got {other:?}"),
+        }
     }
 }
