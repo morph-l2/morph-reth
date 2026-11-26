@@ -5403,6 +5403,7 @@ dependencies = [
  "reth-cli-util",
  "reth-ethereum-cli",
  "reth-node-builder",
+ "reth-node-core",
  "reth-provider",
  "reth-rpc-server-types",
  "reth-tasks",
