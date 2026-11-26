@@ -15,8 +15,8 @@
 //! 1. Listening to canonical state changes (new blocks)
 //! 2. Re-validating every pooled transaction, including those parked behind a nonce gap,
 //!    against the sender's current account balances
-//! 3. Removing the first transaction with an L1 fee or token shortfall that reth cannot
-//!    handle, letting the pool park its descendants
+//! 3. Removing every transaction with a block-gas-limit, L1 fee, or token-fee violation
+//!    that reth cannot handle, letting the pool park surviving descendants
 //!
 //! # Relationship with reth's own maintenance task
 //!
@@ -25,8 +25,9 @@
 //! guarantee between them. Everything reth's task already understands (ETH balance, nonces,
 //! base fee, mined transactions) stays its responsibility. This task also checks the
 //! sender's **ERC20 token** balance and the **L1 data fees** missing from reth's cost.
-//! An ordinary transaction that cannot cover L1 fees is
-//! removed so its descendants are parked instead of remaining unchecked in pending.
+//! Every transaction of a sender at or above the on-chain nonce is revalidated in one pass,
+//! matching go-ethereum's full-list filter; removing offending transactions lets reth park
+//! any surviving descendants.
 //!
 //! Because the ordering is not guaranteed, this task must tolerate seeing a pool snapshot
 //! that still contains transactions the new block already executed. It does so by reading
@@ -100,9 +101,12 @@ fn exceeds_block_gas_limit(tx_gas_limit: u64, block_gas_limit: u64) -> bool {
 
 /// Determines which transactions to remove while revalidating all senders' fee affordability.
 ///
-/// Returns the hashes to remove from the pool. Only the first offending transaction of a
-/// sender is returned: the pool parks the rest of that sender's transactions on its own when
-/// the returned hash is removed (see [`maintain_morph_pool`]).
+/// Scans every transaction of each sender at or above the sender's on-chain nonce and returns
+/// every offending hash in one pass, matching go-ethereum's full-sender filter (`txList.FilterF`).
+/// Continuing past ETH-parked or invalid predecessors prevents an earlier parked transaction from
+/// shielding invalid higher-nonce transactions that reth would otherwise promote unvalidated once
+/// the predecessor is replaced or funded. Surviving descendants of removed transactions are parked
+/// automatically by reth's `remove_transactions` (see [`maintain_morph_pool`]).
 fn collect_removable_transactions<DB: alloy_evm::Database>(
     db: &mut DB,
     l1_block_info: &L1BlockInfo,
@@ -115,7 +119,7 @@ fn collect_removable_transactions<DB: alloy_evm::Database>(
     // reads only; a later block must re-read changed registry parameters and balances.
     let mut token_entries = HashMap::new();
     let mut token_balances = HashMap::new();
-    // Group by sender and process in nonce order so removing a transaction parks its descendants.
+    // Group by sender and process in nonce order for deterministic removal ordering.
     let mut txs_by_sender: HashMap<Address, Vec<&MorphPooledTransaction>> = HashMap::new();
     for tx in pool_txs {
         txs_by_sender.entry(tx.sender()).or_default().push(tx);
@@ -155,42 +159,63 @@ fn collect_removable_transactions<DB: alloy_evm::Database>(
                 continue;
             }
 
-            // A nonce gap does not stop the walk. Every check below is per transaction
-            // against the sender's current balances, which is what admission applies and
-            // what go-ethereum's `promoteExecutables` applies to its whole queue (`FilterF`)
-            // before `Ready` promotes anything. Nothing here accumulates the costs of the
-            // missing predecessors, so a transaction parked behind a gap can be judged on its
-            // own. Left unchecked, reth would promote it unvalidated the moment the gap is
-            // filled: `AllTransactions::insert_tx` only recomputes the ETH cost bits, which
-            // for a token-fee MorphTx cover its value alone.
+            // A nonce gap or earlier invalid/ETH-parked transaction does not stop the walk.
+            // Every check below is per transaction against the sender's current balances,
+            // which is what admission applies and what go-ethereum's `promoteExecutables`
+            // applies to its whole queue (`FilterF`) before `Ready` promotes anything.
+            // Nothing here accumulates the costs of missing predecessors, so every transaction
+            // can be judged on its own. Stopping early would leave invalid higher-nonce
+            // transactions in the pool for reth to promote unvalidated the moment a
+            // predecessor is replaced or funded: `AllTransactions::insert_tx` only recomputes
+            // the ETH cost bits, which for a token-fee MorphTx cover its value alone.
 
             // Reth only sets its block-gas-limit flag at insertion, so a later
             // limit reduction needs the same explicit removal for both tx types.
             if exceeds_block_gas_limit(consensus_tx.gas_limit(), block_gas_limit) {
                 to_remove.push(*tx.hash());
-                break;
+                continue;
             }
 
-            // Reth knows this ETH cost (only value for token-fee MorphTx) and can
-            // park the transaction until a balance update makes it affordable again.
-            if *tx.cost() > account.balance {
-                break;
+            let uses_token_fee = consensus_tx.fee_token_id().is_some_and(|id| id > 0);
+
+            // For ETH-paying transactions (ordinary txs and `fee_token_id == 0` MorphTxs),
+            // reth knows `tx.cost()` (`gas_limit * max_fee_per_gas + value`) and parks the
+            // transaction until a balance update makes it affordable again. Do not remove it
+            // here, but keep scanning higher nonces so an ETH-parked predecessor cannot shield
+            // invalid descendants.
+            //
+            // For token-fee MorphTxs (`fee_token_id > 0`), `tx.cost()` is `value` alone: even
+            // when reth parks the transaction for an ETH `value` shortfall, we must still
+            // validate its token usability and token-fee affordability below so an invalid or
+            // unaffordable token transaction is not left parked and later promoted unvalidated
+            // when ETH arrives.
+            if *tx.cost() > account.balance && !uses_token_fee {
+                continue;
             }
 
             let l1_data_fee = l1_block_info.calculate_tx_l1_cost(tx.encoded_2718(), hardfork);
             if consensus_tx.ty() != morph_primitives::MORPH_TX_TYPE_ID {
                 if tx.cost().saturating_add(l1_data_fee) > account.balance {
                     to_remove.push(*tx.hash());
-                    break;
                 }
                 continue;
             }
 
-            // Validate each transaction against the same chain balance used at admission.
+            // Validate each MorphTx against the same chain balance used at admission.
+            // When a token-fee MorphTx is parked purely due to an ETH `value` shortfall
+            // (`tx.value() > account.balance`), raise `eth_balance` to `tx.value()` so
+            // `validate_morph_tx_with_token_info` does not treat that ETH shortfall as a
+            // removal reason (standard maintenance owns ETH `value` parking) while still
+            // enforcing hardfork, format, token usability, and token balance checks.
+            let eth_balance = if uses_token_fee {
+                account.balance.max(consensus_tx.value())
+            } else {
+                account.balance
+            };
             let input = crate::MorphTxValidationInput {
                 consensus_tx,
                 sender,
-                eth_balance: account.balance,
+                eth_balance,
                 l1_data_fee,
                 hardfork,
                 evm_env,
@@ -225,9 +250,8 @@ fn collect_removable_transactions<DB: alloy_evm::Database>(
                         tx_hash = ?tx.hash(),
                         ?sender,
                         ?err,
-                        "Could not read token state; leaving sender's MorphTx in the pool"
+                        "Could not read token state; leaving MorphTx in the pool"
                     );
-                    break;
                 }
                 Err(MorphTxValidationError::Invalid(err)) => {
                     tracing::debug!(
@@ -238,7 +262,6 @@ fn collect_removable_transactions<DB: alloy_evm::Database>(
                         "Removing MorphTx: validation failed"
                     );
                     to_remove.push(*tx.hash());
-                    break;
                 }
             };
         }
@@ -329,9 +352,10 @@ where
 /// - Re-validates MorphTx (0x7F) transactions in the pool
 /// - Removes transactions that no longer have sufficient token balance
 /// - Re-validates L1 fee affordability for every sender, including ordinary-only senders
-/// - Removes ordinary transactions whose L1 fees make them individually unaffordable,
-///   parking their descendants
-/// - Judges each transaction on its own, including those parked behind a nonce gap
+/// - Removes every transaction whose block gas limit, L1 fee, or token-fee validation fails,
+///   letting the pool park surviving descendants
+/// - Judges each transaction on its own across each sender's full nonce sequence at or above
+///   the on-chain nonce, including transactions parked behind a nonce gap or ETH shortfall
 /// - Re-checks every removal at the canonical head right before applying it
 ///
 pub async fn maintain_morph_pool<Pool, Client, Evm>(pool: Pool, client: Client, evm_config: Evm)
@@ -390,8 +414,8 @@ async fn maintain_morph_pool_with<Pool, N, Source, Events>(
             "Processing new block for pool fee validation"
         );
 
-        // Every transaction type is revalidated (ordinary ones for their L1 fee), and a
-        // sender's full nonce order decides which offender is removed first.
+        // Every transaction type is revalidated (ordinary ones for their L1 fee), scanning each
+        // sender's full nonce sequence at or above the on-chain nonce.
         let all_txs = pool.all_transactions();
         let pool_txs: Vec<&MorphPooledTransaction> = all_txs
             .pending
@@ -537,6 +561,15 @@ mod tests {
     }
 
     fn token_fee_tx_with(tx_nonce: u64, value: U256, gas_limit: u64) -> MorphPooledTransaction {
+        token_fee_tx_with_token_id(tx_nonce, TOKEN_ID, value, gas_limit)
+    }
+
+    fn token_fee_tx_with_token_id(
+        tx_nonce: u64,
+        fee_token_id: u16,
+        value: U256,
+        gas_limit: u64,
+    ) -> MorphPooledTransaction {
         let tx = TxMorph {
             chain_id: 2818,
             nonce: tx_nonce,
@@ -545,7 +578,7 @@ mod tests {
             max_priority_fee_per_gas: 10,
             to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
             value,
-            fee_token_id: TOKEN_ID,
+            fee_token_id,
             fee_limit: U256::ZERO,
             ..Default::default()
         };
@@ -555,6 +588,51 @@ mod tests {
         );
         let encoded_len = recovered.encode_2718_len();
         MorphPooledTransaction::new(recovered, encoded_len)
+    }
+
+    /// Flat L1 data fee under Curie/Emerald (`calldata_gas / 1e9 == l1_fee`).
+    fn l1_block_info_with_fee(l1_fee: u64) -> L1BlockInfo {
+        let scaled = U256::from(l1_fee) * U256::from(1_000_000_000);
+        L1BlockInfo {
+            l1_base_fee: U256::from(1),
+            l1_commit_scalar: scaled,
+            calldata_gas: scaled,
+            ..Default::default()
+        }
+    }
+
+    /// Registers an additional call-mode fee token in `db` for [`SIGNER`].
+    fn register_call_mode_token(
+        db: &mut CacheDB<EmptyDB>,
+        token_id: u16,
+        token: Address,
+        token_balance: u64,
+        active: bool,
+    ) {
+        let mut entries = call_mode_registry_storage(token_id, token);
+        if !active {
+            let mut inactive_with_decimals = [0u8; 32];
+            inactive_with_decimals[30] = 18;
+            inactive_with_decimals[31] = 0;
+            entries[2].1 = U256::from_be_bytes(inactive_with_decimals);
+        }
+        for (slot, value) in entries {
+            db.insert_account_storage(L2_TOKEN_REGISTRY_ADDRESS, slot, value)
+                .unwrap();
+        }
+        let code = revm::state::Bytecode::new_raw(alloy_primitives::Bytes::from_static(
+            BALANCE_OF_RUNTIME,
+        ));
+        db.insert_account_info(
+            token,
+            AccountInfo {
+                code_hash: code.hash_slow(),
+                code: Some(code),
+                ..Default::default()
+            },
+        );
+        db.insert_account_storage(token, token_balance_key(SIGNER), U256::from(token_balance))
+            .unwrap();
     }
 
     /// The environment the revalidation round is evaluated in.
@@ -724,7 +802,9 @@ mod tests {
         assert_eq!(db.reads[&L2_TOKEN_REGISTRY_ADDRESS], 5);
         assert_eq!(db.reads[&FEE_TOKEN], 1);
 
-        // The next round reads both again, so it sees the balance spent in between.
+        // The next round reads both again, so it sees the balance spent in between and
+        // removes every unaffordable transaction of the sender in one pass while still
+        // reusing the single cached registry entry and `balanceOf` read.
         db.inner
             .insert_account_storage(FEE_TOKEN, token_balance_key(SIGNER), U256::ZERO)
             .unwrap();
@@ -736,7 +816,7 @@ mod tests {
                 30_000_000,
                 txs.iter().collect()
             ),
-            vec![*txs[0].hash()]
+            txs.iter().map(|tx| *tx.hash()).collect::<Vec<_>>()
         );
         assert_eq!(db.reads[&L2_TOKEN_REGISTRY_ADDRESS], 10);
         assert_eq!(db.reads[&FEE_TOKEN], 2);
@@ -884,13 +964,32 @@ mod tests {
     }
 
     fn legacy_tx_for_sender(tx_nonce: u64, sender: Address) -> MorphPooledTransaction {
+        legacy_tx_with_sender(tx_nonce, sender, 21_000, 100, U256::ZERO)
+    }
+
+    fn legacy_tx_with(
+        tx_nonce: u64,
+        gas_limit: u64,
+        gas_price: u128,
+        value: U256,
+    ) -> MorphPooledTransaction {
+        legacy_tx_with_sender(tx_nonce, SIGNER, gas_limit, gas_price, value)
+    }
+
+    fn legacy_tx_with_sender(
+        tx_nonce: u64,
+        sender: Address,
+        gas_limit: u64,
+        gas_price: u128,
+        value: U256,
+    ) -> MorphPooledTransaction {
         let tx = TxLegacy {
             chain_id: Some(2818),
             nonce: tx_nonce,
-            gas_limit: 21_000,
-            gas_price: 100,
+            gas_limit,
+            gas_price,
             to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
-            value: U256::ZERO,
+            value,
             ..Default::default()
         };
         let recovered = Recovered::new_unchecked(
@@ -1165,15 +1264,13 @@ mod tests {
                     "standard maintenance cannot see the L1 fee shortfall"
                 );
 
-                // Later rounds judge the parked descendants on their own, one per round; none
-                // of them can cover the same L1 fee either.
-                for _ in 0..3 {
-                    futures::executor::block_on(maintain_morph_pool_with(
-                        pool.clone(),
-                        provider_state(client.clone()),
-                        futures::stream::iter([event.clone()]),
-                    ));
-                }
+                // A single maintenance round scans the entire sender sequence and removes every
+                // L1-unaffordable transaction at once.
+                futures::executor::block_on(maintain_morph_pool_with(
+                    pool.clone(),
+                    provider_state(client.clone()),
+                    futures::stream::iter([event.clone()]),
+                ));
                 let all = pool.all_transactions();
                 let pending: Vec<_> = all
                     .pending
@@ -1197,7 +1294,7 @@ mod tests {
                         ordinary[index..]
                             .iter()
                             .all(|hash| pool.get(hash).is_none()),
-                        "parked descendants that cannot pay either are removed by later rounds"
+                        "all L1-unaffordable transactions of the sender are removed in one round"
                     );
                     assert!(queued.is_empty());
                 } else {
@@ -1434,13 +1531,11 @@ mod tests {
                 "standard maintenance does not see L1 costs"
             );
 
-            for _ in 0..3 {
-                futures::executor::block_on(maintain_morph_pool_with(
-                    pool.clone(),
-                    provider_state(client.clone()),
-                    futures::stream::iter([event.clone()]),
-                ));
-            }
+            futures::executor::block_on(maintain_morph_pool_with(
+                pool.clone(),
+                provider_state(client.clone()),
+                futures::stream::iter([event.clone()]),
+            ));
             let all = pool.all_transactions();
             if l1_fee == 0 {
                 assert!(ordinary.iter().all(|hash| pool.get(hash).is_some()));
@@ -1458,14 +1553,14 @@ mod tests {
                 let (unaffordable, affordable) = ordinary.split_last().unwrap();
                 assert!(
                     pool.get(unaffordable).is_none(),
-                    "the first L1-unaffordable predecessor must be removed"
+                    "the L1-unaffordable predecessor must be removed"
                 );
                 assert!(affordable.iter().all(|hash| pool.get(hash).is_some()));
                 assert_eq!(all.pending.len(), affordable.len());
                 if token_balance == 0 {
                     assert!(
                         pool.get(&token_tx).is_none(),
-                        "a parked successor the sender cannot pay for is removed by a later round"
+                        "an unpayable successor is removed in the same round"
                     );
                     assert!(all.queued.is_empty());
                 } else {
@@ -1588,5 +1683,345 @@ mod tests {
             [0]
         );
         assert!(all.queued.is_empty());
+    }
+
+    #[test]
+    fn multiple_offending_transactions_of_one_sender_are_all_removed_in_one_round() {
+        let l1_info = l1_block_info_with_fee(1_000_000);
+        // ETH balance covers a 21k-gas legacy tx + 1M L1 fee (3.1M), not one carrying 1.5M value (4.6M).
+        // Token balance covers a 21k-gas MorphTx + 1M L1 fee (3.1M), not a 42k-gas MorphTx (5.2M).
+        let mut db = test_state(0, 4_000_000, TX_TOKEN_BUDGET + 1_000_000);
+
+        let tx0_over_gas = legacy_tx_with(0, 30_000_001, 100, U256::ZERO);
+        let tx1_valid_eth = legacy_tx_with(1, 21_000, 100, U256::ZERO);
+        let tx2_l1_shortfall = legacy_tx_with(2, 21_000, 100, U256::from(1_500_000));
+        let tx3_valid_morph = token_fee_tx(3);
+        let tx4_token_shortfall = token_fee_tx_with_gas_limit(4, 2 * 21_000);
+        let tx5_valid_higher_eth = legacy_tx_with(5, 21_000, 100, U256::ZERO);
+
+        let to_remove = collect_removable_transactions(
+            &mut db,
+            &l1_info,
+            &test_evm_env(),
+            30_000_000,
+            vec![
+                &tx0_over_gas,
+                &tx1_valid_eth,
+                &tx2_l1_shortfall,
+                &tx3_valid_morph,
+                &tx4_token_shortfall,
+                &tx5_valid_higher_eth,
+            ],
+        );
+
+        assert_eq!(
+            to_remove,
+            vec![
+                *tx0_over_gas.hash(),
+                *tx2_l1_shortfall.hash(),
+                *tx4_token_shortfall.hash(),
+            ]
+        );
+    }
+
+    #[test]
+    fn eth_shortfall_predecessor_does_not_shield_invalid_descendants() {
+        let l1_info = l1_block_info_with_fee(1_000_000);
+        let mut db = test_state(0, 2_500_000, 0);
+
+        // Nonce 0 has cost 3.1M > 2.5M ETH balance, so reth owns parking it.
+        let tx0_eth_parked = legacy_tx_with(0, 21_000, 100, U256::from(1_000_000));
+        // Nonce 1 is a token-fee MorphTx with 0 token balance -> must be removed.
+        let tx1_unpayable_morph = token_fee_tx(1);
+        // Nonce 2 has cost 2.1M <= 2.5M, but cost + L1 fee = 3.1M > 2.5M -> must be removed.
+        let tx2_l1_shortfall = legacy_tx_with(2, 21_000, 100, U256::ZERO);
+        // Nonce 3 exceeds block gas limit -> must be removed.
+        let tx3_over_gas = legacy_tx_with(3, 30_000_001, 100, U256::ZERO);
+        // Nonce 4 has cost 210k + 1M L1 fee = 1.21M <= 2.5M -> valid, must stay.
+        let tx4_valid = legacy_tx_with(4, 21_000, 10, U256::ZERO);
+
+        let to_remove = collect_removable_transactions(
+            &mut db,
+            &l1_info,
+            &test_evm_env(),
+            30_000_000,
+            vec![
+                &tx0_eth_parked,
+                &tx1_unpayable_morph,
+                &tx2_l1_shortfall,
+                &tx3_over_gas,
+                &tx4_valid,
+            ],
+        );
+
+        assert_eq!(
+            to_remove,
+            vec![
+                *tx1_unpayable_morph.hash(),
+                *tx2_l1_shortfall.hash(),
+                *tx3_over_gas.hash(),
+            ]
+        );
+    }
+
+    #[test]
+    fn replacing_eth_parked_predecessor_cannot_promote_invalid_morph_descendant() {
+        use reth_transaction_pool::TransactionPoolExt;
+
+        let client = mock_provider(10_000_000, 10 * TX_TOKEN_BUDGET);
+        let validator = crate::MorphTransactionValidator::new(
+            EthTransactionValidatorBuilder::new(
+                client.clone(),
+                MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone()),
+            )
+            .disable_balance_check()
+            .with_custom_tx_type(morph_primitives::MORPH_TX_TYPE_ID)
+            .build::<MorphPooledTransaction, _>(InMemoryBlobStore::default()),
+        );
+        let pool = Pool::new(
+            validator,
+            CoinbaseTipOrdering::default(),
+            InMemoryBlobStore::default(),
+            Default::default(),
+        );
+
+        // Admit an ordinary nonce 0 (cost = 7.1M) and a token-fee MorphTx nonce 1.
+        let tx0 = futures::executor::block_on(pool.add_transaction(
+            reth_transaction_pool::TransactionOrigin::Local,
+            legacy_tx_with(0, 21_000, 100, U256::from(5_000_000)),
+        ))
+        .unwrap()
+        .hash;
+        let tx1 = futures::executor::block_on(pool.add_transaction(
+            reth_transaction_pool::TransactionOrigin::Local,
+            token_fee_tx(1),
+        ))
+        .unwrap()
+        .hash;
+        assert_eq!(pool.all_transactions().pending.len(), 2);
+
+        // Both ETH and token balances drop: tx0 becomes ETH-parked (cost 7.1M > 5M) and
+        // tx1 loses its token balance (0 tokens).
+        client.add_account(SIGNER, ExtendedAccount::new(0, U256::from(5_000_000)));
+        set_token_balance(&client, 0);
+        let event = commit_event();
+        pool.on_canonical_state_change(reth_transaction_pool::CanonicalStateUpdate {
+            new_tip: event.tip(),
+            pending_block_base_fee: 10,
+            pending_block_blob_fee: None,
+            changed_accounts: vec![reth_provider::ChangedAccount {
+                address: SIGNER,
+                nonce: 0,
+                balance: U256::from(5_000_000),
+            }],
+            mined_transactions: Vec::new(),
+            update_kind: reth_transaction_pool::PoolUpdateKind::Commit,
+        });
+        assert!(pool.all_transactions().pending.is_empty());
+        assert_eq!(pool.all_transactions().queued.len(), 2);
+
+        // One maintenance round must keep ETH-parked tx0 while still removing unpayable tx1.
+        futures::executor::block_on(maintain_morph_pool_with(
+            pool.clone(),
+            provider_state(client),
+            futures::stream::iter([event]),
+        ));
+        assert!(
+            pool.get(&tx0).is_some(),
+            "ETH-parked ordinary predecessor remains owned by standard maintenance"
+        );
+        assert!(
+            pool.get(&tx1).is_none(),
+            "ETH-parked predecessor must not shield an unpayable MorphTx descendant"
+        );
+
+        // Replacing nonce 0 with an affordable transaction promotes only nonce 0; the invalid
+        // nonce 1 MorphTx is already gone and can never be promoted unvalidated into pending.
+        let replacement = futures::executor::block_on(pool.add_transaction(
+            reth_transaction_pool::TransactionOrigin::Local,
+            legacy_tx_with(0, 21_000, 200, U256::ZERO),
+        ))
+        .unwrap()
+        .hash;
+        let all = pool.all_transactions();
+        assert_eq!(
+            all.pending.iter().map(|tx| *tx.hash()).collect::<Vec<_>>(),
+            vec![replacement]
+        );
+        assert!(all.queued.is_empty());
+    }
+
+    #[test]
+    fn token_fee_morph_tx_with_eth_value_shortfall_still_validates_token() {
+        const INACTIVE_TOKEN_ID: u16 = 2;
+        const INACTIVE_TOKEN: Address = address!("5300000000000000000000000000000000000043");
+
+        // ETH balance (6) is below tx.value() (7), so reth parks all of these for ETH value.
+        // 1. Token valid and affordable -> kept parked (standard maintenance owns pure ETH shortfall).
+        let mut db_valid = test_state(0, 6, TX_TOKEN_BUDGET);
+        let tx_only_eth_short = token_fee_tx_with_value(0, U256::from(7));
+        assert!(removable(&mut db_valid, vec![&tx_only_eth_short]).is_empty());
+
+        // 2. Both ETH value shortfall AND token shortfall -> removed.
+        let mut db_no_tokens = test_state(0, 6, 0);
+        let tx_both_short = token_fee_tx_with_value(0, U256::from(7));
+        assert_eq!(
+            removable(&mut db_no_tokens, vec![&tx_both_short]),
+            vec![*tx_both_short.hash()]
+        );
+
+        // 3. Both ETH value shortfall AND inactive token -> removed, while a pure-ETH-shortfall
+        //    predecessor on an active token stays parked and does not shield the inactive successor.
+        let mut db_mixed = test_state(0, 6, TX_TOKEN_BUDGET);
+        register_call_mode_token(
+            &mut db_mixed,
+            INACTIVE_TOKEN_ID,
+            INACTIVE_TOKEN,
+            10 * TX_TOKEN_BUDGET,
+            false,
+        );
+        let tx0_eth_only = token_fee_tx_with_value(0, U256::from(7));
+        let tx1_inactive_token =
+            token_fee_tx_with_token_id(1, INACTIVE_TOKEN_ID, U256::from(7), 21_000);
+        assert_eq!(
+            removable(&mut db_mixed, vec![&tx0_eth_only, &tx1_inactive_token]),
+            vec![*tx1_inactive_token.hash()]
+        );
+    }
+
+    #[test]
+    fn token_state_read_error_does_not_block_higher_nonces() {
+        const SECOND_TOKEN_ID: u16 = 2;
+        const SECOND_TOKEN: Address = address!("5300000000000000000000000000000000000044");
+        let l1_info = l1_block_info_with_fee(1_000_000);
+
+        for failing in [TokenRead::Storage, TokenRead::Code] {
+            let mut inner = test_state(0, 2_100_000, 10 * TX_TOKEN_BUDGET);
+            // Second token is readable but sender has zero balance in it.
+            register_call_mode_token(&mut inner, SECOND_TOKEN_ID, SECOND_TOKEN, 0, true);
+            let mut db = UnreadableTokenDb {
+                inner,
+                token: FEE_TOKEN,
+                failing,
+            };
+
+            // Nonce 0 hits a DB read error on FEE_TOKEN -> must be left in pool, NOT stop the scan.
+            let tx0_db_err = token_fee_tx(0);
+            // Nonce 1 uses SECOND_TOKEN with 0 balance -> must be removed.
+            let tx1_second_token =
+                token_fee_tx_with_token_id(1, SECOND_TOKEN_ID, U256::ZERO, 21_000);
+            // Nonce 2 is an ordinary tx with cost 2.1M + 1M L1 fee > 2.1M -> must be removed.
+            let tx2_l1_shortfall = legacy_tx(2);
+            // Nonce 3 is a valid ordinary tx (210k + 1M <= 2.1M) -> must stay.
+            let tx3_valid = legacy_tx_with(3, 21_000, 10, U256::ZERO);
+
+            let to_remove = collect_removable_transactions(
+                &mut db,
+                &l1_info,
+                &test_evm_env(),
+                30_000_000,
+                vec![
+                    &tx0_db_err,
+                    &tx1_second_token,
+                    &tx2_l1_shortfall,
+                    &tx3_valid,
+                ],
+            );
+
+            assert_eq!(
+                to_remove,
+                vec![*tx1_second_token.hash(), *tx2_l1_shortfall.hash()],
+                "a {failing:?} read error on nonce 0 must not shield higher nonces"
+            );
+        }
+    }
+
+    #[test]
+    fn recheck_at_canonical_head_handles_partial_recovery_across_multiple_candidates() {
+        // Case 1: tx0 needs 1 budget, tx1 needs 2 budgets; canonical head recovers to 1 budget.
+        // Only tx1 remains removable, so tx0 stays pending and tx1 is removed.
+        //
+        // Case 2: tx0 needs 2 budgets, tx1 needs 1 budget; canonical head recovers to 1 budget.
+        // Only tx0 remains removable, so tx0 is removed and tx1 survives parked in queued.
+        //
+        // Case 3: both need 2 budgets; canonical head still has 0 tokens.
+        // Both tx0 and tx1 are removed in one round.
+        for (gas0, gas1, head_tokens, expected_pending, expected_queued) in [
+            (
+                21_000u64,
+                2 * 21_000u64,
+                TX_TOKEN_BUDGET,
+                vec![0u64],
+                vec![],
+            ),
+            (2 * 21_000, 21_000, TX_TOKEN_BUDGET, vec![], vec![1]),
+            (2 * 21_000, 2 * 21_000, 0, vec![], vec![]),
+        ] {
+            let judged = mock_provider(0, 3 * TX_TOKEN_BUDGET);
+            let validator = crate::MorphTransactionValidator::new(
+                EthTransactionValidatorBuilder::new(
+                    judged.clone(),
+                    MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone()),
+                )
+                .disable_balance_check()
+                .with_custom_tx_type(morph_primitives::MORPH_TX_TYPE_ID)
+                .build::<MorphPooledTransaction, _>(InMemoryBlobStore::default()),
+            );
+            let pool = Pool::new(
+                validator,
+                CoinbaseTipOrdering::default(),
+                InMemoryBlobStore::default(),
+                Default::default(),
+            );
+            let tx0 = futures::executor::block_on(pool.add_transaction(
+                reth_transaction_pool::TransactionOrigin::Local,
+                token_fee_tx_with_gas_limit(0, gas0),
+            ))
+            .unwrap()
+            .hash;
+            let tx1 = futures::executor::block_on(pool.add_transaction(
+                reth_transaction_pool::TransactionOrigin::Local,
+                token_fee_tx_with_gas_limit(1, gas1),
+            ))
+            .unwrap()
+            .hash;
+            assert_eq!(pool.all_transactions().pending.len(), 2);
+
+            // At the older judged block both transactions are unpayable, producing two
+            // removal candidates for the same sender.
+            set_token_balance(&judged, 0);
+            let head = next_block().header;
+            let source = BlockStates {
+                states: HashMap::from([
+                    (head_block().header.hash_slow(), judged),
+                    (head.hash_slow(), mock_provider(0, head_tokens)),
+                ]),
+                head: SealedHeader::seal_slow(head),
+            };
+
+            futures::executor::block_on(maintain_morph_pool_with(
+                pool.clone(),
+                source,
+                futures::stream::iter([commit_event()]),
+            ));
+
+            let all = pool.all_transactions();
+            assert_eq!(
+                all.pending.iter().map(|tx| tx.nonce()).collect::<Vec<_>>(),
+                expected_pending
+            );
+            assert_eq!(
+                all.queued.iter().map(|tx| tx.nonce()).collect::<Vec<_>>(),
+                expected_queued
+            );
+            assert_eq!(
+                pool.get(&tx0).is_some(),
+                expected_pending.contains(&0) || expected_queued.contains(&0)
+            );
+            assert_eq!(
+                pool.get(&tx1).is_some(),
+                expected_pending.contains(&1) || expected_queued.contains(&1)
+            );
+        }
     }
 }
