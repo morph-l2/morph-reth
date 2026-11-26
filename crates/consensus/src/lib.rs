@@ -14,7 +14,7 @@
 //!
 //! 1. All L1 messages must be at the beginning of the block
 //! 2. L1 messages must be in ascending `queue_index` order
-//! 3. No gaps in the `queue_index` sequence
+//! 3. No gaps in the `queue_index` sequence within a block
 //!
 //! # Example
 //!

@@ -120,9 +120,8 @@ impl From<PayloadAttributes> for MorphPayloadAttributes {
 /// This is the internal representation used by the payload builder,
 /// with decoded supplied transactions and a computed payload ID.
 ///
-/// Implements `reth_payload_primitives::PayloadAttributes` so it can serve as the
-/// `type Attributes` in `PayloadBuilder` (v2.0.0 requires the builder attributes to
-/// implement PayloadAttributes). The serde impls are required by the trait bound.
+/// Implements `reth_payload_primitives::PayloadAttributes` so it satisfies the bound on
+/// reth's `PayloadConfig::new`. The serde impls are required by the trait bound.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MorphPayloadBuilderAttributes {
     /// Computed payload ID.

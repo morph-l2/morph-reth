@@ -235,7 +235,8 @@ fn morph_envelope_from_ethereum(
 /// `Ok(None)` if this should be a standard Ethereum transaction,
 /// or `Err(...)` if there's a validation error.
 ///
-/// A MorphTx is constructed when any of these Morph fields is set:
+/// Unless the request sets legacy `gasPrice` (always a standard transaction),
+/// a MorphTx is constructed when any of these Morph fields is set:
 /// - `feeTokenID > 0` (ERC20 gas payment)
 /// - a non-zero `reference`
 /// - a non-empty `memo`
@@ -411,8 +412,7 @@ mod tests {
         );
     }
 
-    /// Test that eth_estimateGas (disable_fee_charge = false) generates RLP encoding for L1 fee
-    /// calculation.
+    /// Test that eth_estimateGas generates RLP encoding for L1 fee calculation.
     ///
     /// This ensures that eth_estimateGas correctly calculates L1 data fee, matching go-ethereum
     /// behavior where available balance is reduced by l1DataFee before checking sufficiency.
@@ -427,7 +427,7 @@ mod tests {
             memo: None,
         };
 
-        // eth_estimateGas scenario: disable_fee_charge = false (default)
+        // reth's eth_estimateGas sets disable_fee_charge = true; the conversion ignores it.
         let evm_env = create_evm_env(false);
 
         // Act: Convert to TxEnv
@@ -497,7 +497,7 @@ mod tests {
             memo: Some(memo.clone()),
         };
 
-        // eth_estimateGas scenario: should encode for L1 fee
+        // Should encode for L1 fee
         let evm_env = create_evm_env(false);
 
         // Act: Convert to TxEnv
@@ -812,7 +812,6 @@ mod tests {
             memo: None,
         };
 
-        // eth_estimateGas scenario
         let evm_env = create_evm_env(false);
 
         // Act: Convert to TxEnv

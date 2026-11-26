@@ -32,7 +32,7 @@ reth-rpc-eth-types.workspace = true
 reth-rpc-server-types.workspace = true
 reth-metrics.workspace = true
 metrics.workspace = true
-reth-evm = { workspace = true, features = ["witness"] }
+reth-evm = { workspace = true, features = ["std", "witness"] }
 reth-provider.workspace = true
 reth-storage-api.workspace = true
 reth-tasks.workspace = true

@@ -25,7 +25,7 @@
     "celadonTime": 1793167200,
     "morph": {
       "useZktrie": false,
-      "maxTxPayloadBytesPerBlock": 122880,
+      "maxTxPayloadBytesPerBlock": 737280,
       "feeVaultAddress": "0x29107cb79ef8f69fe1587f77e283d47e84c5202f"
     },
     "scroll": {}

@@ -1,8 +1,8 @@
 //! Reference index write path helpers.
 //!
 //! All write functions take an already-open write transaction so that the
-//! caller can batch multiple blocks (backfill) or delete+write (reorg) in a
-//! single atomic commit.
+//! caller can batch multiple block writes (backfill) or deletions (reorg
+//! rollback) together with the cursor update in a single atomic commit.
 
 use crate::{
     DEFAULT_BACKFILL_BATCH_BLOCKS,
@@ -189,10 +189,8 @@ mod tests {
         Signature::new(U256::from(1u64), U256::from(1u64), false)
     }
 
-    /// A MorphTx wrapper that returns `Some(reference)` when queried.  We
-    /// don't have a simple TxMorph factory in this crate, so we fabricate
-    /// a test envelope by using the Eip1559 variant and pairing the expected
-    /// hash via the trait impl.
+    /// An Eip1559 envelope, so `reference()` returns `None`.  We don't have a
+    /// simple TxMorph factory in this crate to build a reference-carrying tx.
     ///
     /// For now we test write_block/delete_block indirectly by checking that
     /// `write_block` writes the `IndexedBlocks` row for blocks without any

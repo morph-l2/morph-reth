@@ -13,18 +13,20 @@
 //! 4. Update `morph_hardfork_at()` to check for the new hardfork first (latest hardfork is checked first)
 //! 5. Add `MorphHardfork::Vivace => Self::OSAKA` (or appropriate SpecId) in `From<MorphHardfork> for SpecId`
 //! 6. Update `From<SpecId> for MorphHardfork` to check for the new hardfork first
-//! 7. Add test `test_is_vivace` and update existing `is_*` tests to include the new variant
+//! 7. Add the new variant to the `SpecId` mapping tests and to the fork list in
+//!    `test_morph_hardforks_do_not_enable_amsterdam_state_gas`
+//!
+//! ### In `genesis.rs`:
+//! 8. Add `vivace_time: Option<u64>` field to `MorphHardforkInfo`, named so its camelCase key
+//!    matches morph-geth's genesis JSON key (e.g. `jade_fork_time` for `jadeForkTime`)
 //!
 //! ### In `spec.rs`:
-//! 8. Add `vivace_time: Option<u64>` field to `MorphGenesisInfo`
-//! 9. Extract `vivace_time` in `From<Genesis> for MorphChainSpec`
-//! 10. Add `(MorphHardfork::Vivace, vivace_time)` to `morph_forks` vec
-//! 11. Update tests to include `"vivaceTime": <timestamp>` in genesis JSON
+//! 9. Add `(MorphHardfork::Vivace, hardfork_info.vivace_time)` to `time_forks` in
+//!    `build_hardforks`
+//! 10. Update tests to include `"vivaceTime": <timestamp>` in genesis JSON
 //!
-//! ### In genesis files and generator:
-//! 12. Add `"vivaceTime": 0` to `genesis/dev.json`
-//! 13. Add `vivace_time: Option<u64>` arg to `xtask/src/genesis_args.rs`
-//! 14. Add insertion of `"vivaceTime"` to chain_config.extra_fields
+//! ### In genesis files:
+//! 11. Add the activation key to `res/genesis/{mainnet,hoodi}.json` when the fork is scheduled
 //!
 //! ## Current State
 //!

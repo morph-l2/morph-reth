@@ -1,5 +1,5 @@
 [workspace.package]
-version = "1.4.1"
+version = "1.5.0"
 edition = "2024"
 rust-version = "1.96"
 license = "MIT OR Apache-2.0"
@@ -88,9 +88,17 @@ lto = "fat"
 codegen-units = 1
 
 # Deterministic release profile for reproducible production builds.
+#
+# Panics unwind, as in `release`: a panic in a non-critical task (RPC handler,
+# payload job, background indexer) then fails that task instead of aborting the
+# whole process before its in-memory blocks are persisted. Symbols and line
+# tables stay in the binary so a backtrace names the function and source line.
+# Both are deterministic once source paths are remapped (see MakefileBuild.mk).
 [profile.reproducible]
 inherits = "release"
-panic = "abort"
+panic = "unwind"
+debug = "line-tables-only"
+strip = "none"
 codegen-units = 1
 incremental = false
 
@@ -137,10 +145,11 @@ reth-ethereum-cli = { git = "https://github.com/paradigmxyz/reth", tag = "v2.11.
 reth-ethereum-consensus = { git = "https://github.com/paradigmxyz/reth", tag = "v2.11.0" }
 reth-ethereum-engine-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v2.11.0" }
 reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v2.11.0", default-features = false }
-reth-evm = { git = "https://github.com/paradigmxyz/reth", tag = "v2.11.0" }
+reth-evm = { git = "https://github.com/paradigmxyz/reth", tag = "v2.11.0", default-features = false }
 reth-evm-ethereum = { git = "https://github.com/paradigmxyz/reth", tag = "v2.11.0" }
 reth-execution-types = { git = "https://github.com/paradigmxyz/reth", tag = "v2.11.0" }
 reth-metrics = { git = "https://github.com/paradigmxyz/reth", tag = "v2.11.0" }
+reth-network = { git = "https://github.com/paradigmxyz/reth", tag = "v2.11.0" }
 reth-network-peers = { git = "https://github.com/paradigmxyz/reth", tag = "v2.11.0" }
 reth-node-api = { git = "https://github.com/paradigmxyz/reth", tag = "v2.11.0" }
 reth-node-builder = { git = "https://github.com/paradigmxyz/reth", tag = "v2.11.0" }

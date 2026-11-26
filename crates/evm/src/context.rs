@@ -1,3 +1,4 @@
+#[cfg(feature = "rpc")]
 use alloy_consensus::BlockHeader;
 use reth_evm::NextBlockEnvAttributes;
 

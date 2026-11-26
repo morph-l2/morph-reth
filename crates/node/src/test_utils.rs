@@ -123,6 +123,8 @@ impl HardforkSchedule {
     /// - `AllActive`: no changes (test genesis already has all forks at 0)
     /// - `PreCeladon`: set `celadonTime` to `u64::MAX`
     /// - `PreJade`: set `jadeForkTime` and `celadonTime` to `u64::MAX`
+    /// - `PreViridian`: set `viridianTime`, `emeraldTime`, `jadeForkTime` and
+    ///   `celadonTime` to `u64::MAX`
     /// - `Hoodi`/`Mainnet`: compare each `*Time` key against the reference network;
     ///   forks active now → 0, forks not yet active → `u64::MAX`.
     ///   Block-based forks (`*Block`) are always kept at 0.
@@ -217,6 +219,8 @@ pub struct TestNodeBuilder {
     num_nodes: usize,
     is_dev: bool,
     desired_gas_limit: Option<u64>,
+    debug_tip: Option<B256>,
+    trusted_peer: Option<String>,
     morph_args: Option<MorphArgs>,
 }
 
@@ -242,6 +246,8 @@ impl TestNodeBuilder {
             num_nodes: 1,
             is_dev: false,
             desired_gas_limit: None,
+            debug_tip: None,
+            trusted_peer: None,
             morph_args: None,
         }
     }
@@ -284,7 +290,7 @@ impl TestNodeBuilder {
         self
     }
 
-    /// Enable or disable dev mode (auto-sealing blocks every 100ms).
+    /// Enable or disable dev mode (reth's local miner auto-seals blocks from the pool).
     pub fn with_dev(mut self, is_dev: bool) -> Self {
         self.is_dev = is_dev;
         self
@@ -298,13 +304,25 @@ impl TestNodeBuilder {
         self
     }
 
+    /// Start an initial pipeline backfill toward the given block hash.
+    pub fn with_debug_tip(mut self, tip: B256) -> Self {
+        self.debug_tip = Some(tip);
+        self
+    }
+
+    /// Dial a trusted peer during node startup, before an initial backfill runs.
+    pub fn with_trusted_peer(mut self, enode: impl Into<String>) -> Self {
+        self.trusted_peer = Some(enode.into());
+        self
+    }
+
     /// Override the maximum pool-transaction payload bytes included in a block.
     ///
     /// Restricted to single-node setups.
     pub fn with_max_tx_payload_bytes(mut self, max_bytes: u64) -> Self {
         self.morph_args
             .get_or_insert_with(MorphArgs::default)
-            .max_tx_payload_bytes = max_bytes;
+            .max_tx_payload_bytes = Some(max_bytes);
         self
     }
 
@@ -336,6 +354,8 @@ impl TestNodeBuilder {
         // can carry `--builder.gaslimit`, which `setup_engine` gives no way to set.
         let is_dev = self.is_dev;
         let desired_gas_limit = self.desired_gas_limit;
+        let debug_tip = self.debug_tip;
+        let trusted_peer = self.trusted_peer;
         reth_e2e_test_utils::E2ETestSetupBuilder::<MorphNode>::new_with_attributes_generator(
             self.num_nodes,
             Arc::new(chain_spec),
@@ -343,6 +363,10 @@ impl TestNodeBuilder {
         )
         .with_node_config_modifier(move |mut config| {
             config.builder.gas_limit = desired_gas_limit;
+            config.debug.tip = debug_tip;
+            if let Some(ref enode) = trusted_peer {
+                config.network.trusted_peers = vec![enode.parse().expect("valid trusted enode")];
+            }
             config.set_dev(is_dev)
         })
         .build()
@@ -1018,7 +1042,7 @@ impl MorphTxBuilder {
     /// Configure as MorphTx **v0** with ERC20 fee payment.
     ///
     /// - `fee_token_id` must be > 0 (v0 requires ERC20 fee)
-    /// - Sets a generous `fee_limit` (1e20 tokens) to avoid rejection
+    /// - Sets a generous `fee_limit` (1e20 wei, i.e. 100 tokens) to avoid rejection
     pub fn with_v0_token_fee(mut self, fee_token_id: u16) -> Self {
         assert!(fee_token_id > 0, "v0 MorphTx requires fee_token_id > 0");
         self.version = 0;

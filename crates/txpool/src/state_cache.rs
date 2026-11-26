@@ -1,7 +1,6 @@
 //! Tip-scoped concurrent state cache and reusable `evm2` token-fee validator for Morph txpool.
 
-use crate::MorphTxError;
-use alloy_consensus::BlockHeader;
+use crate::{MorphTxError, MorphTxValidationError};
 use alloy_primitives::{Address, B256, U256, map::DefaultHashBuilder};
 use dashmap::DashMap;
 use evm2::{
@@ -9,11 +8,7 @@ use evm2::{
     evm::{AccountInfo, Database, Db},
     registry::HandlerError,
 };
-use morph_chainspec::hardfork::MorphHardfork;
-use morph_revm::{
-    MorphBlockEnv, MorphEvm, MorphEvmEnv, TokenFeeInfo, TokenRegistryEntry, morph_evm,
-    morph_evm_env,
-};
+use morph_revm::{MorphEvm, MorphEvmEnv, TokenFeeInfo, TokenRegistryEntry, morph_evm};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Concurrent cache of raw state reads and resolved token-fee queries anchored to a single tip.
@@ -34,10 +29,11 @@ pub(crate) struct StateCache {
     registry_entries: DashMap<u16, Option<TokenRegistryEntry>, DefaultHashBuilder>,
     /// Cached call-mode `balanceOf` outcomes keyed by `(caller, token_id)`.
     ///
-    /// Stores `Ok(balance)` on success and `Err(reason)` on deterministic EVM query failures
-    /// (`TokenBalanceQueryFailed`). Transient database read errors (`HandlerError::Database`) are
-    /// never inserted here so a retry against healthy storage can succeed.
-    call_balances: DashMap<(Address, u16), Result<U256, String>, DefaultHashBuilder>,
+    /// Stores `Ok(balance)` on success and `Err(())` on deterministic EVM query failures
+    /// (`TokenBalanceQueryFailed`). Transient database read errors (`HandlerError::Database` /
+    /// `HandlerError::Fatal`) are never inserted here so a retry against healthy storage can
+    /// succeed.
+    call_balances: DashMap<(Address, u16), Result<U256, ()>, DefaultHashBuilder>,
     account_count: AtomicUsize,
     storage_count: AtomicUsize,
     contract_count: AtomicUsize,
@@ -60,7 +56,7 @@ impl StateCache {
         }
     }
 
-    fn insert_call_balance(&self, key: (Address, u16), outcome: Result<U256, String>) {
+    fn insert_call_balance(&self, key: (Address, u16), outcome: Result<U256, ()>) {
         if self.call_balance_count.load(Ordering::Relaxed) < Self::MAX_CALL_BALANCES
             && self.call_balances.insert(key, outcome).is_none()
         {
@@ -170,55 +166,48 @@ impl<'a> TokenFeeValidator<'a> {
     ///
     /// Enforces registry usability (`is_active`, non-zero `price_ratio`, non-zero `scale`)
     /// strictly before any call-mode `balanceOf` execution.
+    ///
+    /// Separates deterministic transaction/token verdicts ([`MorphTxValidationError::Invalid`])
+    /// from transient database/provider read failures ([`MorphTxValidationError::State`]).
     pub(crate) fn resolve_token_fee_info(
         &mut self,
         token_id: u16,
         caller: Address,
-    ) -> Result<TokenFeeInfo, MorphTxError> {
-        let entry =
-            match self.cache.registry_entries.get(&token_id) {
-                Some(cached) => *cached,
-                None => {
-                    let loaded = TokenRegistryEntry::load_from_evm(&mut self.evm, token_id)
-                        .map_err(|err| MorphTxError::TokenInfoFetchFailed {
-                            token_id,
-                            message: err.to_string(),
-                        })?;
-                    self.cache.insert_registry_entry(token_id, loaded);
-                    loaded
-                }
-            };
+    ) -> Result<TokenFeeInfo, MorphTxValidationError<String>> {
+        let entry = match self.cache.registry_entries.get(&token_id) {
+            Some(cached) => *cached,
+            None => {
+                let loaded = TokenRegistryEntry::load_from_evm(&mut self.evm, token_id)
+                    .map_err(|err| MorphTxValidationError::State(err.to_string()))?;
+                self.cache.insert_registry_entry(token_id, loaded);
+                loaded
+            }
+        };
 
         let entry = entry.ok_or(MorphTxError::TokenNotFound { token_id })?;
 
         if !entry.is_active {
-            return Err(MorphTxError::TokenNotActive { token_id });
+            return Err(MorphTxError::TokenNotActive { token_id }.into());
         }
         if entry.price_ratio.is_zero() {
-            return Err(MorphTxError::InvalidPriceRatio { token_id });
+            return Err(MorphTxError::InvalidPriceRatio { token_id }.into());
         }
         if entry.scale.is_zero() {
-            return Err(MorphTxError::InvalidTokenScale { token_id });
+            return Err(MorphTxError::InvalidTokenScale { token_id }.into());
         }
 
         if entry.balance_slot.is_some() {
             let balance = entry
                 .read_caller_balance_with_evm(&mut self.evm, caller)
-                .map_err(|err| MorphTxError::TokenInfoFetchFailed {
-                    token_id,
-                    message: err.to_string(),
-                })?;
+                .map_err(|err| MorphTxValidationError::State(err.to_string()))?;
             return Ok(entry.into_fee_info(caller, balance));
         }
 
         // Call mode (`balance_slot == None`): deduplicate `balanceOf` per `(caller, token_id)`.
         if let Some(cached) = self.cache.call_balances.get(&(caller, token_id)) {
-            return match cached.value() {
-                Ok(balance) => Ok(entry.into_fee_info(caller, *balance)),
-                Err(message) => Err(MorphTxError::TokenInfoFetchFailed {
-                    token_id,
-                    message: message.clone(),
-                }),
+            return match *cached.value() {
+                Ok(balance) => Ok(entry.into_fee_info(caller, balance)),
+                Err(()) => Err(MorphTxError::TokenBalanceQueryFailed { token_id }.into()),
             };
         }
 
@@ -229,42 +218,14 @@ impl<'a> TokenFeeValidator<'a> {
                 Ok(entry.into_fee_info(caller, balance))
             }
             // Never cache transient state/database read errors as zero or failed balances.
-            Err(HandlerError::Database(err)) => Err(MorphTxError::TokenInfoFetchFailed {
-                token_id,
-                message: err.to_string(),
-            }),
-            Err(err) => {
-                let message = err.to_string();
-                self.cache
-                    .insert_call_balance((caller, token_id), Err(message.clone()));
-                Err(MorphTxError::TokenInfoFetchFailed { token_id, message })
+            Err(HandlerError::Database(err)) => Err(MorphTxValidationError::State(err.to_string())),
+            Err(HandlerError::Fatal(err)) => Err(MorphTxValidationError::State(err.to_string())),
+            Err(_) => {
+                self.cache.insert_call_balance((caller, token_id), Err(()));
+                Err(MorphTxError::TokenBalanceQueryFailed { token_id }.into())
             }
         }
     }
-}
-
-/// Builds the [`MorphEvmEnv`] matching a canonical block header so call-mode `balanceOf` queries
-/// in admission and maintenance observe the real chain ID and block context.
-pub(crate) fn morph_evm_env_from_header<H: BlockHeader>(
-    hardfork: MorphHardfork,
-    chain_id: u64,
-    header: &H,
-) -> MorphEvmEnv {
-    let block_env = MorphBlockEnv {
-        number: U256::from(header.number()),
-        beneficiary: header.beneficiary(),
-        timestamp: U256::from(header.timestamp()),
-        difficulty: header.difficulty(),
-        prevrandao: header
-            .mix_hash()
-            .map(|hash| U256::from_be_bytes(hash.0))
-            .unwrap_or_default(),
-        gas_limit: U256::from(header.gas_limit()),
-        basefee: U256::from(header.base_fee_per_gas().unwrap_or_default()),
-        blob_basefee: U256::ONE,
-        ..Default::default()
-    };
-    morph_evm_env(hardfork, chain_id, header.gas_limit(), block_env)
 }
 
 #[cfg(test)]
@@ -272,7 +233,8 @@ mod tests {
     use super::*;
     use alloy_primitives::{Bytes, address, bytes};
     use evm2::evm::{CacheDB, DynDatabase, EmptyDB, InMemoryDB};
-    use morph_revm::{L2_TOKEN_REGISTRY_ADDRESS, compute_mapping_slot};
+    use morph_chainspec::hardfork::MorphHardfork;
+    use morph_revm::{L2_TOKEN_REGISTRY_ADDRESS, MorphBlockEnv, compute_mapping_slot};
     use std::sync::Arc;
 
     #[derive(Debug, Clone, Copy)]
@@ -413,7 +375,7 @@ mod tests {
             let mut validator = TokenFeeValidator::new(&cache, db, env.clone());
             assert_eq!(
                 validator.resolve_token_fee_info(1, caller).unwrap_err(),
-                expected
+                MorphTxValidationError::Invalid(expected)
             );
             assert_eq!(reads.load(Ordering::Relaxed), 0);
         }
@@ -450,7 +412,8 @@ mod tests {
         let env = MorphEvmEnv::new(MorphHardfork::Celadon, MorphBlockEnv::default(), 2818);
         let cache = StateCache::default();
 
-        // First validator hits a transient DB error during `balanceOf` SLOAD -> must NOT poison `cache`.
+        // First validator hits a transient DB error during `balanceOf` SLOAD -> must NOT poison `cache`
+        // and must surface as `MorphTxValidationError::State`.
         let reads = Arc::new(AtomicUsize::new(0));
         let failing_db = CountingTokenDb {
             inner: setup_call_mode_registry(
@@ -469,7 +432,7 @@ mod tests {
         let mut v1 = TokenFeeValidator::new(&cache, failing_db, env.clone());
         assert!(matches!(
             v1.resolve_token_fee_info(1, caller).unwrap_err(),
-            MorphTxError::TokenInfoFetchFailed { token_id: 1, .. }
+            MorphTxValidationError::State(_)
         ));
 
         // Second validator sharing the same tip `cache` over healthy DB succeeds!
@@ -491,7 +454,8 @@ mod tests {
         let info = v2.resolve_token_fee_info(1, caller).unwrap();
         assert_eq!(info.balance, U256::from(123_456u64));
 
-        // Deterministic contract revert (`SLOAD(0); PUSH0; PUSH0; REVERT`) IS cached.
+        // Deterministic contract revert (`SLOAD(0); PUSH0; PUSH0; REVERT`) IS cached as
+        // `MorphTxValidationError::Invalid(TokenBalanceQueryFailed)`.
         let revert_cache = StateCache::default();
         let revert_reads = Arc::new(AtomicUsize::new(0));
         let revert_db = CountingTokenDb {
@@ -510,10 +474,12 @@ mod tests {
         };
         let mut v3 = TokenFeeValidator::new(&revert_cache, revert_db, env);
         for _ in 0..4 {
-            assert!(matches!(
+            assert_eq!(
                 v3.resolve_token_fee_info(1, caller).unwrap_err(),
-                MorphTxError::TokenInfoFetchFailed { token_id: 1, .. }
-            ));
+                MorphTxValidationError::Invalid(MorphTxError::TokenBalanceQueryFailed {
+                    token_id: 1,
+                })
+            );
         }
         assert_eq!(revert_reads.load(Ordering::Relaxed), 1);
     }

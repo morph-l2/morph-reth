@@ -31,7 +31,6 @@
 //! │  │   - Calculates L1 data fee for all L2 transactions     │   │
 //! │  │   - Extracts token fee info for MorphTx (0x7F)         │   │
 //! │  │   - Builds receipts with full Morph-specific context   │   │
-//! │  │   - Applies hardfork state changes (Curie, etc.)       │   │
 //! │  └─────────────────────────────────────────────────────────┘   │
 //! └─────────────────────────────────────────────────────────────────┘
 //! ```
@@ -61,6 +60,10 @@ use alloy_rpc_types_eth as _;
 use reth_ethereum_primitives as _;
 
 mod config;
+// Engine-API payload execution requires `reth-evm/std` (`ConfigureEngineEvm`)
+// and `morph-payload-types`, which transitively pull in `quanta` — unavailable
+// on SP1's zkvm target. Only node compositions enable it.
+#[cfg(feature = "engine")]
 mod engine;
 
 mod assemble;
@@ -97,9 +100,6 @@ pub use morph_revm::{MorphBlockEnv, MorphEvmEnv, MorphEvmTypes};
 /// - Block executor creation with Morph-specific execution logic
 /// - Block assembler for constructing `MorphHeader` blocks
 ///
-/// # Usage
-///
-/// Create with a chain specification:
 /// # Trait Implementations
 ///
 /// - `ConfigureEvm`: Provides EVM environment setup and block context creation

@@ -28,7 +28,9 @@
 //! - Withdrawals field must not be present
 //! - Transaction root must be valid
 //! - L2 transaction payload (EIP-2718 encoded, L1 messages excluded) must not
-//!   exceed [`morph_chainspec::MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK`]
+//!   exceed the limit configured in the chain genesis
+//! - MorphTx (0x7F) must be active (Emerald), use an active version (V1 needs Jade),
+//!   and pass field validation
 //!
 //! ## Post-Execution Validation
 //!
@@ -40,9 +42,7 @@ use crate::MorphConsensusError;
 use alloy_consensus::{BlockHeader as _, EMPTY_OMMER_ROOT_HASH, TxReceipt};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{B256, Bloom};
-use morph_chainspec::{
-    MINIMUM_GAS_LIMIT, MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK, MorphChainSpec, MorphHardforks,
-};
+use morph_chainspec::{MINIMUM_GAS_LIMIT, MorphChainSpec, MorphHardforks};
 use morph_primitives::{
     Block, BlockBody, MorphHeader, MorphReceipt, MorphTxEnvelope,
     transaction::morph_transaction::{MORPH_TX_VERSION_1, MORPH_TX_VERSION_2},
@@ -85,7 +85,7 @@ const GAS_LIMIT_BOUND_DIVISOR: u64 = 1024;
 /// L1 message ordering requires both body data (transactions) and parent header data.
 /// Since reth's `Consensus` trait methods provide these separately — `validate_block_pre_execution`
 /// has the block body but not the parent header, while `validate_header_against_parent` has
-/// both headers but not the body — the validation is split into two independent checks:
+/// both headers but not the body — the validation is split into three independent checks:
 ///
 /// 1. **Internal consistency** (`validate_block_pre_execution`): L1 messages are at the block
 ///    start, have sequential queue indices, and are consistent with `header.next_l1_msg_index`.
@@ -96,10 +96,10 @@ const GAS_LIMIT_BOUND_DIVISOR: u64 = 1024;
 ///    from `parent.next_l1_msg_index` and the block's leading L1 messages.
 ///
 /// The consensus trait methods have no ordering dependency and share no mutable state. The strict
-/// cross-block equality check (`header.next == parent.next + l1_count`) requires simultaneous
-/// access to both parent header and block body, which reth's trait API does not provide in
-/// any single method, so Morph performs that final check in the engine tree payload validator
-/// before a block is accepted.
+/// cross-block equality check (`header.next` equals `parent.next` advanced past the block's
+/// leading L1 messages) requires simultaneous access to both parent header and block body,
+/// which reth's trait API does not provide in any single method, so Morph performs that final
+/// check in the engine tree payload validator before a block is accepted.
 #[derive(Debug, Clone)]
 pub struct MorphConsensus {
     /// Chain specification containing hardfork information and chain config.
@@ -214,8 +214,9 @@ impl HeaderValidator<MorphHeader> for MorphConsensus {
     ///
     /// 1. **Parent Hash**: Header's parent_hash must match parent's hash
     /// 2. **Block Number**: Header's number must be parent's number + 1
-    /// 3. **Timestamp**: Header's timestamp must be >= parent's timestamp
+    /// 3. **Timestamp**: Header's timestamp must be > parent's timestamp (>= from Emerald onward)
     /// 4. **Gas Limit**: Change must be within 1/1024 of parent's limit
+    /// 5. **L1 Message Index**: `next_l1_msg_index` must not decrease relative to the parent
     fn validate_header_against_parent(
         &self,
         header: &SealedHeader<MorphHeader>,
@@ -274,8 +275,9 @@ impl Consensus<Block> for MorphConsensus {
     /// 3. **Transaction Root**: Must be valid
     /// 4. **Withdrawals**: Must be empty (Morph L2 doesn't support withdrawals)
     /// 5. **L2 Payload Size**: Encoded L2 txs (L1 messages excluded) must not
-    ///    exceed [`MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK`]
-    /// 6. **L1 Messages**: Must be ordered correctly (sequential queue indices, L1 before L2)
+    ///    exceed the limit configured in the chain genesis
+    /// 6. **MorphTx**: Type active (Emerald), version active (V1 needs Jade), fields valid
+    /// 7. **L1 Messages**: Must be ordered correctly (sequential queue indices, L1 before L2)
     fn validate_block_pre_execution(
         &self,
         block: &SealedBlock<Block>,
@@ -310,7 +312,10 @@ impl Consensus<Block> for MorphConsensus {
         }
 
         // Matches go-ethereum's BlockValidator.ValidateBody() → IsValidBlockSize().
-        validate_l2_tx_payload_size(&block.body().transactions)?;
+        validate_l2_tx_payload_size(
+            &block.body().transactions,
+            self.chain_spec.max_tx_payload_bytes_per_block(),
+        )?;
 
         // Validate MorphTx activation, version and field constraints.
         // Matches go-ethereum's BlockValidator.ValidateBody() → ValidateMorphTxVersion().
@@ -339,8 +344,22 @@ impl Consensus<Block> for MorphConsensus {
         Ok(())
     }
 
+    /// Rejections that reth must not record in its invalid-header cache.
+    ///
+    /// Besides a timestamp from the future, this covers every check that can fail
+    /// because of a payload field the block hash does not commit to (see
+    /// [`MorphConsensusError::is_unhashed_field_error`]). A peer can relay a validly
+    /// signed block with such a field corrupted; caching that rejection under the block
+    /// hash would make the tree refuse the honest block, which shares the hash, without
+    /// re-validating it until the entry is evicted or the node restarts.
     fn is_transient_error(&self, error: &ConsensusError) -> bool {
-        matches!(error, ConsensusError::TimestampIsInFuture { .. })
+        match error {
+            ConsensusError::TimestampIsInFuture { .. } => true,
+            ConsensusError::Other(err) => err
+                .downcast_ref::<MorphConsensusError>()
+                .is_some_and(MorphConsensusError::is_unhashed_field_error),
+            _ => false,
+        }
     }
 }
 
@@ -492,16 +511,19 @@ fn l2_tx_payload_bytes(txs: &[MorphTxEnvelope]) -> u64 {
         .fold(0, u64::saturating_add)
 }
 
-/// Rejects blocks whose L2 payload exceeds [`MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK`].
+/// Rejects blocks whose L2 payload exceeds `max_tx_payload_bytes_per_block`.
 ///
 /// Matches go-ethereum `MorphConfig.IsValidBlockSize` (`size <= limit`).
-fn validate_l2_tx_payload_size(txs: &[MorphTxEnvelope]) -> Result<(), ConsensusError> {
+fn validate_l2_tx_payload_size(
+    txs: &[MorphTxEnvelope],
+    max_tx_payload_bytes_per_block: u64,
+) -> Result<(), ConsensusError> {
     let size = l2_tx_payload_bytes(txs);
-    if size > MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK {
+    if size > max_tx_payload_bytes_per_block {
         return Err(ConsensusError::other(
             MorphConsensusError::InvalidBlockPayloadSize {
                 size,
-                limit: MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK,
+                limit: max_tx_payload_bytes_per_block,
             },
         ));
     }
@@ -702,12 +724,8 @@ fn validate_morph_txs(
 // Receipts Validation
 // ============================================================================
 
-/// Verifies the receipts root and logs bloom against the expected values.
-///
-/// This function:
-/// 1. Calculates the receipts root from the provided receipts
-/// 2. Calculates the logs bloom by combining all receipt blooms
-/// 3. Compares both against the expected values from the block header
+/// Compares a receipts root and logs bloom pre-computed by the executor against the
+/// expected values from the block header.
 #[inline]
 fn verify_receipts_precomputed(
     expected_receipts_root: B256,
@@ -736,6 +754,12 @@ fn verify_receipts_precomputed(
     Ok(())
 }
 
+/// Verifies the receipts root and logs bloom against the expected values.
+///
+/// This function:
+/// 1. Calculates the receipts root from the provided receipts
+/// 2. Calculates the logs bloom by combining all receipt blooms
+/// 3. Compares both against the expected values from the block header
 fn verify_receipts(
     expected_receipts_root: B256,
     expected_logs_bloom: Bloom,
@@ -785,9 +809,16 @@ mod tests {
     use alloy_consensus::{Header, Signed};
     use alloy_genesis::Genesis;
     use alloy_primitives::{Address, B64, B256, Bytes, Signature, U256};
+    use morph_chainspec::MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK;
     use morph_primitives::transaction::{MAX_MEMO_LENGTH, MORPH_TX_VERSION_0, TxL1Msg};
 
     fn create_test_chainspec() -> Arc<MorphChainSpec> {
+        create_test_chainspec_with_payload_limit(MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK)
+    }
+
+    fn create_test_chainspec_with_payload_limit(
+        max_tx_payload_bytes_per_block: u64,
+    ) -> Arc<MorphChainSpec> {
         let genesis_json = serde_json::json!({
             "config": {
                 "chainId": 1337,
@@ -807,7 +838,9 @@ mod tests {
                 "viridianTime": 0,
                 "emeraldTime": 0,
                 "jadeForkTime": 0,
-                "morph": {}
+                "morph": {
+                    "maxTxPayloadBytesPerBlock": max_tx_payload_bytes_per_block
+                }
             },
             "alloc": {}
         });
@@ -1157,7 +1190,7 @@ mod tests {
             create_regular_tx(),
         ];
 
-        // Header says 2 but should be 3 (last=2, 2+1=3). Value < min_expected triggers error.
+        // Header says 2 but should be 3 (last=2, 2+1=3). Value != expected triggers error.
         let result = validate_l1_messages_in_block(&txs, 2, true);
         assert!(result.is_err());
         let err_str = result.unwrap_err().to_string();
@@ -1218,6 +1251,43 @@ mod tests {
         };
 
         assert!(Consensus::<Block>::is_transient_error(&consensus, &error));
+    }
+
+    #[test]
+    fn unhashed_field_rejections_are_transient_errors() {
+        let consensus = MorphConsensus::new(create_test_chainspec());
+        for error in [
+            MorphConsensusError::InvalidNextL1MessageIndex {
+                expected: 1,
+                actual: 2,
+            },
+            MorphConsensusError::WithdrawTrieRootMismatch {
+                expected: alloy_primitives::B256::ZERO,
+                actual: alloy_primitives::B256::with_last_byte(1),
+            },
+        ] {
+            assert!(
+                Consensus::<Block>::is_transient_error(
+                    &consensus,
+                    &ConsensusError::other(error.clone())
+                ),
+                "{error} must not be cached by block hash"
+            );
+        }
+    }
+
+    #[test]
+    fn rejections_of_hashed_content_are_not_transient_errors() {
+        let consensus = MorphConsensus::new(create_test_chainspec());
+        let in_past = ConsensusError::TimestampIsInPast {
+            parent_timestamp: 2,
+            timestamp: 1,
+        };
+        assert!(!Consensus::<Block>::is_transient_error(
+            &consensus, &in_past
+        ));
+        let order = ConsensusError::other(MorphConsensusError::InvalidL1MessageOrder);
+        assert!(!Consensus::<Block>::is_transient_error(&consensus, &order));
     }
 
     #[test]
@@ -2141,7 +2211,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_block_pre_execution_accepts_payload_at_limit() {
+    fn test_validate_block_pre_execution_accepts_payload_under_default_limit() {
         let consensus = MorphConsensus::new(create_test_chainspec());
         // A default legacy tx is well under the 720 KiB cap.
         let block = create_sealed_block(0, vec![create_regular_tx()]);
@@ -2172,6 +2242,23 @@ mod tests {
             err.contains("invalid block payload size"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn test_validate_block_pre_execution_uses_genesis_payload_limit() {
+        let tx = create_legacy_tx_with_input(Bytes::from(vec![0u8; 1024]));
+        let size = l2_tx_payload_bytes(std::slice::from_ref(&tx));
+        let block = create_sealed_block(0, vec![tx]);
+
+        let at_limit = MorphConsensus::new(create_test_chainspec_with_payload_limit(size));
+        assert!(at_limit.validate_block_pre_execution(&block).is_ok());
+
+        let below_limit = MorphConsensus::new(create_test_chainspec_with_payload_limit(size - 1));
+        let err = below_limit
+            .validate_block_pre_execution(&block)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(&format!("exceeds limit {}", size - 1)));
     }
 
     #[test]

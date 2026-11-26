@@ -4,14 +4,14 @@ use alloy_consensus::{BlockHeader, Sealable, transaction::TxHashRef};
 use alloy_primitives::B256;
 use jsonrpsee::core::client::ClientT;
 use morph_node::test_utils::{TestNodeBuilder, make_transfer_tx};
-use morph_payload_types::GenericResponse;
+use morph_payload_types::{AssembleL2BlockParams, GenericResponse};
 use morph_primitives::MorphHeader;
 use reth_payload_primitives::BuiltPayload;
 use reth_provider::{AccountReader, StateProviderFactory};
 
 use super::helpers::{
-    build_block_no_submit, canonical_snapshot, payload_with_receipts_root, wait_until_evicted,
-    wait_until_pooled,
+    assemble_l2_block, build_block_no_submit, canonical_snapshot, head_timestamp, import_l2_block,
+    payload_with_receipts_root, wait_until_evicted, wait_until_pooled,
 };
 
 /// Behavior contract:
@@ -125,6 +125,59 @@ async fn invalid_receipts_root_preserves_canonical_state_then_recovers() -> eyre
         .map_or(0, |account| account.nonce);
     assert_eq!(nonce_after_recovery, nonce_before + 1);
     wait_until_evicted(&node, tx_hash).await?;
+
+    Ok(())
+}
+
+/// Behavior contract:
+/// - fault: a peer relays a validly signed block whose `NextL1MsgIndex` was corrupted in
+///   transit; the field is not covered by the block hash, so the copy shares its hash with
+///   the honest block;
+/// - evidence: the follower rejects the corrupted copy for that reason, and the honest
+///   block is still accepted afterwards instead of being refused as linking to a
+///   previously rejected block until the invalid-header entry is evicted or the node
+///   restarts (geth re-derives the field and accepts the honest block as well).
+#[tokio::test(flavor = "multi_thread")]
+async fn corrupted_next_l1_msg_index_does_not_poison_the_honest_block() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, _wallet) = TestNodeBuilder::new().with_num_nodes(2).build().await?;
+    let follower = nodes.pop().expect("two nodes requested");
+    let leader = nodes.pop().expect("two nodes requested");
+
+    let mut params = AssembleL2BlockParams::empty(1);
+    params.timestamp = Some(head_timestamp(&leader)? + 1);
+    let honest = assemble_l2_block(&leader, params).await?;
+    import_l2_block(&leader, honest.clone()).await?;
+    let before = canonical_snapshot(&follower)?;
+
+    let mut corrupted = honest.clone();
+    corrupted.next_l1_message_index += 1;
+
+    let err = import_l2_block(&follower, corrupted)
+        .await
+        .expect_err("the corrupted copy must be rejected");
+    assert!(
+        err.to_string().contains("invalid block.NextL1MsgIndex"),
+        "rejection should name the corrupted field, got: {err}"
+    );
+    assert_eq!(
+        canonical_snapshot(&follower)?,
+        before,
+        "a rejected block must leave the canonical chain untouched"
+    );
+
+    let header = import_l2_block(&follower, honest.clone()).await?;
+    assert_eq!(
+        header.hash_slow(),
+        honest.hash,
+        "the honest block shares the corrupted copy's hash"
+    );
+    assert_eq!(
+        canonical_snapshot(&follower)?.hash,
+        honest.hash,
+        "the honest block must become the follower's head"
+    );
 
     Ok(())
 }

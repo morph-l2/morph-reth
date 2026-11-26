@@ -8,6 +8,7 @@ use morph_chainspec::{
     L2_MESSAGE_QUEUE_ADDRESS, L2_MESSAGE_QUEUE_WITHDRAW_TRIE_ROOT_SLOT, MorphChainSpec,
     MorphHardforks,
 };
+use morph_consensus::MorphConsensusError;
 use morph_payload_types::{MorphExecutionData, MorphPayloadTypes};
 use morph_primitives::{MorphHeader, MorphPrimitives, MorphTxEnvelope};
 use parking_lot::Mutex;
@@ -70,8 +71,9 @@ where
 
 /// Builder for Morph tree engine validator.
 ///
-/// This wires [`MorphEngineValidator`] into both payload validation and state-root
-/// decision/validation hooks.
+/// This wires [`MorphEngineValidator`] into upstream payload validation, installs the
+/// pre-Jade-aware `MorphStateRootStrategy`, and wraps the result in
+/// [`MorphTreeEngineValidator`] for the L1-queue and withdraw-trie-root checks.
 #[derive(Debug, Clone)]
 pub struct MorphTreeEngineValidatorBuilder<PVB = MorphEngineValidatorBuilder> {
     payload_validator_builder: PVB,
@@ -297,20 +299,25 @@ where
                 ConsensusError::msg("L1 message transaction is missing queue index")
             })?;
             expected = queue_index.checked_add(1).ok_or_else(|| {
-                ConsensusError::msg(format!(
-                    "invalid block.NextL1MsgIndex: expected {}, got {}",
-                    u64::MAX,
-                    block.header().next_l1_msg_index
-                ))
+                ConsensusError::other(MorphConsensusError::InvalidNextL1MessageIndex {
+                    expected: u64::MAX,
+                    actual: block.header().next_l1_msg_index,
+                })
             })?;
         }
 
+        // Typed so that `MorphConsensus::is_transient_error` keeps this rejection out of
+        // reth's invalid-header cache: the field is not covered by the block hash, so
+        // the cache entry would also match the honest block.
         let actual = block.header().next_l1_msg_index;
         if actual != expected {
-            return Err(ConsensusError::msg(format!(
-                "invalid block.NextL1MsgIndex: expected {expected}, got {actual}"
-            ))
-            .into());
+            return Err(
+                ConsensusError::other(MorphConsensusError::InvalidNextL1MessageIndex {
+                    expected,
+                    actual,
+                })
+                .into(),
+            );
         }
         Ok(())
     }
@@ -672,10 +679,12 @@ impl MorphEngineValidator {
             // The slot was not touched, so its value is unchanged from the parent.
             return Ok(());
         };
+        // Typed for the same reason as the `NextL1MsgIndex` check: the payload's withdraw
+        // trie root is not covered by the block hash.
         if actual != expected {
-            return Err(ConsensusError::msg(format!(
-                "withdraw trie root mismatch: expected {expected}, got {actual}"
-            )));
+            return Err(ConsensusError::other(
+                MorphConsensusError::WithdrawTrieRootMismatch { expected, actual },
+            ));
         }
         Ok(())
     }
@@ -957,7 +966,7 @@ mod tests {
     }
 
     /// Block-input path (P2P sync, pipeline backfill) reaches
-    /// `validate_block_post_execution_with_hashed_state` without calling
+    /// `validate_withdraw_trie_root_update` without calling
     /// `convert_payload_to_block`, so no expectation is registered. The
     /// validator must treat the missing entry as `SkipValidation` and
     /// return `Ok` — otherwise sync stalls. The upstream strict state-root

@@ -9,15 +9,17 @@ pub const MORPH_MAINNET_CHAIN_ID: u64 = 2818;
 pub const MORPH_HOODI_CHAIN_ID: u64 = 2910;
 
 /// The default L2 sequencer fee (0.001 Gwei = 1_000_000 wei).
-/// The sequencer has the right to set any base fee below `MORPH_MAX_BASE_FEE`.
+/// The sequencer has the right to set any base fee up to `MORPH_MAXIMUM_BASE_FEE`
+/// (enforced by `morph-consensus` header validation).
 pub const MORPH_BASE_FEE: u64 = 1_000_000;
 
 /// Maximum L2 transaction payload bytes per block (L1 messages excluded).
 ///
 /// Matches morph-geth `params.MorphMaxTxPayloadBytesPerBlock` (`720 * 1024`).
 /// `720 KiB = 120 KiB × 6`, sized so one uncompressed L2 block fits in a 6-blob
-/// batch (`6 × 4096 × 31 = 761_856` usable bytes). Enforced on import by Morph
-/// consensus and used as the sequencer packing default.
+/// batch (`6 × 4096 × 31 = 761_856` usable bytes). The bundled mainnet and
+/// Hoodi genesis files carry this value; it is also the default when a custom
+/// genesis omits `maxTxPayloadBytesPerBlock`.
 pub const MORPH_MAX_TX_PAYLOAD_BYTES_PER_BLOCK: u64 = 720 * 1024;
 
 /// Default priority fee returned by `eth_maxPriorityFeePerGas` when the gas

@@ -697,7 +697,7 @@ mod tests {
                     );
                 }
 
-                // interval < min_block_interval -> "Nothing to prune" path; default output.
+                // interval < retention_blocks -> "Nothing to prune" path; default output.
                 #[tokio::test]
                 async fn run_inner_interval_too_small_real_db() {
                     let dir = TempDir::new().unwrap();
@@ -723,7 +723,7 @@ mod tests {
                     assert_eq!(e.0, 4);
                     assert_eq!(l.0, 5);
 
-                    // Require min_block_interval=2 (or greater) so interval < min
+                    // Require retention_blocks=2 (or greater) so interval < retention_blocks
                     let block_hash_reader = MockBlockHashReader::new();
                     let pruner = MorphProofStoragePruner::new(store, block_hash_reader, 2, 1000);
                     let out = pruner.run_inner().expect("ok");

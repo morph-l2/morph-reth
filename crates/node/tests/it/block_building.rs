@@ -33,6 +33,48 @@ async fn empty_block_has_no_transactions() -> eyre::Result<()> {
     Ok(())
 }
 
+/// A block without transactions carries no execution artifacts; a block with
+/// transactions still does.
+///
+/// reth pre-inserts every resolved payload into the engine tree through these
+/// artifacts and only prunes such non-canonical blocks below a finalized block. The
+/// sequencer's CL assembles a candidate on every fast tick, discards the empty ones
+/// without telling the EL, and never supplies a finalized tag, so pre-inserted empty
+/// candidates would accumulate for the life of the process.
+#[tokio::test(flavor = "multi_thread")]
+async fn empty_block_carries_no_executed_block() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+
+    // The transfer block goes first: `advance_chain` consumes its own payload events,
+    // while `advance_empty_block` leaves unread events behind on the shared stream.
+    let wallet = wallet_to_arc(wallet);
+    let payloads = advance_chain(1, &mut node, wallet).await?;
+    assert_eq!(
+        payloads[0].block().body().transactions.len(),
+        1,
+        "precondition: the block must carry the transfer"
+    );
+    assert!(
+        payloads[0].executed().is_some(),
+        "a block with transactions keeps its execution artifacts"
+    );
+
+    let empty = advance_empty_block(&mut node).await?;
+    assert!(
+        empty.block().body().transactions.is_empty(),
+        "precondition: the block must be empty"
+    );
+    assert!(
+        empty.executed().is_none(),
+        "an empty block must not carry execution artifacts"
+    );
+
+    Ok(())
+}
+
 /// A block containing a single EIP-1559 transfer transaction.
 #[tokio::test(flavor = "multi_thread")]
 async fn block_with_single_transfer() -> eyre::Result<()> {

@@ -254,7 +254,7 @@ pub(crate) const fn reference_query(reference: B256) -> ReferenceQueryArgs {
 ///
 /// L2 transactions already in the pool will also be included after the L1 messages.
 ///
-/// NOTE: Uses direct `resolve_kind` polling instead of the event stream to
+/// NOTE: Uses direct `best_payload` polling instead of the event stream to
 /// avoid state leakage between sequential calls in multi-block tests.
 pub(crate) async fn advance_block_with_l1_messages(
     node: &mut MorphTestNode,
@@ -398,7 +398,7 @@ pub(crate) async fn build_block_no_submit(
 
 /// Craft a block by modifying a valid payload, then try to import it via engine API.
 ///
-/// Returns `true` if the block was accepted (VALID/SYNCING), `false` if rejected (INVALID).
+/// Returns `true` only if the block was accepted as VALID, `false` otherwise (INVALID/SYNCING).
 /// The modification function receives a mutable reference to the unsealed block.
 ///
 /// After modification, `transactions_root` is recomputed and the block is re-sealed.

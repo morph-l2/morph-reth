@@ -26,7 +26,7 @@ tracing.workspace = true
 
 reth-codecs.workspace = true
 reth-db = { workspace = true, features = ["mdbx"] }
-reth-evm = { workspace = true, features = ["witness"] }
+reth-evm = { workspace = true, features = ["std", "witness"] }
 reth-execution-errors.workspace = true
 reth-metrics.workspace = true
 reth-primitives-traits.workspace = true

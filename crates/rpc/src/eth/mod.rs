@@ -48,7 +48,7 @@ impl RpcTypes for MorphRpcTypes {
     type TransactionRequest = MorphTransactionRequest;
 }
 
-/// Morph RPC converter with custom receipt and header conversion.
+/// Morph RPC converter with custom receipt conversion.
 pub type MorphRpcConverter<N, NetworkT> =
     RpcConverter<NetworkT, <N as FullNodeComponents>::Evm, MorphReceiptConverter>;
 
@@ -466,6 +466,18 @@ where
     MorphEthApiError: reth_rpc_eth_types::error::FromEvmError<N::Evm>,
     Rpc: RpcConvert<Primitives = N::Primitives, Error = EthApiError, Evm = N::Evm>,
 {
+    fn apply_pre_execution_changes(
+        &self,
+        _block: &reth_primitives_traits::RecoveredBlock<
+            reth_provider::ProviderBlock<Self::Provider>,
+        >,
+        _db: &mut reth_rpc_eth_types::StateCacheDb,
+    ) -> Result<reth_trie_common::bundle_state::BundleState, Self::Error> {
+        // Morph has no Ethereum-style (EIP-4788) pre-block system calls to replay. The
+        // upstream default would only run the Morph executor's pre-execution step,
+        // which just pre-warms the L1 gas oracle account.
+        Ok(Default::default())
+    }
 }
 
 impl<N, Rpc> GetBlockAccessList for MorphEthApi<N, Rpc>
