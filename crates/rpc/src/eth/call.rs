@@ -3,9 +3,14 @@
 //! [`Call::caller_gas_allowance`] is overridden so `eth_estimateGas` caps
 //! gas by `balance − value − l1_fee` (ETH path) or a token-denominated limit
 //! (MorphTx `fee_token_id > 0`, see `token_gas_allowance`). `eth_call` and
-//! `eth_createAccessList` are detected via `cfg_env.disable_block_gas_limit = true` and fall
-//! through to the upstream allowance without the L1-fee extension, except
-//! that fee-token callers are left uncapped for the handler.
+//! sibling call/trace RPCs (`eth_callMany`, `eth_createAccessList`,
+//! `debug_traceCall*`, `trace_call*`) are detected via
+//! `cfg_env.disable_block_gas_limit = true` and skip the L1-fee extension:
+//! fee-token callers start from `u64::MAX` (since they may hold zero ETH)
+//! while ETH callers delegate to the upstream balance allowance, and both are
+//! clamped to `call_gas_limit()` when non-zero (backporting
+//! `paradigmxyz/reth#27586` so `--rpc.gascap` holds even under
+//! `blockOverrides.gasLimit`).
 
 use crate::MorphEthApiError;
 use crate::eth::{MorphEthApi, MorphNodeCore};
@@ -72,17 +77,29 @@ where
         evm_env: &EvmEnvFor<<Self as RpcNodeCore>::Evm>,
         tx_env: &TxEnvFor<<Self as RpcNodeCore>::Evm>,
     ) -> Result<u64, <Self as EthApiTypes>::Error> {
-        // eth_call / eth_createAccessList: no L1-fee cap. Token-fee callers
-        // can have zero ETH, so defer to the handler instead of the
-        // upstream ETH allowance.
+        // `eth_call` and sibling call/trace RPCs (`eth_callMany`,
+        // `eth_createAccessList`, `debug_traceCall*`, `trace_call*`) reach
+        // here via `prepare_call_env`, which sets
+        // `cfg_env.disable_block_gas_limit = true`: no L1-fee cap.
+        //
+        // Token-fee callers can legitimately hold zero ETH, so start from
+        // `u64::MAX` instead of the ETH balance cap. In both modes, clamp to
+        // `call_gas_limit()` when non-zero (`0` means uncapped) so
+        // `prepare_call_env`'s `cap.min(block_env.gas_limit())` cannot exceed
+        // `--rpc.gascap` via `blockOverrides.gasLimit` or a block gas limit
+        // above `--rpc.gascap` (backporting `paradigmxyz/reth#27586`).
         if evm_env.cfg_env.disable_block_gas_limit {
-            if tx_env.fee_token_id.is_some_and(|id| id > 0) {
-                return Ok(u64::MAX);
-            }
-            return upstream_caller_gas_allowance(&mut db, tx_env).map_err(|e| match e {
-                CallError::Database(db_err) => MorphEthApiError::Eth(db_err.into()),
-                CallError::InsufficientFunds(_) => MorphEthApiError::InsufficientFundsForTransfer,
-            });
+            let allowance = if tx_env.fee_token_id.is_some_and(|id| id > 0) {
+                u64::MAX
+            } else {
+                upstream_caller_gas_allowance(&mut db, tx_env).map_err(|e| match e {
+                    CallError::Database(db_err) => MorphEthApiError::Eth(db_err.into()),
+                    CallError::InsufficientFunds(_) => {
+                        MorphEthApiError::InsufficientFundsForTransfer
+                    }
+                })?
+            };
+            return Ok(cap_call_gas_allowance(allowance, self.call_gas_limit()));
         }
 
         // eth_estimateGas path.
@@ -200,6 +217,18 @@ where
             gas_price,
             self.eth_api().gas_cap(),
         )
+    }
+}
+
+/// Cap a call-path gas allowance by the configured RPC gas cap (`--rpc.gascap`).
+///
+/// Matches upstream `reth` convention (`paradigmxyz/reth#27586`) where
+/// `gas_cap == 0` disables the cap.
+fn cap_call_gas_allowance(allowance: u64, gas_cap: u64) -> u64 {
+    if gas_cap == 0 {
+        allowance
+    } else {
+        allowance.min(gas_cap)
     }
 }
 
@@ -618,5 +647,28 @@ mod tests {
             token_amount_to_eth(U256::from(10u64), &info),
             Some(U256::from(3u64))
         );
+    }
+
+    #[test]
+    fn cap_call_gas_allowance_clamps_to_nonzero_gas_cap() {
+        let gas_cap = 50_000_000u64;
+        assert_eq!(cap_call_gas_allowance(u64::MAX, gas_cap), gas_cap);
+        assert_eq!(cap_call_gas_allowance(100_000_000, gas_cap), gas_cap);
+        assert_eq!(cap_call_gas_allowance(gas_cap, gas_cap), gas_cap);
+    }
+
+    #[test]
+    fn cap_call_gas_allowance_preserves_smaller_allowance() {
+        let gas_cap = 50_000_000u64;
+        assert_eq!(cap_call_gas_allowance(0, gas_cap), 0);
+        assert_eq!(cap_call_gas_allowance(21_000, gas_cap), 21_000);
+        assert_eq!(cap_call_gas_allowance(gas_cap - 1, gas_cap), gas_cap - 1);
+    }
+
+    #[test]
+    fn cap_call_gas_allowance_zero_gas_cap_is_uncapped() {
+        assert_eq!(cap_call_gas_allowance(u64::MAX, 0), u64::MAX);
+        assert_eq!(cap_call_gas_allowance(100_000_000, 0), 100_000_000);
+        assert_eq!(cap_call_gas_allowance(0, 0), 0);
     }
 }

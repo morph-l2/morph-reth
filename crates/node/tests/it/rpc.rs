@@ -1310,3 +1310,193 @@ async fn native_get_proof_and_get_multi_proof_succeed_on_latest() -> eyre::Resul
 
     Ok(())
 }
+
+/// `eth_call` and `eth_callMany` must respect `--rpc.gascap` even when
+/// `blockOverrides.gasLimit = u64::MAX` is combined with an omitted `gas` field
+/// and a non-zero `gasPrice` (both Morph token-fee and standard ETH callers).
+#[tokio::test(flavor = "multi_thread")]
+async fn eth_call_and_call_many_respect_rpc_gas_cap_under_block_gas_limit_override()
+-> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    // Default `--rpc.gascap` in reth.
+    const DEFAULT_RPC_GAS_CAP: u64 = 50_000_000;
+    // `GAS; PUSH1 0; MSTORE; PUSH1 0x20; PUSH1 0; RETURN` — returns remaining EVM gas.
+    const GAS_PROBE_CODE: &str = "0x5a60005260206000f3";
+    // `JUMPDEST; PUSH1 0; JUMP` — burns all available gas until OutOfGas.
+    const INFINITE_LOOP_CODE: &str = "0x5b600056";
+
+    let decode_gas_seen = |output: &Bytes| -> u64 {
+        assert_eq!(output.len(), 32, "GAS probe must return 32-byte uint256");
+        let val = U256::from_be_slice(output);
+        u64::try_from(val).expect("gas_seen must fit in u64")
+    };
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+
+    advance_chain(1, &mut node, wallet_to_arc(wallet)).await?;
+
+    let client = node
+        .rpc_client()
+        .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
+
+    let probe_contract = Address::random();
+    let loop_contract = Address::random();
+    let zero_eth_sender = Address::random();
+    let rich_eth_sender = Address::random();
+    let fee_token_id = format!("{TEST_TOKEN_ID:#x}");
+    let block_override_max_gas = serde_json::json!({
+        "gasLimit": "0xffffffffffffffff",
+    });
+
+    // (a) Token-fee `eth_call` with omitted `gas`, non-zero `gasPrice`, and
+    //     `blockOverrides.gasLimit = u64::MAX`.
+    let token_call = serde_json::json!({
+        "from": zero_eth_sender,
+        "to": probe_contract,
+        "gasPrice": "0x1",
+        "feeTokenID": fee_token_id,
+    });
+    let token_state_overrides = serde_json::json!({
+        probe_contract.to_string(): {
+            "code": GAS_PROBE_CODE,
+        },
+    });
+    let token_out: Bytes = client
+        .request(
+            "eth_call",
+            (
+                token_call.clone(),
+                "latest",
+                token_state_overrides,
+                block_override_max_gas.clone(),
+            ),
+        )
+        .await?;
+    let token_gas_seen = decode_gas_seen(&token_out);
+    assert!(
+        token_gas_seen > 0 && token_gas_seen <= DEFAULT_RPC_GAS_CAP,
+        "token-fee eth_call gas_seen ({token_gas_seen}) must be within (0, {DEFAULT_RPC_GAS_CAP}]"
+    );
+    assert!(
+        token_gas_seen > 49_000_000,
+        "expected gas cap ~{DEFAULT_RPC_GAS_CAP} under max block gas override, got {token_gas_seen}"
+    );
+
+    // (b) ETH-mode `eth_call` with huge state-overridden balance, omitted `gas`,
+    //     non-zero `gasPrice`, and `blockOverrides.gasLimit = u64::MAX`.
+    let eth_call = serde_json::json!({
+        "from": rich_eth_sender,
+        "to": probe_contract,
+        "gasPrice": "0x1",
+    });
+    let combined_state_overrides = serde_json::json!({
+        probe_contract.to_string(): {
+            "code": GAS_PROBE_CODE,
+        },
+        rich_eth_sender.to_string(): {
+            "balance": "0xffffffffffffffffffffffff",
+        },
+    });
+    let eth_out: Bytes = client
+        .request(
+            "eth_call",
+            (
+                eth_call.clone(),
+                "latest",
+                combined_state_overrides.clone(),
+                block_override_max_gas.clone(),
+            ),
+        )
+        .await?;
+    let eth_gas_seen = decode_gas_seen(&eth_out);
+    assert!(
+        eth_gas_seen > 0 && eth_gas_seen <= DEFAULT_RPC_GAS_CAP,
+        "ETH eth_call gas_seen ({eth_gas_seen}) must be within (0, {DEFAULT_RPC_GAS_CAP}]"
+    );
+    assert!(
+        eth_gas_seen > 49_000_000,
+        "expected gas cap ~{DEFAULT_RPC_GAS_CAP} under max block gas override, got {eth_gas_seen}"
+    );
+
+    // (c) `eth_callMany` with `blockOverride.gasLimit = u64::MAX` covering both
+    //     token-fee and ETH calls in a single bundle.
+    let bundles = serde_json::json!([{
+        "transactions": [token_call, eth_call],
+        "blockOverride": block_override_max_gas,
+    }]);
+    let state_context = serde_json::json!({
+        "blockNumber": "latest",
+    });
+    let call_many_res: Value = client
+        .request(
+            "eth_callMany",
+            (bundles, state_context, combined_state_overrides),
+        )
+        .await?;
+    let bundle_results = call_many_res
+        .as_array()
+        .and_then(|bundles| bundles.first())
+        .and_then(Value::as_array)
+        .expect("eth_callMany must return one bundle with two results");
+    assert_eq!(bundle_results.len(), 2);
+    for (idx, item) in bundle_results.iter().enumerate() {
+        assert!(
+            item.get("error").is_none() || item["error"].is_null(),
+            "eth_callMany tx {idx} unexpectedly failed: {item}"
+        );
+        let value_hex = item["value"]
+            .as_str()
+            .unwrap_or_else(|| panic!("eth_callMany tx {idx} missing value: {item}"));
+        let output: Bytes = value_hex.parse()?;
+        let gas_seen = decode_gas_seen(&output);
+        assert!(
+            gas_seen > 0 && gas_seen <= DEFAULT_RPC_GAS_CAP,
+            "eth_callMany tx {idx} gas_seen ({gas_seen}) must be within (0, {DEFAULT_RPC_GAS_CAP}]"
+        );
+        assert!(
+            gas_seen > 49_000_000,
+            "eth_callMany tx {idx} expected gas cap ~{DEFAULT_RPC_GAS_CAP}, got {gas_seen}"
+        );
+    }
+
+    // (d) Infinite-loop bytecode with token-fee `eth_call` + omitted `gas` +
+    //     non-zero `gasPrice` + `blockOverrides.gasLimit = u64::MAX` must hit
+    //     OutOfGas promptly instead of running uncapped.
+    let loop_call = serde_json::json!({
+        "from": zero_eth_sender,
+        "to": loop_contract,
+        "gasPrice": "0x1",
+        "feeTokenID": format!("{TEST_TOKEN_ID:#x}"),
+    });
+    let loop_state_overrides = serde_json::json!({
+        loop_contract.to_string(): {
+            "code": INFINITE_LOOP_CODE,
+        },
+    });
+    let loop_res: Result<Bytes, _> = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        client.request(
+            "eth_call",
+            (
+                loop_call,
+                "latest",
+                loop_state_overrides,
+                block_override_max_gas,
+            ),
+        ),
+    )
+    .await
+    .expect("infinite-loop eth_call must terminate promptly under --rpc.gascap");
+    let err_str = loop_res
+        .expect_err("infinite-loop eth_call must halt with OutOfGas")
+        .to_string()
+        .to_lowercase();
+    assert!(
+        err_str.contains("out of gas"),
+        "expected OutOfGas error, got: {err_str}"
+    );
+
+    Ok(())
+}
