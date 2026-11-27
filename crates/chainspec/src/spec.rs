@@ -8,7 +8,6 @@ use crate::{
 use alloy_chains::Chain;
 use alloy_consensus::Sealable;
 use alloy_eips::eip7840::BlobParams;
-use alloy_evm::eth::spec::EthExecutorSpec;
 use alloy_genesis::Genesis;
 use alloy_primitives::{Address, B256, U256};
 use morph_primitives::MorphHeader;
@@ -26,25 +25,45 @@ use crate::{morph::MORPH_MAINNET, morph_hoodi::MORPH_HOODI};
 use std::sync::Arc;
 
 // =============================================================================
-// Genesis Helper Functions
+// Genesis Helper Functions & Error Types
 // =============================================================================
 
-/// Build a genesis header with the given state root.
-///
-/// This allows using a ZK-trie state root (from go-ethereum) instead of
-/// computing an MPT state root from alloc. This is necessary because
-/// Morph uses ZK-trie before Jade hardfork.
-pub(crate) fn make_genesis_header(genesis: &Genesis, state_root: B256) -> MorphHeader {
-    let base_spec = ChainSpec::from_genesis(genesis.clone());
-    let mut inner = base_spec.genesis_header.header().clone();
-    inner.state_root = state_root;
-    // morph-geth defaults to MORPH_BASE_FEE (1_000_000) when baseFeePerGas is
-    // absent, not Ethereum's INITIAL_BASE_FEE (1_000_000_000). Apply the same
-    // default so the genesis block header hash matches.
-    if genesis.base_fee_per_gas.is_none() {
-        inner.base_fee_per_gas = Some(MORPH_BASE_FEE);
+/// Errors returned when constructing a [`MorphChainSpec`] from a [`Genesis`].
+#[derive(Debug)]
+pub enum MorphChainSpecError {
+    /// Failed to deserialize Morph-specific fields from `genesis.config.extra_fields`.
+    InvalidGenesisInfo(serde_json::Error),
+    /// [`GenesisConfig::state_root`] was specified without a matching
+    /// [`GenesisConfig::genesis_hash`].
+    MissingGenesisHash,
+}
+
+impl std::fmt::Display for MorphChainSpecError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidGenesisInfo(err) => {
+                write!(f, "invalid Morph genesis configuration: {err}")
+            }
+            Self::MissingGenesisHash => {
+                write!(f, "genesis_hash is required when state_root is provided")
+            }
+        }
     }
-    MorphHeader::from(inner)
+}
+
+impl std::error::Error for MorphChainSpecError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidGenesisInfo(err) => Some(err),
+            Self::MissingGenesisHash => None,
+        }
+    }
+}
+
+impl From<serde_json::Error> for MorphChainSpecError {
+    fn from(err: serde_json::Error) -> Self {
+        Self::InvalidGenesisInfo(err)
+    }
 }
 
 /// Configuration for building a genesis header.
@@ -75,22 +94,18 @@ impl GenesisConfig {
     }
 }
 
-/// Build Morph hardforks configuration from genesis.
+/// Extend base Ethereum hardforks with Morph hardforks from genesis.
 ///
 /// This is the unified hardfork construction logic, eliminating code duplication
 /// between different construction paths (CLI genesis parsing vs predefined networks).
 ///
 /// # Arguments
-/// * `genesis` - Genesis configuration containing Ethereum and Morph hardfork info
+/// * `hardforks` - Base Ethereum hardforks parsed from genesis
 /// * `chain_info` - Morph-specific genesis information extracted from genesis config
 ///
 /// # Returns
 /// A `ChainHardforks` containing both Ethereum and Morph hardforks
-fn build_hardforks(genesis: &Genesis, chain_info: &MorphGenesisInfo) -> ChainHardforks {
-    // Start with Ethereum hardforks from genesis
-    let base_spec = ChainSpec::from_genesis(genesis.clone());
-    let mut hardforks = base_spec.hardforks;
-
+fn build_hardforks(mut hardforks: ChainHardforks, chain_info: &MorphGenesisInfo) -> ChainHardforks {
     let hardfork_info = chain_info
         .hard_fork_info
         .as_ref()
@@ -155,7 +170,9 @@ pub fn chain_value_parser(s: &str) -> eyre::Result<Arc<MorphChainSpec>> {
     Ok(match s {
         "mainnet" => MORPH_MAINNET.clone(),
         "hoodi" => MORPH_HOODI.clone(),
-        _ => Arc::new(MorphChainSpec::from(reth_cli::chainspec::parse_genesis(s)?)),
+        _ => Arc::new(MorphChainSpec::try_from_genesis(
+            reth_cli::chainspec::parse_genesis(s)?,
+        )?),
     })
 }
 
@@ -211,15 +228,111 @@ impl MorphChainSpec {
         Self { inner, info }
     }
 
+    /// Fallibly build a [`MorphChainSpec`] from a genesis configuration.
+    ///
+    /// Automatically computes the MPT state root from the genesis alloc.
+    /// Suitable for CLI scenarios where users provide custom `genesis.json` files.
+    pub fn try_from_genesis(genesis: Genesis) -> Result<Self, MorphChainSpecError> {
+        Self::try_from_genesis_with_config(genesis, GenesisConfig::default())
+    }
+
+    /// Fallibly build a [`MorphChainSpec`] from a genesis configuration with custom settings.
+    ///
+    /// Preserves all fields parsed by [`ChainSpec::from_genesis`] (such as
+    /// `paris_block_and_final_difficulty`, `base_fee_params`, `blob_params`,
+    /// `deposit_contract`, and `prune_delete_limit`) while layering Morph's hardforks
+    /// and genesis header defaults on top.
+    ///
+    /// # Errors
+    /// Returns [`MorphChainSpecError::InvalidGenesisInfo`] if the Morph genesis fields are
+    /// missing or malformed, or [`MorphChainSpecError::MissingGenesisHash`] if
+    /// `config.state_root` is provided without `config.genesis_hash`.
+    pub fn try_from_genesis_with_config(
+        genesis: Genesis,
+        config: GenesisConfig,
+    ) -> Result<Self, MorphChainSpecError> {
+        let chain_info = MorphGenesisInfo::try_from(&genesis.config.extra_fields)?;
+        if config.state_root.is_some() && config.genesis_hash.is_none() {
+            return Err(MorphChainSpecError::MissingGenesisHash);
+        }
+
+        let base_spec = ChainSpec::from_genesis(genesis);
+        Self::from_base_spec_with_info(base_spec, chain_info, config)
+    }
+
+    fn from_base_spec_with_info(
+        base_spec: ChainSpec,
+        chain_info: MorphGenesisInfo,
+        config: GenesisConfig,
+    ) -> Result<Self, MorphChainSpecError> {
+        let ChainSpec {
+            chain,
+            genesis,
+            genesis_header: base_genesis_header,
+            paris_block_and_final_difficulty,
+            hardforks: base_hardforks,
+            deposit_contract,
+            base_fee_params,
+            prune_delete_limit,
+            blob_params,
+        } = base_spec;
+
+        // Extend Ethereum hardforks with Morph hardforks (and Prague at Viridian time).
+        let hardforks = build_hardforks(base_hardforks, &chain_info);
+
+        // Apply Morph's genesis base fee default and optional custom state root.
+        let mut header = base_genesis_header.unseal();
+        // morph-geth defaults to MORPH_BASE_FEE (1_000_000) when baseFeePerGas is
+        // absent, not Ethereum's INITIAL_BASE_FEE (1_000_000_000). Apply the same
+        // default so the genesis block header hash matches.
+        if genesis.base_fee_per_gas.is_none() {
+            header.base_fee_per_gas = Some(MORPH_BASE_FEE);
+        }
+
+        let genesis_header = match config.state_root {
+            Some(state_root) => {
+                // Use custom state root (for predefined networks with ZK-trie)
+                let genesis_hash = config
+                    .genesis_hash
+                    .ok_or(MorphChainSpecError::MissingGenesisHash)?;
+                header.state_root = state_root;
+                SealedHeader::new(MorphHeader::from(header), genesis_hash)
+            }
+            None => {
+                // Use MPT state root computed from alloc (for CLI-provided genesis)
+                let header = MorphHeader::from(header);
+                // Recompute genesis hash with the corrected base fee
+                let hash = header.hash_slow();
+                SealedHeader::new(header, hash)
+            }
+        };
+
+        Ok(Self {
+            inner: ChainSpec {
+                chain,
+                genesis_header,
+                genesis,
+                paris_block_and_final_difficulty,
+                hardforks,
+                deposit_contract,
+                base_fee_params,
+                prune_delete_limit,
+                blob_params,
+            },
+            info: chain_info,
+        })
+    }
+
     /// Build a [`MorphChainSpec`] from a genesis configuration.
     ///
     /// This is the default method for constructing a chain spec from genesis.
     /// It automatically computes the MPT state root from the genesis alloc.
     ///
-    /// This method is suitable for CLI scenarios where users provide custom
-    /// genesis.json files.
+    /// # Panics
+    /// Panics if the Morph genesis fields are missing or malformed. Use
+    /// [`Self::try_from_genesis`] for fallible construction.
     pub fn from_genesis(genesis: Genesis) -> Self {
-        Self::from_genesis_with_config(genesis, GenesisConfig::default())
+        Self::try_from_genesis(genesis).expect("failed to build morph chain spec from genesis")
     }
 
     /// Build a [`MorphChainSpec`] from a genesis configuration with custom settings.
@@ -232,7 +345,9 @@ impl MorphChainSpec {
     /// * `config` - Genesis header configuration (state root, genesis hash)
     ///
     /// # Panics
-    /// Panics if `config.state_root` is provided but `config.genesis_hash` is not.
+    /// Panics if the Morph genesis fields are missing or malformed, or if
+    /// `config.state_root` is provided without `config.genesis_hash`. Use
+    /// [`Self::try_from_genesis_with_config`] for fallible construction.
     ///
     /// # Example
     /// ```no_run
@@ -248,49 +363,8 @@ impl MorphChainSpec {
     /// let spec = MorphChainSpec::from_genesis_with_config(genesis, config);
     /// ```
     pub fn from_genesis_with_config(genesis: Genesis, config: GenesisConfig) -> Self {
-        let chain_info = MorphGenesisInfo::extract_from(&genesis.config.extra_fields)
-            .expect("failed to extract morph genesis info");
-
-        // Build hardforks using the unified logic
-        let hardforks = build_hardforks(&genesis, &chain_info);
-
-        // Build genesis header based on configuration
-        let genesis_header = match config.state_root {
-            Some(state_root) => {
-                // Use custom state root (for predefined networks with ZK-trie)
-                let header = make_genesis_header(&genesis, state_root);
-                let genesis_hash = config
-                    .genesis_hash
-                    .expect("genesis_hash is required when state_root is provided");
-                SealedHeader::new(header, genesis_hash)
-            }
-            None => {
-                // Compute MPT state root from alloc (for CLI-provided genesis)
-                let base_spec = ChainSpec::from_genesis(genesis.clone());
-                let mut header = base_spec.genesis_header.header().clone();
-                // morph-geth defaults to MORPH_BASE_FEE (1_000_000) when
-                // baseFeePerGas is absent, not Ethereum's INITIAL_BASE_FEE
-                // (1_000_000_000). Override to match.
-                if genesis.base_fee_per_gas.is_none() {
-                    header.base_fee_per_gas = Some(MORPH_BASE_FEE);
-                }
-                let header = MorphHeader::from(header);
-                // Recompute genesis hash with the corrected base fee
-                let hash = header.hash_slow();
-                SealedHeader::new(header, hash)
-            }
-        };
-
-        Self {
-            inner: ChainSpec {
-                chain: genesis.config.chain_id.into(),
-                genesis_header,
-                genesis,
-                hardforks,
-                ..Default::default()
-            },
-            info: chain_info,
-        }
+        Self::try_from_genesis_with_config(genesis, config)
+            .expect("failed to build morph chain spec from genesis")
     }
 
     /// Returns whether the fee vault is enabled.
@@ -311,8 +385,10 @@ impl MorphChainSpec {
 
 impl From<ChainSpec> for MorphChainSpec {
     fn from(value: ChainSpec) -> Self {
-        let genesis = value.genesis;
-        genesis.into()
+        let chain_info = MorphGenesisInfo::try_from(&value.genesis.config.extra_fields)
+            .expect("failed to extract morph genesis info");
+        Self::from_base_spec_with_info(value, chain_info, GenesisConfig::default())
+            .expect("failed to build morph chain spec from chain spec")
     }
 }
 
@@ -423,12 +499,6 @@ impl EthChainSpec for MorphChainSpec {
 impl EthereumHardforks for MorphChainSpec {
     fn ethereum_fork_activation(&self, fork: EthereumHardfork) -> ForkCondition {
         self.inner.ethereum_fork_activation(fork)
-    }
-}
-
-impl EthExecutorSpec for MorphChainSpec {
-    fn deposit_contract_address(&self) -> Option<Address> {
-        self.inner.deposit_contract_address()
     }
 }
 
@@ -921,5 +991,258 @@ mod tests {
             Some(address!("530000000000000000000000000000000000000a"))
         );
         assert_eq!(config.max_tx_payload_bytes_per_block(), 122_880);
+    }
+
+    #[test]
+    fn test_try_from_genesis_rejects_malformed_hardfork_and_morph_config() {
+        // Malformed Morph hardfork field (string instead of u64) must return Err.
+        let malformed_fork: Genesis = serde_json::from_value(json!({
+            "config": {
+                "chainId": 1337,
+                "celadonTime": "1750000000",
+                "morph": {}
+            },
+            "alloc": {}
+        }))
+        .unwrap();
+        let err = MorphChainSpec::try_from_genesis(malformed_fork)
+            .expect_err("malformed celadonTime must fail try_from_genesis");
+        assert!(matches!(err, MorphChainSpecError::InvalidGenesisInfo(_)));
+        assert!(
+            !err.to_string().contains("missing field `morph`"),
+            "unexpected error: {err}"
+        );
+
+        // Missing `morph` object must return Err mentioning missing field `morph`.
+        let missing_morph: Genesis = serde_json::from_value(json!({
+            "config": {
+                "chainId": 1337
+            },
+            "alloc": {}
+        }))
+        .unwrap();
+        let err = MorphChainSpec::try_from_genesis(missing_morph)
+            .expect_err("missing morph section must fail try_from_genesis");
+        assert!(matches!(err, MorphChainSpecError::InvalidGenesisInfo(_)));
+        assert!(
+            err.to_string().contains("missing field `morph`"),
+            "expected missing field error, got: {err}"
+        );
+
+        // Malformed `morph` subfield must preserve inner serde error (not `missing field 'morph'`).
+        let malformed_morph: Genesis = serde_json::from_value(json!({
+            "config": {
+                "chainId": 1337,
+                "morph": {
+                    "feeVaultAddress": "not-an-address"
+                }
+            },
+            "alloc": {}
+        }))
+        .unwrap();
+        let err = MorphChainSpec::try_from_genesis(malformed_morph)
+            .expect_err("malformed feeVaultAddress must fail try_from_genesis");
+        assert!(matches!(err, MorphChainSpecError::InvalidGenesisInfo(_)));
+        assert!(
+            !err.to_string().contains("missing field `morph`"),
+            "inner serde error must not be masked: {err}"
+        );
+
+        // Custom state_root without genesis_hash must return MissingGenesisHash without panicking.
+        let valid_empty_forks: Genesis = serde_json::from_value(json!({
+            "config": {
+                "chainId": 1337,
+                "morph": {}
+            },
+            "alloc": {}
+        }))
+        .unwrap();
+        let err = MorphChainSpec::try_from_genesis_with_config(
+            valid_empty_forks.clone(),
+            GenesisConfig {
+                state_root: Some(B256::ZERO),
+                genesis_hash: None,
+            },
+        )
+        .expect_err("state_root without genesis_hash must fail");
+        assert!(matches!(err, MorphChainSpecError::MissingGenesisHash));
+
+        // Empty Morph hardfork fields still succeed.
+        let spec = MorphChainSpec::try_from_genesis(valid_empty_forks)
+            .expect("empty Morph hardfork fields must succeed");
+        assert_eq!(spec.chain().id(), 1337);
+        assert_eq!(
+            spec.genesis_header().inner.base_fee_per_gas,
+            Some(MORPH_BASE_FEE)
+        );
+    }
+
+    #[test]
+    fn test_from_genesis_preserves_chainspec_fields() {
+        let deposit_addr = address!("1111111111111111111111111111111111111111");
+        let genesis: Genesis = serde_json::from_value(json!({
+            "config": {
+                "chainId": 1337,
+                "homesteadBlock": 0,
+                "eip150Block": 0,
+                "eip155Block": 0,
+                "eip158Block": 0,
+                "byzantiumBlock": 0,
+                "constantinopleBlock": 0,
+                "petersburgBlock": 0,
+                "istanbulBlock": 0,
+                "berlinBlock": 0,
+                "londonBlock": 0,
+                "mergeNetsplitBlock": 0,
+                "terminalTotalDifficulty": 42,
+                "terminalTotalDifficultyPassed": true,
+                "shanghaiTime": 0,
+                "cancunTime": 0,
+                "depositContractAddress": "0x1111111111111111111111111111111111111111",
+                "blobSchedule": {
+                    "cancun": {
+                        "target": 4,
+                        "max": 8,
+                        "baseFeeUpdateFraction": 3338477
+                    }
+                },
+                "bernoulliBlock": 0,
+                "curieBlock": 0,
+                "morph": {}
+            },
+            "alloc": {}
+        }))
+        .expect("genesis should be valid");
+
+        let base_spec = ChainSpec::from_genesis(genesis.clone());
+        let morph_spec = MorphChainSpec::try_from_genesis(genesis).unwrap();
+
+        assert_eq!(
+            morph_spec.inner.paris_block_and_final_difficulty,
+            Some((0, U256::from(42)))
+        );
+        assert_eq!(
+            morph_spec.final_paris_total_difficulty(),
+            Some(U256::from(42))
+        );
+        assert_eq!(
+            morph_spec.deposit_contract().map(|c| c.address),
+            Some(deposit_addr)
+        );
+        let blob_params = morph_spec
+            .blob_params_at_timestamp(0)
+            .expect("cancun blob params should be preserved");
+        assert_eq!(blob_params.target_blob_count, 4);
+        assert_eq!(blob_params.max_blob_count, 8);
+        assert_eq!(blob_params.update_fraction, 3_338_477);
+        assert_eq!(morph_spec.inner.base_fee_params, base_spec.base_fee_params);
+        assert_eq!(
+            morph_spec.prune_delete_limit(),
+            base_spec.prune_delete_limit
+        );
+
+        // From<ChainSpec> must also preserve explicit ChainSpec overrides.
+        let mut custom_base = base_spec;
+        let custom_base_fee_params =
+            reth_chainspec::BaseFeeParamsKind::Constant(BaseFeeParams::new(42, 7));
+        custom_base.base_fee_params = custom_base_fee_params.clone();
+        custom_base.prune_delete_limit = 12_345;
+        let converted = MorphChainSpec::from(custom_base);
+        assert_eq!(converted.inner.base_fee_params, custom_base_fee_params);
+        assert_eq!(converted.prune_delete_limit(), 12_345);
+    }
+
+    #[cfg(feature = "cli")]
+    #[test]
+    fn test_chain_value_parser_handles_invalid_and_valid_custom_genesis() {
+        // Malformed hardfork field returns Err instead of panicking.
+        let malformed_fork = json!({
+            "config": {
+                "chainId": 1337,
+                "celadonTime": "1750000000",
+                "morph": {}
+            },
+            "alloc": {}
+        })
+        .to_string();
+        let err = chain_value_parser(&malformed_fork)
+            .expect_err("malformed hardfork in custom genesis must return Err");
+        assert!(
+            !err.to_string().contains("missing field `morph`"),
+            "unexpected error: {err}"
+        );
+
+        // Missing `morph` section returns Err instead of panicking.
+        let missing_morph = json!({
+            "config": {
+                "chainId": 1337
+            },
+            "alloc": {}
+        })
+        .to_string();
+        let err = chain_value_parser(&missing_morph)
+            .expect_err("missing morph config in custom genesis must return Err");
+        assert!(
+            err.to_string().contains("missing field `morph`"),
+            "expected missing field error, got: {err}"
+        );
+
+        // Malformed `morph` subfield preserves inner serde error instead of panicking.
+        let malformed_morph = json!({
+            "config": {
+                "chainId": 1337,
+                "morph": {
+                    "maxTxPayloadBytesPerBlock": "not-a-number"
+                }
+            },
+            "alloc": {}
+        })
+        .to_string();
+        let err = chain_value_parser(&malformed_morph)
+            .expect_err("malformed morph subfield must return Err");
+        assert!(
+            !err.to_string().contains("missing field `morph`"),
+            "inner serde error must not be replaced: {err}"
+        );
+
+        // Valid custom genesis with empty hardfork fields succeeds.
+        let valid_custom = json!({
+            "config": {
+                "chainId": 1337,
+                "morph": {}
+            },
+            "alloc": {}
+        })
+        .to_string();
+        let parsed = chain_value_parser(&valid_custom)
+            .expect("valid custom genesis must parse without error");
+        assert_eq!(parsed.chain().id(), 1337);
+        assert_eq!(
+            parsed.genesis_header().inner.base_fee_per_gas,
+            Some(MORPH_BASE_FEE)
+        );
+
+        // Predefined networks remain intact with expected genesis hash and base fee default.
+        let mainnet = chain_value_parser("mainnet").unwrap();
+        assert_eq!(mainnet.genesis_hash(), crate::MORPH_MAINNET_GENESIS_HASH);
+        assert_eq!(
+            mainnet.genesis_header().hash_slow(),
+            crate::MORPH_MAINNET_GENESIS_HASH
+        );
+        assert_eq!(
+            mainnet.genesis_header().inner.base_fee_per_gas,
+            Some(MORPH_BASE_FEE)
+        );
+
+        let hoodi = chain_value_parser("hoodi").unwrap();
+        assert_eq!(hoodi.genesis_hash(), crate::MORPH_HOODI_GENESIS_HASH);
+        assert_eq!(
+            hoodi.genesis_header().hash_slow(),
+            crate::MORPH_HOODI_GENESIS_HASH
+        );
+        assert_eq!(
+            hoodi.genesis_header().inner.base_fee_per_gas,
+            Some(MORPH_BASE_FEE)
+        );
     }
 }

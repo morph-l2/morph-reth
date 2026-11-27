@@ -19,7 +19,9 @@ static MALLOC_CONF: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:19\0";
 
 use alloy_primitives::U256;
 use clap::Parser;
-use morph_chainspec::{MORPH_DEFAULT_PRIORITY_FEE, MorphChainSpec, MorphChainSpecParser};
+use morph_chainspec::{
+    MORPH_BASE_FEE, MORPH_DEFAULT_PRIORITY_FEE, MorphChainSpec, MorphChainSpecParser,
+};
 use morph_consensus::MorphConsensus;
 use morph_evm::{MorphEvmConfig, evm::MorphEvmFactory};
 use morph_node::{MorphAddOns, MorphArgs, MorphNode};
@@ -30,16 +32,59 @@ use reth_chainspec::EthChainSpec;
 use reth_cli_util::sigsegv_handler;
 use reth_ethereum_cli::{Cli, Commands};
 use reth_node_builder::Node;
-use reth_rpc_server_types::DefaultRpcModuleValidator;
-use std::sync::Arc;
+use reth_node_core::args::{DefaultTxPoolValues, TxPoolArgs};
+use reth_rpc_server_types::{RethRpcModule, RpcModuleSelection, RpcModuleValidator};
+use std::{str::FromStr, sync::Arc};
 use tracing::info;
+
+/// Morph RPC module validator: accepts all standard Reth RPC modules plus the
+/// Morph-specific `morph` namespace while rejecting any other unknown module name.
+#[derive(Debug, Clone, Copy, Default)]
+struct MorphRpcModuleValidator;
+
+impl RpcModuleValidator for MorphRpcModuleValidator {
+    fn parse_selection(s: &str) -> Result<RpcModuleSelection, String> {
+        let selection = RpcModuleSelection::from_str(s)
+            .map_err(|e| format!("Failed to parse RPC modules: {e}"))?;
+
+        if let RpcModuleSelection::Selection(modules) = &selection {
+            for module in modules {
+                if let RethRpcModule::Other(name) = module
+                    && name != "morph"
+                {
+                    return Err(format!("Unknown RPC module: '{name}'"));
+                }
+            }
+        }
+
+        Ok(selection)
+    }
+}
 
 fn morph_default_suggested_fee() -> U256 {
     U256::from_limbs([MORPH_DEFAULT_PRIORITY_FEE, 0, 0, 0])
 }
 
+/// Set Morph's default txpool minimum protocol base fee before CLI parsing.
+///
+/// Morph fixes L2 `baseFee` at `MORPH_BASE_FEE` (0.001 Gwei = 1_000_000 wei),
+/// so transactions with `maxFeePerGas < MORPH_BASE_FEE` can never be included
+/// in a block. Raising the default from Ethereum L1's 7 wei prevents them from
+/// parking indefinitely in `basefee_pool` and inflating `eth_getTransactionCount("pending")`,
+/// while still allowing operators to override via `--txpool.minimal-protocol-fee`.
+fn init_morph_txpool_defaults() {
+    let _ = DefaultTxPoolValues::default()
+        .with_minimal_protocol_basefee(MORPH_BASE_FEE)
+        .try_init();
+    debug_assert_eq!(
+        TxPoolArgs::default().minimal_protocol_basefee,
+        MORPH_BASE_FEE,
+        "txpool defaults must be initialized before CLI parsing"
+    );
+}
+
 fn apply_morph_cli_defaults(
-    cli: &mut Cli<MorphChainSpecParser, MorphArgs, DefaultRpcModuleValidator, MorphSubcommand>,
+    cli: &mut Cli<MorphChainSpecParser, MorphArgs, MorphRpcModuleValidator, MorphSubcommand>,
 ) {
     if let Commands::Node(command) = &mut cli.command {
         command
@@ -54,6 +99,10 @@ fn main() {
     // Override reth's default version info with morph-reth's own version,
     // commit SHA, and build timestamp. Must be called before CLI parsing.
     morph_node::version::init_version_metadata();
+
+    // Override reth's default minimal protocol base fee (7 wei on Ethereum L1)
+    // with Morph's fixed base fee (0.001 Gwei). Must be called before CLI parsing.
+    init_morph_txpool_defaults();
 
     // Install signal handler for segmentation faults
     sigsegv_handler::install();
@@ -74,7 +123,7 @@ fn main() {
     };
 
     let mut cli =
-        Cli::<MorphChainSpecParser, MorphArgs, DefaultRpcModuleValidator, MorphSubcommand>::parse();
+        Cli::<MorphChainSpecParser, MorphArgs, MorphRpcModuleValidator, MorphSubcommand>::parse();
     apply_morph_cli_defaults(&mut cli);
 
     // Run the node
@@ -175,13 +224,16 @@ fn main() {
 mod tests {
     use super::*;
 
-    type MorphCli =
-        Cli<MorphChainSpecParser, MorphArgs, DefaultRpcModuleValidator, MorphSubcommand>;
+    type MorphCli = Cli<MorphChainSpecParser, MorphArgs, MorphRpcModuleValidator, MorphSubcommand>;
+
+    fn parse_cli(args: impl IntoIterator<Item = &'static str>) -> MorphCli {
+        init_morph_txpool_defaults();
+        MorphCli::try_parse_from(args).expect("CLI arguments must parse")
+    }
 
     #[test]
     fn parses_top_level_proofs_command() {
-        let cli = MorphCli::try_parse_from(["morph-reth", "proofs", "init", "--chain", "hoodi"])
-            .expect("top-level proofs command must parse");
+        let cli = parse_cli(["morph-reth", "proofs", "init", "--chain", "hoodi"]);
         assert!(matches!(
             cli.command,
             Commands::Ext(MorphSubcommand::Proofs(_))
@@ -190,12 +242,107 @@ mod tests {
 
     #[test]
     fn disabled_mode_keeps_reth_historical_overlay_off() {
-        let cli = MorphCli::try_parse_from(["morph-reth", "node", "--chain", "hoodi"])
-            .expect("node command must parse");
+        let cli = parse_cli(["morph-reth", "node", "--chain", "hoodi"]);
         let Commands::Node(command) = cli.command else {
             panic!("expected node command")
         };
         assert!(!command.ext.proofs_history);
         assert_eq!(command.rpc.rpc_eth_proof_window, 0);
+    }
+
+    #[test]
+    fn default_minimal_protocol_fee_matches_morph_base_fee() {
+        let cli = parse_cli(["morph-reth", "node", "--chain", "hoodi"]);
+        let Commands::Node(command) = cli.command else {
+            panic!("expected node command")
+        };
+        assert_eq!(command.txpool.minimal_protocol_basefee, MORPH_BASE_FEE);
+    }
+
+    #[test]
+    fn minimal_protocol_fee_cli_flag_overrides_default() {
+        for expected in [0u64, 7, 2_000_000] {
+            let value = expected.to_string();
+            init_morph_txpool_defaults();
+            let cli = MorphCli::try_parse_from([
+                "morph-reth",
+                "node",
+                "--chain",
+                "hoodi",
+                "--txpool.minimal-protocol-fee",
+                value.as_str(),
+            ])
+            .expect("node command with --txpool.minimal-protocol-fee must parse");
+            let Commands::Node(command) = cli.command else {
+                panic!("expected node command")
+            };
+            assert_eq!(command.txpool.minimal_protocol_basefee, expected);
+        }
+    }
+
+    #[test]
+    fn cli_rpc_module_validator_accepts_morph_on_http_ws_and_all() {
+        let cli = parse_cli([
+            "morph-reth",
+            "node",
+            "--chain",
+            "hoodi",
+            "--http",
+            "--http.api",
+            "eth,morph",
+            "--ws",
+            "--ws.api",
+            "eth,morph",
+        ]);
+        let Commands::Node(command) = cli.command else {
+            panic!("expected node command")
+        };
+
+        let http_api = command.rpc.http_api.as_ref().expect("http.api set");
+        let ws_api = command.rpc.ws_api.as_ref().expect("ws.api set");
+        assert!(http_api.contains(&RethRpcModule::Other("morph".into())));
+        assert!(ws_api.contains(&RethRpcModule::Other("morph".into())));
+        assert!(MorphRpcModuleValidator::validate_selection(http_api, "http.api").is_ok());
+        assert!(MorphRpcModuleValidator::validate_selection(ws_api, "ws.api").is_ok());
+
+        let all_cli = parse_cli([
+            "morph-reth",
+            "node",
+            "--chain",
+            "hoodi",
+            "--http",
+            "--http.api",
+            "all",
+        ]);
+        let Commands::Node(all_cmd) = all_cli.command else {
+            panic!("expected node command")
+        };
+        let all_api = all_cmd.rpc.http_api.as_ref().expect("http.api set");
+        assert!(all_api.contains(&RethRpcModule::Other("morph".into())));
+        assert!(MorphRpcModuleValidator::validate_selection(all_api, "http.api").is_ok());
+    }
+
+    #[test]
+    fn cli_rpc_module_validator_rejects_unknown_module_names() {
+        let cli = parse_cli([
+            "morph-reth",
+            "node",
+            "--chain",
+            "hoodi",
+            "--http",
+            "--http.api",
+            "eth,unknown",
+        ]);
+        let Commands::Node(command) = cli.command else {
+            panic!("expected node command")
+        };
+
+        let http_api = command.rpc.http_api.as_ref().expect("http.api set");
+        let err = MorphRpcModuleValidator::validate_selection(http_api, "http.api")
+            .expect_err("unknown RPC module must be rejected by MorphRpcModuleValidator");
+        assert!(
+            err.contains("Unknown RPC module: 'unknown'"),
+            "unexpected validation error: {err}"
+        );
     }
 }

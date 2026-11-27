@@ -22,7 +22,9 @@ use morph_primitives::MorphHeader;
 use reth_node_api::PayloadTypes;
 use reth_payload_builder::BuildNewPayload;
 use reth_payload_primitives::BuiltPayload;
-use reth_provider::{BlockIdReader, BlockReaderIdExt};
+use reth_provider::{
+    BlockIdReader, BlockReaderIdExt, ChainStateBlockReader, DatabaseProviderFactory,
+};
 
 use super::helpers::{
     LOCAL_POLL_BUDGET, POLL_INTERVAL, assemble_l2_block, assemble_l2_block_v2,
@@ -1250,6 +1252,262 @@ async fn empty_block_is_imported_without_execution_artifacts() -> eyre::Result<(
         empty.hash,
         "the empty block must become canonical through normal import"
     );
+
+    Ok(())
+}
+
+/// M-M10: `engine_setBlockTags` must:
+/// 1. Reject non-canonical (orphaned) block hashes;
+/// 2. Enforce `effective_finalized <= effective_safe <= canonical_head` across partial updates;
+/// 3. Preserve the cached L1 finalized hash when `finalized_block_hash == B256::ZERO`;
+/// 4. Persist updated `safe` and `finalized` tags to MDBX via the engine FCU pipeline.
+#[tokio::test(flavor = "multi_thread")]
+async fn set_block_tags_persists_to_mdbx_enforces_ordering_canonicality_and_preserves_zero_hash()
+-> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
+    let node = nodes.pop().unwrap();
+    let client = node.auth_server_handle().http_client();
+
+    let base_ts = head_timestamp(&node)?;
+
+    // Block 1 (canonical ancestor).
+    let b1 = assemble_l2_block(
+        &node,
+        AssembleL2BlockParams {
+            number: 1,
+            transactions: vec![],
+            timestamp: Some(base_ts + 1),
+        },
+    )
+    .await?;
+    import_l2_block(&node, b1.clone()).await?;
+
+    // Import an orphaned sibling block at height 2, then reorg onto the canonical branch.
+    let orphan_2 = assemble_l2_block_v2(
+        &node,
+        AssembleL2BlockV2Params {
+            parent_hash: b1.hash,
+            transactions: vec![],
+            timestamp: Some(base_ts + 2),
+        },
+    )
+    .await?;
+    import_l2_block(&node, orphan_2.clone()).await?;
+
+    let canon_2 = assemble_l2_block_v2(
+        &node,
+        AssembleL2BlockV2Params {
+            parent_hash: b1.hash,
+            transactions: vec![],
+            timestamp: Some(base_ts + 3),
+        },
+    )
+    .await?;
+    assert_ne!(canon_2.hash, orphan_2.hash);
+    import_l2_block(&node, canon_2.clone()).await?;
+
+    let canon_3 = assemble_l2_block_v2(
+        &node,
+        AssembleL2BlockV2Params {
+            parent_hash: canon_2.hash,
+            transactions: vec![],
+            timestamp: Some(base_ts + 4),
+        },
+    )
+    .await?;
+    import_l2_block(&node, canon_3.clone()).await?;
+
+    let canon_4 = assemble_l2_block_v2(
+        &node,
+        AssembleL2BlockV2Params {
+            parent_hash: canon_3.hash,
+            transactions: vec![],
+            timestamp: Some(base_ts + 5),
+        },
+    )
+    .await?;
+    import_l2_block(&node, canon_4.clone()).await?;
+
+    // 1. Orphaned hash must be rejected as non-canonical (or not found).
+    let orphan_err = client
+        .request::<(), _>("engine_setBlockTags", (orphan_2.hash, B256::ZERO))
+        .await
+        .expect_err("orphaned block hash must be rejected by engine_setBlockTags")
+        .to_string();
+    assert!(
+        orphan_err.contains("not canonical") || orphan_err.contains("not found"),
+        "unexpected orphan rejection error: {orphan_err}"
+    );
+
+    // 2. Set safe = 2, finalized = 1.
+    client
+        .request::<(), _>("engine_setBlockTags", (canon_2.hash, b1.hash))
+        .await?;
+    assert_eq!(node.inner.provider.safe_block_hash()?, Some(canon_2.hash));
+    assert_eq!(node.inner.provider.finalized_block_hash()?, Some(b1.hash));
+
+    // Partial update: finalized = 3 > existing safe = 2 must fail.
+    let fin_gt_safe = client
+        .request::<(), _>("engine_setBlockTags", (B256::ZERO, canon_3.hash))
+        .await
+        .expect_err("finalized > existing safe must fail")
+        .to_string();
+    assert!(
+        fin_gt_safe.contains("finalized block number 3 exceeds safe block number 2"),
+        "unexpected partial finalized > safe error: {fin_gt_safe}"
+    );
+
+    // Advance safe = 3, finalized = 2.
+    client
+        .request::<(), _>("engine_setBlockTags", (canon_3.hash, canon_2.hash))
+        .await?;
+    assert_eq!(node.inner.provider.safe_block_hash()?, Some(canon_3.hash));
+    assert_eq!(
+        node.inner.provider.finalized_block_hash()?,
+        Some(canon_2.hash)
+    );
+
+    // Partial update: safe = 1 < existing finalized = 2 must fail.
+    let safe_lt_fin = client
+        .request::<(), _>("engine_setBlockTags", (b1.hash, B256::ZERO))
+        .await
+        .expect_err("safe < existing finalized must fail")
+        .to_string();
+    assert!(
+        safe_lt_fin.contains("finalized block number 2 exceeds safe block number 1"),
+        "unexpected partial safe < finalized error: {safe_lt_fin}"
+    );
+
+    // 3. Safe-only update (finalized == B256::ZERO) must advance safe to 4 while
+    //    preserving finalized = 2 in both provider state and cached L1 finalized tracker.
+    client
+        .request::<(), _>("engine_setBlockTags", (canon_4.hash, B256::ZERO))
+        .await?;
+    assert_eq!(node.inner.provider.safe_block_hash()?, Some(canon_4.hash));
+    assert_eq!(
+        node.inner.provider.finalized_block_hash()?,
+        Some(canon_2.hash)
+    );
+
+    // 4. Advance additional blocks past reth's default persistence threshold (50) and
+    //    memory buffer target (5) so block 4 is flushed to disk together with the queued
+    //    safe=4 and finalized=2 MDBX checkpoints.
+    let mut parent_hash = canon_4.hash;
+    for offset in 6..=56u64 {
+        let next = assemble_l2_block_v2(
+            &node,
+            AssembleL2BlockV2Params {
+                parent_hash,
+                transactions: vec![],
+                timestamp: Some(base_ts + offset),
+            },
+        )
+        .await?;
+        parent_hash = next.hash;
+        import_l2_block(&node, next).await?;
+    }
+
+    assert_eq!(
+        node.inner.provider.finalized_block_hash()?,
+        Some(canon_2.hash),
+        "cached L1 finalized hash must be preserved across subsequent imports"
+    );
+
+    let deadline = tokio::time::Instant::now() + LOCAL_POLL_BUDGET;
+    loop {
+        let db = node.inner.provider.database_provider_ro()?;
+        let db_finalized = db.last_finalized_block_number()?;
+        let db_safe = db.last_safe_block_number()?;
+        if db_finalized == Some(2) && db_safe == Some(4) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "expected MDBX safe=Some(4) and finalized=Some(2), got safe={db_safe:?} finalized={db_finalized:?}"
+        );
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+
+    Ok(())
+}
+
+/// M-M11: Concurrent `engine_assembleL2BlockV2` calls with identical inputs must serialize
+/// cleanly instead of colliding on deterministic `PayloadId` in `PayloadBuilderService`.
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_identical_assemble_l2_block_v2_calls_do_not_collide() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let node = nodes.pop().unwrap();
+
+    let raw_tx = make_transfer_tx(wallet.chain_id, wallet.inner.clone(), wallet.inner_nonce).await;
+    let tx_hash = node.rpc.inject_tx(raw_tx).await?;
+    wait_until_pooled(&node, tx_hash).await?;
+
+    let head = canonical_snapshot(&node)?;
+    let ts = head_timestamp(&node)? + 1;
+
+    let calls = (0..8).map(|_| {
+        assemble_l2_block_v2(
+            &node,
+            AssembleL2BlockV2Params {
+                parent_hash: head.hash,
+                transactions: vec![],
+                timestamp: Some(ts),
+            },
+        )
+    });
+
+    let results = futures::future::try_join_all(calls).await?;
+    assert_eq!(results.len(), 8);
+    for block in results {
+        assert_eq!(block.parent_hash, head.hash);
+        assert_eq!(block.number, head.number + 1);
+        assert_eq!(block.transactions.len(), 1);
+    }
+
+    Ok(())
+}
+
+/// M-H10: `engine_newSafeL2Block` must reject a supplied MorphTx V2 before Celadon
+/// activates, even when Prague is active (Jade) and the authorization list is empty.
+#[tokio::test(flavor = "multi_thread")]
+async fn new_safe_l2_block_rejects_v2_morph_tx_before_celadon() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, wallet) = TestNodeBuilder::new()
+        .with_schedule(HardforkSchedule::PreCeladon)
+        .build()
+        .await?;
+    let node = nodes.pop().unwrap();
+
+    let v2_tx = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), wallet.inner_nonce)
+        .with_v2_eth_fee()
+        .build_signed()?;
+
+    let head = canonical_snapshot(&node)?;
+    let safe_data = SafeL2Data {
+        number: 1,
+        gas_limit: 30_000_000,
+        base_fee_per_gas: Some(1_000_000),
+        timestamp: head_timestamp(&node)? + 1,
+        transactions: vec![v2_tx],
+        parent_hash: Some(head.hash),
+    };
+
+    let client = node.auth_server_handle().http_client();
+    let err = client
+        .request::<MorphHeader, _>("engine_newSafeL2Block", (safe_data,))
+        .await
+        .expect_err("pre-Celadon newSafeL2Block must reject supplied MorphTx V2")
+        .to_string();
+    assert!(
+        err.contains("celadon") || err.contains("failed to get built payload"),
+        "unexpected pre-Celadon MorphTx V2 error: {err}"
+    );
+    assert_eq!(canonical_snapshot(&node)?, head);
 
     Ok(())
 }

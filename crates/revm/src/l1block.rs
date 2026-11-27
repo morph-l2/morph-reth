@@ -22,8 +22,8 @@
 //! | isCurie       | bool    | 9    | Curie hardfork flag            |
 
 use alloy_primitives::{Address, U256, address};
+use evm2::evm::Database;
 use morph_chainspec::hardfork::MorphHardfork;
-use revm::Database;
 
 // =============================================================================
 // Gas Price Oracle Constants
@@ -124,9 +124,24 @@ impl L1BlockInfo {
         db: &mut DB,
         hardfork: MorphHardfork,
     ) -> Result<Self, DB::Error> {
-        let l1_base_fee = db.storage(L1_GAS_PRICE_ORACLE_ADDRESS, GPO_L1_BASE_FEE_SLOT)?;
-        let l1_fee_overhead = db.storage(L1_GAS_PRICE_ORACLE_ADDRESS, GPO_OVERHEAD_SLOT)?;
-        let l1_base_fee_scalar = db.storage(L1_GAS_PRICE_ORACLE_ADDRESS, GPO_SCALAR_SLOT)?;
+        Self::try_fetch_with(
+            |slot| db.get_storage(&L1_GAS_PRICE_ORACLE_ADDRESS, &slot),
+            hardfork,
+        )
+    }
+
+    /// Fetches the L1 block info through `read`, which returns a storage slot of the L1 Gas
+    /// Price Oracle contract.
+    ///
+    /// The handler reads through the transaction overlay with this; it must not warm anything,
+    /// because go-ethereum reads these slots with `GetState`, outside the access list.
+    pub fn try_fetch_with<E>(
+        mut read: impl FnMut(U256) -> Result<U256, E>,
+        hardfork: MorphHardfork,
+    ) -> Result<Self, E> {
+        let l1_base_fee = read(GPO_L1_BASE_FEE_SLOT)?;
+        let l1_fee_overhead = read(GPO_OVERHEAD_SLOT)?;
+        let l1_base_fee_scalar = read(GPO_SCALAR_SLOT)?;
 
         if !hardfork.is_curie() {
             Ok(Self {
@@ -136,11 +151,9 @@ impl L1BlockInfo {
                 ..Default::default()
             })
         } else {
-            let l1_blob_base_fee =
-                db.storage(L1_GAS_PRICE_ORACLE_ADDRESS, GPO_L1_BLOB_BASE_FEE_SLOT)?;
-            let l1_commit_scalar =
-                db.storage(L1_GAS_PRICE_ORACLE_ADDRESS, GPO_COMMIT_SCALAR_SLOT)?;
-            let l1_blob_scalar = db.storage(L1_GAS_PRICE_ORACLE_ADDRESS, GPO_BLOB_SCALAR_SLOT)?;
+            let l1_blob_base_fee = read(GPO_L1_BLOB_BASE_FEE_SLOT)?;
+            let l1_commit_scalar = read(GPO_COMMIT_SCALAR_SLOT)?;
+            let l1_blob_scalar = read(GPO_BLOB_SCALAR_SLOT)?;
 
             // calldata component of commit fees (calldata gas + execution)
             let calldata_gas = l1_commit_scalar.saturating_mul(l1_base_fee);

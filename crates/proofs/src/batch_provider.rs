@@ -4,7 +4,7 @@
 use std::fmt::Debug;
 
 use alloy_primitives::{
-    keccak256,
+    Address, B256, BlockNumber, Bytes, StorageValue, keccak256,
     map::{B256Map, HashMap},
 };
 use derive_more::Constructor;
@@ -13,21 +13,19 @@ use reth_provider::{
     AccountReader, BlockHashReader, BytecodeReader, HashedPostStateProvider, ProviderError,
     ProviderResult, StateProofProvider, StateProvider, StateRootProvider, StorageRootProvider,
 };
-use reth_revm::{
-    db::BundleState,
-    primitives::{Address, B256, Bytes, StorageValue, alloy_primitives::BlockNumber},
-};
 use reth_trie::{
     StateRoot, StorageRoot, TrieType,
     hashed_cursor::{HashedCursor, HashedPostStateCursorFactory, zero_destroyed_account_storage},
     metrics::TrieRootMetrics,
     proof,
+    proof_v2::MultiProofCalculator,
     trie_cursor::InMemoryTrieCursorFactory,
     witness::TrieWitness,
 };
 use reth_trie_common::{
-    AccountProof, ExecutionWitnessMode, HashedPostState, HashedPostStateSorted, HashedStorage,
-    KeccakKeyHasher, MultiProof, MultiProofTargets, StorageMultiProof, StorageProof, TrieInput,
+    AccountProof, DecodedMultiProofV2, ExecutionWitnessMode, HashedPostState,
+    HashedPostStateSorted, HashedStorage, KeccakKeyHasher, MultiProof, MultiProofTargets,
+    MultiProofTargetsV2, StorageMultiProof, StorageProof, TrieInput, bundle_state::BundleState,
     updates::TrieUpdates,
 };
 
@@ -177,14 +175,14 @@ impl<S: MorphProofsBatchSession> StorageRootProvider for MorphProofsBatchStatePr
             HashMap::from_iter([(hashed_address, hashed_storage.into_sorted())]),
         );
         let (trie_factory, hashed_factory) = self.factories();
-        proof::StorageProof::new(trie_factory, hashed_factory.clone(), address)
-            .with_hashed_cursor_factory(HashedPostStateCursorFactory::new(
-                hashed_factory,
-                &state_sorted,
-            ))
-            .with_prefix_set_mut(prefix_set)
-            .storage_proof(slot)
-            .map_err(ProviderError::from)
+        proof::StorageProof::new(
+            trie_factory,
+            HashedPostStateCursorFactory::new(hashed_factory, &state_sorted),
+            address,
+        )
+        .with_prefix_set_mut(prefix_set)
+        .storage_proof(slot)
+        .map_err(ProviderError::from)
     }
 
     fn storage_multiproof(
@@ -201,14 +199,14 @@ impl<S: MorphProofsBatchSession> StorageRootProvider for MorphProofsBatchStatePr
             HashMap::from_iter([(hashed_address, hashed_storage.into_sorted())]),
         );
         let (trie_factory, hashed_factory) = self.factories();
-        proof::StorageProof::new(trie_factory, hashed_factory.clone(), address)
-            .with_hashed_cursor_factory(HashedPostStateCursorFactory::new(
-                hashed_factory,
-                &state_sorted,
-            ))
-            .with_prefix_set_mut(prefix_set)
-            .storage_multiproof(targets)
-            .map_err(ProviderError::from)
+        proof::StorageProof::new(
+            trie_factory,
+            HashedPostStateCursorFactory::new(hashed_factory, &state_sorted),
+            address,
+        )
+        .with_prefix_set_mut(prefix_set)
+        .storage_multiproof(targets)
+        .map_err(ProviderError::from)
     }
 }
 
@@ -222,15 +220,13 @@ impl<S: MorphProofsBatchSession> StateProofProvider for MorphProofsBatchStatePro
         let nodes_sorted = input.nodes.into_sorted();
         let state_sorted = input.state.into_sorted();
         let (trie_factory, hashed_factory) = self.factories();
-        proof::Proof::new(trie_factory.clone(), hashed_factory.clone())
-            .with_trie_cursor_factory(InMemoryTrieCursorFactory::new(trie_factory, &nodes_sorted))
-            .with_hashed_cursor_factory(HashedPostStateCursorFactory::new(
-                hashed_factory,
-                &state_sorted,
-            ))
-            .with_prefix_sets_mut(input.prefix_sets)
-            .account_proof(address, slots)
-            .map_err(ProviderError::from)
+        proof::Proof::new(
+            InMemoryTrieCursorFactory::new(trie_factory, &nodes_sorted),
+            HashedPostStateCursorFactory::new(hashed_factory, &state_sorted),
+        )
+        .with_prefix_sets_mut(input.prefix_sets)
+        .account_proof(address, slots)
+        .map_err(ProviderError::from)
     }
 
     fn multiproof(
@@ -241,15 +237,31 @@ impl<S: MorphProofsBatchSession> StateProofProvider for MorphProofsBatchStatePro
         let nodes_sorted = input.nodes.into_sorted();
         let state_sorted = input.state.into_sorted();
         let (trie_factory, hashed_factory) = self.factories();
-        proof::Proof::new(trie_factory.clone(), hashed_factory.clone())
-            .with_trie_cursor_factory(InMemoryTrieCursorFactory::new(trie_factory, &nodes_sorted))
-            .with_hashed_cursor_factory(HashedPostStateCursorFactory::new(
-                hashed_factory,
-                &state_sorted,
-            ))
-            .with_prefix_sets_mut(input.prefix_sets)
-            .multiproof(targets)
-            .map_err(ProviderError::from)
+        proof::Proof::new(
+            InMemoryTrieCursorFactory::new(trie_factory, &nodes_sorted),
+            HashedPostStateCursorFactory::new(hashed_factory, &state_sorted),
+        )
+        .with_prefix_sets_mut(input.prefix_sets)
+        .multiproof(targets)
+        .map_err(ProviderError::from)
+    }
+
+    fn multiproof_v2(
+        &self,
+        targets: MultiProofTargetsV2,
+        _requires_masks: bool,
+    ) -> ProviderResult<DecodedMultiProofV2> {
+        // The session's versioned trie at `block_number` is the exact trie persisted for that
+        // block, so masks always match and `requires_masks` needs no special handling.
+        let (trie_factory, hashed_factory) = self.factories();
+        MultiProofCalculator::new(
+            trie_factory,
+            hashed_factory,
+            Default::default(),
+            Default::default(),
+        )
+        .multiproof(targets)
+        .map_err(ProviderError::from)
     }
 
     fn witness(
@@ -261,16 +273,14 @@ impl<S: MorphProofsBatchSession> StateProofProvider for MorphProofsBatchStatePro
         let nodes_sorted = input.nodes.into_sorted();
         let state_sorted = input.state.into_sorted();
         let (trie_factory, hashed_factory) = self.factories();
-        let result: B256Map<Bytes> = TrieWitness::new(trie_factory.clone(), hashed_factory.clone())
-            .with_trie_cursor_factory(InMemoryTrieCursorFactory::new(trie_factory, &nodes_sorted))
-            .with_hashed_cursor_factory(HashedPostStateCursorFactory::new(
-                hashed_factory,
-                &state_sorted,
-            ))
-            .with_prefix_sets_mut(input.prefix_sets)
-            .always_include_root_node()
-            .compute(target)
-            .map_err(ProviderError::from)?;
+        let result: B256Map<Bytes> = TrieWitness::new(
+            InMemoryTrieCursorFactory::new(trie_factory, &nodes_sorted),
+            HashedPostStateCursorFactory::new(hashed_factory, &state_sorted),
+        )
+        .with_prefix_sets_mut(input.prefix_sets)
+        .always_include_root_node()
+        .compute(target)
+        .map_err(ProviderError::from)?;
         Ok(result.into_values().collect())
     }
 }
@@ -325,16 +335,51 @@ impl<S: MorphProofsBatchSession> BytecodeReader for MorphProofsBatchStateProvide
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use alloy_eips::BlockNumHash;
     use alloy_primitives::U256;
     use reth_provider::noop::NoopProvider;
-    use reth_revm::{
-        db::{AccountStatus, BundleAccount},
-        state::AccountInfo,
-    };
+    use reth_trie_common::bundle_state::{AccountStatus, BundleAccount};
 
     use super::*;
-    use crate::{InMemoryProofsStorage, MorphProofsBatchStore, MorphProofsInitialStateStore};
+    use crate::{
+        InMemoryProofsStorage, MdbxProofsStorage, MorphProofsBatchStore,
+        MorphProofsInitialStateStore, MorphProofsStore,
+        provider::tests::{assert_multiproof_v2_matches_proof, store_two_contracts},
+    };
+
+    fn assert_session_multiproof_v2_matches_proof<S>(storage: S)
+    where
+        S: MorphProofsStore + MorphProofsBatchStore + MorphProofsInitialStateStore + Clone,
+    {
+        let (state_root, contracts) = store_two_contracts(&storage);
+
+        storage
+            .with_batch_session(|session| {
+                let provider = MorphProofsBatchStateProviderRef::new(
+                    Box::<NoopProvider>::default(),
+                    session,
+                    1,
+                );
+                assert_multiproof_v2_matches_proof(&provider, state_root, &contracts);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn multiproof_v2_matches_proof_in_memory() {
+        assert_session_multiproof_v2_matches_proof(InMemoryProofsStorage::new());
+    }
+
+    #[test]
+    fn multiproof_v2_matches_proof_in_mdbx() {
+        let directory = tempfile::tempdir().unwrap();
+        assert_session_multiproof_v2_matches_proof(Arc::new(
+            MdbxProofsStorage::new(directory.path()).unwrap(),
+        ));
+    }
 
     #[test]
     fn hashed_post_state_zeros_parent_storage_for_destroyed_account() {
@@ -354,7 +399,7 @@ mod tests {
         bundle_state.state.insert(
             address,
             BundleAccount::new(
-                Some(AccountInfo::default()),
+                Some(Default::default()),
                 None,
                 Default::default(),
                 AccountStatus::Destroyed,

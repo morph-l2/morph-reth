@@ -7,9 +7,11 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-alloy-evm.workspace = true
-alloy-primitives.workspace = true
+alloy-consensus.workspace = true
+alloy-eips = { workspace = true, features = ["serde"] }
+alloy-primitives = { workspace = true, features = ["serde"] }
 alloy-rlp.workspace = true
+alloy-signer-local.workspace = true
 alloy-trie.workspace = true
 clap.workspace = true
 eyre.workspace = true
@@ -17,8 +19,7 @@ morph-chainspec.workspace = true
 morph-evm.workspace = true
 morph-revm.workspace = true
 morph-primitives.workspace = true
-revm = { workspace = true, features = ["tracer"] }
-revm-statetest-types.workspace = true
+evm2 = { workspace = true, features = ["std"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

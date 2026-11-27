@@ -1,16 +1,15 @@
 //! Morph-specific transaction validation errors.
 
-use alloy_evm::error::InvalidTxError;
 use alloy_primitives::U256;
-use revm::context::result::{EVMError, HaltReason, InvalidTransaction};
+use evm2::registry::HandlerError;
 
 /// Morph-specific invalid transaction errors.
+///
+/// These travel through evm2 as [`HandlerError::External`]; read them back with
+/// [`HandlerError::external_ref`]. Standard Ethereum rejections stay plain [`HandlerError`]
+/// variants, so generic consumers keep classifying them without knowing about Morph.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, thiserror::Error)]
 pub enum MorphInvalidTransaction {
-    /// Standard Ethereum transaction validation error.
-    #[error(transparent)]
-    EthInvalidTransaction(#[from] InvalidTransaction),
-
     /// Token is not registered in the Token Registry.
     #[error("Token with ID {0} is not registered")]
     TokenNotRegistered(u16),
@@ -65,46 +64,19 @@ pub enum MorphInvalidTransaction {
     /// Same rule as `ErrSetCodeTxCreate` for `0x04` transactions.
     #[error("MorphTx with an authorization list cannot create a contract")]
     AuthorizationListCreate,
+
+    /// A MorphTx carries an authorization list before EIP-7702 is active.
+    #[error("EIP-7702 is not supported by the active hardfork")]
+    Eip7702NotSupported,
+
+    /// The maximum fee of the transaction overflows the balance arithmetic.
+    #[error("overflow payment in transaction")]
+    OverflowPaymentInTransaction,
 }
 
-impl InvalidTxError for MorphInvalidTransaction {
-    fn is_nonce_too_low(&self) -> bool {
-        match self {
-            Self::EthInvalidTransaction(err) => err.is_nonce_too_low(),
-            _ => false,
-        }
-    }
-
-    fn as_invalid_tx_err(&self) -> Option<&InvalidTransaction> {
-        match self {
-            Self::EthInvalidTransaction(err) => Some(err),
-            _ => None,
-        }
-    }
-}
-
-impl<DBError> From<MorphInvalidTransaction> for EVMError<DBError, MorphInvalidTransaction> {
+impl From<MorphInvalidTransaction> for HandlerError {
     fn from(err: MorphInvalidTransaction) -> Self {
-        Self::Transaction(err)
-    }
-}
-
-/// Morph-specific halt reason.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, derive_more::From)]
-pub enum MorphHaltReason {
-    /// Basic Ethereum halt reason.
-    #[from]
-    Ethereum(HaltReason),
-}
-
-#[cfg(feature = "rpc")]
-impl reth_rpc_eth_types::error::api::FromEvmHalt<MorphHaltReason>
-    for reth_rpc_eth_types::EthApiError
-{
-    fn from_evm_halt(halt_reason: MorphHaltReason, gas_limit: u64) -> Self {
-        match halt_reason {
-            MorphHaltReason::Ethereum(halt_reason) => Self::from_evm_halt(halt_reason, gas_limit),
-        }
+        Self::external(err)
     }
 }
 
@@ -149,59 +121,12 @@ mod tests {
     }
 
     #[test]
-    fn test_is_nonce_too_low() {
-        // Morph-specific errors are not nonce-too-low
-        assert!(!MorphInvalidTransaction::TokenNotRegistered(1).is_nonce_too_low());
-        assert!(!MorphInvalidTransaction::TokenIdZeroNotSupported.is_nonce_too_low());
-        assert!(!MorphInvalidTransaction::TokenNotActive(1).is_nonce_too_low());
-        assert!(!MorphInvalidTransaction::InvalidTokenConfig(1).is_nonce_too_low());
-
-        // Wrapped Ethereum nonce-too-low should be detected
-        let eth_err = InvalidTransaction::NonceTooLow { tx: 5, state: 10 };
-        let morph_err = MorphInvalidTransaction::EthInvalidTransaction(eth_err);
-        assert!(morph_err.is_nonce_too_low());
-    }
-
-    #[test]
-    fn test_as_invalid_tx_err() {
-        // Morph-specific errors return None
-        assert!(
-            MorphInvalidTransaction::TokenNotRegistered(1)
-                .as_invalid_tx_err()
-                .is_none()
+    fn morph_error_round_trips_through_handler_error() {
+        let handler_err: HandlerError = MorphInvalidTransaction::TokenNotRegistered(1).into();
+        assert_eq!(
+            handler_err.external_ref::<MorphInvalidTransaction>(),
+            Some(&MorphInvalidTransaction::TokenNotRegistered(1))
         );
-
-        // Wrapped Ethereum errors return Some
-        let eth_err = InvalidTransaction::NonceTooLow { tx: 5, state: 10 };
-        let morph_err = MorphInvalidTransaction::EthInvalidTransaction(eth_err.clone());
-        assert_eq!(morph_err.as_invalid_tx_err(), Some(&eth_err));
-    }
-
-    #[test]
-    fn test_from_invalid_transaction() {
-        let eth_err = InvalidTransaction::NonceTooLow { tx: 5, state: 10 };
-        let morph_err: MorphInvalidTransaction = eth_err.into();
-        assert!(matches!(
-            morph_err,
-            MorphInvalidTransaction::EthInvalidTransaction(_)
-        ));
-    }
-
-    #[test]
-    fn test_into_evm_error() {
-        let morph_err = MorphInvalidTransaction::TokenNotRegistered(1);
-        let evm_err: EVMError<std::convert::Infallible, MorphInvalidTransaction> = morph_err.into();
-        assert!(matches!(
-            evm_err,
-            EVMError::Transaction(MorphInvalidTransaction::TokenNotRegistered(1))
-        ));
-    }
-
-    #[test]
-    fn test_morph_halt_reason_from_ethereum() {
-        let halt = HaltReason::OutOfGas(revm::context::result::OutOfGasError::Basic);
-        let morph_halt: MorphHaltReason = halt.clone().into();
-        assert_eq!(morph_halt, MorphHaltReason::Ethereum(halt));
     }
 
     #[test]

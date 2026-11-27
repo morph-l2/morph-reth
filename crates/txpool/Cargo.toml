@@ -23,18 +23,19 @@ reth-chainspec.workspace = true
 reth-evm = { workspace = true, features = ["std"] }
 reth-primitives-traits.workspace = true
 reth-provider.workspace = true
-reth-revm = { workspace = true, features = ["std"] }
 reth-storage-api.workspace = true
 reth-transaction-pool.workspace = true
+
+evm2 = { workspace = true, features = ["std"] }
 
 # Alloy
 alloy-consensus.workspace = true
 alloy-eips.workspace = true
-alloy-evm.workspace = true
 alloy-primitives.workspace = true
 
 # Misc
 c-kzg = "2.1.5"
+dashmap.workspace = true
 derive_more.workspace = true
 futures.workspace = true
 parking_lot.workspace = true

@@ -7,7 +7,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use alloy_consensus::{SignableTransaction, TxEip1559, constants::KECCAK_EMPTY};
+use alloy_consensus::{SignableTransaction, TxEip1559};
 use alloy_eips::{Encodable2718, NumHash, eip1898::BlockWithParent};
 use alloy_genesis::Genesis;
 use alloy_primitives::{Address, B256, Bytes, TxKind, U256};
@@ -474,11 +474,11 @@ fn assert_outside_window(error: &str, requested: u64) {
         "expected window error for block {requested}, got: {error}"
     );
     // The window conditions are client conditions, so they must not arrive as internal server
-    // errors. `MorphEthApiError::STATE_NOT_AVAILABLE_CODE`, kept as a literal here because the test
-    // asserts the wire contract rather than the constant.
+    // errors. They use the pruned-history code, kept as a literal here because the test asserts
+    // the wire contract rather than the constant.
     assert!(
-        error.contains("-32005"),
-        "expected error code -32005 for block {requested}, got: {error}"
+        error.contains("4444"),
+        "expected error code 4444 for block {requested}, got: {error}"
     );
 }
 
@@ -782,10 +782,8 @@ async fn proof_history_multi_proof_uses_one_historical_state() -> eyre::Result<(
 /// is `None` **and** `storage_root` is the empty root. A response that invented either field, or
 /// an implementation that returned an existing neighbour's leaf, would fail verification here.
 ///
-/// `KECCAK_EMPTY` / `EMPTY_ROOT_HASH` are asserted because they are the values the absent account
-/// *would* hash to, which is what keeps the response self-consistent: a verifier can recompute the
-/// leaf that must be missing. Zero hashes would carry no such meaning, and only signal absence
-/// out-of-band.
+/// `codeHash` and `storageHash` are zero, as for the default `eth_getProof`: the account has no leaf
+/// in the trie, which is what separates it from an existing account with empty code and storage.
 #[tokio::test(flavor = "multi_thread")]
 async fn proof_history_proves_absent_accounts() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -805,8 +803,8 @@ async fn proof_history_proves_absent_accounts() -> eyre::Result<()> {
     verify_against_state_root(&single, block_1.header.state_root)?;
     assert_eq!(single.nonce, 0);
     assert_eq!(single.balance, U256::ZERO);
-    assert_eq!(single.code_hash, KECCAK_EMPTY);
-    assert_eq!(single.storage_hash, EMPTY_ROOT_HASH);
+    assert_eq!(single.code_hash, B256::ZERO);
+    assert_eq!(single.storage_hash, B256::ZERO);
     // A slot on a missing account still gets an entry, proving zero rather than omitting it.
     assert_eq!(storage_entry(&single, absent_slot), U256::ZERO);
 

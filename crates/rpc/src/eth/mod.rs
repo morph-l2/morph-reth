@@ -3,19 +3,19 @@
 use crate::MorphEthApiError;
 use crate::eth::receipt::MorphReceiptConverter;
 use crate::types::{MorphRpcReceipt, MorphRpcTransaction, MorphTransactionRequest};
+use alloy_primitives::U256;
 use alloy_rpc_types_eth::Header as RpcHeader;
 use eyre::Result;
-use morph_chainspec::MorphChainSpec;
+use morph_chainspec::{MORPH_DEFAULT_PRIORITY_FEE, MorphChainSpec};
 use morph_evm::MorphEvmConfig;
 use morph_primitives::{MorphHeader, MorphPrimitives};
-use reth_node_api::{FullNodeComponents, FullNodeTypes, NodeTypes};
-use reth_node_builder::rpc::{EthApiBuilder, EthApiCtx};
-use reth_primitives_traits::RecoveredBlock;
-use reth_provider::{BlockReader, ChainSpecProvider};
+use reth_node_api::{FullNodeComponents, NodeTypes};
+use reth_node_builder::rpc::{EthApiBuilder, EthApiCtx, RpcNodeCoreFor};
+use reth_provider::ChainSpecProvider;
 use reth_rpc::EthApi;
 use reth_rpc_convert::{RpcConvert, RpcConverter, RpcTypes};
 use reth_rpc_eth_api::{
-    EthApiTypes, RpcNodeCore, RpcNodeCoreExt,
+    EthApiTypes, FromEthApiError, RpcNodeCore, RpcNodeCoreExt,
     helpers::{
         EthApiSpec, EthBlocks, EthFees, EthState, EthSubscriptions, EthTransactions, LoadBlock,
         LoadFee, LoadPendingBlock, LoadState, LoadTransaction, SpawnBlocking, Trace,
@@ -23,7 +23,7 @@ use reth_rpc_eth_api::{
     },
 };
 use reth_rpc_eth_types::{
-    EthApiError, EthStateCache, FeeHistoryCache, GasPriceOracle, StateCacheDb,
+    EthApiError, EthApiSettings, EthStateCache, FeeHistoryCache, GasPriceOracle,
 };
 use reth_tasks::{
     Runtime,
@@ -79,10 +79,6 @@ where
             Evm = MorphEvmConfig,
             Types: NodeTypes<Primitives = MorphPrimitives, ChainSpec = MorphChainSpec>,
             Provider: ChainSpecProvider<ChainSpec = MorphChainSpec>,
-        > + crate::eth::MorphNodeCore
-        + reth_rpc_eth_api::RpcNodeCore<
-            Provider = <N as FullNodeTypes>::Provider,
-            Pool = <N as FullNodeComponents>::Pool,
         >,
     NetworkT: RpcTypes<
             Header = RpcHeader<MorphHeader>,
@@ -92,12 +88,12 @@ where
         >,
     MorphRpcConverter<N, NetworkT>: reth_rpc_convert::RpcConvert<
             Network = NetworkT,
-            Primitives = <N as reth_rpc_eth_api::RpcNodeCore>::Primitives,
+            Primitives = MorphPrimitives,
             Error = reth_rpc_eth_types::EthApiError,
-            Evm = <N as reth_rpc_eth_api::RpcNodeCore>::Evm,
+            Evm = MorphEvmConfig,
         >,
 {
-    type EthApi = MorphEthApi<N, MorphRpcConverter<N, NetworkT>>;
+    type EthApi = MorphEthApi<RpcNodeCoreFor<N>, MorphRpcConverter<N, NetworkT>>;
 
     async fn build_eth_api(self, ctx: EthApiCtx<'_, N>) -> Result<Self::EthApi> {
         let rpc_converter = RpcConverter::new(MorphReceiptConverter::default());
@@ -160,6 +156,10 @@ where
 
     fn converter(&self) -> &Self::RpcConvert {
         self.inner.eth_api.converter()
+    }
+
+    fn eth_api_settings(&self) -> &EthApiSettings {
+        self.inner.eth_api.eth_api_settings()
     }
 }
 
@@ -258,6 +258,32 @@ where
     fn fee_history_cache(&self) -> &FeeHistoryCache<reth_provider::ProviderHeader<N::Provider>> {
         self.inner.eth_api.fee_history_cache()
     }
+
+    /// Suggests a priority fee using the single-sequencer L2 algorithm
+    /// ([`GasPriceOracle::op_suggest_tip_cap`]).
+    ///
+    /// Upstream `GasPriceOracle::suggest_tip_cap` pushes `U256::ZERO` for every empty block
+    /// and scans up to `2 * max_block_history` (2,048) blocks against a 1,024-entry LRU cache.
+    /// On Morph L2, where empty blocks are frequent, that caused `eth_maxPriorityFeePerGas` to
+    /// collapse to `0x0` (making `MORPH_DEFAULT_PRIORITY_FEE` dead code) and risked full LRU
+    /// thrashing on quiet networks. Inspecting only the latest block keeps suggestions O(1),
+    /// skips L1 message transactions, enforces the configured floor (defaulting to
+    /// [`MORPH_DEFAULT_PRIORITY_FEE`]), and scales up by 10% above the median tip when a block
+    /// reaches gas capacity.
+    async fn suggested_priority_fee(&self) -> Result<U256, Self::Error>
+    where
+        Self: 'static,
+    {
+        let min_suggested_fee = self
+            .gas_oracle()
+            .config()
+            .default_suggested_fee
+            .unwrap_or_else(|| U256::from(MORPH_DEFAULT_PRIORITY_FEE));
+        self.gas_oracle()
+            .op_suggest_tip_cap(min_suggested_fee)
+            .await
+            .map_err(Self::Error::from_eth_err)
+    }
 }
 
 impl<N, Rpc> LoadPendingBlock for MorphEthApi<N, Rpc>
@@ -351,6 +377,78 @@ where
         .await
         .map_err(Into::into)
     }
+
+    fn send_raw_transaction_sync(
+        &self,
+        tx: alloy_primitives::Bytes,
+        timeout_ms: Option<u64>,
+    ) -> impl std::future::Future<
+        Output = Result<reth_rpc_eth_api::RpcReceipt<Self::NetworkTypes>, Self::Error>,
+    > + Send
+    where
+        Self: reth_rpc_eth_api::helpers::LoadReceipt,
+    {
+        let this = self.clone();
+        let configured_timeout = self.send_raw_transaction_sync_timeout();
+        let timeout_duration = timeout_ms
+            .filter(|timeout_ms| *timeout_ms > 0)
+            .map(Duration::from_millis)
+            .map(|timeout| timeout.min(configured_timeout))
+            .unwrap_or(configured_timeout);
+        async move {
+            use futures::StreamExt;
+            use reth_chain_state::CanonStateSubscriptions;
+            use reth_rpc_eth_types::block::convert_transaction_receipt;
+
+            let mut stream = this.provider().canonical_state_stream();
+            let hash = EthTransactions::send_raw_transaction(&this, tx).await?;
+
+            // DB receipt fallback right after submission (covers fast inclusion or
+            // already-committed notifications before the stream is polled).
+            if let Some(receipt) = this.transaction_receipt(hash).await? {
+                return Ok(receipt);
+            }
+
+            let receipt_res = tokio::time::timeout(timeout_duration, async {
+                while let Some(notification) = stream.next().await {
+                    let chain = notification.committed();
+                    if let Some((block, tx, receipt, all_receipts)) =
+                        chain.find_transaction_and_receipt_by_hash(hash)
+                        && let Some(receipt) = convert_transaction_receipt(
+                            block,
+                            all_receipts,
+                            tx,
+                            receipt,
+                            this.converter(),
+                        )
+                        .transpose()?
+                    {
+                        return Ok(Some(receipt));
+                    }
+                }
+                Ok::<_, Self::Error>(None)
+            })
+            .await;
+
+            match receipt_res {
+                Ok(Ok(Some(receipt))) => return Ok(receipt),
+                Ok(Err(err)) => return Err(err),
+                Ok(Ok(None)) | Err(_) => {}
+            }
+
+            // Final DB receipt fallback before returning the EIP-7966 timeout error.
+            if let Some(receipt) = this.transaction_receipt(hash).await? {
+                return Ok(receipt);
+            }
+
+            Err(reth_rpc_eth_api::FromEthApiError::from_eth_err(
+                EthApiError::TransactionConfirmationTimeout {
+                    hash,
+                    duration: timeout_duration,
+                },
+            ))
+        }
+    }
 }
 
 impl<N, Rpc> EthSubscriptions for MorphEthApi<N, Rpc>
@@ -397,13 +495,15 @@ where
 {
     fn apply_pre_execution_changes(
         &self,
-        _block: &RecoveredBlock<<Self::Provider as BlockReader>::Block>,
-        _db: &mut StateCacheDb,
-    ) -> Result<(), Self::Error> {
+        _block: &reth_primitives_traits::RecoveredBlock<
+            reth_provider::ProviderBlock<Self::Provider>,
+        >,
+        _db: &mut reth_rpc_eth_types::StateCacheDb,
+    ) -> Result<reth_trie_common::bundle_state::BundleState, Self::Error> {
         // Morph has no Ethereum-style (EIP-4788) pre-block system calls to replay. The
         // upstream default would only run the Morph executor's pre-execution step,
         // which just pre-warms the L1 gas oracle account.
-        Ok(())
+        Ok(Default::default())
     }
 }
 

@@ -4,15 +4,14 @@
 //! enabling execution of engine payloads with proper transaction iteration and context setup.
 
 use crate::MorphEvmConfig;
-use alloy_consensus::crypto::RecoveryError;
-use alloy_evm::block::ExecutableTxParts;
+use alloy_consensus::{crypto::RecoveryError, transaction::Recovered};
 use alloy_primitives::Address;
 use morph_payload_types::MorphExecutionData;
 use morph_primitives::{Block, MorphTxEnvelope};
 use morph_revm::MorphTxEnv;
 use reth_evm::{
-    ConfigureEngineEvm, ConfigureEvm, EvmEnvFor, ExecutableTxIterator, ExecutionCtxFor,
-    RecoveredTx, ToTxEnv,
+    ConfigureEngineEvm, ConfigureEvm, EvmEnvFor, ExecutableTxIterator, ExecutableTxParts,
+    ExecutionCtxFor, RecoveredTx,
 };
 use reth_primitives_traits::{SealedBlock, SignedTransaction};
 use std::sync::Arc;
@@ -82,17 +81,11 @@ impl RecoveredTx<MorphTxEnvelope> for RecoveredInBlock {
     }
 }
 
-impl ToTxEnv<MorphTxEnv> for RecoveredInBlock {
-    fn to_tx_env(&self) -> MorphTxEnv {
-        MorphTxEnv::from_recovered_tx(self.tx(), *self.signer())
-    }
-}
-
-impl ExecutableTxParts<MorphTxEnv, MorphTxEnvelope> for RecoveredInBlock {
+impl ExecutableTxParts<Recovered<MorphTxEnv>, MorphTxEnvelope> for RecoveredInBlock {
     type Recovered = Self;
 
-    fn into_parts(self) -> (MorphTxEnv, Self) {
-        let tx_env = MorphTxEnv::from_recovered_tx(self.tx(), *self.signer());
+    fn into_parts(self) -> (Recovered<MorphTxEnv>, Self) {
+        let tx_env = Recovered::new_unchecked(MorphTxEnv::from_envelope(self.tx()), self.sender);
         (tx_env, self)
     }
 }
@@ -242,14 +235,11 @@ mod tests {
         let evm_env = result.unwrap();
 
         // Verify EVM environment fields
-        assert_eq!(evm_env.block_env.inner.number, U256::from(block.number()));
+        assert_eq!(evm_env.block.number, U256::from(block.number()));
+        assert_eq!(evm_env.block.timestamp, U256::from(block.timestamp()));
         assert_eq!(
-            evm_env.block_env.inner.timestamp,
-            U256::from(block.timestamp())
-        );
-        assert_eq!(
-            evm_env.block_env.inner.gas_limit,
-            block.header().gas_limit()
+            evm_env.block.gas_limit,
+            U256::from(block.header().gas_limit())
         );
     }
 }

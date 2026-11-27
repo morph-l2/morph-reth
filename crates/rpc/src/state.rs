@@ -2,6 +2,7 @@
 
 use alloy_eips::BlockId;
 use alloy_primitives::B256;
+use alloy_rpc_types_eth::error::EthRpcErrorCode;
 use jsonrpsee::types::ErrorObject;
 use morph_proofs::{MorphProofsStorage, MorphProofsStore, provider::MorphProofsStateProviderRef};
 use reth_provider::{
@@ -11,8 +12,6 @@ use reth_rpc_api::eth::helpers::FullEthApi;
 use reth_rpc_eth_types::{EthApiError, error::ToRpcError};
 use thiserror::Error;
 use tracing::warn;
-
-use crate::error::MorphEthApiError;
 
 /// A request cannot be served by the current durable proof window.
 ///
@@ -39,7 +38,8 @@ enum ProofWindowError {
 }
 
 impl ToRpcError for ProofWindowError {
-    /// Reports every variant as `StateNotAvailable` (-32005).
+    /// Reports every variant with the pruned-history code (4444), as reth does for its own proof
+    /// window (`EthApiError::ExceedsMaxProofWindow`).
     ///
     /// These are client conditions — a block tag this node cannot serve a proof for — so they must
     /// not surface as internal server errors, which is what any error reaching reth through
@@ -47,9 +47,6 @@ impl ToRpcError for ProofWindowError {
     /// `EthApiError::from`, and the rest fall through to `Internal`. Routing through
     /// [`EthApiError::other`] keeps the code under our control and spares clients from
     /// string-matching on messages.
-    ///
-    /// Not EIP-4444's 4444 (`PrunedHistoryUnavailable`), which is about missing block history; what
-    /// is unavailable here is a state proof for a block whose header and body we still serve.
     ///
     /// `CanonicalMismatch` sends no hashes. The canonical hash is public via `eth_getBlockByNumber`,
     /// but the stored one would tell a caller which abandoned branch this node's proof database is
@@ -71,11 +68,7 @@ impl ToRpcError for ProofWindowError {
                 format!("state proof unavailable for block {block}")
             }
         };
-        ErrorObject::owned(
-            MorphEthApiError::STATE_NOT_AVAILABLE_CODE,
-            message,
-            None::<()>,
-        )
+        ErrorObject::owned(EthRpcErrorCode::PrunedHistory.code(), message, None::<()>)
     }
 }
 
@@ -227,7 +220,7 @@ mod tests {
     use alloy_primitives::B256;
     use reth_rpc_eth_types::error::ToRpcError;
 
-    use super::{MorphEthApiError, ProofWindowError, validate_canonical_anchor, validate_window};
+    use super::{ProofWindowError, validate_canonical_anchor, validate_window};
 
     #[test]
     fn rejects_an_empty_window() {
@@ -266,7 +259,7 @@ mod tests {
     }
 
     #[test]
-    fn reports_every_window_condition_as_state_not_available() {
+    fn reports_every_window_condition_as_pruned_history() {
         // Not an internal server error: these are all "this node cannot serve a proof for that
         // block", which the client fixes by choosing another block, not by retrying.
         for error in [
@@ -284,7 +277,7 @@ mod tests {
         ] {
             assert_eq!(
                 error.to_rpc_error().code(),
-                MorphEthApiError::STATE_NOT_AVAILABLE_CODE,
+                4444,
                 "unexpected code for {error:?}"
             );
         }

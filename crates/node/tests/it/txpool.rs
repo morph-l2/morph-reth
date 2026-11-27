@@ -13,6 +13,7 @@ use morph_node::test_utils::{
     L1MessageBuilder, TestNodeBuilder, advance_chain, make_eip4844_tx, make_transfer_tx,
 };
 use morph_primitives::MorphTxEnvelope;
+use reth_e2e_test_utils::wallet::Wallet;
 use reth_payload_primitives::BuiltPayload;
 
 use super::helpers::wallet_to_arc;
@@ -270,39 +271,184 @@ async fn tx_gas_limit_exceeds_block_limit_rejected() -> eyre::Result<()> {
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn tx_max_fee_below_base_fee_accepted_for_queuing() -> eyre::Result<()> {
-    reth_tracing::init_test_tracing();
-    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
-    let node = nodes.pop().unwrap();
-
+/// Signs an EIP-1559 call to an account without code.
+fn signed_call(wallet: &Wallet, gas_limit: u64, input: Bytes) -> eyre::Result<Bytes> {
     use alloy_consensus::{SignableTransaction, TxEip1559};
     use alloy_signer::SignerSync;
+
     let tx = TxEip1559 {
         chain_id: wallet.chain_id,
         nonce: 0,
-        gas_limit: 21_000,
-        max_fee_per_gas: 500_000u128, // below base fee of 1_000_000
-        max_priority_fee_per_gas: 500_000u128,
-        to: alloy_primitives::TxKind::Call(alloy_primitives::Address::with_last_byte(0x42)),
-        value: alloy_primitives::U256::from(100),
+        gas_limit,
+        max_fee_per_gas: 20_000_000_000u128,
+        max_priority_fee_per_gas: 20_000_000_000u128,
+        to: TxKind::Call(Address::with_last_byte(0x42)),
+        value: U256::ZERO,
         access_list: Default::default(),
-        input: alloy_primitives::Bytes::new(),
+        input,
     };
     let sig = wallet
         .inner
         .sign_hash_sync(&tx.signature_hash())
         .map_err(|e| eyre::eyre!("{e}"))?;
-    let envelope = morph_primitives::MorphTxEnvelope::Eip1559(tx.into_signed(sig));
-    use alloy_eips::eip2718::Encodable2718;
-    let raw: alloy_primitives::Bytes = envelope.encoded_2718().into();
+    Ok(MorphTxEnvelope::Eip1559(tx.into_signed(sig))
+        .encoded_2718()
+        .into())
+}
 
-    // reth pools low-fee txs for future execution when baseFee drops,
-    // so they are accepted into the queued set, not rejected outright.
+/// A transaction above the EIP-7825 gas cap is admitted and mined.
+///
+/// Morph caps a transaction at the block gas limit only, while the upstream default for a recent
+/// spec is 2^24. Historical transactions exceed that, so losing the override would reject blocks
+/// as well as pool transactions.
+#[tokio::test(flavor = "multi_thread")]
+async fn tx_gas_limit_above_eip7825_cap_is_mined() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+
+    node.rpc
+        .inject_tx(signed_call(&wallet, (1 << 24) + 1, Bytes::new())?)
+        .await?;
+    let payload = node.advance_block().await?;
+
+    assert_eq!(payload.block().body().transactions.len(), 1);
+    Ok(())
+}
+
+/// A transaction with a gas limit below the EIP-7623 calldata floor is admitted and mined.
+///
+/// Morph does not adopt EIP-7623, so regular intrinsic gas is the only lower bound.
+#[tokio::test(flavor = "multi_thread")]
+async fn tx_gas_limit_below_eip7623_floor_is_mined() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+
+    // 1000 non-zero bytes: intrinsic gas is 37_000, the EIP-7623 floor would be 61_000.
+    node.rpc
+        .inject_tx(signed_call(
+            &wallet,
+            40_000,
+            Bytes::from(vec![0xff; 1_000]),
+        )?)
+        .await?;
+    let payload = node.advance_block().await?;
+
+    assert_eq!(payload.block().body().transactions.len(), 1);
+    Ok(())
+}
+
+/// Helper to sign and 2718-encode a simple EIP-1559 transfer with custom fees.
+fn sign_eip1559_transfer(
+    chain_id: u64,
+    signer: &alloy_signer_local::PrivateKeySigner,
+    nonce: u64,
+    max_fee_per_gas: u128,
+    max_priority_fee_per_gas: u128,
+) -> eyre::Result<Bytes> {
+    use alloy_consensus::{SignableTransaction, TxEip1559};
+    use alloy_signer::SignerSync;
+
+    let tx = TxEip1559 {
+        chain_id,
+        nonce,
+        gas_limit: 21_000,
+        max_fee_per_gas,
+        max_priority_fee_per_gas,
+        to: TxKind::Call(Address::with_last_byte(0x42)),
+        value: U256::from(100),
+        access_list: Default::default(),
+        input: Bytes::new(),
+    };
+    let sig = signer
+        .sign_hash_sync(&tx.signature_hash())
+        .map_err(|e| eyre::eyre!("{e}"))?;
+    let envelope = MorphTxEnvelope::Eip1559(tx.into_signed(sig));
+    Ok(envelope.encoded_2718().into())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tx_max_fee_below_morph_base_fee_rejected_by_default() -> eyre::Result<()> {
+    use jsonrpsee::core::client::ClientT;
+
+    reth_tracing::init_test_tracing();
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+
+    let below_floor = sign_eip1559_transfer(
+        wallet.chain_id,
+        &wallet.inner,
+        0,
+        morph_chainspec::MORPH_BASE_FEE as u128 - 1,
+        0,
+    )?;
+
+    // Morph fixes L2 baseFee at MORPH_BASE_FEE (1_000_000 wei), so transactions
+    // below it can never be mined and must be rejected outright rather than
+    // parked in basefee_pool (where they would also inflate pending nonces).
+    let err = node
+        .rpc
+        .inject_tx(below_floor)
+        .await
+        .expect_err("tx with maxFeePerGas < MORPH_BASE_FEE must be rejected by default");
+    let err_msg = err.to_string().to_lowercase();
+    assert!(
+        err_msg.contains("underpriced") || err_msg.contains("below chain minimum"),
+        "expected underpriced/below-minimum error, got: {err}"
+    );
+
+    // Pending nonce must remain clean (0) after the rejection.
+    let client = node
+        .rpc_client()
+        .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
+    let pending_nonce: U256 = client
+        .request(
+            "eth_getTransactionCount",
+            (wallet.inner.address(), "pending"),
+        )
+        .await?;
+    assert_eq!(
+        pending_nonce,
+        U256::ZERO,
+        "rejected sub-basefee tx must not inflate eth_getTransactionCount(\"pending\")"
+    );
+
+    // Exact MORPH_BASE_FEE with zero priority fee must still be accepted and mined.
+    let at_floor = sign_eip1559_transfer(
+        wallet.chain_id,
+        &wallet.inner,
+        0,
+        morph_chainspec::MORPH_BASE_FEE as u128,
+        0,
+    )?;
+    node.rpc.inject_tx(at_floor).await?;
+    let payload = node.advance_block().await?;
+    assert_eq!(
+        payload.block().body().transactions.len(),
+        1,
+        "tx with maxFeePerGas == MORPH_BASE_FEE should be included"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tx_max_fee_below_base_fee_accepted_when_minimal_protocol_fee_lowered() -> eyre::Result<()>
+{
+    reth_tracing::init_test_tracing();
+    // Simulates operators passing `--txpool.minimal-protocol-fee 7`.
+    let (mut nodes, wallet) = TestNodeBuilder::new()
+        .with_minimal_protocol_basefee(7)
+        .build()
+        .await?;
+    let node = nodes.pop().unwrap();
+
+    let raw = sign_eip1559_transfer(wallet.chain_id, &wallet.inner, 0, 500_000, 500_000)?;
     let result = node.rpc.inject_tx(raw).await;
     assert!(
         result.is_ok(),
-        "tx with maxFeePerGas < baseFee should be accepted for queuing"
+        "tx with maxFeePerGas < baseFee should be accepted when minimal_protocol_basefee is lowered"
     );
     Ok(())
 }

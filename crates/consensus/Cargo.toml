@@ -19,12 +19,12 @@ morph-primitives = { workspace = true, features = ["serde-bincode-compat", "reth
 # Reth
 reth-consensus.workspace = true
 reth-consensus-common.workspace = true
+reth-execution-types.workspace = true
 reth-primitives-traits.workspace = true
 
 # Alloy
 alloy-consensus.workspace = true
 alloy-eips.workspace = true
-alloy-evm.workspace = true
 alloy-primitives.workspace = true
 alloy-rlp.workspace = true
 

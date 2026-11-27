@@ -2,32 +2,29 @@
 
 use std::fmt::Debug;
 
-use alloy_primitives::keccak256;
+use alloy_primitives::{Address, B256, BlockNumber, Bytes, StorageValue, keccak256};
 use parking_lot::{MappedMutexGuard, Mutex, MutexGuard};
 use reth_primitives_traits::{Account, Bytecode};
 use reth_provider::{
     AccountReader, BlockHashReader, BytecodeReader, HashedPostStateProvider, ProviderError,
     ProviderResult, StateProofProvider, StateProvider, StateRootProvider, StorageRootProvider,
 };
-use reth_revm::{
-    db::BundleState,
-    primitives::{Address, B256, Bytes, StorageValue, alloy_primitives::BlockNumber},
-};
 use reth_trie::{
     StateRoot, StorageRoot,
     hashed_cursor::{HashedCursor, zero_destroyed_account_storage},
     proof::{self, Proof},
+    proof_v2::MultiProofCalculator,
     witness::TrieWitness,
 };
 use reth_trie_common::{
-    AccountProof, ExecutionWitnessMode, HashedPostState, HashedStorage, KeccakKeyHasher,
-    MultiProof, MultiProofTargets, StorageMultiProof, StorageProof, TrieInput,
-    updates::TrieUpdates,
+    AccountProof, DecodedMultiProofV2, ExecutionWitnessMode, HashedPostState, HashedStorage,
+    KeccakKeyHasher, MultiProof, MultiProofTargets, MultiProofTargetsV2, StorageMultiProof,
+    StorageProof, TrieInput, bundle_state::BundleState, updates::TrieUpdates,
 };
 
 use crate::{
     MorphProofsHashedAccountCursorFactory, MorphProofsStorage, MorphProofsStorageError,
-    MorphProofsStore,
+    MorphProofsStore, MorphProofsTrieCursorFactory,
     proof::{
         DatabaseProof, DatabaseStateRoot, DatabaseStorageProof, DatabaseStorageRoot,
         DatabaseTrieWitness,
@@ -259,6 +256,24 @@ impl<'a, Storage: MorphProofsStore + Clone> StateProofProvider
             .map_err(ProviderError::from)
     }
 
+    fn multiproof_v2(
+        &self,
+        targets: MultiProofTargetsV2,
+        _requires_masks: bool,
+    ) -> ProviderResult<DecodedMultiProofV2> {
+        // The versioned trie at `block_number` is the exact trie persisted for that block, so
+        // masks always match and `requires_masks` needs no special handling.
+        let tx = self.ensure_tx()?;
+        MultiProofCalculator::new(
+            MorphProofsTrieCursorFactory::new(self.storage, &tx, self.block_number),
+            MorphProofsHashedAccountCursorFactory::new(self.storage, &tx, self.block_number),
+            Default::default(),
+            Default::default(),
+        )
+        .multiproof(targets)
+        .map_err(ProviderError::from)
+    }
+
     fn witness(
         &self,
         input: TrieInput,
@@ -337,17 +352,137 @@ impl<'a, Storage: MorphProofsStore> BytecodeReader for MorphProofsStateProviderR
 }
 
 #[cfg(test)]
-mod tests {
-    use alloy_eips::BlockNumHash;
+pub(crate) mod tests {
+    use std::sync::Arc;
+
+    use alloy_eips::{BlockNumHash, NumHash, eip1898::BlockWithParent};
     use alloy_primitives::U256;
     use reth_provider::noop::NoopProvider;
-    use reth_revm::{
-        db::{AccountStatus, BundleAccount},
-        state::AccountInfo,
+    use reth_trie_common::{
+        ProofV2Target,
+        bundle_state::{AccountStatus, BundleAccount},
     };
 
     use super::*;
-    use crate::{InMemoryProofsStorage, MorphProofsInitialStateStore};
+    use crate::{
+        BlockStateDiff, InMemoryProofsStorage, MdbxProofsStorage, MorphProofsInitialStateStore,
+    };
+
+    /// Stores two contracts as block 1, each with a storage trie deep enough to persist branch
+    /// nodes, and returns the state root together with every contract's slots.
+    pub(crate) fn store_two_contracts<S>(storage: &S) -> (B256, Vec<(Address, Vec<B256>)>)
+    where
+        S: MorphProofsStore + MorphProofsInitialStateStore + Clone,
+    {
+        let genesis_hash = B256::repeat_byte(0x01);
+        storage
+            .set_initial_state_anchor(BlockNumHash::new(0, genesis_hash))
+            .unwrap();
+        storage.commit_initial_state().unwrap();
+
+        let contracts: Vec<(Address, Vec<B256>)> = [0x11, 0x22]
+            .map(|byte| {
+                let slots = (0..32).map(B256::with_last_byte).collect();
+                (Address::repeat_byte(byte), slots)
+            })
+            .into();
+
+        let mut post_state = HashedPostState::default();
+        for (address, slots) in &contracts {
+            let hashed_address = keccak256(address);
+            let account = Account {
+                nonce: 1,
+                balance: U256::from(1),
+                bytecode_hash: None,
+            };
+            post_state.accounts.insert(hashed_address, Some(account));
+            post_state.storages.insert(
+                hashed_address,
+                HashedStorage::from_iter(slots.iter().map(|slot| (keccak256(slot), U256::from(1)))),
+            );
+        }
+
+        let (state_root, trie_updates) =
+            StateRoot::overlay_root_with_updates(storage, 0, post_state.clone()).unwrap();
+        assert!(
+            trie_updates.storage_tries_ref().len() == contracts.len()
+                && trie_updates
+                    .storage_tries_ref()
+                    .values()
+                    .all(|trie| !trie.storage_nodes_ref().is_empty()),
+            "every contract must persist storage trie nodes for the cursors to read"
+        );
+
+        storage
+            .store_trie_updates(
+                BlockWithParent::new(genesis_hash, NumHash::new(1, B256::repeat_byte(0x02))),
+                BlockStateDiff {
+                    sorted_trie_updates: trie_updates.into_sorted(),
+                    sorted_post_state: post_state.into_sorted(),
+                },
+            )
+            .unwrap();
+
+        (state_root, contracts)
+    }
+
+    /// Proves every contract in a single request, which makes the calculator retarget its shared
+    /// storage cursors between accounts, and checks the result against the legacy proof path.
+    pub(crate) fn assert_multiproof_v2_matches_proof<P: StateProofProvider>(
+        provider: &P,
+        state_root: B256,
+        contracts: &[(Address, Vec<B256>)],
+    ) {
+        let mut targets = MultiProofTargetsV2::default();
+        for (address, slots) in contracts {
+            let hashed_address = keccak256(address);
+            targets
+                .account_targets
+                .push(ProofV2Target::new(hashed_address));
+            targets.storage_targets.insert(
+                hashed_address,
+                slots
+                    .iter()
+                    .map(|slot| ProofV2Target::new(keccak256(slot)))
+                    .collect(),
+            );
+        }
+
+        let multiproof = provider.multiproof_v2(targets, false).unwrap();
+
+        for (address, slots) in contracts {
+            let proof = multiproof.account_proof(*address, slots).unwrap();
+            assert_eq!(proof.storage_proofs.len(), slots.len());
+            proof.verify(state_root).unwrap();
+            assert_eq!(
+                proof,
+                provider
+                    .proof(TrieInput::default(), *address, slots)
+                    .unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn multiproof_v2_matches_proof_in_memory() {
+        let storage = InMemoryProofsStorage::new();
+        let (state_root, contracts) = store_two_contracts(&storage);
+        let provider =
+            MorphProofsStateProviderRef::new(Box::<NoopProvider>::default(), &storage, 1);
+
+        assert_multiproof_v2_matches_proof(&provider, state_root, &contracts);
+    }
+
+    #[test]
+    fn multiproof_v2_matches_proof_in_mdbx() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Arc::new(MdbxProofsStorage::new(directory.path()).unwrap());
+        let (state_root, contracts) = store_two_contracts(&storage);
+        let provider =
+            MorphProofsStateProviderRef::new(Box::<NoopProvider>::default(), &storage, 1);
+
+        assert_multiproof_v2_matches_proof(&provider, state_root, &contracts);
+    }
 
     #[test]
     fn test_morph_proofs_state_provider_ref_debug() {
@@ -382,7 +517,7 @@ mod tests {
         bundle_state.state.insert(
             address,
             BundleAccount::new(
-                Some(AccountInfo::default()),
+                Some(Default::default()),
                 None,
                 Default::default(),
                 AccountStatus::Destroyed,

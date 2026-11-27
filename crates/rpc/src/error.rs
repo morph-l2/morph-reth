@@ -1,10 +1,10 @@
 //! Error types for Morph RPC
 
 use alloy_primitives::B256;
-use morph_evm::MorphEvmConfig;
+use alloy_rpc_types_eth::error::EthRpcErrorCode;
+use evm2::interpreter::InstrStop;
 use reth_errors::ProviderError;
-use reth_evm::revm::context::result::EVMError;
-use reth_evm::{HaltReasonFor, InvalidTxError};
+use reth_evm::BlockExecutionError;
 use reth_rpc_convert::TransactionConversionError;
 use reth_rpc_eth_types::{
     EthApiError,
@@ -90,9 +90,6 @@ pub enum MorphEthApiError {
 
 impl MorphEthApiError {
     /// JSON-RPC error code reported for [`Self::StateNotAvailable`].
-    ///
-    /// Exposed so other error types that mean the same thing to a client can report it without
-    /// duplicating the literal. Used by the historical-proof window errors in [`crate::state`].
     pub const STATE_NOT_AVAILABLE_CODE: i32 = -32005;
 }
 
@@ -100,6 +97,13 @@ impl MorphEthApiError {
 impl From<MorphEthApiError> for jsonrpsee::types::ErrorObject<'static> {
     fn from(err: MorphEthApiError) -> Self {
         match err {
+            MorphEthApiError::Eth(
+                ref e @ EthApiError::TransactionConfirmationTimeout { hash, .. },
+            ) => jsonrpsee::types::ErrorObject::owned(
+                EthRpcErrorCode::TransactionConfirmationTimeout.code(),
+                e.to_string(),
+                Some(hash),
+            ),
             MorphEthApiError::Eth(e) => e.into(),
             MorphEthApiError::BlockNotFound => {
                 jsonrpsee::types::ErrorObject::owned(-32001, "Block not found", None::<()>)
@@ -172,8 +176,8 @@ impl AsEthApiError for MorphEthApiError {
 // We get it for free since we have `#[from] EthApiError` above.
 
 /// Converts EVM halt reasons to [`MorphEthApiError`].
-impl FromEvmHalt<HaltReasonFor<MorphEvmConfig>> for MorphEthApiError {
-    fn from_evm_halt(halt: HaltReasonFor<MorphEvmConfig>, gas_limit: u64) -> Self {
+impl FromEvmHalt<InstrStop> for MorphEthApiError {
+    fn from_evm_halt(halt: InstrStop, gas_limit: u64) -> Self {
         Self::Eth(EthApiError::from_evm_halt(halt, gas_limit))
     }
 }
@@ -192,13 +196,12 @@ impl From<ProviderError> for MorphEthApiError {
     }
 }
 
-/// Converts [`EVMError`] to [`MorphEthApiError`].
-impl<T, TxError> From<EVMError<T, TxError>> for MorphEthApiError
-where
-    T: Into<EthApiError>,
-    TxError: InvalidTxError,
-{
-    fn from(err: EVMError<T, TxError>) -> Self {
+/// Converts [`BlockExecutionError`] to [`MorphEthApiError`].
+///
+/// Standard rejections keep their Ethereum JSON-RPC error; Morph's own are reported with their
+/// message as a rejected transaction.
+impl From<BlockExecutionError> for MorphEthApiError {
+    fn from(err: BlockExecutionError) -> Self {
         Self::Eth(err.into())
     }
 }
@@ -255,6 +258,23 @@ mod tests {
             MorphEthApiError::Provider("provider fail".to_string()).to_string(),
             "provider error: provider fail"
         );
+    }
+
+    #[test]
+    fn confirmation_timeout_error_includes_code_4_and_tx_hash_data() {
+        let hash = B256::repeat_byte(0xab);
+        let err = MorphEthApiError::Eth(EthApiError::TransactionConfirmationTimeout {
+            hash,
+            duration: std::time::Duration::from_secs(2),
+        });
+        let obj: jsonrpsee::types::ErrorObject<'static> = err.into();
+        assert_eq!(obj.code(), 4);
+        assert!(obj.message().contains(&hash.to_string()));
+        let data = obj
+            .data()
+            .expect("EIP-7966 timeout error must carry tx hash in error.data");
+        let parsed: B256 = serde_json::from_str(data.get()).expect("error.data must be a hex hash");
+        assert_eq!(parsed, hash);
     }
 
     #[test]

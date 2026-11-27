@@ -33,6 +33,12 @@ pub enum MorphTxError {
         token_id: u16,
     },
 
+    /// Token scale is zero or invalid.
+    InvalidTokenScale {
+        /// The token ID with invalid scale.
+        token_id: u16,
+    },
+
     /// Insufficient ERC20 token balance to pay for gas.
     InsufficientTokenBalance {
         /// The token ID.
@@ -66,6 +72,16 @@ pub enum MorphTxError {
         /// Reason for the validation failure.
         reason: String,
     },
+
+    /// Transaction type or version requires a hardfork that is not yet active on this node.
+    ///
+    /// Separated from [`Self::InvalidFormat`] / `TxTypeNotSupported` so peers that are one
+    /// block ahead across a hardfork boundary are not penalized or banned for relaying valid
+    /// post-fork transactions.
+    ForkNotActive {
+        /// Human-readable description of the inactive hardfork gate.
+        reason: String,
+    },
 }
 
 impl fmt::Display for MorphTxError {
@@ -85,6 +101,9 @@ impl fmt::Display for MorphTxError {
             }
             Self::InvalidPriceRatio { token_id } => {
                 write!(f, "token ID {token_id} has invalid price ratio (zero)")
+            }
+            Self::InvalidTokenScale { token_id } => {
+                write!(f, "token ID {token_id} has invalid scale (zero)")
             }
             Self::InsufficientTokenBalance {
                 token_id,
@@ -110,6 +129,9 @@ impl fmt::Display for MorphTxError {
             Self::InvalidFormat { reason } => {
                 write!(f, "invalid MorphTx format: {reason}")
             }
+            Self::ForkNotActive { reason } => {
+                write!(f, "{reason}")
+            }
         }
     }
 }
@@ -119,16 +141,21 @@ impl std::error::Error for MorphTxError {}
 impl PoolTransactionError for MorphTxError {
     fn is_bad_transaction(&self) -> bool {
         // MorphTx validation errors are not necessarily "bad" transactions that warrant
-        // peer penalization. They are often just insufficient balance or inactive tokens.
+        // peer penalization. They are often just insufficient balance, inactive tokens,
+        // or a peer being slightly ahead across a hardfork activation boundary.
         match self {
             // Missing/invalid MorphTx fee fields indicate malformed transaction input.
             Self::InvalidTokenId => true,
             // Format violations (bad version, memo too long, etc.) are malformed input.
             Self::InvalidFormat { .. } => true,
+            // Fork not yet active on our local head - peer may simply be 1 block ahead
+            Self::ForkNotActive { .. } => false,
             // Token not found or not active - could be due to temporary state, not penalizable
             Self::TokenNotFound { .. } | Self::TokenNotActive { .. } => false,
-            // Invalid price ratio - configuration issue, not penalizable
-            Self::InvalidPriceRatio { .. } | Self::TokenBalanceQueryFailed { .. } => false,
+            // Invalid price ratio, scale, or balanceOf failure - state/config issue, not penalizable
+            Self::InvalidPriceRatio { .. }
+            | Self::InvalidTokenScale { .. }
+            | Self::TokenBalanceQueryFailed { .. } => false,
             // Insufficient balance or fee limit - normal validation failure
             Self::InsufficientTokenBalance { .. } | Self::InsufficientEthForValue { .. } => false,
         }
@@ -146,12 +173,8 @@ impl From<MorphTxError> for InvalidPoolTransactionError {
                 cost: value,
                 balance,
             },
-            MorphTxError::InsufficientTokenBalance {
-                balance, required, ..
-            } => Self::Overdraft {
-                cost: required,
-                balance,
-            },
+            // Keep `InsufficientTokenBalance` as `Other` rather than `Overdraft` so RPC
+            // callers receive the token-denominated message instead of ETH wei wording.
             _ => Self::Other(Box::new(err)),
         }
     }
@@ -224,6 +247,9 @@ mod tests {
 
     #[test]
     fn test_error_conversion_insufficient_token() {
+        use alloy_primitives::TxHash;
+        use reth_transaction_pool::error::PoolError;
+
         let err = MorphTxError::InsufficientTokenBalance {
             token_id: 1,
             token_address: address!("1234567890123456789012345678901234567890"),
@@ -231,14 +257,19 @@ mod tests {
             required: U256::from(60),
         };
         let pool_err: InvalidPoolTransactionError = err.into();
-        assert!(matches!(
-            pool_err,
-            InvalidPoolTransactionError::Overdraft { .. }
-        ));
+        assert!(matches!(pool_err, InvalidPoolTransactionError::Other(_)));
+        assert!(
+            pool_err.to_string().contains("insufficient token balance"),
+            "expected token balance error message, got: {pool_err}"
+        );
+        assert!(!PoolError::new(TxHash::ZERO, pool_err).is_bad_transaction());
     }
 
     #[test]
     fn test_is_bad_transaction() {
+        use alloy_primitives::TxHash;
+        use reth_transaction_pool::error::PoolError;
+
         // Malformed = bad
         assert!(MorphTxError::InvalidTokenId.is_bad_transaction());
         assert!(
@@ -247,6 +278,14 @@ mod tests {
             }
             .is_bad_transaction()
         );
+
+        // Fork not active = not bad (peer may be 1 block ahead across a fork boundary)
+        let fork_err = MorphTxError::ForkNotActive {
+            reason: "MorphTx version 2 is not yet active (celadon fork not reached)".into(),
+        };
+        assert!(!fork_err.is_bad_transaction());
+        let pool_fork_err: InvalidPoolTransactionError = fork_err.into();
+        assert!(!PoolError::new(TxHash::ZERO, pool_fork_err).is_bad_transaction());
 
         // Insufficient funds = not bad (shouldn't penalize peer)
         assert!(
@@ -271,6 +310,8 @@ mod tests {
         assert!(!MorphTxError::TokenNotFound { token_id: 1 }.is_bad_transaction());
         assert!(!MorphTxError::TokenNotActive { token_id: 1 }.is_bad_transaction());
         assert!(!MorphTxError::InvalidPriceRatio { token_id: 1 }.is_bad_transaction());
+        assert!(!MorphTxError::InvalidTokenScale { token_id: 1 }.is_bad_transaction());
+        assert!(!MorphTxError::TokenBalanceQueryFailed { token_id: 1 }.is_bad_transaction());
     }
 
     #[test]
@@ -281,6 +322,7 @@ mod tests {
             MorphTxError::TokenNotFound { token_id: 1 },
             MorphTxError::TokenNotActive { token_id: 2 },
             MorphTxError::InvalidPriceRatio { token_id: 3 },
+            MorphTxError::InvalidTokenScale { token_id: 3 },
             MorphTxError::InsufficientTokenBalance {
                 token_id: 4,
                 token_address: Address::ZERO,

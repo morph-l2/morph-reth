@@ -14,6 +14,7 @@ use morph_primitives::{MorphTxEnvelope, MorphTxType};
 use reth_primitives_traits::InMemorySize;
 use reth_transaction_pool::{
     EthBlobTransactionSidecar, EthPoolTransaction, EthPooledTransaction, PoolTransaction,
+    PriceBumpConfig,
 };
 use std::sync::{Arc, OnceLock};
 
@@ -130,6 +131,25 @@ impl PoolTransaction for MorphPooledTransaction {
 
     fn encoded_length(&self) -> usize {
         self.inner.encoded_length
+    }
+
+    fn is_replacement_underpriced(
+        &self,
+        replacement: &Self,
+        price_bumps: &PriceBumpConfig,
+    ) -> bool {
+        // Upstream `PriceBumpConfig::is_replacement_underpriced` skips the priority-fee bump
+        // whenever `replacement_max_priority_fee_per_gas == 0`, allowing a dynamic-fee tx
+        // (EIP-1559 / EIP-7702 / MorphTx) with `tip == 0` to replace a `tip > 0` tx by only
+        // inflating `max_fee_per_gas`. On Morph's fixed low base fee, that downgrades the
+        // effective tip to zero, so reject it explicitly while preserving Legacy replacements
+        // (`max_priority_fee_per_gas() == None`) and `0 -> 0` tip replacements.
+        if self.max_priority_fee_per_gas().is_some_and(|tip| tip > 0)
+            && replacement.max_priority_fee_per_gas() == Some(0)
+        {
+            return true;
+        }
+        price_bumps.is_replacement_underpriced(self, replacement)
     }
 }
 
@@ -417,6 +437,99 @@ mod tests {
         assert!(tx.encoded_length() > 0);
     }
 
+    fn create_eip1559_pooled_tx(
+        max_fee_per_gas: u128,
+        max_priority_fee_per_gas: u128,
+    ) -> MorphPooledTransaction {
+        use alloy_consensus::TxEip1559;
+        let tx = TxEip1559 {
+            chain_id: 1337,
+            nonce: 0,
+            gas_limit: 21_000,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+            to: TxKind::Call(Address::repeat_byte(0x02)),
+            value: U256::ZERO,
+            access_list: Default::default(),
+            input: Bytes::new(),
+        };
+        let sig = Signature::test_signature();
+        let envelope = MorphTxEnvelope::Eip1559(Signed::new_unhashed(tx, sig));
+        let recovered = Recovered::new_unchecked(envelope, Address::repeat_byte(0xaa));
+        let len = recovered.encode_2718_len();
+        MorphPooledTransaction::new(recovered, len)
+    }
+
+    fn create_morph_pooled_tx_with_fees(
+        max_fee_per_gas: u128,
+        max_priority_fee_per_gas: u128,
+    ) -> MorphPooledTransaction {
+        use morph_primitives::TxMorph;
+        let tx = TxMorph {
+            chain_id: 1337,
+            nonce: 0,
+            gas_limit: 21_000,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+            to: TxKind::Call(Address::repeat_byte(0x02)),
+            value: U256::ZERO,
+            access_list: Default::default(),
+            version: 0,
+            fee_token_id: 1,
+            fee_limit: U256::from(1000u64),
+            reference: None,
+            memo: None,
+            authorization_list: Vec::new(),
+            input: Bytes::new(),
+        };
+        let sig = Signature::test_signature();
+        let envelope = MorphTxEnvelope::Morph(Signed::new_unhashed(tx, sig));
+        let recovered = Recovered::new_unchecked(envelope, Address::repeat_byte(0xaa));
+        let len = recovered.encode_2718_len();
+        MorphPooledTransaction::new(recovered, len)
+    }
+
+    fn create_eip7702_pooled_tx(
+        max_fee_per_gas: u128,
+        max_priority_fee_per_gas: u128,
+    ) -> MorphPooledTransaction {
+        use alloy_consensus::TxEip7702;
+        let tx = TxEip7702 {
+            chain_id: 1337,
+            nonce: 0,
+            gas_limit: 21_000,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+            to: Address::repeat_byte(0x02),
+            value: U256::ZERO,
+            access_list: Default::default(),
+            authorization_list: Vec::new(),
+            input: Bytes::new(),
+        };
+        let sig = Signature::test_signature();
+        let envelope = MorphTxEnvelope::Eip7702(Signed::new_unhashed(tx, sig));
+        let recovered = Recovered::new_unchecked(envelope, Address::repeat_byte(0xaa));
+        let len = recovered.encode_2718_len();
+        MorphPooledTransaction::new(recovered, len)
+    }
+
+    fn create_legacy_pooled_tx_with_gas_price(gas_price: u128) -> MorphPooledTransaction {
+        let tx = TxLegacy {
+            chain_id: Some(1337),
+            nonce: 0,
+            gas_price,
+            gas_limit: 21_000,
+            to: TxKind::Call(Address::repeat_byte(0x02)),
+            value: U256::ZERO,
+            input: Bytes::new(),
+        };
+        let sig = Signature::test_signature();
+        let envelope = MorphTxEnvelope::Legacy(Signed::new_unhashed(tx, sig));
+        let recovered = Recovered::new_unchecked(envelope, Address::repeat_byte(0xaa));
+        let len = recovered.encode_2718_len();
+        MorphPooledTransaction::new(recovered, len)
+    }
+
     fn create_morph_pooled_tx_with(fee_token_id: u16, value: U256) -> MorphPooledTransaction {
         use morph_primitives::TxMorph;
         let tx = TxMorph {
@@ -441,6 +554,67 @@ mod tests {
         let recovered = Recovered::new_unchecked(envelope, Address::repeat_byte(0xcc));
         let len = recovered.encode_2718_len();
         MorphPooledTransaction::new(recovered, len)
+    }
+
+    #[test]
+    fn test_replacement_rejects_zero_tip_downgrade_from_positive_tip() {
+        let bumps = PriceBumpConfig::default();
+
+        // EIP-1559 (tip > 0) -> EIP-1559 / MorphTx / EIP-7702 (tip == 0) with bumped maxFee
+        let existing_1559 = create_eip1559_pooled_tx(10_000_000_000, 5_000_000_000);
+        let zero_tip_1559 = create_eip1559_pooled_tx(20_000_000_000, 0);
+        let zero_tip_morph = create_morph_pooled_tx_with_fees(20_000_000_000, 0);
+        let zero_tip_7702 = create_eip7702_pooled_tx(20_000_000_000, 0);
+
+        assert!(existing_1559.is_replacement_underpriced(&zero_tip_1559, &bumps));
+        assert!(existing_1559.is_replacement_underpriced(&zero_tip_morph, &bumps));
+        assert!(existing_1559.is_replacement_underpriced(&zero_tip_7702, &bumps));
+
+        // MorphTx (tip > 0) -> MorphTx / EIP-1559 (tip == 0)
+        let existing_morph = create_morph_pooled_tx_with_fees(10_000_000_000, 5_000_000_000);
+        assert!(existing_morph.is_replacement_underpriced(&zero_tip_morph, &bumps));
+        assert!(existing_morph.is_replacement_underpriced(&zero_tip_1559, &bumps));
+
+        // EIP-7702 (tip > 0) -> EIP-7702 / EIP-1559 (tip == 0)
+        let existing_7702 = create_eip7702_pooled_tx(10_000_000_000, 5_000_000_000);
+        assert!(existing_7702.is_replacement_underpriced(&zero_tip_7702, &bumps));
+        assert!(existing_7702.is_replacement_underpriced(&zero_tip_1559, &bumps));
+    }
+
+    #[test]
+    fn test_replacement_preserves_valid_bumps_zero_to_zero_and_legacy() {
+        let bumps = PriceBumpConfig::default();
+
+        // 0-tip -> 0-tip with >= 10% maxFee bump is still allowed
+        let zero_1559 = create_eip1559_pooled_tx(1_000_000, 0);
+        let zero_1559_bumped = create_eip1559_pooled_tx(1_100_000, 0);
+        let zero_1559_low = create_eip1559_pooled_tx(1_099_999, 0);
+        assert!(!zero_1559.is_replacement_underpriced(&zero_1559_bumped, &bumps));
+        assert!(zero_1559.is_replacement_underpriced(&zero_1559_low, &bumps));
+
+        let zero_morph = create_morph_pooled_tx_with_fees(1_000_000, 0);
+        let zero_morph_bumped = create_morph_pooled_tx_with_fees(1_100_000, 0);
+        assert!(!zero_morph.is_replacement_underpriced(&zero_morph_bumped, &bumps));
+
+        // 0-tip -> positive-tip with >= 10% maxFee bump is allowed
+        let pos_1559_bumped = create_eip1559_pooled_tx(1_100_000, 100_000);
+        assert!(!zero_1559.is_replacement_underpriced(&pos_1559_bumped, &bumps));
+
+        // positive-tip -> positive-tip requires >= 10% bump on both maxFee and tip
+        let existing = create_eip1559_pooled_tx(10_000_000, 2_000_000);
+        let good_bump = create_eip1559_pooled_tx(11_000_000, 2_200_000);
+        let low_tip_bump = create_eip1559_pooled_tx(11_000_000, 2_199_999);
+        assert!(!existing.is_replacement_underpriced(&good_bump, &bumps));
+        assert!(existing.is_replacement_underpriced(&low_tip_bump, &bumps));
+
+        // EIP-1559 (tip > 0) -> Legacy (gasPrice >= 1.1x maxFee) is allowed
+        let legacy_bumped = create_legacy_pooled_tx_with_gas_price(11_000_000);
+        assert!(!existing.is_replacement_underpriced(&legacy_bumped, &bumps));
+
+        // Legacy -> EIP-1559 with >= 1.1x maxFee preserves upstream reth behavior
+        let legacy = create_legacy_pooled_tx_with_gas_price(10_000_000);
+        let eip1559_from_legacy = create_eip1559_pooled_tx(11_000_000, 2_000_000);
+        assert!(!legacy.is_replacement_underpriced(&eip1559_from_legacy, &bumps));
     }
 
     /// A MorphTx paying gas in an ERC20 token must report an ETH cost of `value` only.

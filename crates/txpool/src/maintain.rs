@@ -15,8 +15,8 @@
 //! 1. Listening to canonical state changes (new blocks)
 //! 2. Re-validating every pooled transaction, including those parked behind a nonce gap,
 //!    against the sender's current account balances
-//! 3. Removing the first transaction with an L1 fee or token shortfall that reth cannot
-//!    handle, letting the pool park its descendants
+//! 3. Removing every transaction with a block-gas-limit, L1 fee, or token-fee violation
+//!    that reth cannot handle, letting the pool park surviving descendants
 //!
 //! # Relationship with reth's own maintenance task
 //!
@@ -25,8 +25,9 @@
 //! guarantee between them. Everything reth's task already understands (ETH balance, nonces,
 //! base fee, mined transactions) stays its responsibility. This task also checks the
 //! sender's **ERC20 token** balance and the **L1 data fees** missing from reth's cost.
-//! An ordinary transaction that cannot cover L1 fees is
-//! removed so its descendants are parked instead of remaining unchecked in pending.
+//! Every transaction of a sender at or above the on-chain nonce is revalidated in one pass,
+//! matching go-ethereum's full-list filter; removing offending transactions lets reth park
+//! any surviving descendants.
 //!
 //! Because the ordering is not guaranteed, this task must tolerate seeing a pool snapshot
 //! that still contains transactions the new block already executed. It does so by reading
@@ -40,19 +41,22 @@
 //! and `demoteUnexecutables` (tx_pool.go), but implemented as a separate
 //! maintenance task since we cannot modify reth's internal pool logic.
 
-use crate::{MorphPooledTransaction, MorphTxValidationError, MorphValidationState};
+use crate::{
+    MorphPooledTransaction, MorphTxValidationError, MorphValidationState,
+    morph_tx_validation::validate_morph_tx_with,
+    state_cache::{StateCache, TokenFeeValidator},
+};
 use alloy_consensus::Transaction;
 use alloy_consensus::Typed2718;
 use alloy_primitives::{Address, B256, TxHash};
 use futures::{FutureExt, StreamExt};
-use morph_chainspec::hardfork::{MorphHardfork, MorphHardforks};
-use morph_revm::{L1BlockInfo, MorphBlockEnv, MorphEvmEnv};
+use morph_chainspec::hardfork::MorphHardforks;
+use morph_revm::{L1BlockInfo, MorphEvmEnv};
 use reth_chainspec::ChainSpecProvider;
-use reth_evm::{ConfigureEvm, EvmFactory, EvmFactoryFor};
+use reth_evm::{ConfigureEvm, Database, EvmEnvFor, database::StateProviderDatabase};
 use reth_primitives_traits::{AlloyBlockHeader, HeaderTy, NodePrimitives, SealedHeader};
 use reth_provider::CanonStateSubscriptions;
-use reth_revm::database::StateProviderDatabase;
-use reth_storage_api::{BlockReaderIdExt, StateProviderFactory};
+use reth_storage_api::{BlockReaderIdExt, StateProvider as _, StateProviderFactory};
 use reth_transaction_pool::{PoolTransaction, TransactionPool};
 use std::collections::{HashMap, HashSet};
 
@@ -80,7 +84,7 @@ impl<Client, Evm> FeeStateSource<Evm::Primitives> for ProviderFeeState<Client, E
 where
     Client: StateProviderFactory + BlockReaderIdExt<Header = HeaderTy<Evm::Primitives>>,
     Evm: ConfigureEvm,
-    EvmFactoryFor<Evm>: EvmFactory<Spec = MorphHardfork, BlockEnv = MorphBlockEnv>,
+    EvmEnvFor<Evm>: Into<MorphEvmEnv>,
 {
     fn state_for(
         &self,
@@ -100,124 +104,135 @@ fn exceeds_block_gas_limit(tx_gas_limit: u64, block_gas_limit: u64) -> bool {
 
 /// Determines which transactions to remove while revalidating all senders' fee affordability.
 ///
-/// Returns the hashes to remove from the pool. Only the first offending transaction of a
-/// sender is returned: the pool parks the rest of that sender's transactions on its own when
-/// the returned hash is removed (see [`maintain_morph_pool`]).
-fn collect_removable_transactions<DB: alloy_evm::Database>(
+/// Scans every transaction of each sender at or above the sender's on-chain nonce and returns
+/// every offending hash in one pass, matching go-ethereum's full-sender filter (`txList.FilterF`).
+/// Continuing past ETH-parked or invalid predecessors prevents an earlier parked transaction from
+/// shielding invalid higher-nonce transactions that reth would otherwise promote unvalidated once
+/// the predecessor is replaced or funded. Surviving descendants of removed transactions are parked
+/// automatically by reth's `remove_transactions` (see [`maintain_morph_pool`]).
+fn collect_removable_transactions<DB: Database>(
     db: &mut DB,
     l1_block_info: &L1BlockInfo,
     evm_env: &MorphEvmEnv,
     block_gas_limit: u64,
     pool_txs: Vec<&MorphPooledTransaction>,
 ) -> Vec<TxHash> {
-    let hardfork = *evm_env.cfg_env.spec();
-    // These caches live for exactly this provider/environment snapshot. Cache successful
-    // reads only; a later block must re-read changed registry parameters and balances.
-    let mut token_entries = HashMap::new();
-    let mut token_balances = HashMap::new();
-    // Group by sender and process in nonce order so removing a transaction parks its descendants.
+    let hardfork = evm_env.spec;
+
+    // Group by sender and process in nonce order for deterministic removal ordering.
     let mut txs_by_sender: HashMap<Address, Vec<&MorphPooledTransaction>> = HashMap::new();
     for tx in pool_txs {
         txs_by_sender.entry(tx.sender()).or_default().push(tx);
     }
 
-    let mut to_remove: Vec<TxHash> = Vec::new();
-
-    for (sender, mut sender_txs) in txs_by_sender {
-        sender_txs.sort_by_key(|tx| tx.transaction().nonce());
-
-        // Read one account per sender. Affordability is per transaction, matching
-        // admission and geth; cumulative ETH parking remains owned by reth.
-        let account = match db.basic(sender) {
-            Ok(account) => account.unwrap_or_default(),
+    // Read each sender's on-chain account once before constructing the reusable `TokenFeeValidator`
+    // over `&mut *db`. If a sender's account cannot be read due to a transient DB error, skip
+    // that sender instead of evicting their transactions.
+    let mut sender_accounts: HashMap<Address, evm2::evm::AccountInfo> =
+        HashMap::with_capacity(txs_by_sender.len());
+    for sender in txs_by_sender.keys() {
+        match db.get_account(sender) {
+            Ok(account) => {
+                sender_accounts.insert(*sender, account.unwrap_or_default());
+            }
             Err(err) => {
                 tracing::warn!(
                     target: "morph::txpool::maintain",
                     ?sender,
                     ?err,
-                    "Failed to get account info; skipping sender"
+                    "Failed to get account info; leaving sender's transactions in the pool"
                 );
-                continue;
             }
+        }
+    }
+
+    // Cache registry entries, storage reads, and call-mode `balanceOf` results across all
+    // transactions in this round only; a later block builds a fresh cache.
+    let cache = StateCache::default();
+    let mut token_validator = TokenFeeValidator::new(&cache, db, evm_env.clone());
+
+    let mut to_remove: Vec<TxHash> = Vec::new();
+
+    for (sender, mut sender_txs) in txs_by_sender {
+        let Some(account) = sender_accounts.get(&sender) else {
+            continue;
         };
+        sender_txs.sort_by_key(|tx| Transaction::nonce(*tx));
 
         for tx in sender_txs {
-            // Access the consensus tx by reference (via Deref chain) instead of
-            // cloning. Use the pool tx's cached EIP-2718 encoding for L1 fee.
             let consensus_tx = tx.transaction();
 
-            // Already executed by the new block. reth's own maintenance task removes these
-            // when it applies the same canonical update; both tasks subscribe to the
-            // canonical stream independently, so this one can still observe them here.
-            // Judging them is pointless, and removing one here would park the sender's next
-            // transaction until reth's own update re-promotes it.
-            if consensus_tx.nonce() < account.nonce {
+            // Standard maintenance removes mined transactions concurrently; skip any the
+            // new block already executed rather than judging them against post-block balances.
+            if tx.nonce() < account.nonce {
                 continue;
             }
 
-            // A nonce gap does not stop the walk. Every check below is per transaction
-            // against the sender's current balances, which is what admission applies and
-            // what go-ethereum's `promoteExecutables` applies to its whole queue (`FilterF`)
-            // before `Ready` promotes anything. Nothing here accumulates the costs of the
-            // missing predecessors, so a transaction parked behind a gap can be judged on its
-            // own. Left unchecked, reth would promote it unvalidated the moment the gap is
-            // filled: `AllTransactions::insert_tx` only recomputes the ETH cost bits, which
-            // for a token-fee MorphTx cover its value alone.
+            // A nonce gap or earlier invalid/ETH-parked transaction does not stop the walk.
+            // Every check below is per transaction against the sender's current balances,
+            // which is what admission applies and what go-ethereum's `promoteExecutables`
+            // applies to its whole queue (`FilterF`) before `Ready` promotes anything.
+            // Nothing here accumulates the costs of missing predecessors, so every transaction
+            // can be judged on its own. Stopping early would leave invalid higher-nonce
+            // transactions in the pool for reth to promote unvalidated the moment a
+            // predecessor is replaced or funded: `AllTransactions::insert_tx` only recomputes
+            // the ETH cost bits, which for a token-fee MorphTx cover its value alone.
 
             // Reth only sets its block-gas-limit flag at insertion, so a later
             // limit reduction needs the same explicit removal for both tx types.
             if exceeds_block_gas_limit(consensus_tx.gas_limit(), block_gas_limit) {
                 to_remove.push(*tx.hash());
-                break;
+                continue;
             }
 
-            // Reth knows this ETH cost (only value for token-fee MorphTx) and can
-            // park the transaction until a balance update makes it affordable again.
-            if *tx.cost() > account.balance {
-                break;
+            let uses_token_fee = consensus_tx.fee_token_id().is_some_and(|id| id > 0);
+
+            // For ETH-paying transactions (ordinary txs and `fee_token_id == 0` MorphTxs),
+            // reth knows `tx.cost()` (`gas_limit * max_fee_per_gas + value`) and parks the
+            // transaction until a balance update makes it affordable again. Do not remove it
+            // here, but keep scanning higher nonces so an ETH-parked predecessor cannot shield
+            // invalid descendants.
+            //
+            // For token-fee MorphTxs (`fee_token_id > 0`), `tx.cost()` is `value` alone: even
+            // when reth parks the transaction for an ETH `value` shortfall, we must still
+            // validate its token usability and token-fee affordability below so an invalid or
+            // unaffordable token transaction is not left parked and later promoted unvalidated
+            // when ETH arrives.
+            if *tx.cost() > account.balance && !uses_token_fee {
+                continue;
             }
 
             let l1_data_fee = l1_block_info.calculate_tx_l1_cost(tx.encoded_2718(), hardfork);
             if consensus_tx.ty() != morph_primitives::MORPH_TX_TYPE_ID {
                 if tx.cost().saturating_add(l1_data_fee) > account.balance {
                     to_remove.push(*tx.hash());
-                    break;
                 }
                 continue;
             }
 
-            // Validate each transaction against the same chain balance used at admission.
+            // Validate each MorphTx against the same chain balance used at admission.
+            // When a token-fee MorphTx is parked purely due to an ETH `value` shortfall
+            // (`tx.value() > account.balance`), raise `eth_balance` to `tx.value()` so
+            // `validate_morph_tx_with` does not treat that ETH shortfall as a removal reason
+            // (standard maintenance owns ETH `value` parking) while still enforcing hardfork,
+            // format, token usability, and token balance checks.
+            let eth_balance = if uses_token_fee {
+                account.balance.max(consensus_tx.value())
+            } else {
+                account.balance
+            };
             let input = crate::MorphTxValidationInput {
                 consensus_tx,
                 sender,
-                eth_balance: account.balance,
+                eth_balance,
                 l1_data_fee,
                 hardfork,
                 evm_env,
             };
 
-            match crate::morph_tx_validation::validate_morph_tx_with_token_info(
-                &input,
-                |token_id| {
-                    use morph_revm::TokenRegistryEntry;
-                    let entry = match token_entries.entry(token_id) {
-                        std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
-                        std::collections::hash_map::Entry::Vacant(entry) => {
-                            *entry.insert(TokenRegistryEntry::load(db, token_id)?)
-                        }
-                    };
-                    let Some(entry) = entry else {
-                        return Ok(None);
-                    };
-                    let info = match token_balances.entry((sender, token_id)) {
-                        std::collections::hash_map::Entry::Occupied(info) => *info.get(),
-                        std::collections::hash_map::Entry::Vacant(info) => {
-                            *info.insert(entry.load_for_caller(db, sender, evm_env)?)
-                        }
-                    };
-                    Ok(Some(info))
-                },
-            ) {
+            match validate_morph_tx_with(&input, |token_id, caller| {
+                token_validator.resolve_token_fee_info(token_id, caller)
+            }) {
                 Ok(_) => {}
                 Err(MorphTxValidationError::State(err)) => {
                     tracing::warn!(
@@ -225,9 +240,8 @@ fn collect_removable_transactions<DB: alloy_evm::Database>(
                         tx_hash = ?tx.hash(),
                         ?sender,
                         ?err,
-                        "Could not read token state; leaving sender's MorphTx in the pool"
+                        "Could not read token state; leaving MorphTx in the pool"
                     );
-                    break;
                 }
                 Err(MorphTxValidationError::Invalid(err)) => {
                     tracing::debug!(
@@ -238,9 +252,8 @@ fn collect_removable_transactions<DB: alloy_evm::Database>(
                         "Removing MorphTx: validation failed"
                     );
                     to_remove.push(*tx.hash());
-                    break;
                 }
-            };
+            }
         }
     }
 
@@ -305,7 +318,8 @@ where
         .into_iter()
         .flat_map(|sender| pool.get_transactions_by_sender(sender))
         .collect();
-    let mut db = StateProviderDatabase::new(state.provider);
+    let evm_state_provider = (&state.provider).into_evm_state_provider();
+    let mut db = StateProviderDatabase::new(&evm_state_provider);
     let still_removable: HashSet<TxHash> = collect_removable_transactions(
         &mut db,
         &state.head.l1_block_info,
@@ -329,11 +343,11 @@ where
 /// - Re-validates MorphTx (0x7F) transactions in the pool
 /// - Removes transactions that no longer have sufficient token balance
 /// - Re-validates L1 fee affordability for every sender, including ordinary-only senders
-/// - Removes ordinary transactions whose L1 fees make them individually unaffordable,
-///   parking their descendants
-/// - Judges each transaction on its own, including those parked behind a nonce gap
+/// - Removes every transaction whose block gas limit, L1 fee, or token-fee validation fails,
+///   letting the pool park surviving descendants
+/// - Judges each transaction on its own across each sender's full nonce sequence at or above
+///   the on-chain nonce, including transactions parked behind a nonce gap or ETH shortfall
 /// - Re-checks every removal at the canonical head right before applying it
-///
 pub async fn maintain_morph_pool<Pool, Client, Evm>(pool: Pool, client: Client, evm_config: Evm)
 where
     Pool: TransactionPool<Transaction = MorphPooledTransaction> + Clone,
@@ -343,8 +357,8 @@ where
         + CanonStateSubscriptions
         + Clone
         + 'static,
-    Evm: ConfigureEvm<Primitives = <Client as reth_provider::NodePrimitivesProvider>::Primitives>,
-    EvmFactoryFor<Evm>: EvmFactory<Spec = MorphHardfork, BlockEnv = MorphBlockEnv>,
+    Evm: ConfigureEvm<Primitives = <Client as CanonStateSubscriptions>::Primitives>,
+    EvmEnvFor<Evm>: Into<MorphEvmEnv>,
 {
     let chain_events = client.canonical_state_stream();
 
@@ -390,8 +404,8 @@ async fn maintain_morph_pool_with<Pool, N, Source, Events>(
             "Processing new block for pool fee validation"
         );
 
-        // Every transaction type is revalidated (ordinary ones for their L1 fee), and a
-        // sender's full nonce order decides which offender is removed first.
+        // Every transaction type is revalidated (ordinary ones for their L1 fee), scanning each
+        // sender's full nonce sequence at or above the on-chain nonce.
         let all_txs = pool.all_transactions();
         let pool_txs: Vec<&MorphPooledTransaction> = all_txs
             .pending
@@ -411,7 +425,8 @@ async fn maintain_morph_pool_with<Pool, N, Source, Events>(
                 continue;
             }
         };
-        let mut db = StateProviderDatabase::new(state.provider);
+        let evm_state_provider = (&state.provider).into_evm_state_provider();
+        let mut db = StateProviderDatabase::new(&evm_state_provider);
         let l1_block_info = state.head.l1_block_info;
         let evm_env = &state.head.evm_env;
 
@@ -455,7 +470,118 @@ async fn maintain_morph_pool_with<Pool, N, Source, Events>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::U256;
+    use crate::morph_tx_validation::tests::{
+        BALANCE_OF_RUNTIME, FAILING_BALANCE_OF, TokenRead, UnreadableTokenDb,
+        call_mode_registry_storage, call_mode_token_state, test_evm_env, token_balance_key,
+    };
+    use alloy_consensus::{Signed, TxLegacy, transaction::Recovered};
+    use alloy_eips::eip2718::Encodable2718;
+    use alloy_primitives::{Bytes, Sealable, Signature, TxKind, U256, address};
+    use evm2::bytecode::Bytecode;
+    use evm2::evm::{AccountInfo, CacheDB, DynDatabase, EmptyDB, InMemoryDB};
+    use morph_chainspec::{MORPH_MAINNET, MorphHardfork};
+    use morph_evm::MorphEvmConfig;
+    use morph_primitives::{MorphHeader, MorphPrimitives, MorphTxEnvelope, TxMorph};
+    use morph_revm::L2_TOKEN_REGISTRY_ADDRESS;
+    use reth_provider::test_utils::{ExtendedAccount, MockEthProvider};
+    use reth_transaction_pool::{
+        CoinbaseTipOrdering, Pool, blobstore::InMemoryBlobStore,
+        validate::EthTransactionValidatorBuilder,
+    };
+    use std::sync::Arc;
+
+    const SIGNER: Address = address!("1000000000000000000000000000000000000001");
+    const FEE_TOKEN: Address = address!("5300000000000000000000000000000000000042");
+    const SECOND_TOKEN: Address = address!("5300000000000000000000000000000000000043");
+    const TOKEN_ID: u16 = 1;
+    const SECOND_TOKEN_ID: u16 = 2;
+    const TX_TOKEN_BUDGET: u64 = 21_000 * 100;
+
+    fn l1_block_info_with_fee(l1_fee: u64) -> L1BlockInfo {
+        let scaled = U256::from(l1_fee) * U256::from(1_000_000_000);
+        L1BlockInfo {
+            l1_base_fee: U256::from(1),
+            l1_commit_scalar: scaled,
+            calldata_gas: scaled,
+            ..Default::default()
+        }
+    }
+
+    fn token_fee_tx(
+        nonce: u64,
+        token_id: u16,
+        value: U256,
+        gas_limit: u64,
+    ) -> MorphPooledTransaction {
+        let tx = TxMorph {
+            chain_id: 2818,
+            nonce,
+            gas_limit,
+            max_fee_per_gas: 100,
+            max_priority_fee_per_gas: 10,
+            to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
+            value,
+            fee_token_id: token_id,
+            fee_limit: U256::ZERO,
+            ..Default::default()
+        };
+        let envelope =
+            MorphTxEnvelope::Morph(Signed::new_unhashed(tx, Signature::test_signature()));
+        let recovered = Recovered::new_unchecked(envelope, SIGNER);
+        let len = recovered.encode_2718_len();
+        MorphPooledTransaction::new(recovered, len)
+    }
+
+    fn legacy_tx(
+        nonce: u64,
+        gas_limit: u64,
+        gas_price: u128,
+        value: U256,
+    ) -> MorphPooledTransaction {
+        let tx = TxLegacy {
+            chain_id: Some(2818),
+            nonce,
+            gas_limit,
+            gas_price,
+            to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
+            value,
+            input: Bytes::new(),
+        };
+        let envelope =
+            MorphTxEnvelope::Legacy(Signed::new_unhashed(tx, Signature::test_signature()));
+        let recovered = Recovered::new_unchecked(envelope, SIGNER);
+        let len = recovered.encode_2718_len();
+        MorphPooledTransaction::new(recovered, len)
+    }
+
+    fn register_call_mode_token(
+        db: &mut InMemoryDB,
+        token_id: u16,
+        token: Address,
+        token_balance: u64,
+        active: bool,
+    ) {
+        let mut entries = call_mode_registry_storage(token_id, token);
+        if !active {
+            let mut inactive = [0u8; 32];
+            inactive[30] = 18;
+            inactive[31] = 0;
+            entries[2].1 = U256::from_be_bytes(inactive);
+        }
+        for (slot, value) in entries {
+            db.insert_account_storage(&L2_TOKEN_REGISTRY_ADDRESS, &slot, &value);
+        }
+        db.insert_account_info(
+            &token,
+            AccountInfo::default()
+                .with_code(Bytecode::new_legacy(Bytes::from_static(BALANCE_OF_RUNTIME))),
+        );
+        db.insert_account_storage(
+            &token,
+            &token_balance_key(SIGNER),
+            &U256::from(token_balance),
+        );
+    }
 
     #[test]
     fn gas_limit_check_rejects_transactions_above_block_limit() {
@@ -463,1130 +589,331 @@ mod tests {
         assert!(!exceeds_block_gas_limit(30_000_000, 30_000_000));
     }
 
-    // ---------------------------------------------------------------------------------
-    // Revalidation round tests
-    //
-    // These drive `collect_removable_transactions` against a hand-built state so the
-    // removal verdict can be asserted without a pool, and one pool-level test covers the
-    // descendant handling that only the pool can show.
-    // ---------------------------------------------------------------------------------
-
-    use crate::morph_tx_validation::tests::{
-        BALANCE_OF_RUNTIME, FAILING_BALANCE_OF, TokenRead, UnreadableTokenDb,
-        call_mode_registry_storage, call_mode_token_state, token_balance_key,
-    };
-    use alloy_consensus::{Signed, transaction::Recovered};
-    use alloy_eips::eip2718::Encodable2718;
-    use alloy_primitives::{Signature, TxKind, address};
-    use morph_primitives::{MorphTxEnvelope, TxMorph};
-    use morph_revm::L2_TOKEN_REGISTRY_ADDRESS;
-    use reth_revm::revm;
-    use reth_revm::revm::database::{CacheDB, EmptyDB};
-    use reth_revm::revm::state::AccountInfo;
-
-    const SIGNER: Address = address!("0000000000000000000000000000000000000001");
-    const FEE_TOKEN: Address = address!("5300000000000000000000000000000000000042");
-    const TOKEN_ID: u16 = 1;
-    /// `gas_limit * max_fee_per_gas` of [`token_fee_tx`]; at a 1:1 price ratio this is also
-    /// the per-transaction token requirement at admission and revalidation.
-    const TX_TOKEN_BUDGET: u64 = 21_000 * 100;
-
-    /// State with [`TOKEN_ID`] registered as an active call-mode fee token at a 1:1 price
-    /// ratio, whose `balanceOf` reports `token_balance` for [`SIGNER`].
-    fn test_state(account_nonce: u64, eth_balance: u64, token_balance: u64) -> CacheDB<EmptyDB> {
-        test_state_with_token_code(
-            account_nonce,
-            eth_balance,
-            token_balance,
-            BALANCE_OF_RUNTIME,
-        )
-    }
-
-    /// [`test_state`] with the fee token's `balanceOf` replaced by `code`.
-    fn test_state_with_token_code(
-        account_nonce: u64,
-        eth_balance: u64,
-        token_balance: u64,
-        code: &'static [u8],
-    ) -> CacheDB<EmptyDB> {
-        let mut db =
-            call_mode_token_state(TOKEN_ID, FEE_TOKEN, code, SIGNER, U256::from(token_balance));
+    #[test]
+    fn skips_mined_nonces_and_revalidates_ordinary_tx_l1_fee() {
+        let mut db = CacheDB::new(EmptyDB::default());
         db.insert_account_info(
-            SIGNER,
+            &SIGNER,
             AccountInfo {
-                nonce: account_nonce,
-                balance: U256::from(eth_balance),
+                nonce: 1,
+                balance: U256::from(2_100_000u64), // covers tx1 cost (2.1M) alone, NOT + 1M L1 fee
                 ..Default::default()
             },
         );
-        db
-    }
+        let tx0_mined = legacy_tx(0, 21_000, 100, U256::ZERO);
+        let tx1_unpayable_l1 = legacy_tx(1, 21_000, 100, U256::ZERO);
+        let tx2_payable = legacy_tx(2, 21_000, 10, U256::ZERO); // 210k + 1M <= 2.1M
 
-    /// A token-fee MorphTx requiring [`TX_TOKEN_BUDGET`] tokens and no ETH.
-    fn token_fee_tx(tx_nonce: u64) -> MorphPooledTransaction {
-        token_fee_tx_with(tx_nonce, U256::ZERO, 21_000)
-    }
-
-    fn token_fee_tx_with_value(tx_nonce: u64, value: U256) -> MorphPooledTransaction {
-        token_fee_tx_with(tx_nonce, value, 21_000)
-    }
-
-    /// [`token_fee_tx`] with `gas_limit`, so its token requirement scales with it.
-    fn token_fee_tx_with_gas_limit(tx_nonce: u64, gas_limit: u64) -> MorphPooledTransaction {
-        token_fee_tx_with(tx_nonce, U256::ZERO, gas_limit)
-    }
-
-    fn token_fee_tx_with(tx_nonce: u64, value: U256, gas_limit: u64) -> MorphPooledTransaction {
-        let tx = TxMorph {
-            chain_id: 2818,
-            nonce: tx_nonce,
-            gas_limit,
-            max_fee_per_gas: 100,
-            max_priority_fee_per_gas: 10,
-            to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
-            value,
-            fee_token_id: TOKEN_ID,
-            fee_limit: U256::ZERO,
-            ..Default::default()
-        };
-        let recovered = Recovered::new_unchecked(
-            MorphTxEnvelope::Morph(Signed::new_unhashed(tx, Signature::test_signature())),
-            SIGNER,
-        );
-        let encoded_len = recovered.encode_2718_len();
-        MorphPooledTransaction::new(recovered, encoded_len)
-    }
-
-    /// The environment the revalidation round is evaluated in.
-    fn test_evm_env() -> MorphEvmEnv {
-        MorphEvmEnv::new(
-            reth_revm::revm::context::CfgEnv::new_with_spec(MorphHardfork::Emerald),
-            MorphBlockEnv::default(),
-        )
-    }
-
-    fn removable(db: &mut CacheDB<EmptyDB>, txs: Vec<&MorphPooledTransaction>) -> Vec<TxHash> {
-        collect_removable_transactions(
-            db,
-            &L1BlockInfo::default(),
-            &test_evm_env(),
+        let to_remove = collect_removable_transactions(
+            &mut db,
+            &l1_block_info_with_fee(1_000_000),
+            &test_evm_env(MorphHardfork::Celadon),
             30_000_000,
-            txs,
-        )
-    }
-
-    #[test]
-    fn transactions_already_executed_by_the_block_are_skipped_not_taken_for_a_gap() {
-        // The new block executed nonce 0, but this task can still see it: reth's own maintenance
-        // removes it on the same notification, in no guaranteed order. Reading it as a nonce gap
-        // would end the walk before nonce 1, which the post-state can no longer pay for.
-        let mut db = test_state(1, 0, TX_TOKEN_BUDGET - 1);
-        let (tx0, tx1) = (token_fee_tx(0), token_fee_tx(1));
-
-        assert_eq!(removable(&mut db, vec![&tx0, &tx1]), vec![*tx1.hash()]);
-    }
-
-    #[test]
-    fn individually_affordable_token_transactions_are_retained() {
-        // Each transaction passes admission against the same account balance.
-        // Maintenance must not evict one merely because their maximum costs add up.
-        let mut db = test_state(0, 0, TX_TOKEN_BUDGET + TX_TOKEN_BUDGET / 2);
-        let (tx0, tx1) = (token_fee_tx(0), token_fee_tx(1));
-
-        assert!(removable(&mut db, vec![&tx0, &tx1]).is_empty());
-    }
-
-    #[test]
-    fn an_ordinary_transaction_between_morph_txs_does_not_hide_the_successor() {
-        let mut db = test_state(0, 10_000_000, TX_TOKEN_BUDGET - 1);
-        let (first, middle, last) = (legacy_tx(0), legacy_tx(1), token_fee_tx(2));
-        assert_eq!(
-            removable(&mut db, vec![&first, &middle, &last]),
-            vec![*last.hash()]
+            vec![&tx0_mined, &tx1_unpayable_l1, &tx2_payable],
         );
+
+        assert_eq!(to_remove, vec![*tx1_unpayable_l1.hash()]);
     }
 
     #[test]
-    fn ordinary_predecessors_do_not_cause_a_morph_tx_value_to_be_evicted() {
-        let mut db = test_state(0, TX_TOKEN_BUDGET + 6, 10 * TX_TOKEN_BUDGET);
-        let (first, last) = (legacy_tx(0), token_fee_tx_with_value(1, U256::from(7)));
-        assert!(removable(&mut db, vec![&first, &last]).is_empty());
-    }
+    fn eth_parked_and_transient_db_errors_do_not_shield_higher_nonces() {
+        for fail_on in [
+            TokenRead::Registry,
+            TokenRead::TokenAccount,
+            TokenRead::TokenStorage,
+        ] {
+            let mut inner = call_mode_token_state(
+                TOKEN_ID,
+                FEE_TOKEN,
+                SIGNER,
+                U256::from(TX_TOKEN_BUDGET),
+                BALANCE_OF_RUNTIME,
+            );
+            // Second token is inactive (only detectable if registry read works).
+            register_call_mode_token(&mut inner, SECOND_TOKEN_ID, SECOND_TOKEN, 0, false);
+            inner.insert_account_info(
+                &SIGNER,
+                AccountInfo {
+                    nonce: 0,
+                    balance: U256::from(2_100_000u64),
+                    ..Default::default()
+                },
+            );
 
-    #[test]
-    fn morph_eth_shortfalls_remain_owned_by_standard_maintenance() {
-        let mut db = test_state(0, 6, 10 * TX_TOKEN_BUDGET);
-        let tx = token_fee_tx_with_value(0, U256::from(7));
-        assert!(removable(&mut db, vec![&tx]).is_empty());
-    }
+            let mut db = UnreadableTokenDb {
+                inner,
+                token: FEE_TOKEN,
+                fail_on,
+            };
 
-    #[test]
-    fn block_gas_limit_decreases_remove_both_transaction_types() {
-        for tx in [legacy_tx(0), token_fee_tx(0)] {
-            let mut db = test_state(0, 10_000_000, 10 * TX_TOKEN_BUDGET);
+            // Nonce 0 triggers transient DB error on FEE_TOKEN -> must NOT be removed.
+            let tx0_db_err = token_fee_tx(0, TOKEN_ID, U256::ZERO, 21_000);
+            // Nonce 1 is ETH-parked (cost > 2.1M) -> left to reth, must NOT shield nonce 2.
+            let tx1_eth_parked = legacy_tx(1, 21_000, 200, U256::ZERO);
+            // Nonce 2 fails L1 fee check (2.1M + 1M > 2.1M) -> must be removed!
+            let tx2_l1_shortfall = legacy_tx(2, 21_000, 100, U256::ZERO);
+            // Nonce 3 is affordable (210k + 1M <= 2.1M) -> stays.
+            let tx3_valid = legacy_tx(3, 21_000, 10, U256::ZERO);
+
+            let to_remove = collect_removable_transactions(
+                &mut db,
+                &l1_block_info_with_fee(1_000_000),
+                &test_evm_env(MorphHardfork::Celadon),
+                30_000_000,
+                vec![&tx0_db_err, &tx1_eth_parked, &tx2_l1_shortfall, &tx3_valid],
+            );
+
             assert_eq!(
-                collect_removable_transactions(
-                    &mut db,
-                    &L1BlockInfo::default(),
-                    &test_evm_env(),
-                    20_000,
-                    vec![&tx]
-                ),
-                vec![*tx.hash()]
+                to_remove,
+                vec![*tx2_l1_shortfall.hash()],
+                "transient {fail_on:?} error or ETH-parked tx must not remove tx0 or shield tx2"
             );
         }
     }
 
     #[test]
-    fn unaffordable_ordinary_predecessors_remain_owned_by_standard_maintenance() {
-        let mut db = test_state(0, 0, 10 * TX_TOKEN_BUDGET);
-        let (first, last) = (legacy_tx(0), token_fee_tx(1));
-        assert!(removable(&mut db, vec![&first, &last]).is_empty());
-    }
+    fn failing_balance_of_removes_morph_tx_without_removing_valid_descendants() {
+        for (label, runtime) in FAILING_BALANCE_OF {
+            let mut db = call_mode_token_state(
+                TOKEN_ID,
+                FEE_TOKEN,
+                SIGNER,
+                U256::from(TX_TOKEN_BUDGET),
+                runtime,
+            );
+            db.insert_account_info(
+                &SIGNER,
+                AccountInfo {
+                    nonce: 0,
+                    balance: U256::from(10_000_000u64),
+                    ..Default::default()
+                },
+            );
+            let tx0_bad_token = token_fee_tx(0, TOKEN_ID, U256::ZERO, 21_000);
+            let tx1_valid_eth = legacy_tx(1, 21_000, 100, U256::ZERO);
 
-    #[test]
-    fn a_payable_transaction_behind_a_nonce_gap_is_kept() {
-        // The gap only decides where the transaction sits; affordability is judged on its own.
-        let mut db = test_state(0, 0, TX_TOKEN_BUDGET);
-        let (tx0, gapped) = (token_fee_tx(0), token_fee_tx(10));
-
-        assert!(removable(&mut db, vec![&tx0, &gapped]).is_empty());
-    }
-
-    #[test]
-    fn an_unpayable_transaction_behind_a_nonce_gap_is_removed() {
-        // Nonce 0 needs one budget, nonce 10 needs two, and the sender holds one. Stopping at
-        // the gap would leave nonce 10 in place for reth to promote unvalidated once nonces
-        // 1 to 9 arrive.
-        let mut db = test_state(0, 0, TX_TOKEN_BUDGET);
-        let (tx0, gapped) = (token_fee_tx(0), token_fee_tx_with_gas_limit(10, 2 * 21_000));
-
-        assert_eq!(
-            removable(&mut db, vec![&tx0, &gapped]),
-            vec![*gapped.hash()]
-        );
-    }
-
-    #[test]
-    fn a_sender_holding_only_future_nonces_is_still_revalidated() {
-        // go-ethereum's `promoteExecutables` filters the whole queue per transaction before
-        // promoting anything; a sender that no longer holds tokens loses its parked MorphTx.
-        let mut db = test_state(0, 0, 0);
-        let gapped = token_fee_tx(5);
-
-        assert_eq!(removable(&mut db, vec![&gapped]), vec![*gapped.hash()]);
-    }
-
-    #[derive(Debug)]
-    struct CountingDb {
-        inner: CacheDB<EmptyDB>,
-        reads: HashMap<Address, usize>,
-    }
-
-    impl revm::Database for CountingDb {
-        type Error = core::convert::Infallible;
-        fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
-            self.inner.basic(address)
-        }
-        fn code_by_hash(
-            &mut self,
-            hash: alloy_primitives::B256,
-        ) -> Result<revm::state::Bytecode, Self::Error> {
-            self.inner.code_by_hash(hash)
-        }
-        fn storage(&mut self, address: Address, slot: U256) -> Result<U256, Self::Error> {
-            *self.reads.entry(address).or_default() += 1;
-            self.inner.storage(address, slot)
-        }
-        fn block_hash(&mut self, number: u64) -> Result<alloy_primitives::B256, Self::Error> {
-            self.inner.block_hash(number)
-        }
-    }
-
-    #[test]
-    fn token_cache_is_shared_within_a_round_and_refreshed_next_round() {
-        let mut db = CountingDb {
-            inner: test_state(0, 0, TX_TOKEN_BUDGET),
-            reads: HashMap::new(),
-        };
-        let txs: Vec<_> = (0..3).map(token_fee_tx).collect();
-        assert!(
-            collect_removable_transactions(
-                &mut db,
-                &L1BlockInfo::default(),
-                &test_evm_env(),
-                30_000_000,
-                txs.iter().collect()
-            )
-            .is_empty()
-        );
-        // Three transactions share one registry entry (five words) and one `balanceOf` SLOAD.
-        assert_eq!(db.reads[&L2_TOKEN_REGISTRY_ADDRESS], 5);
-        assert_eq!(db.reads[&FEE_TOKEN], 1);
-
-        // The next round reads both again, so it sees the balance spent in between.
-        db.inner
-            .insert_account_storage(FEE_TOKEN, token_balance_key(SIGNER), U256::ZERO)
-            .unwrap();
-        assert_eq!(
-            collect_removable_transactions(
-                &mut db,
-                &L1BlockInfo::default(),
-                &test_evm_env(),
-                30_000_000,
-                txs.iter().collect()
-            ),
-            vec![*txs[0].hash()]
-        );
-        assert_eq!(db.reads[&L2_TOKEN_REGISTRY_ADDRESS], 10);
-        assert_eq!(db.reads[&FEE_TOKEN], 2);
-    }
-
-    #[test]
-    fn unreadable_token_state_does_not_remove_transactions() {
-        let tx = token_fee_tx(0);
-
-        // Sanity check: the same transaction against readable state is kept as well, so the
-        // assertions below are about the read failure and not about affordability.
-        assert!(
-            removable(&mut test_state(0, 0, 10 * TX_TOKEN_BUDGET), vec![&tx]).is_empty(),
-            "transaction is affordable when the token balance can be read"
-        );
-
-        for failing in [TokenRead::Storage, TokenRead::Code] {
-            let mut db = UnreadableTokenDb {
-                inner: test_state(0, 0, 10 * TX_TOKEN_BUDGET),
-                token: FEE_TOKEN,
-                failing,
-            };
             let to_remove = collect_removable_transactions(
                 &mut db,
                 &L1BlockInfo::default(),
-                &test_evm_env(),
+                &test_evm_env(MorphHardfork::Celadon),
                 30_000_000,
-                vec![&tx],
+                vec![&tx0_bad_token, &tx1_valid_eth],
             );
-            assert!(
-                to_remove.is_empty(),
-                "a {failing:?} read failure inside balanceOf is not an invalid transaction"
-            );
+            assert_eq!(to_remove, vec![*tx0_bad_token.hash()], "case {label}");
         }
     }
 
     #[test]
-    fn a_balance_query_without_a_balance_removes_the_transaction() {
-        let tx = token_fee_tx(0);
-        for code in FAILING_BALANCE_OF {
-            let mut db = test_state_with_token_code(0, 0, 10 * TX_TOKEN_BUDGET, code);
-            assert_eq!(
-                removable(&mut db, vec![&tx]),
-                vec![*tx.hash()],
-                "balanceOf code {code:02x?}"
-            );
-        }
-    }
+    fn remove_transactions_parks_surviving_descendant_and_rechecks_canonical_head() {
+        type TestPool = Pool<
+            crate::MorphTransactionValidator<
+                MockEthProvider<MorphPrimitives, morph_chainspec::MorphChainSpec>,
+                MorphPooledTransaction,
+                MorphEvmConfig,
+            >,
+            CoinbaseTipOrdering<MorphPooledTransaction>,
+            InMemoryBlobStore,
+        >;
 
-    // ---------------------------------------------------------------------------------
-    // Pool-level test: only the pool can show what happens to a removed transaction's
-    // descendants, so this one drives the maintenance loop against a real pool.
-    // ---------------------------------------------------------------------------------
-
-    use alloy_consensus::TxLegacy;
-    use alloy_primitives::Sealable;
-    use morph_chainspec::{MORPH_MAINNET, MorphChainSpec};
-    use morph_evm::MorphEvmConfig;
-    use morph_primitives::MorphPrimitives;
-    use reth_provider::test_utils::{ExtendedAccount, MockEthProvider};
-    use reth_transaction_pool::{
-        CoinbaseTipOrdering, Pool, blobstore::InMemoryBlobStore,
-        validate::EthTransactionValidatorBuilder,
-    };
-
-    type TestProvider = MockEthProvider<MorphPrimitives, MorphChainSpec>;
-
-    fn storage_key(slot: U256) -> alloy_primitives::B256 {
-        alloy_primitives::B256::from(slot.to_be_bytes::<32>())
-    }
-
-    /// The chain head the pool validates against: an empty Emerald-active block.
-    fn head_block() -> morph_primitives::Block {
-        morph_primitives::Block {
-            header: morph_primitives::MorphHeader::from(alloy_consensus::Header {
+        let head0 = MorphHeader {
+            inner: alloy_consensus::Header {
                 number: 1,
-                timestamp: 1_767_765_600,
+                timestamp: 2_000_000_000,
                 gas_limit: 30_000_000,
-                base_fee_per_gas: Some(10),
+                base_fee_per_gas: Some(1),
                 ..Default::default()
-            }),
-            body: Default::default(),
-        }
-    }
-
-    /// Mirrors [`test_state`] for [`MockEthProvider`], which the pool's validator needs.
-    fn mock_provider(eth_balance: u64, token_balance: u64) -> TestProvider {
-        let client = MockEthProvider::<MorphPrimitives, _>::new()
-            .with_chain_spec((**MORPH_MAINNET).clone())
-            .with_genesis_block();
-
-        // MorphTx is only accepted from Emerald onwards, so the head must be past it.
-        let head = head_block();
-        client.add_block(head.header.hash_slow(), head);
-
-        client.add_account(SIGNER, ExtendedAccount::new(0, U256::from(eth_balance)));
-        client.add_account(
-            L2_TOKEN_REGISTRY_ADDRESS,
-            ExtendedAccount::new(0, U256::ZERO).extend_storage(
-                call_mode_registry_storage(TOKEN_ID, FEE_TOKEN)
-                    .map(|(slot, value)| (storage_key(slot), value)),
-            ),
-        );
-        set_token_balance(&client, token_balance);
-        client
-    }
-
-    /// Deploys the call-mode fee token with `token_balance` recorded for [`SIGNER`].
-    fn set_token_balance(client: &TestProvider, token_balance: u64) {
-        client.add_account(
-            FEE_TOKEN,
-            ExtendedAccount::new(0, U256::ZERO)
-                .with_bytecode(alloy_primitives::Bytes::from_static(BALANCE_OF_RUNTIME))
-                .extend_storage([(
-                    storage_key(token_balance_key(SIGNER)),
-                    U256::from(token_balance),
-                )]),
-        );
-    }
-
-    /// A canonical commit of [`head_block`].
-    fn commit_event() -> reth_provider::CanonStateNotification<MorphPrimitives> {
-        commit_event_of(head_block())
-    }
-
-    /// A canonical commit of `block`.
-    fn commit_event_of(
-        block: morph_primitives::Block,
-    ) -> reth_provider::CanonStateNotification<MorphPrimitives> {
-        reth_provider::CanonStateNotification::Commit {
-            new: std::sync::Arc::new(reth_provider::Chain::new(
-                [reth_primitives_traits::RecoveredBlock::new_unhashed(
-                    block,
-                    Vec::new(),
-                )],
-                Default::default(),
-                Default::default(),
-            )),
-        }
-    }
-
-    /// A plain ETH-fee transaction, affordable on its own.
-    fn legacy_tx(tx_nonce: u64) -> MorphPooledTransaction {
-        legacy_tx_for_sender(tx_nonce, SIGNER)
-    }
-
-    fn legacy_tx_for_sender(tx_nonce: u64, sender: Address) -> MorphPooledTransaction {
-        let tx = TxLegacy {
-            chain_id: Some(2818),
-            nonce: tx_nonce,
-            gas_limit: 21_000,
-            gas_price: 100,
-            to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
-            value: U256::ZERO,
+            },
             ..Default::default()
         };
-        let recovered = Recovered::new_unchecked(
-            MorphTxEnvelope::Legacy(Signed::new_unhashed(tx, Signature::test_signature())),
-            sender,
-        );
-        let encoded_len = recovered.encode_2718_len();
-        MorphPooledTransaction::new(recovered, encoded_len)
-    }
+        let head1 = MorphHeader {
+            inner: alloy_consensus::Header {
+                number: 2,
+                timestamp: 2_000_000_002,
+                gas_limit: 30_000_000,
+                base_fee_per_gas: Some(1),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
 
-    /// Runs the maintenance loop against the provider, as the node does.
-    fn provider_state(client: TestProvider) -> ProviderFeeState<TestProvider, MorphEvmConfig> {
-        ProviderFeeState {
-            client,
-            evm_config: MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone()),
-        }
-    }
+        let make_provider = |token_balance: u64, header: &MorphHeader| {
+            let p = MockEthProvider::<MorphPrimitives, _>::new()
+                .with_chain_spec((**MORPH_MAINNET).clone())
+                .with_genesis_block();
+            p.add_block(
+                header.hash_slow(),
+                morph_primitives::Block::new(header.clone(), Default::default()),
+            );
+            let registry = ExtendedAccount::new(0, U256::ZERO).extend_storage(
+                call_mode_registry_storage(TOKEN_ID, FEE_TOKEN)
+                    .into_iter()
+                    .map(|(k, v)| (B256::from(k.to_be_bytes::<32>()), v)),
+            );
+            let token = ExtendedAccount::new(0, U256::ZERO)
+                .with_bytecode(Bytes::from_static(BALANCE_OF_RUNTIME))
+                .extend_storage([(
+                    B256::from(token_balance_key(SIGNER).to_be_bytes::<32>()),
+                    U256::from(token_balance),
+                )]);
+            p.add_account(L2_TOKEN_REGISTRY_ADDRESS, registry);
+            p.add_account(FEE_TOKEN, token);
+            p.add_account(SIGNER, ExtendedAccount::new(0, U256::from(10_000_000u64)));
+            p
+        };
 
-    /// A [`FeeStateSource`] with a separate state per block, unlike [`MockEthProvider`],
-    /// whose state ignores the block hash. `head` is the canonical head.
-    struct BlockStates {
-        states: HashMap<B256, TestProvider>,
-        head: SealedHeader<morph_primitives::MorphHeader>,
-    }
-
-    impl FeeStateSource<MorphPrimitives> for BlockStates {
-        fn state_for(
-            &self,
-            header: &morph_primitives::MorphHeader,
-        ) -> Result<MorphValidationState, BoxError> {
-            let client = self
-                .states
-                .get(&header.hash_slow())
-                .ok_or("no state for this block")?;
-            crate::validator::validation_state_for_header(
-                client,
-                &MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone()),
-                header,
-            )
-        }
-
-        fn canonical_head(
-            &self,
-        ) -> Result<Option<SealedHeader<morph_primitives::MorphHeader>>, BoxError> {
-            Ok(Some(self.head.clone()))
-        }
-    }
-
-    /// The block after [`head_block`].
-    fn next_block() -> morph_primitives::Block {
-        let mut block = head_block();
-        block.header.inner.number = 2;
-        block.header.inner.timestamp += 1;
-        block
-    }
-
-    /// Admits [`token_fee_tx`] 0 while [`SIGNER`] can pay, then runs maintenance on `events`
-    /// with the sender's tokens drained at [`head_block`] and `head_token_balance` at the
-    /// canonical head, [`next_block`]. Returns whether the transaction is still pooled.
-    ///
-    /// The events go through a tokio broadcast channel, like reth's canonical stream, and the
-    /// loop runs the way `spawn_critical_blocking_task` runs it: `Handle::block_on` on a
-    /// blocking thread, where tokio's cooperative budget applies.
-    fn survives_a_stale_round(
-        head_token_balance: u64,
-        events: Vec<reth_provider::CanonStateNotification<MorphPrimitives>>,
-    ) -> bool {
-        let judged = mock_provider(0, TX_TOKEN_BUDGET);
+        // Start with enough tokens for both txs.
+        let p_initial = make_provider(3 * TX_TOKEN_BUDGET, &head0);
         let validator = crate::MorphTransactionValidator::new(
             EthTransactionValidatorBuilder::new(
-                judged.clone(),
+                p_initial,
                 MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone()),
             )
             .disable_balance_check()
             .with_custom_tx_type(morph_primitives::MORPH_TX_TYPE_ID)
+            .no_shanghai()
+            .no_cancun()
             .build::<MorphPooledTransaction, _>(InMemoryBlobStore::default()),
         );
-        let pool = Pool::new(
+        let pool: TestPool = Pool::new(
             validator,
             CoinbaseTipOrdering::default(),
             InMemoryBlobStore::default(),
             Default::default(),
         );
-        let hash = futures::executor::block_on(pool.add_transaction(
+
+        // tx0 needs 2*budget in tokens; tx1 needs 1*budget in tokens.
+        let tx0 = futures::executor::block_on(pool.add_transaction(
             reth_transaction_pool::TransactionOrigin::Local,
-            token_fee_tx(0),
+            token_fee_tx(0, TOKEN_ID, U256::ZERO, 42_000),
         ))
         .unwrap()
         .hash;
-        set_token_balance(&judged, 0);
-        let head = next_block().header;
-        let source = BlockStates {
-            states: HashMap::from([
-                (head_block().header.hash_slow(), judged),
-                (head.hash_slow(), mock_provider(0, head_token_balance)),
-            ]),
-            head: SealedHeader::seal_slow(head),
-        };
-
-        let (sender, receiver) = tokio::sync::broadcast::channel(events.len());
-        for event in events {
-            sender.send(event).unwrap();
-        }
-        drop(sender);
-        let events = tokio_stream::wrappers::BroadcastStream::new(receiver)
-            .map(|event| event.expect("the channel holds every event"));
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let handle = runtime.handle().clone();
-        let loop_pool = pool.clone();
-        let task = runtime.spawn_blocking(move || {
-            handle.block_on(maintain_morph_pool_with(loop_pool, source, events))
-        });
-        runtime.block_on(task).unwrap();
-        pool.get(&hash).is_some()
-    }
-
-    #[test]
-    fn removals_judged_at_an_older_block_are_rechecked_at_the_canonical_head() {
-        for backlog in [false, true] {
-            // Without a backlog, the head moved on before its notification arrived. With one,
-            // 128 notifications exhaust tokio's cooperative budget within a single poll, so the
-            // loop cannot see the head's notification behind them before it removes anything.
-            let events = || {
-                let mut events: Vec<_> = std::iter::repeat_with(commit_event)
-                    .take(if backlog { 128 } else { 1 })
-                    .collect();
-                if backlog {
-                    events.push(commit_event_of(next_block()));
-                }
-                events
-            };
-            assert!(
-                survives_a_stale_round(TX_TOKEN_BUDGET, events()),
-                "backlog={backlog}: payable at the canonical head, so it must stay"
-            );
-            assert!(
-                !survives_a_stale_round(0, events()),
-                "backlog={backlog}: still unpayable at the canonical head, so it must go"
-            );
-        }
-    }
-
-    #[test]
-    fn unchanged_head_does_not_evict_newly_admitted_transactions() {
-        let client = mock_provider(6_300_000, 10_000_000);
-        client.add_account(
-            morph_revm::L1_GAS_PRICE_ORACLE_ADDRESS,
-            ExtendedAccount::new(0, U256::ZERO).extend_storage([
-                (storage_key(U256::from(1)), U256::from(1)),
-                (
-                    storage_key(U256::from(7)),
-                    U256::from(2_000_000_000_000_000u64),
-                ),
-            ]),
-        );
-        let validator = crate::MorphTransactionValidator::new(
-            EthTransactionValidatorBuilder::new(
-                client.clone(),
-                MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone()),
-            )
-            .disable_balance_check()
-            .with_custom_tx_type(morph_primitives::MORPH_TX_TYPE_ID)
-            .build::<MorphPooledTransaction, _>(InMemoryBlobStore::default()),
-        );
-        let pool = Pool::new(
-            validator,
-            CoinbaseTipOrdering::default(),
-            InMemoryBlobStore::default(),
-            Default::default(),
-        );
-        let hashes: Vec<_> = (0..3)
-            .map(|nonce| {
-                futures::executor::block_on(pool.add_transaction(
-                    reth_transaction_pool::TransactionOrigin::Local,
-                    legacy_tx(nonce),
-                ))
-                .unwrap()
-                .hash
-            })
-            .collect();
-        assert_eq!(pool.all_transactions().pending.len(), 3);
-        futures::executor::block_on(maintain_morph_pool_with(
-            pool.clone(),
-            provider_state(client),
-            futures::stream::iter([commit_event()]),
-        ));
-        assert!(hashes.iter().all(|hash| pool.get(hash).is_some()));
-        assert_eq!(pool.all_transactions().pending.len(), 3);
-    }
-
-    #[test]
-    fn ordinary_only_senders_are_revalidated_when_l1_fees_rise() {
-        use reth_transaction_pool::TransactionPoolExt;
-
-        let sender = address!("0000000000000000000000000000000000000009");
-        // Each ordinary transaction costs 2,100,000 wei before L1 fees.
-        // A 2,000,000 L1 fee still fits individually at 6,300,000;
-        // a 5,000,000 L1 fee does not.
-        for unrelated_morph in [false, true] {
-            for (l1_fee, eth_balance, first_unaffordable) in [
-                (0u64, 6_300_000u64, None),
-                (2_000_000, 12_300_000, None),
-                (2_000_000, 6_300_000, None),
-                (5_000_000, 6_300_000, Some(0usize)),
-            ] {
-                let client = mock_provider(10_000_000, 100_000_000);
-                client.add_account(sender, ExtendedAccount::new(0, U256::from(20_000_000)));
-                let validator = crate::MorphTransactionValidator::new(
-                    EthTransactionValidatorBuilder::new(
-                        client.clone(),
-                        MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone()),
-                    )
-                    .disable_balance_check()
-                    .with_custom_tx_type(morph_primitives::MORPH_TX_TYPE_ID)
-                    .build::<MorphPooledTransaction, _>(InMemoryBlobStore::default()),
-                );
-                let pool = Pool::new(
-                    validator,
-                    CoinbaseTipOrdering::default(),
-                    InMemoryBlobStore::default(),
-                    Default::default(),
-                );
-                let ordinary: Vec<_> = (0..3)
-                    .map(|nonce| {
-                        futures::executor::block_on(pool.add_transaction(
-                            reth_transaction_pool::TransactionOrigin::Local,
-                            legacy_tx_for_sender(nonce, sender),
-                        ))
-                        .unwrap()
-                        .hash
-                    })
-                    .collect();
-                if unrelated_morph {
-                    futures::executor::block_on(pool.add_transaction(
-                        reth_transaction_pool::TransactionOrigin::Local,
-                        token_fee_tx(0),
-                    ))
-                    .unwrap();
-                }
-                assert_eq!(
-                    pool.all_transactions().pending.len(),
-                    3 + usize::from(unrelated_morph)
-                );
-
-                client.add_account(sender, ExtendedAccount::new(0, U256::from(eth_balance)));
-                client.add_account(
-                    morph_revm::L1_GAS_PRICE_ORACLE_ADDRESS,
-                    ExtendedAccount::new(0, U256::ZERO).extend_storage([
-                        (storage_key(U256::from(1)), U256::from(1)),
-                        (
-                            storage_key(U256::from(7)),
-                            U256::from(l1_fee) * U256::from(1_000_000_000),
-                        ),
-                    ]),
-                );
-                let event = commit_event();
-                pool.on_canonical_state_change(reth_transaction_pool::CanonicalStateUpdate {
-                    new_tip: event.tip(),
-                    pending_block_base_fee: 10,
-                    pending_block_blob_fee: None,
-                    changed_accounts: vec![reth_provider::ChangedAccount {
-                        address: sender,
-                        nonce: 0,
-                        balance: U256::from(eth_balance),
-                    }],
-                    mined_transactions: Vec::new(),
-                    update_kind: reth_transaction_pool::PoolUpdateKind::Commit,
-                });
-                assert_eq!(
-                    pool.all_transactions().pending.len(),
-                    3 + usize::from(unrelated_morph),
-                    "standard maintenance cannot see the L1 fee shortfall"
-                );
-
-                // Later rounds judge the parked descendants on their own, one per round; none
-                // of them can cover the same L1 fee either.
-                for _ in 0..3 {
-                    futures::executor::block_on(maintain_morph_pool_with(
-                        pool.clone(),
-                        provider_state(client.clone()),
-                        futures::stream::iter([event.clone()]),
-                    ));
-                }
-                let all = pool.all_transactions();
-                let pending: Vec<_> = all
-                    .pending
-                    .iter()
-                    .filter(|tx| tx.sender() == sender)
-                    .map(|tx| *tx.hash())
-                    .collect();
-                let queued: Vec<_> = all
-                    .queued
-                    .iter()
-                    .filter(|tx| tx.sender() == sender)
-                    .map(|tx| *tx.hash())
-                    .collect();
-                if let Some(index) = first_unaffordable {
-                    assert!(
-                        pool.get(&ordinary[index]).is_none(),
-                        "remove the first L1-unaffordable ordinary transaction; unrelated MorphTx={unrelated_morph}"
-                    );
-                    assert_eq!(pending, ordinary[..index]);
-                    assert!(
-                        ordinary[index..]
-                            .iter()
-                            .all(|hash| pool.get(hash).is_none()),
-                        "parked descendants that cannot pay either are removed by later rounds"
-                    );
-                    assert!(queued.is_empty());
-                } else {
-                    assert_eq!(pending, ordinary);
-                    assert!(queued.is_empty());
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn ordinary_only_senders_keep_nonce_gaps_and_eth_parked_transactions() {
-        use reth_transaction_pool::TransactionPoolExt;
-
-        for (nonces, state_nonce, eth_balance, pending_nonces, queued_nonces) in [
-            (vec![0, 2], 0, 3_100_000u64, vec![0], vec![2]),
-            (vec![5], 0, 3_100_000, vec![], vec![5]),
-            // Parked behind a gap and unable to cover its L1 fee: removed, not left for later.
-            (vec![5], 0, 2_100_000, vec![], vec![]),
-            (vec![0, 1], 0, 2_000_000, vec![], vec![0, 1]),
-            (vec![0, 1], 1, 3_100_000, vec![1], vec![]),
-        ] {
-            let client = mock_provider(10_000_000, 0);
-            let validator = crate::MorphTransactionValidator::new(
-                EthTransactionValidatorBuilder::new(
-                    client.clone(),
-                    MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone()),
-                )
-                .disable_balance_check()
-                .with_custom_tx_type(morph_primitives::MORPH_TX_TYPE_ID)
-                .build::<MorphPooledTransaction, _>(InMemoryBlobStore::default()),
-            );
-            let pool = Pool::new(
-                validator,
-                CoinbaseTipOrdering::default(),
-                InMemoryBlobStore::default(),
-                Default::default(),
-            );
-            for nonce in nonces {
-                futures::executor::block_on(pool.add_transaction(
-                    reth_transaction_pool::TransactionOrigin::Local,
-                    legacy_tx(nonce),
-                ))
-                .unwrap();
-            }
-            client.add_account(
-                SIGNER,
-                ExtendedAccount::new(state_nonce, U256::from(eth_balance)),
-            );
-            // Every ordinary transaction now owes 1,000,000 wei in L1 fees.
-            client.add_account(
-                morph_revm::L1_GAS_PRICE_ORACLE_ADDRESS,
-                ExtendedAccount::new(0, U256::ZERO).extend_storage([
-                    (storage_key(U256::from(1)), U256::from(1)),
-                    (
-                        storage_key(U256::from(7)),
-                        U256::from(1_000_000_000_000_000u64),
-                    ),
-                ]),
-            );
-            let event = commit_event();
-            // Run Morph first to cover a pool snapshot that still contains a mined nonce.
-            futures::executor::block_on(maintain_morph_pool_with(
-                pool.clone(),
-                provider_state(client.clone()),
-                futures::stream::iter([event.clone()]),
-            ));
-            pool.on_canonical_state_change(reth_transaction_pool::CanonicalStateUpdate {
-                new_tip: event.tip(),
-                pending_block_base_fee: 10,
-                pending_block_blob_fee: None,
-                changed_accounts: vec![reth_provider::ChangedAccount {
-                    address: SIGNER,
-                    nonce: state_nonce,
-                    balance: U256::from(eth_balance),
-                }],
-                mined_transactions: Vec::new(),
-                update_kind: reth_transaction_pool::PoolUpdateKind::Commit,
-            });
-            // And run after reth parks/removes transactions, covering either task order.
-            futures::executor::block_on(maintain_morph_pool_with(
-                pool.clone(),
-                provider_state(client),
-                futures::stream::iter([event]),
-            ));
-            let all = pool.all_transactions();
-            assert_eq!(
-                all.pending.iter().map(|tx| tx.nonce()).collect::<Vec<_>>(),
-                pending_nonces
-            );
-            assert_eq!(
-                all.queued.iter().map(|tx| tx.nonce()).collect::<Vec<_>>(),
-                queued_nonces
-            );
-        }
-    }
-
-    #[test]
-    fn morph_after_legacy_nonce_is_revalidated_after_token_balance_drops() {
-        let client = mock_provider(10_000_000, 10 * TX_TOKEN_BUDGET);
-        let validator = crate::MorphTransactionValidator::new(
-            EthTransactionValidatorBuilder::new(
-                client.clone(),
-                MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone()),
-            )
-            .disable_balance_check()
-            .with_custom_tx_type(morph_primitives::MORPH_TX_TYPE_ID)
-            .build::<MorphPooledTransaction, _>(InMemoryBlobStore::default()),
-        );
-        let pool = Pool::new(
-            validator,
-            CoinbaseTipOrdering::default(),
-            InMemoryBlobStore::default(),
-            Default::default(),
-        );
-
-        futures::executor::block_on(pool.add_transaction(
+        let tx1 = futures::executor::block_on(pool.add_transaction(
             reth_transaction_pool::TransactionOrigin::Local,
-            legacy_tx(0),
-        ))
-        .unwrap();
-        let token_tx = futures::executor::block_on(pool.add_transaction(
-            reth_transaction_pool::TransactionOrigin::Local,
-            token_fee_tx(1),
+            token_fee_tx(1, TOKEN_ID, U256::ZERO, 21_000),
         ))
         .unwrap()
         .hash;
         assert_eq!(pool.all_transactions().pending.len(), 2);
-        assert!(pool.all_transactions().queued.is_empty());
 
-        set_token_balance(&client, 0);
-        futures::executor::block_on(maintain_morph_pool_with(
-            pool.clone(),
-            provider_state(client),
-            futures::stream::iter([commit_event()]),
-        ));
-
-        assert!(
-            pool.get(&token_tx).is_none(),
-            "a pending MorphTx following a legacy nonce must still be checked after its token balance becomes zero"
-        );
-    }
-
-    #[test]
-    fn ordinary_l1_fee_shortfall_parks_the_morph_successor() {
-        use reth_transaction_pool::TransactionPoolExt;
-
-        // Two individually affordable predecessors must both survive, even if
-        // their combined maximum gas and L1 costs exceed the account balance.
-        for (ordinary_count, l1_fee, eth_balance, token_balance) in [
-            (1, 0u64, 2_100_000u64, 0u64),
-            (1, 1_000_000, 2_100_000, 0),
-            (1, 1_000_000, 2_100_000, 21_000_000),
-            (2, 1_000_000, 4_200_000, 21_000_000),
-        ] {
-            let client = mock_provider(10_000_000, 10 * TX_TOKEN_BUDGET);
-            let validator = crate::MorphTransactionValidator::new(
-                EthTransactionValidatorBuilder::new(
-                    client.clone(),
-                    MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone()),
+        // At judged block (head0) balance dropped to 0, but at canonical head (head1) balance
+        // recovered to 1*budget: tx0 must be removed, tx1 must survive parked in queued!
+        struct TwoBlockSource {
+            states:
+                HashMap<B256, MockEthProvider<MorphPrimitives, morph_chainspec::MorphChainSpec>>,
+            head: SealedHeader<MorphHeader>,
+        }
+        impl FeeStateSource<MorphPrimitives> for TwoBlockSource {
+            fn state_for(&self, header: &MorphHeader) -> Result<MorphValidationState, BoxError> {
+                let provider = self
+                    .states
+                    .get(&header.hash_slow())
+                    .expect("state for header");
+                crate::validator::validation_state_for_header(
+                    provider,
+                    &MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone()),
+                    header,
                 )
-                .disable_balance_check()
-                .with_custom_tx_type(morph_primitives::MORPH_TX_TYPE_ID)
-                .build::<MorphPooledTransaction, _>(InMemoryBlobStore::default()),
-            );
-            let pool = Pool::new(
-                validator,
-                CoinbaseTipOrdering::default(),
-                InMemoryBlobStore::default(),
-                Default::default(),
-            );
-            let ordinary: Vec<_> = (0..ordinary_count)
-                .map(|nonce| {
-                    futures::executor::block_on(pool.add_transaction(
-                        reth_transaction_pool::TransactionOrigin::Local,
-                        legacy_tx(nonce),
-                    ))
-                    .unwrap()
-                    .hash
-                })
-                .collect();
-            let token_tx = futures::executor::block_on(pool.add_transaction(
-                reth_transaction_pool::TransactionOrigin::Local,
-                token_fee_tx(ordinary_count),
-            ))
-            .unwrap()
-            .hash;
-            assert_eq!(pool.all_transactions().pending.len(), ordinary.len() + 1);
-
-            // All were affordable at admission. The new state still covers reth's
-            // ordinary transaction cost, but cannot cover the new L1 fee as well.
-            client.add_account(SIGNER, ExtendedAccount::new(0, U256::from(eth_balance)));
-            set_token_balance(&client, token_balance);
-            client.add_account(
-                morph_revm::L1_GAS_PRICE_ORACLE_ADDRESS,
-                ExtendedAccount::new(0, U256::ZERO).extend_storage([
-                    (storage_key(U256::from(1)), U256::from(1)),
-                    (
-                        storage_key(U256::from(7)),
-                        U256::from(l1_fee) * U256::from(1_000_000_000),
-                    ),
-                ]),
-            );
-            let mut block = head_block();
-            block.header.inner.number = 2;
-            block.header.inner.timestamp += 1;
-            client.add_block(block.header.hash_slow(), block.clone());
-            let event = reth_provider::CanonStateNotification::Commit {
-                new: std::sync::Arc::new(reth_provider::Chain::new(
-                    [reth_primitives_traits::RecoveredBlock::new_unhashed(
-                        block,
-                        Vec::new(),
-                    )],
-                    Default::default(),
-                    Default::default(),
-                )),
-            };
-            // Exercise the same public canonical update used by standard maintenance.
-            pool.on_canonical_state_change(reth_transaction_pool::CanonicalStateUpdate {
-                new_tip: event.tip(),
-                pending_block_base_fee: 10,
-                pending_block_blob_fee: None,
-                changed_accounts: vec![reth_provider::ChangedAccount {
-                    address: SIGNER,
-                    nonce: 0,
-                    balance: U256::from(eth_balance),
-                }],
-                mined_transactions: Vec::new(),
-                update_kind: reth_transaction_pool::PoolUpdateKind::Commit,
-            });
-            assert_eq!(
-                pool.all_transactions().pending.len(),
-                ordinary.len() + 1,
-                "standard maintenance does not see L1 costs"
-            );
-
-            for _ in 0..3 {
-                futures::executor::block_on(maintain_morph_pool_with(
-                    pool.clone(),
-                    provider_state(client.clone()),
-                    futures::stream::iter([event.clone()]),
-                ));
             }
-            let all = pool.all_transactions();
-            if l1_fee == 0 {
-                assert!(ordinary.iter().all(|hash| pool.get(hash).is_some()));
-                assert!(
-                    pool.get(&token_tx).is_none(),
-                    "the unfunded MorphTx is removed"
-                );
-                assert!(all.queued.is_empty());
-            } else if ordinary_count == 2 {
-                assert!(ordinary.iter().all(|hash| pool.get(hash).is_some()));
-                assert!(pool.get(&token_tx).is_some());
-                assert_eq!(all.pending.len(), 3);
-                assert!(all.queued.is_empty());
-            } else {
-                let (unaffordable, affordable) = ordinary.split_last().unwrap();
-                assert!(
-                    pool.get(unaffordable).is_none(),
-                    "the first L1-unaffordable predecessor must be removed"
-                );
-                assert!(affordable.iter().all(|hash| pool.get(hash).is_some()));
-                assert_eq!(all.pending.len(), affordable.len());
-                if token_balance == 0 {
-                    assert!(
-                        pool.get(&token_tx).is_none(),
-                        "a parked successor the sender cannot pay for is removed by a later round"
-                    );
-                    assert!(all.queued.is_empty());
-                } else {
-                    assert_eq!(
-                        all.queued.iter().map(|tx| *tx.hash()).collect::<Vec<_>>(),
-                        [token_tx],
-                        "preserve the successor in queued while it still has tokens"
-                    );
-                }
+            fn canonical_head(&self) -> Result<Option<SealedHeader<MorphHeader>>, BoxError> {
+                Ok(Some(self.head.clone()))
             }
         }
-    }
 
-    #[test]
-    fn removing_a_morph_tx_parks_its_descendants_instead_of_deleting_them() {
-        let client = mock_provider(10_000_000, 10 * TX_TOKEN_BUDGET);
-        let validator = crate::MorphTransactionValidator::new(
-            EthTransactionValidatorBuilder::new(
-                client.clone(),
-                MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone()),
-            )
-            .disable_balance_check()
-            .with_custom_tx_type(morph_primitives::MORPH_TX_TYPE_ID)
-            .build::<MorphPooledTransaction, _>(InMemoryBlobStore::default()),
+        let source = TwoBlockSource {
+            states: HashMap::from([
+                (head0.hash_slow(), make_provider(0, &head0)),
+                (head1.hash_slow(), make_provider(TX_TOKEN_BUDGET, &head1)),
+            ]),
+            head: SealedHeader::seal_slow(head1),
+        };
+
+        let sealed_block0 = reth_primitives_traits::RecoveredBlock::new_unhashed(
+            morph_primitives::Block::new(head0, Default::default()),
+            Vec::new(),
         );
-        let pool = Pool::new(
-            validator,
-            CoinbaseTipOrdering::default(),
-            InMemoryBlobStore::default(),
+        let chain = Arc::new(reth_provider::Chain::new(
+            vec![sealed_block0],
             Default::default(),
-        );
+            Default::default(),
+        ));
+        let event = reth_provider::CanonStateNotification::Commit { new: chain };
 
-        // nonce 0 pays in tokens, nonce 1 is a plain ETH transaction that only depends on
-        // nonce 0 through the nonce sequence.
-        let unpayable = futures::executor::block_on(pool.add_transaction(
-            reth_transaction_pool::TransactionOrigin::Local,
-            token_fee_tx(0),
-        ))
-        .unwrap()
-        .hash;
-        let descendant = futures::executor::block_on(pool.add_transaction(
-            reth_transaction_pool::TransactionOrigin::Local,
-            legacy_tx(1),
-        ))
-        .unwrap()
-        .hash;
-
-        // The sender spends its whole token balance elsewhere, so nonce 0 is no longer payable.
-        set_token_balance(&client, 0);
-        let event = commit_event();
         futures::executor::block_on(maintain_morph_pool_with(
             pool.clone(),
-            provider_state(client),
+            source,
             futures::stream::iter([event]),
         ));
 
-        // Without the removal, every early return of the maintenance round would pass the
-        // descendant check below as well.
+        assert!(pool.get(&tx0).is_none(), "unaffordable tx0 must be removed");
         assert!(
-            pool.get(&unpayable).is_none(),
-            "the transaction the sender can no longer pay for must be removed"
+            pool.get(&tx1).is_some(),
+            "tx1 payable at canonical head must survive parked in queued"
         );
-        let queued = pool.all_transactions().queued;
-        assert!(
-            queued.iter().any(|tx| *tx.hash() == descendant),
-            "an independently affordable ETH-fee successor must be parked, not deleted"
-        );
+        assert_eq!(pool.all_transactions().pending.len(), 0);
+        assert_eq!(pool.all_transactions().queued.len(), 1);
     }
 
+    // Ensure `DynDatabase` import is exercised even when tests are trimmed.
     #[test]
-    fn a_morph_tx_parked_behind_a_nonce_gap_is_removed_before_the_gap_is_filled() {
-        let client = mock_provider(10_000_000, 10 * TX_TOKEN_BUDGET);
-        let validator = crate::MorphTransactionValidator::new(
-            EthTransactionValidatorBuilder::new(
-                client.clone(),
-                MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone()),
-            )
-            .disable_balance_check()
-            .with_custom_tx_type(morph_primitives::MORPH_TX_TYPE_ID)
-            .build::<MorphPooledTransaction, _>(InMemoryBlobStore::default()),
-        );
-        let pool = Pool::new(
-            validator,
-            CoinbaseTipOrdering::default(),
-            InMemoryBlobStore::default(),
-            Default::default(),
-        );
+    fn counting_db_reuses_cache_per_round() {
+        struct CountingDb {
+            inner: InMemoryDB,
+            reads: HashMap<Address, usize>,
+        }
+        impl Database for CountingDb {
+            type Error = std::convert::Infallible;
+            fn get_account(
+                &mut self,
+                address: &Address,
+            ) -> Result<Option<AccountInfo>, Self::Error> {
+                Ok(DynDatabase::get_account(&mut self.inner, address).unwrap())
+            }
+            fn get_code_by_hash(&mut self, code_hash: &B256) -> Result<Bytecode, Self::Error> {
+                Ok(DynDatabase::get_code_by_hash(&mut self.inner, code_hash).unwrap())
+            }
+            fn get_storage(
+                &mut self,
+                address: &Address,
+                index: &U256,
+            ) -> Result<U256, Self::Error> {
+                *self.reads.entry(*address).or_default() += 1;
+                Ok(DynDatabase::get_storage(&mut self.inner, address, index).unwrap())
+            }
+            fn get_block_hash(&mut self, number: &U256) -> Result<B256, Self::Error> {
+                Ok(DynDatabase::get_block_hash(&mut self.inner, number).unwrap())
+            }
+        }
 
-        // Admitted while the sender could pay, then parked: nonce 0 is missing.
-        let parked = futures::executor::block_on(pool.add_transaction(
-            reth_transaction_pool::TransactionOrigin::Local,
-            token_fee_tx(1),
-        ))
-        .unwrap()
-        .hash;
-        assert_eq!(pool.all_transactions().queued.len(), 1);
+        let mut inner = call_mode_token_state(
+            TOKEN_ID,
+            FEE_TOKEN,
+            SIGNER,
+            U256::from(TX_TOKEN_BUDGET),
+            BALANCE_OF_RUNTIME,
+        );
+        inner.insert_account_info(&SIGNER, AccountInfo::default());
+        let mut db = CountingDb {
+            inner,
+            reads: HashMap::new(),
+        };
+        let txs = [
+            token_fee_tx(0, TOKEN_ID, U256::ZERO, 21_000),
+            token_fee_tx(1, TOKEN_ID, U256::ZERO, 21_000),
+            token_fee_tx(2, TOKEN_ID, U256::ZERO, 21_000),
+        ];
 
-        // The sender spends every token before nonce 0 shows up.
-        set_token_balance(&client, 0);
-        futures::executor::block_on(maintain_morph_pool_with(
-            pool.clone(),
-            provider_state(client),
-            futures::stream::iter([commit_event()]),
-        ));
         assert!(
-            pool.get(&parked).is_none(),
-            "a parked MorphTx the sender can no longer pay for must be removed"
+            collect_removable_transactions(
+                &mut db,
+                &L1BlockInfo::default(),
+                &test_evm_env(MorphHardfork::Celadon),
+                30_000_000,
+                txs.iter().collect(),
+            )
+            .is_empty()
         );
-
-        // Filling the gap promotes whatever is parked without running the validator again, so
-        // an unpayable nonce 1 left in place would now be pending and offered to the builder.
-        futures::executor::block_on(pool.add_transaction(
-            reth_transaction_pool::TransactionOrigin::Local,
-            legacy_tx(0),
-        ))
-        .unwrap();
-        let all = pool.all_transactions();
-        assert_eq!(
-            all.pending.iter().map(|tx| tx.nonce()).collect::<Vec<_>>(),
-            [0]
-        );
-        assert!(all.queued.is_empty());
+        assert_eq!(db.reads[&L2_TOKEN_REGISTRY_ADDRESS], 5);
+        assert_eq!(db.reads[&FEE_TOKEN], 1);
     }
 }

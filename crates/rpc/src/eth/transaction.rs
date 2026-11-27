@@ -1,15 +1,20 @@
 //! Morph transaction conversion for `eth_` RPC responses.
 
 use crate::MorphTransactionRequest;
-use alloy_consensus::{EthereumTxEnvelope, SignableTransaction, TxEip4844};
+use alloy_consensus::{
+    EthereumTxEnvelope, SignableTransaction, TxEip4844, TxType, transaction::Recovered,
+};
 use alloy_network::TxSigner;
 use alloy_primitives::{B256, Signature, TxKind, U64, U256};
 use alloy_rpc_types_eth::AccessList;
-use reth_rpc_convert::{SignTxRequestError, SignableTxRequest, TryIntoSimTx, TryIntoTxEnv};
+use reth_rpc_convert::{
+    EthTxEnvError, SignTxRequestError, SignableTxRequest, TryIntoSimTx, TryIntoTxEnv,
+    normalize_transaction_request,
+};
 use reth_rpc_eth_types::EthApiError;
 
-use morph_primitives::{MorphTxEnvelope, TxMorph};
-use morph_revm::{MorphBlockEnv, MorphTxEnv};
+use morph_primitives::{MorphTxEnvelope, TxMorph, transaction::morph_transaction::MAX_MEMO_LENGTH};
+use morph_revm::{MorphAuthorization, MorphEvmEnv, MorphTxEnv};
 use reth_evm::EvmEnv;
 
 /// Converts a [`MorphTransactionRequest`] into a simulated transaction envelope.
@@ -99,21 +104,15 @@ impl SignableTxRequest<MorphTxEnvelope> for MorphTransactionRequest {
 /// Also encodes the transaction for L1 fee calculation.
 /// The MorphTx version is derived from the content, see
 /// [`try_build_morph_tx_from_request`].
-impl<Spec> TryIntoTxEnv<MorphTxEnv, Spec, MorphBlockEnv> for MorphTransactionRequest {
+impl TryIntoTxEnv<Recovered<MorphTxEnv>, MorphEvmEnv> for MorphTransactionRequest {
     type Err = EthApiError;
 
-    fn try_into_tx_env(
-        self,
-        evm_env: &EvmEnv<Spec, MorphBlockEnv>,
-    ) -> Result<MorphTxEnv, Self::Err> {
+    fn try_into_tx_env(self, evm_env: &MorphEvmEnv) -> Result<Recovered<MorphTxEnv>, Self::Err> {
         let fee_token_id = self.fee_token_id;
         let fee_limit = self.fee_limit;
         let reference = normalize_reference(self.reference);
         let memo = self.memo;
         let mut inner = self.inner;
-        if inner.chain_id.is_none() {
-            inner.chain_id = Some(evm_env.cfg_env.chain_id);
-        }
         let legacy_gas_price = inner.gas_price;
         let has_authorizations = inner
             .authorization_list
@@ -131,31 +130,100 @@ impl<Spec> TryIntoTxEnv<MorphTxEnv, Spec, MorphBlockEnv> for MorphTransactionReq
             || is_nonzero_reference(reference.as_ref())
             || memo.as_ref().is_some_and(|m| !m.is_empty());
 
-        let inner_tx_env = inner.try_into_tx_env(evm_env).map_err(EthApiError::from)?;
+        // Match geth's `ToMessage` / `DoEstimateGas`: when `maxFeePerGas` is omitted and
+        // `maxPriorityFeePerGas` is explicitly `0` (with no legacy `gasPrice`), treat the
+        // request as zero-priced — identical to omitting both or passing `(0, 0)` — rather
+        // than letting `normalize_transaction_request` price it at `base_fee + 0` and
+        // reject zero-balance callers with `insufficient funds for l1 fee`.
+        if inner.gas_price.is_none()
+            && inner.max_fee_per_gas.is_none()
+            && inner.max_priority_fee_per_gas == Some(0)
+        {
+            inner.max_fee_per_gas = Some(0);
+        }
 
-        let mut tx_env = MorphTxEnv::new(inner_tx_env);
+        let tx_type = inner.minimal_tx_type();
+        let fees = normalize_transaction_request(&mut inner, evm_env).map_err(EthApiError::from)?;
+        let kind = inner.to.unwrap_or(TxKind::Create);
+        if !is_morph_tx && tx_type == TxType::Eip7702 && kind.is_create() {
+            return Err(EthTxEnvError::AuthorizationListInvalidFields.into());
+        }
+        let caller = inner.from.unwrap_or_default();
+
+        // Keep `max_fee_per_gas` in `MorphTxEnv::gas_price` for dynamic-fee requests so
+        // `caller_gas_allowance`, `encode_for_l1_fee`, and balance checks enforce the
+        // worst-case fee cap, while `MorphTxEnv::effective_gas_price_at(base_fee)` still
+        // derives the effective gas price for the GASPRICE opcode and fee settlement.
+        let (gas_price, gas_priority_fee) = if matches!(tx_type, TxType::Legacy | TxType::Eip2930) {
+            (
+                fees.gas_price.saturating_to(),
+                fees.max_priority_fee_per_gas.map(|fee| fee.saturating_to()),
+            )
+        } else {
+            (
+                inner
+                    .max_fee_per_gas
+                    .unwrap_or_else(|| fees.gas_price.saturating_to()),
+                inner
+                    .max_priority_fee_per_gas
+                    .or_else(|| fees.max_priority_fee_per_gas.map(|fee| fee.saturating_to())),
+            )
+        };
+
+        let mut tx_env = MorphTxEnv {
+            tx_type: tx_type.into(),
+            gas_limit: inner.gas.unwrap_or_default(),
+            gas_price,
+            gas_priority_fee,
+            kind,
+            value: inner.value.unwrap_or_default(),
+            data: inner.input.into_input().unwrap_or_default(),
+            nonce: inner.nonce.unwrap_or_default(),
+            chain_id: inner.chain_id,
+            access_list: inner.access_list.unwrap_or_default(),
+            authorization_list: inner
+                .authorization_list
+                .unwrap_or_default()
+                .into_iter()
+                .map(MorphAuthorization::Signed)
+                .collect(),
+            ..Default::default()
+        };
         if is_morph_tx {
-            tx_env.fee_token_id = match fee_token_id {
+            let parsed_fee_token_id = match fee_token_id {
                 Some(id) => Some(
                     u16::try_from(id.to::<u64>())
                         .map_err(|_| EthApiError::InvalidParams("invalid token".to_string()))?,
                 ),
                 None => None,
             };
+            if memo.as_ref().is_some_and(|m| m.len() > MAX_MEMO_LENGTH) {
+                return Err(EthApiError::InvalidParams(
+                    "memo exceeds maximum length of 64 bytes".to_string(),
+                ));
+            }
+            if parsed_fee_token_id.unwrap_or(0) == 0
+                && fee_limit.is_some_and(|limit| limit > U256::ZERO)
+            {
+                return Err(EthApiError::InvalidParams(
+                    "MorphTx cannot have FeeLimit when FeeTokenID is 0".to_string(),
+                ));
+            }
+            tx_env.fee_token_id = parsed_fee_token_id;
             tx_env.fee_limit = fee_limit;
             tx_env.reference = reference;
             tx_env.memo = memo;
-            tx_env.inner.tx_type = morph_primitives::MORPH_TX_TYPE_ID;
+            tx_env.tx_type = morph_primitives::MORPH_TX_TYPE_ID;
             // geth's `ToMessage` maps legacy `gasPrice` to both EIP-1559 caps.
             // Preserve that shape so fallback MorphTx encoding produces the
             // same L1 data fee.
             if let Some(gas_price) = legacy_gas_price {
-                tx_env.inner.gas_priority_fee = Some(gas_price);
+                tx_env.gas_priority_fee = Some(gas_price);
             }
             // Same static rule as `TxMorph::validate`, surfaced as a parameter
             // error so simulations fail with a clear message rather than an
             // EVM-level rejection.
-            if has_authorizations && tx_env.inner.kind.is_create() {
+            if has_authorizations && tx_env.kind.is_create() {
                 return Err(EthApiError::InvalidParams(
                     "MorphTx with an authorization list cannot create a contract".to_string(),
                 ));
@@ -165,9 +233,9 @@ impl<Spec> TryIntoTxEnv<MorphTxEnv, Spec, MorphBlockEnv> for MorphTransactionReq
 
         // Required by `MorphEthApi::caller_gas_allowance` (eth/call.rs) to
         // recover the L1 data fee when capping `eth_estimateGas` allowance.
-        tx_env.rlp_bytes = Some(tx_env.encode_for_l1_fee(evm_env.cfg_env.chain_id));
+        tx_env.rlp_bytes = Some(tx_env.encode_for_l1_fee(evm_env.chain_id()));
 
-        Ok(tx_env)
+        Ok(Recovered::new_unchecked(tx_env, caller))
     }
 }
 
@@ -291,12 +359,13 @@ mod tests {
     use alloy_eips::eip2718::Decodable2718;
     use alloy_primitives::{Address, B256, Bytes, address};
     use alloy_rpc_types_eth::{TransactionInfo, TransactionInput, TransactionRequest};
+    use evm2::EvmFeatures;
     use morph_chainspec::MorphHardfork;
     use morph_primitives::transaction::morph_transaction::{
         MORPH_TX_VERSION_1, MORPH_TX_VERSION_2,
     };
+    use morph_revm::{MorphBlockEnv, morph_evm_env};
     use reth_rpc_convert::FromConsensusTx;
-    use revm::context::{BlockEnv, CfgEnv};
 
     /// Helper function to create a basic TransactionRequest for testing
     fn create_basic_transaction_request() -> TransactionRequest {
@@ -322,27 +391,20 @@ mod tests {
     }
 
     /// Helper function to create a basic EvmEnv for testing
-    fn create_evm_env(disable_fee_charge: bool) -> EvmEnv<MorphHardfork, MorphBlockEnv> {
-        let mut cfg = CfgEnv::<MorphHardfork>::default();
-        cfg.disable_fee_charge = disable_fee_charge;
-        cfg.chain_id = 2818;
-
-        // Construct MorphBlockEnv directly to avoid clippy warning
+    fn create_evm_env(disable_fee_charge: bool) -> MorphEvmEnv {
         let block_env = MorphBlockEnv {
-            inner: BlockEnv {
-                number: alloy_primitives::U256::from(1),
-                beneficiary: alloy_primitives::Address::ZERO,
-                timestamp: alloy_primitives::U256::from(1234567890),
-                gas_limit: 30000000u64,
-                basefee: 1000000000u64,
-                difficulty: alloy_primitives::U256::ZERO,
-                prevrandao: Some(B256::ZERO),
-                blob_excess_gas_and_price: None,
-                slot_num: 0,
-            },
+            number: U256::from(1),
+            timestamp: U256::from(1234567890),
+            gas_limit: U256::from(30_000_000u64),
+            basefee: U256::from(1_000_000_000u64),
+            ..Default::default()
         };
 
-        EvmEnv::new(cfg, block_env)
+        let mut evm_env = morph_evm_env(MorphHardfork::default(), 2818, 30_000_000, block_env);
+        if disable_fee_charge {
+            evm_env.version.features.remove(EvmFeatures::FEE_CHARGE);
+        }
+        evm_env
     }
 
     /// RLP bytes are always populated — even on `eth_call` where
@@ -370,7 +432,7 @@ mod tests {
             "rlp_bytes should be populated even when disable_fee_charge = true"
         );
         assert!(
-            !tx_env.rlp_bytes.unwrap().is_empty(),
+            !tx_env.rlp_bytes.as_ref().unwrap().is_empty(),
             "RLP bytes should not be empty"
         );
     }
@@ -404,7 +466,7 @@ mod tests {
             "eth_estimateGas should encode RLP bytes for L1 fee calculation"
         );
         assert!(
-            !tx_env.rlp_bytes.unwrap().is_empty(),
+            !tx_env.rlp_bytes.as_ref().unwrap().is_empty(),
             "RLP bytes should not be empty"
         );
     }
@@ -426,8 +488,11 @@ mod tests {
             .try_into_tx_env(&evm_env)
             .expect("conversion should succeed");
 
-        assert_eq!(tx_env.inner.tx_type, 0, "gasPrice-only request is Legacy");
-        let encoded = tx_env.rlp_bytes.expect("rlp_bytes must be populated");
+        assert_eq!(tx_env.tx_type, 0, "gasPrice-only request is Legacy");
+        let encoded = tx_env
+            .rlp_bytes
+            .as_ref()
+            .expect("rlp_bytes must be populated");
         assert_eq!(
             encoded.first().copied(),
             Some(0x02),
@@ -473,7 +538,7 @@ mod tests {
 
         // Assert: Transaction type should be MorphTx (0x7F)
         assert_eq!(
-            tx_env.inner.tx_type,
+            tx_env.tx_type,
             morph_primitives::MORPH_TX_TYPE_ID,
             "Transaction type should be MorphTx (0x7F)"
         );
@@ -549,13 +614,13 @@ mod tests {
         let tx_env = json_request(serde_json::json!({ "version": "0x1" }))
             .try_into_tx_env(&create_evm_env(false))
             .expect("a legacy version key alone is a standard request");
-        assert_ne!(tx_env.inner.tx_type, morph_primitives::MORPH_TX_TYPE_ID);
+        assert_ne!(tx_env.tx_type, morph_primitives::MORPH_TX_TYPE_ID);
         assert!(tx_env.version.is_none());
 
         let tx_env = json_request(serde_json::json!({ "feeTokenID": "0x1", "version": "0x2" }))
             .try_into_tx_env(&create_evm_env(false))
             .expect("token fee request");
-        assert_eq!(tx_env.inner.tx_type, morph_primitives::MORPH_TX_TYPE_ID);
+        assert_eq!(tx_env.tx_type, morph_primitives::MORPH_TX_TYPE_ID);
         assert_eq!(
             tx_env.version,
             Some(MORPH_TX_VERSION_1),
@@ -626,12 +691,12 @@ mod tests {
             .try_into_tx_env(&evm_env)
             .expect("conversion should succeed");
 
-        assert_eq!(tx_env.inner.tx_type, morph_primitives::MORPH_TX_TYPE_ID);
+        assert_eq!(tx_env.tx_type, morph_primitives::MORPH_TX_TYPE_ID);
         assert_eq!(tx_env.fee_token_id, Some(1));
         assert_eq!(tx_env.fee_limit, Some(U256::from(1000000)));
         // The legacy gas price is still what the EVM prices the call with.
-        assert_eq!(tx_env.inner.gas_price, 1_000_000_000);
-        assert_eq!(tx_env.inner.gas_priority_fee, Some(1_000_000_000));
+        assert_eq!(tx_env.gas_price, 1_000_000_000);
+        assert_eq!(tx_env.gas_priority_fee, Some(1_000_000_000));
 
         let encoded = tx_env
             .rlp_bytes
@@ -644,6 +709,53 @@ mod tests {
         };
         assert_eq!(signed.tx().max_fee_per_gas, 1_000_000_000);
         assert_eq!(signed.tx().max_priority_fee_per_gas, 1_000_000_000);
+    }
+
+    #[test]
+    fn eip1559_and_morph_tx_env_preserve_max_fee_per_gas() {
+        let block_env = MorphBlockEnv {
+            number: U256::from(1),
+            timestamp: U256::from(1234567890),
+            gas_limit: U256::from(30_000_000u64),
+            basefee: U256::from(1_000_000u64), // 0.001 Gwei
+            ..Default::default()
+        };
+        let evm_env = morph_evm_env(MorphHardfork::default(), 2818, 30_000_000, block_env);
+
+        for (priority_fee, fee_token_id) in [
+            (Some(0u128), None),
+            (None, None),
+            (Some(5_000_000u128), None),
+            (Some(0u128), Some(U64::from(1))),
+        ] {
+            let req = MorphTransactionRequest {
+                inner: TransactionRequest {
+                    gas_price: None,
+                    max_fee_per_gas: Some(100_000_000_000), // 100 Gwei >> baseFee
+                    max_priority_fee_per_gas: priority_fee,
+                    ..create_basic_transaction_request()
+                },
+                fee_token_id,
+                ..Default::default()
+            };
+
+            let recovered = req.try_into_tx_env(&evm_env).unwrap();
+            let tx_env = recovered.inner();
+            assert_eq!(
+                tx_env.gas_price, 100_000_000_000,
+                "MorphTxEnv::gas_price must preserve max_fee_per_gas"
+            );
+            assert_eq!(
+                tx_env.gas_priority_fee,
+                Some(priority_fee.unwrap_or(0)),
+                "dynamic-fee priority fee must be preserved (or default to 0)"
+            );
+            assert_eq!(
+                tx_env.effective_gas_price_at(1_000_000),
+                1_000_000 + priority_fee.unwrap_or(0),
+                "effective_gas_price_at must still compute min(max_fee, base_fee + tip)"
+            );
+        }
     }
 
     #[test]
@@ -663,16 +775,16 @@ mod tests {
             .try_into_tx_env(&evm_env)
             .expect("conversion should default missing chain_id from EVM env");
 
-        assert_eq!(tx_env.inner.chain_id, Some(2818));
+        assert_eq!(tx_env.chain_id, Some(2818));
     }
 
     /// MorphTx converted on the `eth_call` path still carries RLP bytes.
     ///
     /// Before reth v2.0.0 this test asserted `rlp_bytes.is_none()` on the
     /// assumption that `eth_call` fell through to the EVM handler, which
-    /// read `rlp_bytes` for L1 fee deduction. reth v2.0.0 sets
-    /// `cfg_env.disable_fee_charge = true` on `eth_call`, causing the
-    /// handler to short-circuit before reading `rlp_bytes`, and the RLP
+    /// read `rlp_bytes` for L1 fee deduction. reth v2.0.0 turned fee
+    /// charging off on `eth_call`, causing the handler to
+    /// short-circuit before reading `rlp_bytes`, and the RLP
     /// is instead needed by `MorphEthApi::caller_gas_allowance` to
     /// compute the L1 fee cap on `eth_estimateGas`. We now populate it
     /// unconditionally.
@@ -698,13 +810,13 @@ mod tests {
             "rlp_bytes should be populated even when disable_fee_charge = true"
         );
         assert!(
-            !tx_env.rlp_bytes.unwrap().is_empty(),
+            !tx_env.rlp_bytes.as_ref().unwrap().is_empty(),
             "RLP bytes should not be empty"
         );
 
         // Transaction type should still be MorphTx
         assert_eq!(
-            tx_env.inner.tx_type,
+            tx_env.tx_type,
             morph_primitives::MORPH_TX_TYPE_ID,
             "Transaction type should still be MorphTx"
         );
@@ -737,7 +849,7 @@ mod tests {
 
         // Assert: Transaction type should NOT be MorphTx
         assert_ne!(
-            tx_env.inner.tx_type,
+            tx_env.tx_type,
             morph_primitives::MORPH_TX_TYPE_ID,
             "Transaction type should not be MorphTx for standard Ethereum tx"
         );
@@ -1061,15 +1173,18 @@ mod tests {
             .try_into_tx_env(&evm_env)
             .expect("conversion should succeed");
 
-        assert_eq!(tx_env.inner.tx_type, morph_primitives::MORPH_TX_TYPE_ID);
+        assert_eq!(tx_env.tx_type, morph_primitives::MORPH_TX_TYPE_ID);
         assert_eq!(tx_env.version, Some(MORPH_TX_VERSION_2));
         assert_eq!(
-            tx_env.inner.authorization_list.len(),
+            tx_env.authorization_list.len(),
             1,
             "EVM env must carry the authorization list"
         );
 
-        let encoded = tx_env.rlp_bytes.expect("rlp_bytes must be populated");
+        let encoded = tx_env
+            .rlp_bytes
+            .as_ref()
+            .expect("rlp_bytes must be populated");
         let envelope =
             MorphTxEnvelope::decode_2718(&mut encoded.as_ref()).expect("RLP should decode");
         let MorphTxEnvelope::Morph(signed) = envelope else {
@@ -1097,10 +1212,10 @@ mod tests {
         let tx_env = request
             .try_into_tx_env(&create_evm_env(false))
             .expect("memo + list is a valid V2 request");
-        assert_eq!(tx_env.inner.tx_type, morph_primitives::MORPH_TX_TYPE_ID);
+        assert_eq!(tx_env.tx_type, morph_primitives::MORPH_TX_TYPE_ID);
         assert_eq!(tx_env.version, Some(MORPH_TX_VERSION_2));
         assert_eq!(tx_env.fee_token_id, None);
-        assert_eq!(tx_env.inner.authorization_list.len(), 1);
+        assert_eq!(tx_env.authorization_list.len(), 1);
     }
 
     /// `eth_call` / `eth_estimateGas` without authorizations (absent key or
@@ -1122,11 +1237,14 @@ mod tests {
             let tx_env = request
                 .try_into_tx_env(&create_evm_env(false))
                 .expect("memo without a list is a valid V1 request");
-            assert_eq!(tx_env.inner.tx_type, morph_primitives::MORPH_TX_TYPE_ID);
+            assert_eq!(tx_env.tx_type, morph_primitives::MORPH_TX_TYPE_ID);
             assert_eq!(tx_env.version, Some(MORPH_TX_VERSION_1));
-            assert!(tx_env.inner.authorization_list.is_empty());
+            assert!(tx_env.authorization_list.is_empty());
 
-            let encoded = tx_env.rlp_bytes.expect("rlp_bytes must be populated");
+            let encoded = tx_env
+                .rlp_bytes
+                .as_ref()
+                .expect("rlp_bytes must be populated");
             let envelope =
                 MorphTxEnvelope::decode_2718(&mut encoded.as_ref()).expect("RLP should decode");
             let MorphTxEnvelope::Morph(signed) = envelope else {
@@ -1155,7 +1273,7 @@ mod tests {
             .try_into_tx_env(&create_evm_env(false))
             .expect("CREATE without authorizations is valid");
         assert_eq!(tx_env.version, Some(MORPH_TX_VERSION_1));
-        assert!(tx_env.inner.kind.is_create());
+        assert!(tx_env.kind.is_create());
     }
 
     #[test]
@@ -1192,7 +1310,7 @@ mod tests {
         let tx_env = request
             .try_into_tx_env(&create_evm_env(false))
             .expect("conversion should succeed");
-        assert_eq!(tx_env.inner.tx_type, 4, "plain SetCode request");
+        assert_eq!(tx_env.tx_type, 4, "plain SetCode request");
         assert!(tx_env.version.is_none());
         assert_eq!(
             tx_env.rlp_bytes.as_ref().and_then(|b| b.first().copied()),
@@ -1559,5 +1677,106 @@ mod tests {
         // = min(500_000_000, 3_000_000_000 - 1_000_000_000) + 1_000_000_000
         // = 500_000_000 + 1_000_000_000 = 1_500_000_000
         assert_eq!(rpc_tx.effective_gas_price, Some(1_500_000_000));
+    }
+
+    #[test]
+    fn try_into_tx_env_zero_tip_without_max_fee_is_zero_priced() {
+        let evm_env = create_evm_env(true);
+
+        // Omitting `maxFeePerGas` while passing `maxPriorityFeePerGas: 0` must produce
+        // a zero-priced EIP-1559 TxEnv (matching geth's `ToMessage` / `DoEstimateGas`).
+        let req = MorphTransactionRequest {
+            inner: TransactionRequest {
+                from: Some(address!("0000000000000000000000000000000000000001")),
+                to: Some(address!("0000000000000000000000000000000000000002").into()),
+                max_priority_fee_per_gas: Some(0),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let tx_env = req.try_into_tx_env(&evm_env).unwrap();
+        assert_eq!(tx_env.gas_price, 0);
+        assert_eq!(tx_env.gas_priority_fee, Some(0));
+
+        // Explicit positive `maxFeePerGas` with `maxPriorityFeePerGas: 0` must keep the cap.
+        let req_with_cap = MorphTransactionRequest {
+            inner: TransactionRequest {
+                from: Some(address!("0000000000000000000000000000000000000001")),
+                to: Some(address!("0000000000000000000000000000000000000002").into()),
+                max_fee_per_gas: Some(2_000_000_000),
+                max_priority_fee_per_gas: Some(0),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let tx_env_with_cap = req_with_cap.try_into_tx_env(&evm_env).unwrap();
+        assert_eq!(tx_env_with_cap.gas_price, 2_000_000_000);
+        assert_eq!(tx_env_with_cap.gas_priority_fee, Some(0));
+    }
+
+    #[test]
+    fn try_into_tx_env_rejects_oversized_morph_tx_memo() {
+        let evm_env = create_evm_env(true);
+
+        // Exactly MAX_MEMO_LENGTH (64) bytes is accepted.
+        let ok_req = MorphTransactionRequest {
+            inner: create_morph_transaction_request(),
+            fee_token_id: None,
+            fee_limit: None,
+            reference: None,
+            memo: Some(Bytes::from(vec![0xaa; MAX_MEMO_LENGTH])),
+        };
+        assert!(ok_req.try_into_tx_env(&evm_env).is_ok());
+
+        // MAX_MEMO_LENGTH + 1 (65) bytes is rejected.
+        let bad_req = MorphTransactionRequest {
+            inner: create_morph_transaction_request(),
+            fee_token_id: None,
+            fee_limit: None,
+            reference: None,
+            memo: Some(Bytes::from(vec![0xaa; MAX_MEMO_LENGTH + 1])),
+        };
+        let err = bad_req.try_into_tx_env(&evm_env).unwrap_err();
+        match err {
+            EthApiError::InvalidParams(msg) => {
+                assert!(msg.contains("64 bytes"), "unexpected error: {msg}");
+            }
+            other => panic!("expected InvalidParams, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn try_into_tx_env_rejects_fee_limit_with_zero_fee_token_id() {
+        let evm_env = create_evm_env(true);
+
+        for fee_token_id in [None, Some(U64::ZERO)] {
+            let bad_req = MorphTransactionRequest {
+                inner: create_morph_transaction_request(),
+                fee_token_id,
+                fee_limit: Some(U256::from(100)),
+                reference: Some(B256::repeat_byte(0x11)),
+                memo: None,
+            };
+            let err = bad_req.try_into_tx_env(&evm_env).unwrap_err();
+            match err {
+                EthApiError::InvalidParams(msg) => {
+                    assert!(
+                        msg.contains("FeeLimit") && msg.contains("FeeTokenID"),
+                        "unexpected error: {msg}"
+                    );
+                }
+                other => panic!("expected InvalidParams, got {other:?}"),
+            }
+        }
+
+        // Zero fee_limit with fee_token_id == 0 is permitted.
+        let ok_req = MorphTransactionRequest {
+            inner: create_morph_transaction_request(),
+            fee_token_id: Some(U64::ZERO),
+            fee_limit: Some(U256::ZERO),
+            reference: Some(B256::repeat_byte(0x11)),
+            memo: None,
+        };
+        assert!(ok_req.try_into_tx_env(&evm_env).is_ok());
     }
 }

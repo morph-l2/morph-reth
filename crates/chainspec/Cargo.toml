@@ -21,12 +21,13 @@ reth-primitives-traits.workspace = true
 
 alloy-chains.workspace = true
 alloy-consensus.workspace = true
-alloy-evm.workspace = true
 alloy-genesis.workspace = true
 alloy-primitives.workspace = true
 alloy-eips.workspace = true
 alloy-hardforks.workspace = true
 alloy-serde.workspace = true
+
+evm2.workspace = true
 
 auto_impl.workspace = true
 eyre = { workspace = true, optional = true }

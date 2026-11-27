@@ -1,16 +1,14 @@
 use crate::{MorphBlockAssembler, MorphEvmConfig, MorphEvmError, MorphNextBlockEnvAttributes};
 use alloy_consensus::BlockHeader;
-use alloy_primitives::B256;
-use morph_chainspec::hardfork::{MorphHardfork, MorphHardforks};
+use alloy_primitives::{B256, U256};
+use morph_chainspec::hardfork::MorphHardforks;
 use morph_primitives::Block;
 use morph_primitives::{MorphHeader, MorphPrimitives};
-use morph_revm::MorphBlockEnv;
+use morph_revm::{MorphBlockEnv, morph_evm_env};
 use reth_chainspec::EthChainSpec;
-use reth_evm::{ConfigureEvm, EvmEnv, EvmEnvFor, eth::EthBlockExecutionCtx};
+use reth_evm::{ConfigureEvm, EvmEnvFor, ExecutionCtxFor};
+use reth_evm_ethereum::EthBlockExecutionCtx;
 use reth_primitives_traits::{SealedBlock, SealedHeader};
-use revm::context::{BlockEnv, CfgEnv};
-use revm::context_interface::block::BlobExcessGasAndPrice;
-use revm::primitives::U256;
 use std::borrow::Cow;
 
 impl ConfigureEvm for MorphEvmConfig {
@@ -33,45 +31,34 @@ impl ConfigureEvm for MorphEvmConfig {
             .chain_spec()
             .morph_hardfork_at(header.number(), header.timestamp());
 
-        let mut cfg_env = CfgEnv::<MorphHardfork>::default()
-            .with_chain_id(self.chain_spec().chain().id())
-            .with_spec_and_mainnet_gas_params(spec);
-        cfg_env.disable_eip7623 = true;
-        // Morph does not enforce EIP-7825 transaction gas limit cap. Historical mainnet
-        // transactions (e.g. block 20459477, gas_limit=21,165,068) exceed the EIP-7825
-        // cap of 2^24 (16,777,216). Cap at block gas limit instead so all valid
-        // transactions can execute regardless of which SpecId is active.
-        cfg_env.tx_gas_limit_cap = Some(header.gas_limit());
-
         let fee_recipient = self
             .chain_spec()
             .fee_vault_address()
             .unwrap_or_else(|| header.beneficiary());
 
-        // Morph doesn't support EIP-4844 blob transactions, but when SpecId >= CANCUN,
-        // revm requires `blob_excess_gas_and_price` to be set. We provide a placeholder
-        // value (excess_blob_gas = 0, blob_gasprice = 1) to satisfy the validation.
-        // This won't affect execution since Morph rejects blob transactions at the
-        // transaction pool level.
-        let block_env = BlockEnv {
+        let block_env = MorphBlockEnv {
             number: U256::from(header.number()),
             beneficiary: fee_recipient,
             timestamp: U256::from(header.timestamp()),
             difficulty: header.difficulty(),
-            prevrandao: header.mix_hash(),
-            gas_limit: header.gas_limit(),
-            basefee: header.base_fee_per_gas().unwrap_or_default(),
-            blob_excess_gas_and_price: Some(BlobExcessGasAndPrice {
-                excess_blob_gas: 0,
-                blob_gasprice: 1, // minimum blob gas price
-            }),
-            slot_num: 0,
+            prevrandao: header
+                .mix_hash()
+                .map(|hash| U256::from_be_bytes(hash.0))
+                .unwrap_or_default(),
+            gas_limit: U256::from(header.gas_limit()),
+            basefee: U256::from(header.base_fee_per_gas().unwrap_or_default()),
+            // Morph doesn't support EIP-4844 blob transactions; this is the minimum blob gas
+            // price, which nothing observes because BLOBBASEFEE is disabled.
+            blob_basefee: U256::ONE,
+            ..Default::default()
         };
 
-        Ok(EvmEnv {
-            cfg_env,
-            block_env: MorphBlockEnv { inner: block_env },
-        })
+        Ok(morph_evm_env(
+            spec,
+            self.chain_spec().chain().id(),
+            header.gas_limit(),
+            block_env,
+        ))
     }
 
     fn next_evm_env(
@@ -84,51 +71,44 @@ impl ConfigureEvm for MorphEvmConfig {
             .chain_spec()
             .morph_hardfork_at(parent.number() + 1, attributes.timestamp);
 
-        let mut cfg_env = CfgEnv::<MorphHardfork>::default()
-            .with_chain_id(self.chain_spec().chain().id())
-            .with_spec_and_mainnet_gas_params(spec);
-        cfg_env.disable_eip7623 = true;
-        // Morph does not enforce EIP-7825 transaction gas limit cap — see evm_env() above.
-        cfg_env.tx_gas_limit_cap = Some(attributes.gas_limit);
-
         let fee_recipient = self
             .chain_spec()
             .fee_vault_address()
             .unwrap_or(attributes.suggested_fee_recipient);
 
-        // Morph doesn't support EIP-4844 blob transactions, but when SpecId >= CANCUN,
-        // revm requires `blob_excess_gas_and_price` to be set. We provide a placeholder
-        // value to satisfy the validation.
-        let block_env = BlockEnv {
+        let block_env = MorphBlockEnv {
             number: U256::from(parent.number() + 1),
             beneficiary: fee_recipient,
             timestamp: U256::from(attributes.timestamp),
             difficulty: U256::ZERO,
             // Morph L2 follows geth's L2 path here: PREVRANDAO/mixHash is fixed to zero.
-            prevrandao: Some(B256::ZERO),
-            gas_limit: attributes.gas_limit,
-            basefee: attributes.base_fee_per_gas.unwrap_or_else(|| {
+            prevrandao: U256::from_be_bytes(B256::ZERO.0),
+            gas_limit: U256::from(attributes.gas_limit),
+            basefee: U256::from(attributes.base_fee_per_gas.unwrap_or_else(|| {
                 self.chain_spec()
                     .next_block_base_fee(parent, attributes.timestamp)
                     .unwrap_or_default()
-            }),
-            blob_excess_gas_and_price: Some(BlobExcessGasAndPrice {
-                excess_blob_gas: 0,
-                blob_gasprice: 1, // minimum blob gas price
-            }),
-            slot_num: 0,
+            })),
+            // See `evm_env`.
+            blob_basefee: U256::ONE,
+            ..Default::default()
         };
 
-        Ok(EvmEnv {
-            cfg_env,
-            block_env: MorphBlockEnv { inner: block_env },
-        })
+        Ok(morph_evm_env(
+            spec,
+            self.chain_spec().chain().id(),
+            attributes.gas_limit,
+            block_env,
+        ))
     }
 
     fn context_for_block<'a>(
         &self,
         block: &'a SealedBlock<Block>,
-    ) -> Result<EthBlockExecutionCtx<'a>, Self::Error> {
+    ) -> Result<ExecutionCtxFor<'a, Self>, Self::Error>
+    where
+        Self: 'a,
+    {
         Ok(EthBlockExecutionCtx {
             parent_hash: block.header().parent_hash(),
             parent_beacon_block_root: block.header().parent_beacon_block_root(),
@@ -137,7 +117,7 @@ impl ConfigureEvm for MorphEvmConfig {
                 .body()
                 .withdrawals
                 .as_ref()
-                .map(|w| Cow::Borrowed(w.0.as_slice())),
+                .map(|w| Cow::Borrowed(w.as_slice())),
             extra_data: block.extra_data().clone(),
             tx_count_hint: Some(block.body().transactions.len()),
             // Morph L2 has no PoS slot semantics; introduced upstream in alloy 2.0.
@@ -149,12 +129,15 @@ impl ConfigureEvm for MorphEvmConfig {
         &self,
         parent: &SealedHeader<MorphHeader>,
         attributes: Self::NextBlockEnvCtx,
-    ) -> Result<EthBlockExecutionCtx<'_>, Self::Error> {
+    ) -> Result<ExecutionCtxFor<'_, Self>, Self::Error> {
         Ok(EthBlockExecutionCtx {
             parent_hash: parent.hash(),
             parent_beacon_block_root: attributes.parent_beacon_block_root,
             ommers: &[],
-            withdrawals: attributes.inner.withdrawals.map(|w| Cow::Owned(w.0)),
+            withdrawals: attributes
+                .inner
+                .withdrawals
+                .map(|w| Cow::Owned(w.into_inner())),
             extra_data: attributes.inner.extra_data,
             tx_count_hint: None,
             // Morph L2 has no PoS slot semantics; introduced upstream in alloy 2.0.
@@ -224,7 +207,7 @@ mod tests {
         let header = create_morph_header(100, 1000);
         let env = config.evm_env(&header).unwrap();
 
-        assert_eq!(env.cfg_env.chain_id, 1337);
+        assert_eq!(env.version.chain_id, 1337);
     }
 
     #[test]
@@ -235,10 +218,10 @@ mod tests {
         let header = create_morph_header(100, 1000);
         let env = config.evm_env(&header).unwrap();
 
-        assert_eq!(env.block_env.inner.number, U256::from(100u64));
-        assert_eq!(env.block_env.inner.timestamp, U256::from(1000u64));
-        assert_eq!(env.block_env.inner.gas_limit, 30_000_000);
-        assert_eq!(env.block_env.inner.basefee, 1_000_000);
+        assert_eq!(env.block.number, U256::from(100u64));
+        assert_eq!(env.block.timestamp, U256::from(1000u64));
+        assert_eq!(env.block.gas_limit, U256::from(30_000_000));
+        assert_eq!(env.block.basefee, U256::from(1_000_000));
     }
 
     #[test]
@@ -249,10 +232,8 @@ mod tests {
         let header = create_morph_header(100, 1000);
         let env = config.evm_env(&header).unwrap();
 
-        // Morph uses placeholder blob gas values
-        let blob_info = env.block_env.inner.blob_excess_gas_and_price.unwrap();
-        assert_eq!(blob_info.excess_blob_gas, 0);
-        assert_eq!(blob_info.blob_gasprice, 1);
+        // Morph uses a placeholder blob base fee
+        assert_eq!(env.block.blob_basefee, U256::ONE);
     }
 
     #[test]
@@ -263,7 +244,7 @@ mod tests {
         let header = create_morph_header(100, 1000);
         let env = config.evm_env(&header).unwrap();
 
-        assert!(env.cfg_env.disable_eip7623);
+        assert!(!env.version.feature(evm2::EvmFeatures::EIP7623));
     }
 
     #[test]
@@ -288,9 +269,9 @@ mod tests {
 
         let env = config.next_evm_env(&parent, &attrs).unwrap();
 
-        assert_eq!(env.block_env.inner.number, U256::from(100u64));
-        assert_eq!(env.block_env.inner.timestamp, U256::from(1001u64));
-        assert_eq!(env.block_env.inner.basefee, 500_000);
+        assert_eq!(env.block.number, U256::from(100u64));
+        assert_eq!(env.block.timestamp, U256::from(1001u64));
+        assert_eq!(env.block.basefee, U256::from(500_000));
     }
 
     #[test]

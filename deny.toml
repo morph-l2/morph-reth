@@ -82,6 +82,8 @@ license-files = [{ path = "LICENSE", hash = 0x001c7e6c }]
 unknown-registry = "warn"
 unknown-git = "deny"
 allow-git = [
-    "https://github.com/morph-l2/reth",
-    "https://github.com/sigp/discv5",
+    "https://github.com/paradigmxyz/reth",
+    "https://github.com/paradigmxyz/reth-core",
+    # evm2 has no crates.io release; reth v2.11.0 requires this exact URL through a `[patch]`.
+    "https://github.com/DaniPopes/evm2",
 ]

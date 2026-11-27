@@ -201,9 +201,6 @@ pub trait MorphProofsStore: Send + Sync + Debug {
         'db: 'tx;
 
     /// Store a batch of trie updates.
-    ///
-    /// If wiped is true, the entire storage trie is wiped, but this is unsupported going forward,
-    /// so should only happen for legacy reasons.
     fn store_trie_updates(
         &self,
         block_ref: BlockWithParent,

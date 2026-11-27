@@ -21,18 +21,22 @@ use alloy_eips::{BlockId, BlockNumberOrTag};
 use alloy_primitives::B256;
 use alloy_rpc_types_debug::ExecutionWitness;
 use async_trait::async_trait;
+use evm2::evm::{CacheDB, Db};
 use jsonrpsee::{
     core::RpcResult,
     proc_macros::rpc,
     types::{ErrorCode, ErrorObject},
 };
 use morph_proofs::{MorphProofsStorage, MorphProofsStore};
-use reth_evm::{ConfigureEvm, execute::Executor};
+use reth_evm::{
+    ConfigureEvm, database::StateProviderDatabase, execute::Executor,
+    witness::ExecutionWitnessRecord,
+};
 use reth_metrics::metrics::Label;
-use reth_revm::{State, database::StateProviderDatabase, witness::ExecutionWitnessRecord};
 use reth_rpc_api::eth::helpers::FullEthApi;
 use reth_rpc_eth_api::FromEthApiError;
 use reth_rpc_eth_types::EthApiError;
+use reth_storage_api::StateProvider as _;
 use reth_trie_common::ExecutionWitnessMode;
 
 use crate::{
@@ -135,28 +139,22 @@ where
             let state = factory
                 .state_provider(Some(parent_id))
                 .map_err(Eth::Error::from_eth_err)?;
-            let mut db = StateProviderDatabase::new(&state);
-            let executor = factory.eth_api().evm_config().executor(&mut db);
-
-            // The same `mode` must reach both halves: it decides which bytecodes are collected
-            // here and how the trie witness is computed below. Passing different values would ship
-            // codes that describe a different execution than the trie nodes.
-            // Since reth 2.5.2 the record is built from the post-execution state inside the
-            // closure; the provider result is unwrapped only after execution succeeded.
-            let mut witness = None;
-            executor
-                .execute_with_state_closure(&block, |statedb: &State<_>| {
-                    witness = Some(ExecutionWitnessRecord::new(statedb).into_execution_witness(
-                        &*state,
-                        factory.eth_api().provider(),
-                        block_number,
-                        mode,
-                    ));
-                })
+            let mut db = CacheDB::new(Db::new(StateProviderDatabase::new(
+                (&state).into_evm_state_provider(),
+            )));
+            let output = factory
+                .eth_api()
+                .evm_config()
+                .executor(&mut db)
+                .execute(&block)
                 .map_err(|error| Eth::Error::from_eth_err(EthApiError::Internal(error.into())))?;
 
-            witness
-                .expect("state closure is called after successful execution")
+            // The codes are captured before the output is committed, so canonical witnesses only
+            // carry code read from the parent state.
+            let codes = ExecutionWitnessRecord::commit_execution(&mut db, &output.state);
+            ExecutionWitnessRecord::new(&db)
+                .with_canonical_codes(codes)
+                .into_execution_witness(&*state, factory.eth_api().provider(), block_number, mode)
                 .map_err(Eth::Error::from_eth_err)
         })
         .await;

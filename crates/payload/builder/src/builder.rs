@@ -2,25 +2,31 @@
 
 use crate::metrics::MorphPayloadBuilderMetrics;
 use crate::{MorphBuilderConfig, MorphPayloadBuilderError, config::PayloadBuildingBreaker};
-use alloy_consensus::{BlockHeader, Transaction, Typed2718};
+use alloy_consensus::{BlockHeader, Transaction, Typed2718, transaction::TxHashRef};
 use alloy_eips::eip2718::Encodable2718;
-use alloy_primitives::{B256, Bytes, U256};
-use morph_chainspec::MorphChainSpec;
-use morph_chainspec::{L2_MESSAGE_QUEUE_ADDRESS, L2_MESSAGE_QUEUE_WITHDRAW_TRIE_ROOT_SLOT};
-use morph_evm::{MorphEvmConfig, MorphNextBlockEnvAttributes};
+use alloy_primitives::{Address, B256, Bytes, U256};
+use evm2::{DatabaseError, evm::State, registry::HandlerError};
+use morph_chainspec::{
+    L2_MESSAGE_QUEUE_ADDRESS, L2_MESSAGE_QUEUE_WITHDRAW_TRIE_ROOT_SLOT, MorphChainSpec,
+    MorphHardforks,
+};
+use morph_evm::{MorphEvmConfig, MorphInvalidTransaction, MorphNextBlockEnvAttributes};
 use morph_payload_types::{
     ExecutableL2Data, MorphBuiltPayload, MorphPayloadAttributes, MorphPayloadBuilderAttributes,
 };
-use morph_primitives::{MorphHeader, MorphTxEnvelope};
+use morph_primitives::{
+    MorphHeader, MorphTxEnvelope,
+    transaction::morph_transaction::{MORPH_TX_VERSION_1, MORPH_TX_VERSION_2},
+};
 use reth_basic_payload_builder::{
     BuildArguments, BuildOutcome, BuildOutcomeKind, MissingPayloadBehaviour, PayloadBuilder,
     PayloadConfig, is_better_payload,
 };
 use reth_chainspec::ChainSpecProvider;
 use reth_evm::{
-    ConfigureEvm, Database, Evm, NextBlockEnvAttributes,
-    block::{BlockExecutionError, BlockValidationError},
-    execute::{BlockBuilder, BlockBuilderOutcome},
+    BlockBuilder, BlockBuilderOutcome, BlockExecutionError, BlockValidationError, ConfigureEvm,
+    Database, EvmEnv as _, InvalidTxError, NextBlockEnvAttributes, OnStateHook,
+    database::StateProviderDatabase,
 };
 use reth_execution_cache::{CachedStateMetrics, CachedStateMetricsSource, CachedStateProvider};
 use reth_execution_types::BlockExecutionOutput;
@@ -28,17 +34,71 @@ use reth_payload_builder::PayloadId;
 use reth_payload_primitives::{BuiltPayloadExecutedBlock, PayloadBuilderError};
 use reth_payload_util::{BestPayloadTransactions, NoopPayloadTransactions, PayloadTransactions};
 use reth_primitives_traits::{FastInstant as Instant, RecoveredBlock, SealedHeader};
-use reth_revm::{database::StateProviderDatabase, db::State};
-use reth_storage_api::{StateProvider, StateProviderFactory};
+use reth_storage_api::{EvmStateProvider, StateProvider, StateProviderFactory};
+use reth_tasks::CancelOnDrop;
 use reth_transaction_pool::{BestTransactionsAttributes, PoolTransaction, TransactionPool};
-use revm::context_interface::Block as RevmBlock;
+use std::collections::HashSet;
 use std::sync::Arc;
 
+/// Returns true when `error` wraps a deterministic Morph token-fee error that cannot
+/// succeed without an on-chain configuration or token-contract state change, so a failing
+/// pool transaction should be evicted rather than left in `Pending` to burn up to 200k gas
+/// on every subsequent block-building tick.
+///
+/// Explicitly excludes [`MorphInvalidTransaction::InsufficientTokenBalance`], which is a
+/// normal balance shortfall (and may be caused by an earlier transaction in the same block).
+fn is_evictable_token_fee_error(error: &dyn InvalidTxError) -> bool {
+    let Some(morph_err) = error
+        .as_any()
+        .downcast_ref::<HandlerError>()
+        .and_then(|err| err.external_ref::<MorphInvalidTransaction>())
+        .or_else(|| error.as_any().downcast_ref::<MorphInvalidTransaction>())
+    else {
+        return false;
+    };
+    matches!(
+        morph_err,
+        MorphInvalidTransaction::TokenTransferFailed { .. }
+            | MorphInvalidTransaction::TokenBalanceQueryFailed
+            | MorphInvalidTransaction::TokenNotRegistered(_)
+            | MorphInvalidTransaction::TokenNotActive(_)
+            | MorphInvalidTransaction::InvalidTokenConfig(_)
+    )
+}
+
+/// Validates MorphTx (0x7F) hardfork activation gates and structural field rules against
+/// the target block timestamp, matching `MorphConsensus::validate_block_pre_execution`.
+fn validate_morph_tx_for_block(
+    tx: &MorphTxEnvelope,
+    chain_spec: &MorphChainSpec,
+    block_timestamp: u64,
+) -> Result<(), String> {
+    let MorphTxEnvelope::Morph(signed) = tx else {
+        return Ok(());
+    };
+    let morph_tx = signed.tx();
+
+    if !chain_spec.is_emerald_active_at_timestamp(block_timestamp) {
+        return Err("MorphTx type is not yet active (emerald fork not reached)".into());
+    }
+    if !chain_spec.is_jade_active_at_timestamp(block_timestamp)
+        && morph_tx.version == MORPH_TX_VERSION_1
+    {
+        return Err("MorphTx version 1 is not yet active (jade fork not reached)".into());
+    }
+    if !chain_spec.is_celadon_active_at_timestamp(block_timestamp)
+        && morph_tx.version == MORPH_TX_VERSION_2
+    {
+        return Err("MorphTx version 2 is not yet active (celadon fork not reached)".into());
+    }
+    morph_tx.validate().map_err(str::to_string)
+}
+
 /// Reads the withdraw trie root from the L2MessageQueue contract storage.
-fn read_withdraw_trie_root<DB: revm::Database>(db: &mut DB) -> Result<B256, DB::Error> {
-    let value = db.storage(
-        L2_MESSAGE_QUEUE_ADDRESS,
-        L2_MESSAGE_QUEUE_WITHDRAW_TRIE_ROOT_SLOT,
+fn read_withdraw_trie_root(state: &mut State<'_>) -> Result<B256, DatabaseError> {
+    let value = state.storage_slot_untracked(
+        &L2_MESSAGE_QUEUE_ADDRESS,
+        &L2_MESSAGE_QUEUE_WITHDRAW_TRIE_ROOT_SLOT,
     )?;
     Ok(B256::from(value))
 }
@@ -208,27 +268,33 @@ where
         // block. Wrap the state provider so account/storage/code reads consult
         // the cache before hitting the DB — amortizes cross-block cost when the
         // payload builder and engine both touch overlapping state.
-        let mut state_provider: Box<dyn StateProvider> =
-            self.client.state_by_block_hash(ctx.parent().hash())?;
-        if let Some(execution_cache) = execution_cache {
-            // reth v2.2.0 dropped `SavedCache::metrics`; the canonical pattern
-            // (see `reth-ethereum-payload`) is to materialize a fresh zeroed
-            // metrics handle on every payload build — cheap because morph-reth
-            // builds payloads on demand rather than every 12s like upstream.
-            state_provider = Box::new(CachedStateProvider::new(
-                state_provider,
+        let state_provider = self.client.state_by_block_hash(ctx.parent().hash())?;
+        let evm_state_provider = (&state_provider).into_evm_state_provider();
+        // reth v2.2.0 dropped `SavedCache::metrics`; the canonical pattern
+        // (see `reth-ethereum-payload`) is to materialize a fresh zeroed
+        // metrics handle on every payload build — cheap because morph-reth
+        // builds payloads on demand rather than every 12s like upstream.
+        let cached_state_provider = execution_cache.map(|execution_cache| {
+            CachedStateProvider::new(
+                &evm_state_provider,
                 execution_cache.cache().clone(),
                 Some(CachedStateMetrics::zeroed(
                     CachedStateMetricsSource::Builder,
                 )),
-            ));
-        }
-        let state = StateProviderDatabase::new(state_provider.as_ref());
+            )
+        });
+        let state = StateProviderDatabase::new(
+            cached_state_provider
+                .as_ref()
+                .map(|provider| provider as &dyn EvmStateProvider)
+                .unwrap_or(&evm_state_provider),
+        );
 
         // Reuse cached reads from previous runs for incremental payload building
         build_payload_inner(
             cached_reads.as_db_mut(state),
             state_provider.as_ref(),
+            &self.pool,
             ctx,
             best,
             state_root_handle,
@@ -293,7 +359,7 @@ struct MorphPayloadBuilderCtx {
     /// Payload configuration.
     config: PayloadConfig<MorphPayloadBuilderAttributes, MorphHeader>,
     /// Marker to check whether the job has been cancelled.
-    cancel: reth_revm::cancelled::CancelOnDrop,
+    cancel: CancelOnDrop,
     /// The currently best payload.
     best_payload: Option<MorphBuiltPayload>,
     /// Builder configuration with limits.
@@ -349,8 +415,12 @@ impl MorphPayloadBuilderCtx {
         builder: &mut impl BlockBuilder<Primitives = morph_primitives::MorphPrimitives>,
         info: &mut ExecutionInfo,
     ) -> Result<Vec<Bytes>, PayloadBuilderError> {
-        let block_gas_limit = builder.evm().block().gas_limit();
-        let base_fee = builder.evm().block().basefee();
+        let block_gas_limit = builder
+            .evm_env()
+            .block_env()
+            .gas_limit
+            .saturating_to::<u64>();
+        let base_fee = builder.evm_env().block_base_fee();
         let supplied_tx_count = self.attributes().transactions.len();
         let mut executed_txs: Vec<Bytes> = Vec::with_capacity(supplied_tx_count);
         let mut saw_l2_transaction = false;
@@ -369,21 +439,55 @@ impl MorphPayloadBuilderCtx {
                 ));
             }
 
-            // L1 messages must precede every L2 transaction. Consensus rejects a violation
-            // post-execution (`validate_l1_messages_in_block`), but under a deterministic
-            // build the supplied list may legitimately contain L2 transactions, so catching
-            // the bad ordering here fails fast and names the actual problem — the caller's
-            // transaction list — instead of surfacing it as a block validation error after
-            // the whole block has been executed.
-            if recovered_tx.is_l1_msg() {
+            // L1 messages must precede every L2 transaction and carry strictly sequential
+            // queue indices. Validate ordering, queue index, overflow, and MorphTx hardfork /
+            // structural gates *before* EVM execution so invalid supplied transactions are
+            // rejected cleanly without mutating block state.
+            let is_l1_msg = recovered_tx.is_l1_msg();
+            let next_l1_message_index = if is_l1_msg {
                 if saw_l2_transaction {
                     return Err(PayloadBuilderError::other(
                         MorphPayloadBuilderError::L1MessageAfterRegularTx,
                     ));
                 }
+                let queue_index = recovered_tx.queue_index().ok_or_else(|| {
+                    PayloadBuilderError::other(
+                        MorphPayloadBuilderError::InvalidSuppliedTransaction {
+                            error: "L1 message transaction is missing queue index".to_string(),
+                        },
+                    )
+                })?;
+                if queue_index != info.next_l1_message_index {
+                    return Err(PayloadBuilderError::other(
+                        MorphPayloadBuilderError::InvalidSuppliedTransaction {
+                            error: format!(
+                                "invalid L1 message queue index: expected {}, got {}",
+                                info.next_l1_message_index, queue_index
+                            ),
+                        },
+                    ));
+                }
+                let next_index = queue_index.checked_add(1).ok_or_else(|| {
+                    PayloadBuilderError::other(
+                        MorphPayloadBuilderError::InvalidSuppliedTransaction {
+                            error: format!("L1 message queue index overflow: {queue_index}"),
+                        },
+                    )
+                })?;
+                Some(next_index)
             } else {
                 saw_l2_transaction = true;
-            }
+                if let Err(reason) = validate_morph_tx_for_block(
+                    recovered_tx.inner(),
+                    self.evm_config.chain_spec(),
+                    self.attributes().timestamp,
+                ) {
+                    return Err(PayloadBuilderError::other(
+                        MorphPayloadBuilderError::InvalidSuppliedTransaction { error: reason },
+                    ));
+                }
+                None
+            };
 
             let tx_gas = recovered_tx.gas_limit();
 
@@ -431,9 +535,9 @@ impl MorphPayloadBuilderCtx {
 
             // Execute the transaction and record EVM execution time.
             let apply_started = Instant::now();
-            // `BlockBuilder::execute_transaction` returns alloy-evm's `GasOutput`;
-            // pre-Amsterdam morph treats regular and state gas as a single number,
-            // so collapse to `tx_gas_used()` immediately.
+            // `BlockBuilder::execute_transaction` returns a `GasOutput`; pre-Amsterdam morph
+            // treats regular and state gas as a single number, so collapse to
+            // `tx_gas_used()` immediately.
             let gas_used = match builder.execute_transaction(recovered_tx.clone()) {
                 Ok(gas_output) => gas_output.tx_gas_used(),
                 Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
@@ -483,24 +587,10 @@ impl MorphPayloadBuilderCtx {
                 .commit_tx_apply_duration_seconds
                 .record(apply_started.elapsed());
 
-            // For L1 messages, track the next L1 message index.
+            // For L1 messages, advance the next L1 message index.
             // L1 gas is prepaid on L1, so no fees are collected here.
-            let is_l1_msg = recovered_tx.is_l1_msg();
-            if is_l1_msg {
-                // Ensure the queue index is strictly sequential
-                if let Some(queue_index) = recovered_tx.queue_index() {
-                    if queue_index != info.next_l1_message_index {
-                        return Err(PayloadBuilderError::other(
-                            MorphPayloadBuilderError::InvalidSuppliedTransaction {
-                                error: format!(
-                                    "invalid L1 message queue index: expected {}, got {}",
-                                    info.next_l1_message_index, queue_index
-                                ),
-                            },
-                        ));
-                    }
-                    info.next_l1_message_index = queue_index + 1;
-                }
+            if let Some(next_index) = next_l1_message_index {
+                info.next_l1_message_index = next_index;
             } else {
                 // Calculate fees for L2 transactions: effective_tip * gas_used
                 let effective_tip = recovered_tx
@@ -528,22 +618,55 @@ impl MorphPayloadBuilderCtx {
     ///
     /// Returns `Ok(Some(()))` if the job was cancelled or breaker triggered, `Ok(None)` otherwise.
     /// Executed transaction bytes are appended to the provided vector.
-    fn execute_pool_transactions<BestTxs>(
+    fn execute_pool_transactions<BestTxs, Pool>(
+        &self,
+        builder: &mut impl BlockBuilder<Primitives = morph_primitives::MorphPrimitives>,
+        info: &mut ExecutionInfo,
+        executed_txs: &mut Vec<Bytes>,
+        best_txs: BestTxs,
+        pool: &Pool,
+        breaker: &PayloadBuildingBreaker,
+    ) -> Result<Option<()>, PayloadBuilderError>
+    where
+        BestTxs: PayloadTransactions<Transaction: PoolTransaction<Consensus = MorphTxEnvelope>>,
+        Pool: TransactionPool<Transaction: PoolTransaction<Consensus = MorphTxEnvelope>>,
+    {
+        self.execute_pool_transactions_with_evictor(
+            builder,
+            info,
+            executed_txs,
+            best_txs,
+            breaker,
+            |tx_hash| {
+                pool.remove_transactions(vec![tx_hash]);
+            },
+        )
+    }
+
+    fn execute_pool_transactions_with_evictor<BestTxs>(
         &self,
         builder: &mut impl BlockBuilder<Primitives = morph_primitives::MorphPrimitives>,
         info: &mut ExecutionInfo,
         executed_txs: &mut Vec<Bytes>,
         mut best_txs: BestTxs,
         breaker: &PayloadBuildingBreaker,
+        mut evict_from_pool: impl FnMut(B256),
     ) -> Result<Option<()>, PayloadBuilderError>
     where
         BestTxs: PayloadTransactions<Transaction: PoolTransaction<Consensus = MorphTxEnvelope>>,
     {
-        let block_gas_limit = builder.evm().block().gas_limit();
-        let base_fee = builder.evm().block().basefee();
+        let block_gas_limit = builder
+            .evm_env()
+            .block_env()
+            .gas_limit
+            .saturating_to::<u64>();
+        let base_fee = builder.evm_env().block_base_fee();
+        let mut executed_senders: HashSet<Address> = HashSet::new();
 
         while let Some(tx) = best_txs.next(()) {
-            // Check if the job was cancelled
+            // Check if the job was cancelled. This must stay `is_cancelled`: `is_interrupted`
+            // also reports a requested finalization, which every `engine_assembleL2Block`
+            // issues right after the job starts and would truncate the block.
             if self.cancel.is_cancelled() {
                 return Ok(Some(()));
             }
@@ -577,6 +700,26 @@ impl MorphPayloadBuilderCtx {
                     is_blob = tx.is_eip4844(),
                     is_l1_msg = tx.is_l1_msg(),
                     "unexpected blob or L1-message transaction in the pool; skipping"
+                );
+                best_txs.mark_invalid(tx.signer(), tx.nonce());
+                continue;
+            }
+
+            // Enforce MorphTx hardfork gates and structural validation against the target
+            // block's timestamp (a reorg build via assembleL2BlockV2 may target an older
+            // fork than the canonical head at which the pool admitted the tx).
+            if let Err(reason) = validate_morph_tx_for_block(
+                tx.inner(),
+                self.evm_config.chain_spec(),
+                self.attributes().timestamp,
+            ) {
+                tracing::debug!(
+                    target: "payload_builder",
+                    signer = %tx.signer(),
+                    nonce = tx.nonce(),
+                    block_timestamp = self.attributes().timestamp,
+                    %reason,
+                    "skipping pool MorphTx invalid for target block timestamp"
                 );
                 best_txs.mark_invalid(tx.signer(), tx.nonce());
                 continue;
@@ -630,6 +773,19 @@ impl MorphPayloadBuilderCtx {
                             "skipping invalid transaction and its descendants"
                         );
                         best_txs.mark_invalid(tx.signer(), tx.nonce());
+                        if is_evictable_token_fee_error(error.as_ref())
+                            && !executed_senders.contains(&tx.signer())
+                        {
+                            tracing::debug!(
+                                target: "payload_builder",
+                                tx_hash = %tx.tx_hash(),
+                                signer = %tx.signer(),
+                                nonce = tx.nonce(),
+                                %error,
+                                "evicting pool transaction after deterministic token-fee failure"
+                            );
+                            evict_from_pool(*tx.tx_hash());
+                        }
                     }
                     continue;
                 }
@@ -659,6 +815,7 @@ impl MorphPayloadBuilderCtx {
             self.metrics
                 .commit_tx_apply_duration_seconds
                 .record(apply_started.elapsed());
+            executed_senders.insert(tx.signer());
 
             // Update execution info
             info.cumulative_gas_used += gas_used;
@@ -742,16 +899,18 @@ impl ExecutionInfo {
 }
 
 /// Builds the payload on top of the state.
-fn build_payload_inner<'a, DB, BestTxs>(
+fn build_payload_inner<'a, DB, BestTxs, Pool>(
     db: DB,
     state_provider: &(impl StateProvider + ?Sized),
+    pool: &Pool,
     ctx: MorphPayloadBuilderCtx,
     best: impl FnOnce(BestTransactionsAttributes) -> BestTxs + Send + Sync + 'a,
     mut state_root_handle: Option<reth_trie_parallel::state_root_task::PayloadStateRootHandle>,
 ) -> Result<BuildOutcomeKind<MorphBuiltPayload>, PayloadBuilderError>
 where
-    DB: Database<Error = reth_evm::execute::ProviderError>,
+    DB: Database + 'a,
     BestTxs: PayloadTransactions<Transaction: PoolTransaction<Consensus = MorphTxEnvelope>> + 'a,
+    Pool: TransactionPool<Transaction: PoolTransaction<Consensus = MorphTxEnvelope>>,
 {
     let build_started = Instant::now();
     let attributes = ctx.attributes();
@@ -763,11 +922,6 @@ where
         parent_number = ctx.parent().number(),
         "building new payload"
     );
-
-    let mut db = State::builder()
-        .with_database(db)
-        .with_bundle_update()
-        .build();
 
     // Build next block env attributes
     let next_block_attrs = MorphNextBlockEnvAttributes {
@@ -790,7 +944,7 @@ where
     // Create block builder
     let mut builder = ctx
         .evm_config
-        .builder_for_next_block(&mut db, ctx.parent(), next_block_attrs)
+        .builder_for_next_block(db, ctx.parent(), next_block_attrs)
         .map_err(PayloadBuilderError::other)?;
 
     // If the engine tree provided a sparse-trie state root handle, wire the
@@ -798,10 +952,8 @@ where
     // during execution. The final `state_root()` recv() at finish time will
     // return quickly since most work is done concurrently.
     if let Some(handle) = state_root_handle.as_mut() {
-        builder
-            .evm_mut()
-            .db_mut()
-            .set_state_hook(Some(Box::new(handle.take_state_hook())));
+        let mut hook = handle.take_state_hook();
+        builder.set_state_hook(move |state| hook.on_state(state));
     }
 
     // 1. Apply pre-execution changes (system contracts, etc.)
@@ -815,8 +967,12 @@ where
         ctx.parent().next_l1_msg_index,
         ctx.builder_config.max_da_block_size,
     );
-    let base_fee = builder.evm().block().basefee();
-    let block_gas_limit = builder.evm().block().gas_limit();
+    let base_fee = builder.evm_env().block_base_fee();
+    let block_gas_limit = builder
+        .evm_env()
+        .block_env()
+        .gas_limit
+        .saturating_to::<u64>();
 
     // Create breaker for early exit from pool transaction execution
     let breaker = ctx.builder_config.breaker(block_gas_limit);
@@ -838,6 +994,7 @@ where
                 &mut info,
                 &mut executed_txs,
                 best_txs,
+                pool,
                 &breaker,
             )?
             .is_some()
@@ -880,31 +1037,28 @@ where
     // Read withdraw_trie_root from L2MessageQueue contract storage
     // This must be done before finish() consumes the builder
     let withdraw_trie_root =
-        read_withdraw_trie_root(builder.evm_mut().db_mut()).map_err(|err| {
+        read_withdraw_trie_root(builder.evm_mut().state_mut()).map_err(|err| {
             PayloadBuilderError::other(MorphPayloadBuilderError::Storage(err.to_string()))
         })?;
 
     // 6. Finish building the block.
     //
-    // When `state_root_handle` is provided, drop the state hook to signal FinishedStateUpdates
-    // to the background sparse trie task (via `StateRootUpdateHook`'s Drop impl), then wait for
-    // the final root. Fall back to synchronous state root if the task fails.
+    // Finishing consumes the executor, which drops the state hook and so signals
+    // FinishedStateUpdates to the background sparse trie task before the closure waits
+    // for the final root. Fall back to a synchronous state root if the task fails.
     let BlockBuilderOutcome {
         execution_result,
+        execution_state,
         hashed_state,
         trie_updates,
         mut block,
         block_access_list: _,
     } = if let Some(mut handle) = state_root_handle {
-        builder.evm_mut().db_mut().set_state_hook(None);
-        match handle.state_root() {
-            Ok(outcome) => builder.finish(
-                state_provider,
-                Some((
-                    outcome.state_root,
-                    Arc::unwrap_or_clone(outcome.trie_updates),
-                )),
-            )?,
+        builder.finish_with_state_root(state_provider, |_| match handle.state_root() {
+            Ok(outcome) => Ok(Some((
+                outcome.state_root,
+                Arc::unwrap_or_clone(outcome.trie_updates),
+            ))),
             Err(err) => {
                 tracing::warn!(
                     target: "payload_builder",
@@ -912,9 +1066,9 @@ where
                     %err,
                     "sparse trie task failed, falling back to sync state root",
                 );
-                builder.finish(state_provider, None)?
+                Ok(None)
             }
-        }
+        })?
     } else {
         builder.finish(state_provider, None)?
     };
@@ -973,7 +1127,7 @@ where
     let executed = has_transactions.then(|| {
         let execution_output = BlockExecutionOutput {
             result: execution_result,
-            state: db.take_bundle(),
+            state: execution_state,
         };
         BuiltPayloadExecutedBlock {
             recovered_block: Arc::new(block),
@@ -1238,65 +1392,687 @@ mod tests {
     // read_withdraw_trie_root tests (requires mock DB)
     // =========================================================================
 
-    struct MockDb {
-        storage_value: U256,
-    }
-
-    impl revm::Database for MockDb {
-        type Error = std::convert::Infallible;
-
-        fn basic(
-            &mut self,
-            _address: alloy_primitives::Address,
-        ) -> Result<Option<revm::state::AccountInfo>, Self::Error> {
-            Ok(None)
-        }
-
-        fn code_by_hash(
-            &mut self,
-            _code_hash: B256,
-        ) -> Result<revm::bytecode::Bytecode, Self::Error> {
-            Ok(revm::bytecode::Bytecode::default())
-        }
-
-        fn storage(
-            &mut self,
-            _address: alloy_primitives::Address,
-            _index: U256,
-        ) -> Result<U256, Self::Error> {
-            Ok(self.storage_value)
-        }
-
-        fn block_hash(&mut self, _number: u64) -> Result<B256, Self::Error> {
-            Ok(B256::ZERO)
-        }
+    fn state_with_withdraw_trie_root(value: U256) -> State<'static> {
+        let mut db = evm2::evm::InMemoryDB::default();
+        db.insert_account_storage(
+            &L2_MESSAGE_QUEUE_ADDRESS,
+            &L2_MESSAGE_QUEUE_WITHDRAW_TRIE_ROOT_SLOT,
+            &value,
+        );
+        State::new(db)
     }
 
     #[test]
     fn test_read_withdraw_trie_root_zero() {
-        let mut db = MockDb {
-            storage_value: U256::ZERO,
-        };
-        let root = read_withdraw_trie_root(&mut db).unwrap();
+        let mut state = state_with_withdraw_trie_root(U256::ZERO);
+        let root = read_withdraw_trie_root(&mut state).unwrap();
         assert_eq!(root, B256::ZERO);
     }
 
     #[test]
     fn test_read_withdraw_trie_root_nonzero() {
         let expected = B256::from([0xAB; 32]);
-        let mut db = MockDb {
-            storage_value: expected.into(),
-        };
-        let root = read_withdraw_trie_root(&mut db).unwrap();
+        let mut state = state_with_withdraw_trie_root(expected.into());
+        let root = read_withdraw_trie_root(&mut state).unwrap();
         assert_eq!(root, expected);
     }
 
     #[test]
     fn test_read_withdraw_trie_root_max_value() {
-        let mut db = MockDb {
-            storage_value: U256::MAX,
-        };
-        let root = read_withdraw_trie_root(&mut db).unwrap();
+        let mut state = state_with_withdraw_trie_root(U256::MAX);
+        let root = read_withdraw_trie_root(&mut state).unwrap();
         assert_eq!(root, B256::from(U256::MAX));
+    }
+
+    // =========================================================================
+    // Shared scripted test helpers for M-H09, M-H10, and M-M12
+    // =========================================================================
+
+    /// Mirrors `morph_evm::block::MorphInvalidTxError`: wraps [`HandlerError`] and exposes it
+    /// via `as_any()` so `is_evictable_token_fee_error` exercises the real production downcast.
+    #[derive(Debug)]
+    struct TestInvalidTxError(HandlerError);
+
+    impl core::fmt::Display for TestInvalidTxError {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            self.0.fmt(f)
+        }
+    }
+
+    impl core::error::Error for TestInvalidTxError {}
+
+    impl InvalidTxError for TestInvalidTxError {
+        fn is_nonce_too_low(&self) -> bool {
+            matches!(self.0, HandlerError::InvalidNonce { expected, got } if got < expected)
+        }
+
+        fn is_gas_limit_too_high(&self) -> bool {
+            matches!(
+                self.0,
+                HandlerError::GasLimitMoreThanBlock { .. }
+                    | HandlerError::TxGasLimitGreaterThanCap { .. }
+                    | HandlerError::IntrinsicGasGreaterThanCap { .. }
+            )
+        }
+
+        fn is_gas_limit_too_low(&self) -> bool {
+            matches!(
+                self.0,
+                HandlerError::IntrinsicGasTooLow { .. } | HandlerError::GasLimitBelowFloor { .. }
+            )
+        }
+
+        fn as_any(&self) -> &(dyn std::any::Any + 'static) {
+            &self.0
+        }
+    }
+
+    struct ScriptedBlockBuilder {
+        evm_env: morph_evm::MorphEvmEnv,
+        outcomes: std::collections::HashMap<B256, Result<u64, HandlerError>>,
+        executed_count: usize,
+    }
+
+    impl ScriptedBlockBuilder {
+        fn new(outcomes: std::collections::HashMap<B256, Result<u64, HandlerError>>) -> Self {
+            let header = MorphHeader {
+                inner: alloy_consensus::Header {
+                    gas_limit: 30_000_000,
+                    base_fee_per_gas: Some(1),
+                    timestamp: 1_800_000_000,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let evm_env = test_evm_config().evm_env(&header).expect("evm_env");
+            Self {
+                evm_env,
+                outcomes,
+                executed_count: 0,
+            }
+        }
+    }
+
+    impl BlockBuilder for ScriptedBlockBuilder {
+        type Primitives = morph_primitives::MorphPrimitives;
+        type Executor = morph_evm::MorphBlockExecutor<'static>;
+        type EvmEnv = morph_evm::MorphEvmEnv;
+
+        fn evm_env(&self) -> &Self::EvmEnv {
+            &self.evm_env
+        }
+
+        fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
+            Ok(())
+        }
+
+        fn execute_transaction_with_commit_condition(
+            &mut self,
+            tx: impl reth_evm::ExecutorTx<Self::Executor>,
+            _f: impl FnOnce(
+                &evm2::TxResult<morph_evm::MorphEvmTypes>,
+                evm2::TxStateChanges<'_>,
+            ) -> reth_evm::CommitChanges,
+        ) -> Result<Option<reth_evm::GasOutput>, BlockExecutionError> {
+            use reth_evm::RecoveredTx as _;
+            self.executed_count += 1;
+            let (_tx_env, recovered) = tx.into_parts();
+            let hash = *recovered.tx().tx_hash();
+            match self.outcomes.remove(&hash).expect("scripted outcome") {
+                Ok(gas_used) => Ok(Some(reth_evm::GasOutput::new(gas_used, 0))),
+                Err(err) => Err(BlockExecutionError::Validation(
+                    BlockValidationError::InvalidTx {
+                        hash,
+                        error: Box::new(TestInvalidTxError(err)),
+                    },
+                )),
+            }
+        }
+
+        fn execute_transaction_with_result_closure(
+            &mut self,
+            _tx: impl reth_evm::ExecutorTx<Self::Executor>,
+            _f: impl FnOnce(&morph_evm::MorphTxResult),
+        ) -> Result<reth_evm::GasOutput, BlockExecutionError> {
+            unreachable!()
+        }
+
+        fn finish_with_state_root(
+            self,
+            _state_provider: impl StateProvider,
+            _state_root: impl FnOnce(
+                &BlockExecutionOutput<morph_primitives::MorphReceipt>,
+            ) -> Result<
+                Option<(B256, reth_trie_common::updates::TrieUpdates)>,
+                BlockExecutionError,
+            >,
+        ) -> Result<BlockBuilderOutcome<Self::Primitives>, BlockExecutionError> {
+            unreachable!()
+        }
+
+        fn executor_mut(&mut self) -> &mut Self::Executor {
+            unreachable!()
+        }
+
+        fn executor(&self) -> &Self::Executor {
+            unreachable!()
+        }
+
+        fn into_executor(self) -> Self::Executor {
+            unreachable!()
+        }
+    }
+
+    struct ScriptedPoolTxs {
+        txs: std::collections::VecDeque<morph_txpool::MorphPooledTransaction>,
+        marked_invalid: Vec<(Address, u64)>,
+    }
+
+    impl PayloadTransactions for ScriptedPoolTxs {
+        type Transaction = morph_txpool::MorphPooledTransaction;
+
+        fn next(&mut self, _ctx: ()) -> Option<Self::Transaction> {
+            self.txs.pop_front()
+        }
+
+        fn mark_invalid(&mut self, sender: Address, nonce: u64) {
+            self.marked_invalid.push((sender, nonce));
+        }
+    }
+
+    fn test_ctx_with_timestamp_and_txs(
+        timestamp: u64,
+        transactions: Vec<Bytes>,
+    ) -> MorphPayloadBuilderCtx {
+        let mut rpc_attrs = morph_payload_types::MorphPayloadAttributes::default();
+        rpc_attrs.inner.timestamp = timestamp;
+        rpc_attrs.transactions = Some(transactions);
+        let attrs = MorphPayloadBuilderAttributes::try_new(
+            B256::ZERO,
+            rpc_attrs,
+            morph_payload_types::MORPH_PAYLOAD_BUILDER_VERSION,
+        )
+        .unwrap();
+        let payload_id = attrs.payload_id();
+        MorphPayloadBuilderCtx {
+            evm_config: test_evm_config(),
+            config: PayloadConfig::new(
+                Arc::new(SealedHeader::seal_slow(MorphHeader::default())),
+                attrs,
+                payload_id,
+            ),
+            cancel: Default::default(),
+            best_payload: None,
+            builder_config: MorphBuilderConfig::default(),
+            metrics: MorphPayloadBuilderMetrics::default(),
+        }
+    }
+
+    // =========================================================================
+    // M-H09: Pre-execution queue_index validation & overflow protection tests
+    // =========================================================================
+
+    #[test]
+    fn test_execute_supplied_transactions_rejects_bad_queue_index_before_execution() {
+        use alloy_consensus::Sealable;
+        use morph_primitives::TxL1Msg;
+
+        let l1_msg = TxL1Msg {
+            queue_index: 5,
+            gas_limit: 50_000,
+            to: Address::repeat_byte(0xaa),
+            value: U256::ZERO,
+            sender: Address::repeat_byte(0xbb),
+            input: Bytes::new(),
+        };
+        let encoded = Bytes::from(MorphTxEnvelope::L1Msg(l1_msg.seal_slow()).encoded_2718());
+        let ctx = test_ctx_with_timestamp_and_txs(1_800_000_000, vec![encoded]);
+        let mut builder = ScriptedBlockBuilder::new(std::collections::HashMap::new());
+        let mut info = ExecutionInfo::new(0, None);
+
+        let err = ctx
+            .execute_supplied_transactions(&mut builder, &mut info)
+            .expect_err("non-sequential queue_index must be rejected");
+        assert!(
+            err.to_string()
+                .contains("invalid L1 message queue index: expected 0, got 5"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            builder.executed_count, 0,
+            "bad queue_index must be rejected before EVM execution"
+        );
+    }
+
+    #[test]
+    fn test_execute_supplied_transactions_rejects_queue_index_overflow() {
+        use alloy_consensus::Sealable;
+        use morph_primitives::TxL1Msg;
+
+        let l1_msg = TxL1Msg {
+            queue_index: u64::MAX,
+            gas_limit: 50_000,
+            to: Address::repeat_byte(0xaa),
+            value: U256::ZERO,
+            sender: Address::repeat_byte(0xbb),
+            input: Bytes::new(),
+        };
+        let encoded = Bytes::from(MorphTxEnvelope::L1Msg(l1_msg.seal_slow()).encoded_2718());
+        let ctx = test_ctx_with_timestamp_and_txs(1_800_000_000, vec![encoded]);
+        let mut builder = ScriptedBlockBuilder::new(std::collections::HashMap::new());
+        let mut info = ExecutionInfo::new(u64::MAX, None);
+
+        let err = ctx
+            .execute_supplied_transactions(&mut builder, &mut info)
+            .expect_err("u64::MAX queue_index overflow must be rejected cleanly");
+        assert!(
+            err.to_string().contains("queue index overflow"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            builder.executed_count, 0,
+            "overflowing queue_index must be rejected before EVM execution"
+        );
+    }
+
+    // =========================================================================
+    // M-H10: MorphTx hardfork & structural validation tests
+    // =========================================================================
+
+    #[test]
+    fn test_validate_morph_tx_for_block_enforces_hardfork_gates_and_validate() {
+        use alloy_consensus::Signed;
+        use alloy_primitives::{Signature, TxKind};
+        use morph_primitives::TxMorph;
+
+        let chain_spec = morph_chainspec::MORPH_MAINNET.as_ref();
+        // Mainnet fork timestamps: emerald=1767765600, jade=1775628000, celadon=1793772000
+        let pre_emerald = 1_767_765_599;
+        let pre_jade = 1_775_627_999;
+        let pre_celadon = 1_793_771_999;
+        let celadon = 1_793_772_000;
+
+        let wrap = |tx: TxMorph| {
+            MorphTxEnvelope::Morph(Signed::new_unchecked(
+                tx,
+                Signature::test_signature(),
+                B256::repeat_byte(0x01),
+            ))
+        };
+
+        let v0 = wrap(TxMorph {
+            chain_id: 2818,
+            gas_limit: 50_000,
+            max_fee_per_gas: 100,
+            max_priority_fee_per_gas: 10,
+            to: TxKind::Call(Address::repeat_byte(0xee)),
+            fee_token_id: 1,
+            version: 0,
+            ..Default::default()
+        });
+        let v1 = wrap(TxMorph {
+            chain_id: 2818,
+            gas_limit: 50_000,
+            max_fee_per_gas: 100,
+            max_priority_fee_per_gas: 10,
+            to: TxKind::Call(Address::repeat_byte(0xee)),
+            fee_token_id: 0,
+            version: MORPH_TX_VERSION_1,
+            ..Default::default()
+        });
+        let v2 = wrap(TxMorph {
+            chain_id: 2818,
+            gas_limit: 50_000,
+            max_fee_per_gas: 100,
+            max_priority_fee_per_gas: 10,
+            to: TxKind::Call(Address::repeat_byte(0xee)),
+            fee_token_id: 0,
+            version: MORPH_TX_VERSION_2,
+            ..Default::default()
+        });
+        let bad_v1_fee_limit = wrap(TxMorph {
+            chain_id: 2818,
+            gas_limit: 50_000,
+            max_fee_per_gas: 100,
+            max_priority_fee_per_gas: 10,
+            to: TxKind::Call(Address::repeat_byte(0xee)),
+            fee_token_id: 0,
+            fee_limit: U256::from(100),
+            version: MORPH_TX_VERSION_1,
+            ..Default::default()
+        });
+
+        // Pre-Emerald rejects every MorphTx version.
+        assert!(validate_morph_tx_for_block(&v0, chain_spec, pre_emerald).is_err());
+        assert!(validate_morph_tx_for_block(&v1, chain_spec, pre_emerald).is_err());
+        assert!(validate_morph_tx_for_block(&v2, chain_spec, pre_emerald).is_err());
+
+        // Emerald (pre-Jade) permits V0, rejects V1 & V2.
+        assert!(validate_morph_tx_for_block(&v0, chain_spec, pre_jade).is_ok());
+        assert!(validate_morph_tx_for_block(&v1, chain_spec, pre_jade).is_err());
+        assert!(validate_morph_tx_for_block(&v2, chain_spec, pre_jade).is_err());
+
+        // Jade (pre-Celadon) permits V0 & V1, rejects V2.
+        assert!(validate_morph_tx_for_block(&v0, chain_spec, pre_celadon).is_ok());
+        assert!(validate_morph_tx_for_block(&v1, chain_spec, pre_celadon).is_ok());
+        assert!(validate_morph_tx_for_block(&v2, chain_spec, pre_celadon).is_err());
+
+        // Celadon permits V2, but structural `TxMorph::validate()` still rejects bad fields.
+        assert!(validate_morph_tx_for_block(&v2, chain_spec, celadon).is_ok());
+        assert!(validate_morph_tx_for_block(&bad_v1_fee_limit, chain_spec, celadon).is_err());
+    }
+
+    #[test]
+    fn test_execute_pool_transactions_skips_pre_celadon_v2_without_executing_or_evicting() {
+        use alloy_consensus::Signed;
+        use alloy_primitives::{Signature, TxKind};
+        use morph_primitives::TxMorph;
+        use morph_txpool::MorphPooledTransaction;
+        use reth_primitives_traits::Recovered;
+
+        let sender_v2 = Address::repeat_byte(0x11);
+        let sender_v1 = Address::repeat_byte(0x22);
+
+        let v2_tx = TxMorph {
+            chain_id: 2818,
+            nonce: 0,
+            gas_limit: 50_000,
+            max_fee_per_gas: 100,
+            max_priority_fee_per_gas: 10,
+            to: TxKind::Call(Address::repeat_byte(0xee)),
+            fee_token_id: 0,
+            version: MORPH_TX_VERSION_2,
+            ..Default::default()
+        };
+        let v2_hash = B256::repeat_byte(0xaa);
+        let v2_rec = Recovered::new_unchecked(
+            MorphTxEnvelope::Morph(Signed::new_unchecked(
+                v2_tx,
+                Signature::test_signature(),
+                v2_hash,
+            )),
+            sender_v2,
+        );
+        let v2_len = v2_rec.encode_2718_len();
+        let v2_pooled = MorphPooledTransaction::new(v2_rec, v2_len);
+
+        let v1_tx = TxMorph {
+            chain_id: 2818,
+            nonce: 0,
+            gas_limit: 50_000,
+            max_fee_per_gas: 100,
+            max_priority_fee_per_gas: 10,
+            to: TxKind::Call(Address::repeat_byte(0xee)),
+            fee_token_id: 0,
+            version: MORPH_TX_VERSION_1,
+            ..Default::default()
+        };
+        let v1_hash = B256::repeat_byte(0xbb);
+        let v1_rec = Recovered::new_unchecked(
+            MorphTxEnvelope::Morph(Signed::new_unchecked(
+                v1_tx,
+                Signature::test_signature(),
+                v1_hash,
+            )),
+            sender_v1,
+        );
+        let v1_len = v1_rec.encode_2718_len();
+        let v1_pooled = MorphPooledTransaction::new(v1_rec, v1_len);
+
+        // Only v1_hash has a scripted outcome; if v2 were executed it would panic.
+        let mut outcomes = std::collections::HashMap::new();
+        outcomes.insert(v1_hash, Ok(21_000));
+        let mut builder = ScriptedBlockBuilder::new(outcomes);
+        let mut info = ExecutionInfo::default();
+        let mut executed_txs = Vec::new();
+        let best_txs = ScriptedPoolTxs {
+            txs: std::collections::VecDeque::from([v2_pooled, v1_pooled]),
+            marked_invalid: Vec::new(),
+        };
+        // Pre-Celadon, post-Jade timestamp on MORPH_MAINNET.
+        let ctx = test_ctx_with_timestamp_and_txs(1_793_771_999, vec![]);
+        let breaker = ctx.builder_config.breaker(30_000_000);
+        let mut evicted = Vec::new();
+
+        ctx.execute_pool_transactions_with_evictor(
+            &mut builder,
+            &mut info,
+            &mut executed_txs,
+            best_txs,
+            &breaker,
+            |hash| evicted.push(hash),
+        )
+        .expect("pool execution should complete");
+
+        assert_eq!(
+            builder.executed_count, 1,
+            "only V1 should execute; V2 must be skipped pre-Celadon"
+        );
+        assert_eq!(executed_txs.len(), 1);
+        assert!(
+            evicted.is_empty(),
+            "fork-gated skip during reorg build must not evict from pool"
+        );
+    }
+
+    #[test]
+    fn test_execute_supplied_transactions_rejects_pre_celadon_v2_before_execution() {
+        use alloy_consensus::Signed;
+        use alloy_primitives::{Signature, TxKind};
+        use morph_primitives::TxMorph;
+
+        let v2_tx = TxMorph {
+            chain_id: 2818,
+            nonce: 0,
+            gas_limit: 50_000,
+            max_fee_per_gas: 100,
+            max_priority_fee_per_gas: 10,
+            to: TxKind::Call(Address::repeat_byte(0xee)),
+            fee_token_id: 0,
+            version: MORPH_TX_VERSION_2,
+            ..Default::default()
+        };
+        let encoded = Bytes::from(
+            MorphTxEnvelope::Morph(Signed::new_unchecked(
+                v2_tx,
+                Signature::test_signature(),
+                B256::repeat_byte(0xcc),
+            ))
+            .encoded_2718(),
+        );
+        // Pre-Celadon timestamp on MORPH_MAINNET.
+        let ctx = test_ctx_with_timestamp_and_txs(1_793_771_999, vec![encoded]);
+        let mut builder = ScriptedBlockBuilder::new(std::collections::HashMap::new());
+        let mut info = ExecutionInfo::default();
+
+        let err = ctx
+            .execute_supplied_transactions(&mut builder, &mut info)
+            .expect_err("pre-Celadon supplied MorphTx V2 must be rejected");
+        assert!(
+            err.to_string().contains("celadon fork not reached"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            builder.executed_count, 0,
+            "fork-invalid supplied MorphTx must be rejected before EVM execution"
+        );
+    }
+
+    // =========================================================================
+    // M-M12: Deterministic token-fee failure pool eviction tests
+    // =========================================================================
+
+    #[test]
+    fn test_is_evictable_token_fee_error_classification() {
+        let wrap = |err: HandlerError| TestInvalidTxError(err);
+
+        // Deterministic token-fee failures MUST evict.
+        assert!(is_evictable_token_fee_error(&wrap(
+            MorphInvalidTransaction::TokenTransferFailed {
+                reason: "reverted".into(),
+            }
+            .into(),
+        )));
+        assert!(is_evictable_token_fee_error(&wrap(
+            MorphInvalidTransaction::TokenBalanceQueryFailed.into(),
+        )));
+        assert!(is_evictable_token_fee_error(&wrap(
+            MorphInvalidTransaction::TokenNotRegistered(1).into(),
+        )));
+        assert!(is_evictable_token_fee_error(&wrap(
+            MorphInvalidTransaction::TokenNotActive(1).into(),
+        )));
+        assert!(is_evictable_token_fee_error(&wrap(
+            MorphInvalidTransaction::InvalidTokenConfig(1).into(),
+        )));
+
+        // InsufficientTokenBalance and standard ETH errors MUST NOT evict.
+        assert!(!is_evictable_token_fee_error(&wrap(
+            MorphInvalidTransaction::InsufficientTokenBalance {
+                required: U256::from(100),
+                available: U256::from(50),
+            }
+            .into(),
+        )));
+        assert!(!is_evictable_token_fee_error(&wrap(
+            HandlerError::InvalidNonce {
+                expected: 1,
+                got: 0,
+            },
+        )));
+        assert!(!is_evictable_token_fee_error(&wrap(
+            HandlerError::InsufficientFunds {
+                fee: U256::from(100),
+                balance: U256::ZERO,
+            },
+        )));
+    }
+
+    #[test]
+    fn test_execute_pool_transactions_evicts_only_unexecuted_senders_deterministic_token_errors() {
+        use alloy_consensus::{Signed, TxEip1559};
+        use alloy_primitives::{Signature, TxKind};
+        use morph_primitives::TxMorph;
+        use morph_txpool::MorphPooledTransaction;
+        use reth_primitives_traits::Recovered;
+        use std::collections::{HashMap, VecDeque};
+
+        let make_morph_tx = |signer: Address, nonce: u64, tag: u8| {
+            let tx = TxMorph {
+                chain_id: 2818,
+                nonce,
+                gas_limit: 50_000,
+                max_fee_per_gas: 100,
+                max_priority_fee_per_gas: 10,
+                to: TxKind::Call(Address::repeat_byte(0xee)),
+                fee_token_id: 1,
+                ..Default::default()
+            };
+            let hash = B256::repeat_byte(tag);
+            let env = MorphTxEnvelope::Morph(Signed::new_unchecked(
+                tx,
+                Signature::test_signature(),
+                hash,
+            ));
+            let recovered = Recovered::new_unchecked(env, signer);
+            let len = recovered.encode_2718_len();
+            (hash, MorphPooledTransaction::new(recovered, len))
+        };
+
+        let make_eth_tx = |signer: Address, nonce: u64, tag: u8| {
+            let tx = TxEip1559 {
+                chain_id: 2818,
+                nonce,
+                gas_limit: 21_000,
+                max_fee_per_gas: 100,
+                max_priority_fee_per_gas: 10,
+                to: TxKind::Call(Address::repeat_byte(0xee)),
+                ..Default::default()
+            };
+            let hash = B256::repeat_byte(tag);
+            let env = MorphTxEnvelope::Eip1559(Signed::new_unchecked(
+                tx,
+                Signature::test_signature(),
+                hash,
+            ));
+            let recovered = Recovered::new_unchecked(env, signer);
+            let len = recovered.encode_2718_len();
+            (hash, MorphPooledTransaction::new(recovered, len))
+        };
+
+        let sender_blacklisted = Address::repeat_byte(0x01);
+        let sender_low_bal = Address::repeat_byte(0x02);
+        let sender_already_executed = Address::repeat_byte(0x03);
+        let sender_inactive = Address::repeat_byte(0x04);
+
+        let (h_transfer_fail, tx_transfer_fail) = make_morph_tx(sender_blacklisted, 0, 0x11);
+        let (h_low_bal, tx_low_bal) = make_morph_tx(sender_low_bal, 0, 0x22);
+        let (h_exec_ok, tx_exec_ok) = make_eth_tx(sender_already_executed, 0, 0x33);
+        let (h_exec_then_fail, tx_exec_then_fail) = make_morph_tx(sender_already_executed, 1, 0x34);
+        let (h_inactive, tx_inactive) = make_morph_tx(sender_inactive, 0, 0x44);
+
+        let mut outcomes = HashMap::new();
+        outcomes.insert(
+            h_transfer_fail,
+            Err(MorphInvalidTransaction::TokenTransferFailed {
+                reason: "blacklisted".into(),
+            }
+            .into()),
+        );
+        outcomes.insert(
+            h_low_bal,
+            Err(MorphInvalidTransaction::InsufficientTokenBalance {
+                required: U256::from(100),
+                available: U256::from(10),
+            }
+            .into()),
+        );
+        outcomes.insert(h_exec_ok, Ok(21_000));
+        outcomes.insert(
+            h_exec_then_fail,
+            Err(MorphInvalidTransaction::TokenTransferFailed {
+                reason: "post-tx state change".into(),
+            }
+            .into()),
+        );
+        outcomes.insert(
+            h_inactive,
+            Err(MorphInvalidTransaction::TokenNotActive(1).into()),
+        );
+
+        let mut builder = ScriptedBlockBuilder::new(outcomes);
+        let mut info = ExecutionInfo::default();
+        let mut executed_txs = Vec::new();
+        let best_txs = ScriptedPoolTxs {
+            txs: VecDeque::from([
+                tx_transfer_fail,
+                tx_low_bal,
+                tx_exec_ok,
+                tx_exec_then_fail,
+                tx_inactive,
+            ]),
+            marked_invalid: Vec::new(),
+        };
+        // Post-Celadon timestamp so MorphTx hardfork gates pass.
+        let ctx = test_ctx_with_timestamp_and_txs(1_800_000_000, vec![]);
+        let breaker = ctx.builder_config.breaker(30_000_000);
+        let mut evicted = Vec::new();
+
+        ctx.execute_pool_transactions_with_evictor(
+            &mut builder,
+            &mut info,
+            &mut executed_txs,
+            best_txs,
+            &breaker,
+            |hash| evicted.push(hash),
+        )
+        .expect("pool execution should complete");
+
+        // Only sender_blacklisted (TokenTransferFailed, unexecuted) and sender_inactive
+        // (TokenNotActive, unexecuted) should be evicted.
+        // - sender_low_bal (InsufficientTokenBalance) must NOT be evicted.
+        // - sender_already_executed nonce 1 (had nonce 0 succeed in this block) must NOT be evicted.
+        assert_eq!(evicted, vec![h_transfer_fail, h_inactive]);
+        assert_eq!(executed_txs.len(), 1);
     }
 }

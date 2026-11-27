@@ -5,12 +5,10 @@
 use alloy_primitives::B256;
 use reth_codecs::DecompressError;
 use reth_db_api::{
-    DatabaseError, TableSet, TableType, TableViewer,
-    table::{Compress, Decode, Decompress, Encode, TableInfo},
-    tables,
+    DatabaseError, TableSet,
+    table::{Compress, Decode, Decompress, Encode, Table, TableInfo},
 };
 use serde::{Deserialize, Serialize};
-use std::fmt;
 
 /// Key for looking up transactions by Morph transaction reference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -244,6 +242,64 @@ impl Decompress for MetaValue {
     fn decompress_owned(value: Vec<u8>) -> Result<Self, DecompressError> {
         Ok(Self(value))
     }
+}
+
+/// Declares this database's tables: a marker type with a [`Table`] impl per entry, plus the
+/// [`Tables`] set passed to `init_db_for`.
+///
+/// `reth_db::tables!` cannot be used here: it sets [`Table::TABLE`] to the enum it generates,
+/// while that constant has to name an entry of reth's own `Tables`. Tables defined outside that
+/// enum leave it at its default of `None`, which makes MDBX resolve them by name.
+macro_rules! tables {
+    ($($(#[$attr:meta])* table $name:ident {
+        type Key = $key:ty;
+        type Value = $value:ty;
+    })*) => {
+        $(
+            $(#[$attr])*
+            #[derive(Debug)]
+            pub enum $name {}
+
+            impl Table for $name {
+                const NAME: &'static str = stringify!($name);
+                const DUPSORT: bool = false;
+
+                type Key = $key;
+                type Value = $value;
+            }
+        )*
+
+        /// A table in this database.
+        #[derive(Clone, Copy, Debug)]
+        pub enum Tables {
+            $(
+                #[doc = concat!("The [`", stringify!($name), "`] table.")]
+                $name,
+            )*
+        }
+
+        impl TableInfo for Tables {
+            fn name(&self) -> &'static str {
+                match self {
+                    $(Self::$name => stringify!($name),)*
+                }
+            }
+
+            fn is_dupsort(&self) -> bool {
+                false
+            }
+        }
+
+        impl TableSet for Tables {
+            fn tables() -> Box<dyn Iterator<Item = Box<dyn TableInfo>>> {
+                Box::new(
+                    [$(Self::$name,)*]
+                        .into_iter()
+                        .map(|table| Box::new(table) as Box<dyn TableInfo>),
+                )
+            }
+        }
+    };
 }
 
 tables! {

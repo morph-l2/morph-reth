@@ -7,11 +7,11 @@ use jsonrpsee::{
     types::{ErrorCode, ErrorObjectOwned},
 };
 use morph_reference_index::{
-    CanonicalTip, ReferenceIndexError, ReferenceIndexHandle, ReferenceIndexPhase, ReferenceQuery,
-    ReferenceTransactionResult,
+    CanonicalTip, ReferenceIndexError, ReferenceIndexHandle, ReferenceIndexPhase,
+    ReferenceIndexProgress, ReferenceQuery, ReferenceTransactionResult,
 };
 use reth_storage_api::{BlockNumReader, HeaderProvider};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tracing;
 
 const TARGET: &str = "morph::reference_index_rpc";
@@ -22,12 +22,90 @@ const TARGET: &str = "morph::reference_index_rpc";
 /// this budget and return real data instead of forcing the client to retry.
 const INDEX_WAIT_TIMEOUT: Duration = Duration::from_millis(300);
 
-/// Poll cadence while waiting for the index cursor to reach the canonical tip.
-const INDEX_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(5);
+/// Maximum block lag for which the RPC handler waits asynchronously for the
+/// reference index to catch up. When the durable cursor lags further behind the
+/// canonical tip (for example during large historical backfill), the handler
+/// fails fast with `IndexBehind` instead of holding an async waiter open.
+const MAX_STEADY_STATE_LAG: u64 = 2;
 
-fn next_poll_delay(now: Instant, deadline: Instant) -> Option<Duration> {
-    let remaining = deadline.saturating_duration_since(now);
-    (!remaining.is_zero()).then(|| INDEX_WAIT_POLL_INTERVAL.min(remaining))
+fn should_fail_fast(progress: ReferenceIndexProgress, canonical_tip_number: u64) -> bool {
+    if matches!(
+        progress.phase,
+        ReferenceIndexPhase::Deferred
+            | ReferenceIndexPhase::PreJade
+            | ReferenceIndexPhase::Repairing
+    ) {
+        return true;
+    }
+
+    if let Some(indexed_to) = progress.indexed_to
+        && canonical_tip_number.saturating_sub(indexed_to) > MAX_STEADY_STATE_LAG
+    {
+        return true;
+    }
+
+    false
+}
+
+enum QueryAttempt {
+    Ready(Vec<ReferenceTransactionResult>),
+    TipChanged,
+    Behind { tip_number: u64 },
+}
+
+fn query_once<Provider>(
+    ctx: &MorphRpc<Provider>,
+    query: ReferenceQuery,
+) -> Result<QueryAttempt, ReferenceIndexError>
+where
+    Provider: BlockNumReader + HeaderProvider,
+{
+    let before = ctx.provider.chain_info()?;
+    let header = ctx
+        .provider
+        .header(before.best_hash)?
+        .ok_or(ReferenceIndexError::IndexBehind)?;
+    if header.number() != before.best_number {
+        return Err(ReferenceIndexError::IndexBehind);
+    }
+    let canonical_tip = CanonicalTip {
+        number: before.best_number,
+        hash: before.best_hash,
+        timestamp: header.timestamp(),
+    };
+
+    // Pre-Jade is a complete, terminal empty answer: no reference-carrying
+    // transaction can exist before Jade, so return `[]` without touching
+    // the index. This must not be `IndexBehind` (which instructs clients
+    // to retry) — before Jade there is nothing to wait for.
+    if ctx.reference_index.is_pre_jade(canonical_tip.timestamp) {
+        let after = ctx.provider.chain_info()?;
+        if after == before {
+            return Ok(QueryAttempt::Ready(Vec::new()));
+        }
+        // The pre-Jade snapshot changed while it was bracketed. Do not
+        // query the index with the stale tip: rebuild a fresh canonical
+        // snapshot on the next iteration.
+        return Ok(QueryAttempt::TipChanged);
+    }
+
+    match ctx.reference_index.query_at(query, canonical_tip) {
+        Ok(result) => {
+            let after = ctx.provider.chain_info()?;
+            if after == before {
+                Ok(QueryAttempt::Ready(result))
+            } else {
+                // The tip advanced while we read; this snapshot no longer
+                // matches a stable head. Retry against the new tip while the
+                // wait budget allows, otherwise report behind.
+                Ok(QueryAttempt::TipChanged)
+            }
+        }
+        Err(ReferenceIndexError::IndexBehind) => Ok(QueryAttempt::Behind {
+            tip_number: canonical_tip.number,
+        }),
+        Err(other) => Err(other),
+    }
 }
 
 // ── Context ──────────────────────────────────────────────────────────────────
@@ -111,10 +189,6 @@ impl<'a, Provider> RpcWaitGuard<'a, Provider> {
         }
     }
 
-    const fn has_waited(&self) -> bool {
-        self.waited
-    }
-
     const fn begin_wait(&mut self) {
         self.waited = true;
     }
@@ -132,11 +206,12 @@ impl<Provider> Drop for RpcWaitGuard<'_, Provider> {
     }
 }
 
+#[async_trait::async_trait]
 impl<Provider> MorphRpcServer for MorphRpcHandler<Provider>
 where
     Provider: BlockNumReader + HeaderProvider + Clone + Send + Sync + 'static,
 {
-    fn get_transaction_hashes_by_reference(
+    async fn get_transaction_hashes_by_reference(
         &self,
         args: ReferenceQueryArgs,
     ) -> RpcResult<Vec<ReferenceTransactionResult>> {
@@ -145,105 +220,96 @@ where
 
         // The index runtime is asynchronous (PR #141 decoupled it from block
         // execution), so for a few milliseconds after a new block becomes the
-        // canonical tip the durable cursor still lags it. Rather than returning
-        // `IndexBehind` immediately — forcing the client into a retry loop —
-        // wait a bounded amount for the runtime to catch up. This is a
-        // `blocking` RPC handler, so the sleep only occupies a blocking-pool
-        // thread (never the async reactor) and is strictly bounded by
-        // `INDEX_WAIT_TIMEOUT`.
-        let deadline = Instant::now() + INDEX_WAIT_TIMEOUT;
+        // canonical tip the durable cursor still lags it. Run each synchronous
+        // provider + MDBX read on Tokio's blocking pool, and park asynchronously
+        // on the runtime's `watch` progress channel when waiting for steady-state
+        // catch-up — holding zero OS blocking threads and opening zero MDBX read
+        // transactions while waiting.
+        let deadline = tokio::time::Instant::now() + INDEX_WAIT_TIMEOUT;
         let mut wait = RpcWaitGuard::new(self);
+        let mut progress_rx = self.ctx.reference_index.subscribe_progress();
+        let mut watch_closed = false;
 
         loop {
-            if wait.has_waited() && Instant::now() >= deadline {
-                wait.mark_timed_out();
-                return Err(to_rpc_error(ReferenceIndexError::IndexBehind));
-            }
+            // Mark the latest published progress as seen BEFORE running the
+            // blocking read attempt so any commit/phase change occurring while
+            // `query_once` executes immediately wakes `progress_rx.changed()`.
+            let _ = *progress_rx.borrow_and_update();
 
-            let before = self
-                .ctx
-                .provider
-                .chain_info()
-                .map_err(ReferenceIndexError::from)
+            let ctx = self.ctx.clone();
+            let attempt = tokio::task::spawn_blocking(move || query_once(&ctx, query))
+                .await
+                .map_err(|err| {
+                    to_rpc_error(ReferenceIndexError::Other(eyre::eyre!(
+                        "reference index query task failed: {err}"
+                    )))
+                })?
                 .map_err(to_rpc_error)?;
-            let header = self
-                .ctx
-                .provider
-                .header(before.best_hash)
-                .map_err(ReferenceIndexError::from)
-                .map_err(to_rpc_error)?
-                .ok_or(ReferenceIndexError::IndexBehind)
-                .map_err(to_rpc_error)?;
-            if header.number() != before.best_number {
-                return Err(to_rpc_error(ReferenceIndexError::IndexBehind));
-            }
-            let canonical_tip = CanonicalTip {
-                number: before.best_number,
-                hash: before.best_hash,
-                timestamp: header.timestamp(),
-            };
 
-            // Pre-Jade is a complete, terminal empty answer: no reference-carrying
-            // transaction can exist before Jade, so return `[]` without touching
-            // the index. This must not be `IndexBehind` (which instructs clients
-            // to retry) — before Jade there is nothing to wait for.
-            if self
-                .ctx
-                .reference_index
-                .is_pre_jade(canonical_tip.timestamp)
-            {
-                let after = self
-                    .ctx
-                    .provider
-                    .chain_info()
-                    .map_err(ReferenceIndexError::from)
-                    .map_err(to_rpc_error)?;
-                if after == before {
-                    return Ok(Vec::new());
-                }
-                // The pre-Jade snapshot changed while it was bracketed. Do not
-                // query the index with the stale tip: wait once, then rebuild a
-                // fresh canonical snapshot on the next iteration.
-            } else {
-                match self.ctx.reference_index.query_at(query, canonical_tip) {
-                    Ok(result) => {
-                        let after = self
-                            .ctx
-                            .provider
-                            .chain_info()
-                            .map_err(ReferenceIndexError::from)
-                            .map_err(to_rpc_error)?;
-                        if after == before {
-                            return Ok(result);
-                        }
-                        // The tip advanced while we read; this snapshot no longer
-                        // matches a stable head. Retry against the new tip while the
-                        // wait budget allows, otherwise report behind.
+            match attempt {
+                QueryAttempt::Ready(results) => return Ok(results),
+                QueryAttempt::TipChanged => {
+                    if tokio::time::Instant::now() >= deadline {
+                        wait.begin_wait();
+                        wait.mark_timed_out();
+                        return Err(to_rpc_error(ReferenceIndexError::IndexBehind));
                     }
-                    Err(ReferenceIndexError::IndexBehind) => {
-                        // Waiting only pays off for the steady-state per-block lag
-                        // (phase oscillates Live<->Backfill for the newest block and
-                        // catches up in a few ms). Rapid-sync `Deferred` (indexing
-                        // intentionally paused) and the one-time `PreJade` activation
-                        // boundary catch up on a much coarser timescale, so fail fast
-                        // instead of burning the whole budget.
-                        if matches!(
-                            self.ctx.reference_index.phase(),
-                            ReferenceIndexPhase::Deferred | ReferenceIndexPhase::PreJade
-                        ) {
-                            return Err(to_rpc_error(ReferenceIndexError::IndexBehind));
+                    wait.begin_wait();
+                    tokio::task::yield_now().await;
+                }
+                QueryAttempt::Behind { tip_number } => {
+                    let progress = self.ctx.reference_index.progress();
+                    if progress.unavailable {
+                        return Err(to_rpc_error(ReferenceIndexError::IndexUnavailable));
+                    }
+                    if should_fail_fast(progress, tip_number) || watch_closed {
+                        return Err(to_rpc_error(ReferenceIndexError::IndexBehind));
+                    }
+
+                    wait.begin_wait();
+                    loop {
+                        match tokio::time::timeout_at(deadline, progress_rx.changed()).await {
+                            Ok(Ok(())) => {
+                                let updated = self.ctx.reference_index.progress();
+                                if updated.unavailable {
+                                    return Err(to_rpc_error(
+                                        ReferenceIndexError::IndexUnavailable,
+                                    ));
+                                }
+                                if matches!(
+                                    updated.phase,
+                                    ReferenceIndexPhase::Deferred | ReferenceIndexPhase::Repairing
+                                ) || updated.indexed_to.is_some_and(|cur| {
+                                    tip_number.saturating_sub(cur) > MAX_STEADY_STATE_LAG
+                                }) {
+                                    return Err(to_rpc_error(ReferenceIndexError::IndexBehind));
+                                }
+                                // Entering `Backfill` notifies before the batch commits; if
+                                // the durable cursor is still strictly below `tip_number`,
+                                // keep waiting for the actual commit instead of opening a
+                                // doomed MDBX read transaction.
+                                if updated.phase == ReferenceIndexPhase::Backfill
+                                    && updated.indexed_to.is_some_and(|cur| cur < tip_number)
+                                {
+                                    continue;
+                                }
+                                break;
+                            }
+                            Ok(Err(_closed)) => {
+                                // Runtime shut down (watch sender dropped): perform one
+                                // final recheck in case a terminal commit or `Unavailable`
+                                // transition happened immediately before shutdown, then exit.
+                                watch_closed = true;
+                                break;
+                            }
+                            Err(_elapsed) => {
+                                wait.mark_timed_out();
+                                return Err(to_rpc_error(ReferenceIndexError::IndexBehind));
+                            }
                         }
                     }
-                    Err(other) => return Err(to_rpc_error(other)),
                 }
             }
-
-            wait.begin_wait();
-            let Some(delay) = next_poll_delay(Instant::now(), deadline) else {
-                wait.mark_timed_out();
-                return Err(to_rpc_error(ReferenceIndexError::IndexBehind));
-            };
-            std::thread::sleep(delay);
         }
     }
 }
@@ -410,19 +476,11 @@ mod tests {
         }
     }
 
-    #[derive(Debug)]
-    struct ChainInfoGate {
-        call: usize,
-        calls: AtomicUsize,
-        reached: Arc<Barrier>,
-        released: Arc<Barrier>,
-    }
-
     #[derive(Clone, Debug)]
     struct TestProvider {
         chain_info: Arc<Mutex<VecDeque<ChainInfo>>>,
         headers: Arc<BTreeMap<B256, MorphHeader>>,
-        gate: Option<Arc<ChainInfoGate>>,
+        chain_info_calls: Arc<AtomicUsize>,
     }
 
     impl TestProvider {
@@ -433,30 +491,16 @@ mod tests {
             Self {
                 chain_info: Arc::new(Mutex::new(chain_info.into_iter().collect())),
                 headers: Arc::new(headers),
-                gate: None,
+                chain_info_calls: Arc::new(AtomicUsize::new(0)),
             }
         }
 
-        fn gate_chain_info_call(mut self, call: usize) -> (Self, Arc<Barrier>, Arc<Barrier>) {
-            let reached = Arc::new(Barrier::new(2));
-            let released = Arc::new(Barrier::new(2));
-            self.gate = Some(Arc::new(ChainInfoGate {
-                call,
-                calls: AtomicUsize::new(0),
-                reached: reached.clone(),
-                released: released.clone(),
-            }));
-            (self, reached, released)
+        fn chain_info_calls(&self) -> usize {
+            self.chain_info_calls.load(Ordering::Acquire)
         }
 
         fn info(&self) -> ChainInfo {
-            if let Some(gate) = &self.gate {
-                let call = gate.calls.fetch_add(1, Ordering::Relaxed) + 1;
-                if call == gate.call {
-                    gate.reached.wait();
-                    gate.released.wait();
-                }
-            }
+            self.chain_info_calls.fetch_add(1, Ordering::AcqRel);
             let mut infos = self.chain_info.lock().unwrap();
             if infos.len() > 1 {
                 infos.pop_front().unwrap()
@@ -580,8 +624,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn rejects_results_if_canonical_head_changes_during_query() {
+    #[tokio::test]
+    async fn rejects_results_if_canonical_head_changes_during_query() {
         let indexed_hash = B256::repeat_byte(0x11);
         let changed_hash = B256::repeat_byte(0x22);
         let (_dir, handle) = synced_handle(0, 100, indexed_hash);
@@ -602,14 +646,15 @@ mod tests {
 
         let error = handler
             .get_transaction_hashes_by_reference(args())
+            .await
             .unwrap_err();
 
         assert_eq!(error.code(), -32000);
         assert_eq!(error.message(), "reference index is behind");
     }
 
-    #[test]
-    fn passes_the_exact_head_timestamp_to_the_index() {
+    #[tokio::test]
+    async fn passes_the_exact_head_timestamp_to_the_index() {
         let hash = B256::repeat_byte(0x11);
         let (_dir, handle) = synced_handle(200, 199, hash);
         let provider = TestProvider::new(
@@ -623,14 +668,15 @@ mod tests {
 
         let error = handler
             .get_transaction_hashes_by_reference(args())
+            .await
             .unwrap_err();
 
         assert_eq!(error.code(), -32000);
         assert_eq!(error.message(), "reference index is behind");
     }
 
-    #[test]
-    fn pre_jade_empty_result_is_rejected_if_head_crosses_jade() {
+    #[tokio::test]
+    async fn pre_jade_empty_result_is_rejected_if_head_crosses_jade() {
         let pre_jade_hash = B256::repeat_byte(0x11);
         let jade_hash = B256::repeat_byte(0x22);
         let (_dir, handle) = synced_handle(200, 199, pre_jade_hash);
@@ -651,14 +697,15 @@ mod tests {
 
         let error = handler
             .get_transaction_hashes_by_reference(args())
+            .await
             .expect_err("a head change across Jade must invalidate the empty snapshot");
 
         assert_eq!(error.code(), -32000);
         assert_eq!(error.message(), "reference index is behind");
     }
 
-    #[test]
-    fn changed_pre_jade_snapshot_retries_without_querying_the_opening_index() {
+    #[tokio::test]
+    async fn changed_pre_jade_snapshot_retries_without_querying_the_opening_index() {
         let first_hash = B256::repeat_byte(0x11);
         let second_hash = B256::repeat_byte(0x22);
         let handle = ReferenceIndexHandle::new(200);
@@ -681,15 +728,18 @@ mod tests {
         );
         let handler = MorphRpcHandler::new(MorphRpc::new(handle, provider));
 
-        let results = handler.get_transaction_hashes_by_reference(args()).unwrap();
+        let results = handler
+            .get_transaction_hashes_by_reference(args())
+            .await
+            .unwrap();
 
         assert!(results.is_empty());
     }
 
-    #[test]
-    fn rapid_sync_deferred_fails_fast_without_burning_the_wait_budget() {
+    #[tokio::test]
+    async fn rapid_sync_deferred_fails_fast_without_burning_the_wait_budget() {
         // Rapid-sync `Deferred`: a post-Jade query must return `IndexBehind`
-        // promptly rather than sleeping out the full `INDEX_WAIT_TIMEOUT`, since
+        // promptly rather than waiting out the full `INDEX_WAIT_TIMEOUT`, since
         // the runtime will not catch up while indexing is intentionally paused.
         let dir = tempfile::tempdir().unwrap();
         let hash = B256::repeat_byte(0x11);
@@ -713,35 +763,90 @@ mod tests {
             }],
             BTreeMap::from([(hash, header(0, 100))]),
         );
-        let handler = MorphRpcHandler::new(MorphRpc::new(handle, provider));
+        let outcomes = Arc::new(Mutex::new(Vec::new()));
+        let observed = outcomes.clone();
+        let handler = MorphRpcHandler::new(MorphRpc::new(handle, provider.clone()))
+            .with_wait_observer(move |timed_out| {
+                observed.lock().unwrap().push(timed_out);
+            });
 
+        let started = std::time::Instant::now();
         let error = handler
             .get_transaction_hashes_by_reference(args())
+            .await
             .unwrap_err();
+        drop(runtime);
 
         assert_eq!(error.message(), "reference index is behind");
+        assert!(started.elapsed() < Duration::from_millis(100));
+        assert!(outcomes.lock().unwrap().is_empty());
+        assert_eq!(provider.chain_info_calls(), 1);
     }
 
     #[test]
-    fn poll_delay_never_exceeds_the_remaining_budget() {
-        let now = Instant::now();
+    fn should_fail_fast_classifies_phases_and_steady_state_lag() {
+        let progress = |phase, indexed_to| ReferenceIndexProgress {
+            phase,
+            indexed_to,
+            unavailable: phase == ReferenceIndexPhase::Unavailable,
+        };
 
-        assert_eq!(next_poll_delay(now, now), None);
-        assert_eq!(
-            next_poll_delay(now, now + Duration::from_millis(2)),
-            Some(Duration::from_millis(2))
-        );
-        assert_eq!(
-            next_poll_delay(now, now + Duration::from_millis(10)),
-            Some(INDEX_WAIT_POLL_INTERVAL)
-        );
+        assert!(should_fail_fast(
+            progress(ReferenceIndexPhase::Deferred, Some(10)),
+            10
+        ));
+        assert!(should_fail_fast(
+            progress(ReferenceIndexPhase::PreJade, None),
+            10
+        ));
+        assert!(should_fail_fast(
+            progress(ReferenceIndexPhase::Repairing, Some(10)),
+            10
+        ));
+
+        // Steady-state lag <= MAX_STEADY_STATE_LAG (2) is allowed to wait.
+        assert!(!should_fail_fast(
+            progress(ReferenceIndexPhase::Live, Some(10)),
+            11
+        ));
+        assert!(!should_fail_fast(
+            progress(ReferenceIndexPhase::Backfill, Some(10)),
+            12
+        ));
+        assert!(!should_fail_fast(
+            progress(ReferenceIndexPhase::Backfill, None),
+            1
+        ));
+
+        // Lag > MAX_STEADY_STATE_LAG (2) fails fast.
+        assert!(should_fail_fast(
+            progress(ReferenceIndexPhase::Backfill, Some(10)),
+            13
+        ));
+        assert!(should_fail_fast(
+            progress(ReferenceIndexPhase::Live, Some(10)),
+            13
+        ));
     }
 
-    #[test]
-    fn live_lag_wait_eventually_returns_behind() {
+    #[tokio::test]
+    async fn live_lag_wait_eventually_returns_behind_without_polling() {
+        let dir = tempfile::tempdir().unwrap();
         let indexed_hash = B256::repeat_byte(0x11);
         let head_hash = B256::repeat_byte(0x22);
-        let (_dir, handle) = synced_handle(0, 100, indexed_hash);
+        let chain = TestChain {
+            block: CanonicalBlock {
+                number: 0,
+                hash: indexed_hash,
+                timestamp: 100,
+                transactions: Vec::new(),
+            },
+        };
+        let config = ReferenceIndexConfig::new(dir.path(), 2818, B256::ZERO, 0);
+        // Keep `runtime` alive so the watch sender stays open and the wait hits the deadline.
+        let (mut runtime, handle) = ReferenceIndexRuntime::new(config, chain);
+        runtime.synchronize_once(false).unwrap();
+
         let provider = TestProvider::new(
             [ChainInfo {
                 best_hash: head_hash,
@@ -749,17 +854,27 @@ mod tests {
             }],
             BTreeMap::from([(head_hash, header(1, 101))]),
         );
-        let handler = MorphRpcHandler::new(MorphRpc::new(handle, provider));
+        let outcomes = Arc::new(Mutex::new(Vec::new()));
+        let observed = outcomes.clone();
+        let handler = MorphRpcHandler::new(MorphRpc::new(handle, provider.clone()))
+            .with_wait_observer(move |timed_out| {
+                observed.lock().unwrap().push(timed_out);
+            });
 
         let error = handler
             .get_transaction_hashes_by_reference(args())
+            .await
             .unwrap_err();
+        drop(runtime);
 
         assert_eq!(error.message(), "reference index is behind");
+        assert_eq!(*outcomes.lock().unwrap(), [true]);
+        // Only the initial read occurred; no polling reads during the 300ms wait.
+        assert_eq!(provider.chain_info_calls(), 1);
     }
 
-    #[test]
-    fn live_lag_wait_returns_from_the_same_request_after_runtime_catches_up() {
+    #[tokio::test]
+    async fn live_lag_wait_returns_from_the_same_request_after_runtime_catches_up() {
         let dir = tempfile::tempdir().unwrap();
         let indexed_hash = B256::repeat_byte(0x11);
         let head_hash = B256::repeat_byte(0x22);
@@ -786,22 +901,325 @@ mod tests {
             }],
             BTreeMap::from([(head_hash, header(1, 101))]),
         );
-        let (provider, second_attempt, catch_up_complete) = provider.gate_chain_info_call(2);
-        let catch_up = std::thread::spawn(move || {
-            second_attempt.wait();
-            runtime.synchronize_once(false).unwrap();
-            catch_up_complete.wait();
+        let catch_up = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            tokio::task::spawn_blocking(move || {
+                runtime.synchronize_once(false).unwrap();
+                runtime
+            })
+            .await
+            .unwrap()
         });
-        let handler = MorphRpcHandler::new(MorphRpc::new(handle, provider));
+        let handler = MorphRpcHandler::new(MorphRpc::new(handle, provider.clone()));
 
-        let results = handler.get_transaction_hashes_by_reference(args()).unwrap();
-        catch_up.join().unwrap();
+        let results = handler
+            .get_transaction_hashes_by_reference(args())
+            .await
+            .unwrap();
+        let _runtime = catch_up.await.unwrap();
 
         assert!(results.is_empty());
+        // Attempt 1 (`before`) + Attempt 2 (`before` + `after`) = 3 calls; zero polling.
+        assert_eq!(provider.chain_info_calls(), 3);
     }
 
-    #[test]
-    fn live_lag_wait_covers_a_200ms_catch_up() {
+    #[tokio::test]
+    async fn steady_state_lag_of_two_waits_and_succeeds_without_polling() {
+        let dir = tempfile::tempdir().unwrap();
+        let hash0 = B256::repeat_byte(0x10);
+        let hash1 = B256::repeat_byte(0x11);
+        let hash2 = B256::repeat_byte(0x12);
+        let chain = GrowingTestChain::new(CanonicalBlock {
+            number: 0,
+            hash: hash0,
+            timestamp: 100,
+            transactions: Vec::new(),
+        });
+        let config = ReferenceIndexConfig::new(dir.path(), 2818, B256::ZERO, 0);
+        let (mut runtime, handle) = ReferenceIndexRuntime::new(config, chain.clone());
+        runtime.synchronize_once(false).unwrap();
+        chain.push(CanonicalBlock {
+            number: 1,
+            hash: hash1,
+            timestamp: 101,
+            transactions: Vec::new(),
+        });
+        chain.push(CanonicalBlock {
+            number: 2,
+            hash: hash2,
+            timestamp: 102,
+            transactions: Vec::new(),
+        });
+
+        let provider = TestProvider::new(
+            [ChainInfo {
+                best_hash: hash2,
+                best_number: 2,
+            }],
+            BTreeMap::from([(hash2, header(2, 102))]),
+        );
+        let catch_up = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            tokio::task::spawn_blocking(move || {
+                runtime.synchronize_once(false).unwrap();
+                runtime
+            })
+            .await
+            .unwrap()
+        });
+        let handler = MorphRpcHandler::new(MorphRpc::new(handle, provider.clone()));
+
+        let results = handler
+            .get_transaction_hashes_by_reference(args())
+            .await
+            .unwrap();
+        let _runtime = catch_up.await.unwrap();
+
+        assert!(results.is_empty());
+        assert_eq!(provider.chain_info_calls(), 3);
+    }
+
+    #[tokio::test]
+    async fn backfill_lag_above_two_fails_fast_without_waiting() {
+        let dir = tempfile::tempdir().unwrap();
+        let hash0 = B256::repeat_byte(0x10);
+        let hash3 = B256::repeat_byte(0x13);
+        let chain = TestChain {
+            block: CanonicalBlock {
+                number: 0,
+                hash: hash0,
+                timestamp: 100,
+                transactions: Vec::new(),
+            },
+        };
+        let config = ReferenceIndexConfig::new(dir.path(), 2818, B256::ZERO, 0);
+        let (mut runtime, handle) = ReferenceIndexRuntime::new(config, chain);
+        runtime.synchronize_once(false).unwrap();
+
+        let provider = TestProvider::new(
+            [ChainInfo {
+                best_hash: hash3,
+                best_number: 3,
+            }],
+            BTreeMap::from([(hash3, header(3, 103))]),
+        );
+        let outcomes = Arc::new(Mutex::new(Vec::new()));
+        let observed = outcomes.clone();
+        let handler = MorphRpcHandler::new(MorphRpc::new(handle, provider.clone()))
+            .with_wait_observer(move |timed_out| {
+                observed.lock().unwrap().push(timed_out);
+            });
+
+        let started = std::time::Instant::now();
+        let error = handler
+            .get_transaction_hashes_by_reference(args())
+            .await
+            .unwrap_err();
+        drop(runtime);
+
+        assert_eq!(error.message(), "reference index is behind");
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "lag > 2 must fail fast without waiting"
+        );
+        assert!(outcomes.lock().unwrap().is_empty());
+        assert_eq!(provider.chain_info_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn repairing_phase_fails_fast_without_waiting() {
+        #[derive(Clone, Debug)]
+        struct PausingReorgChain {
+            blocks: Arc<Mutex<Vec<CanonicalBlock>>>,
+            pause_on_hash_of: Arc<Mutex<Option<u64>>>,
+            entered_repair: Arc<Barrier>,
+            release_repair: Arc<Barrier>,
+        }
+
+        impl CanonicalChain for PausingReorgChain {
+            fn head(&self) -> Result<CanonicalTip, ReferenceIndexError> {
+                let blocks = self.blocks.lock().unwrap();
+                let block = blocks.last().unwrap();
+                Ok(CanonicalTip {
+                    number: block.number,
+                    hash: block.hash,
+                    timestamp: block.timestamp,
+                })
+            }
+
+            fn canonical_hash(&self, number: u64) -> Result<Option<B256>, ReferenceIndexError> {
+                let should_pause = {
+                    let mut target = self.pause_on_hash_of.lock().unwrap();
+                    if *target == Some(number) {
+                        *target = None;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if should_pause {
+                    self.entered_repair.wait();
+                    self.release_repair.wait();
+                }
+                Ok(self
+                    .blocks
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find_map(|block| (block.number == number).then_some(block.hash)))
+            }
+
+            fn block_timestamp(&self, number: u64) -> Result<Option<u64>, ReferenceIndexError> {
+                Ok(self
+                    .blocks
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find_map(|block| (block.number == number).then_some(block.timestamp)))
+            }
+
+            fn finalized_block_number(&self) -> Result<Option<u64>, ReferenceIndexError> {
+                Ok(None)
+            }
+
+            fn canonical_blocks(
+                &self,
+                range: RangeInclusive<u64>,
+            ) -> Result<Vec<CanonicalBlock>, ReferenceIndexError> {
+                Ok(self
+                    .blocks
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|block| range.contains(&block.number))
+                    .cloned()
+                    .collect())
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let entered_repair = Arc::new(Barrier::new(2));
+        let release_repair = Arc::new(Barrier::new(2));
+        let reorg_hash = B256::repeat_byte(0x99);
+        let chain = PausingReorgChain {
+            blocks: Arc::new(Mutex::new(vec![
+                CanonicalBlock {
+                    number: 0,
+                    hash: B256::repeat_byte(0x10),
+                    timestamp: 100,
+                    transactions: Vec::new(),
+                },
+                CanonicalBlock {
+                    number: 1,
+                    hash: B256::repeat_byte(0x11),
+                    timestamp: 101,
+                    transactions: Vec::new(),
+                },
+            ])),
+            pause_on_hash_of: Arc::new(Mutex::new(None)),
+            entered_repair: entered_repair.clone(),
+            release_repair: release_repair.clone(),
+        };
+        let config = ReferenceIndexConfig::new(dir.path(), 2818, B256::ZERO, 0);
+        let (mut runtime, handle) = ReferenceIndexRuntime::new(config, chain.clone());
+        runtime.synchronize_once(false).unwrap();
+
+        // Trigger a reorg on block 1 and pause inside `reconcile_cursor` after
+        // `ReferenceIndexPhase::Repairing` has been published.
+        chain.blocks.lock().unwrap()[1].hash = reorg_hash;
+        *chain.pause_on_hash_of.lock().unwrap() = Some(1);
+        let repair_thread = std::thread::spawn(move || {
+            runtime.synchronize_once(false).unwrap();
+            runtime
+        });
+        entered_repair.wait();
+        assert_eq!(handle.phase(), ReferenceIndexPhase::Repairing);
+
+        let provider = TestProvider::new(
+            [ChainInfo {
+                best_hash: reorg_hash,
+                best_number: 1,
+            }],
+            BTreeMap::from([(reorg_hash, header(1, 101))]),
+        );
+        let outcomes = Arc::new(Mutex::new(Vec::new()));
+        let observed = outcomes.clone();
+        let handler = MorphRpcHandler::new(MorphRpc::new(handle, provider.clone()))
+            .with_wait_observer(move |timed_out| {
+                observed.lock().unwrap().push(timed_out);
+            });
+
+        let started = std::time::Instant::now();
+        let error = handler
+            .get_transaction_hashes_by_reference(args())
+            .await
+            .unwrap_err();
+        release_repair.wait();
+        let _runtime = repair_thread.join().unwrap();
+
+        assert_eq!(error.message(), "reference index is behind");
+        assert!(started.elapsed() < Duration::from_millis(100));
+        assert!(outcomes.lock().unwrap().is_empty());
+        assert_eq!(provider.chain_info_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn watch_sender_drop_wakes_waiter_and_exits_immediately() {
+        let dir = tempfile::tempdir().unwrap();
+        let indexed_hash = B256::repeat_byte(0x11);
+        let head_hash = B256::repeat_byte(0x22);
+        let chain = TestChain {
+            block: CanonicalBlock {
+                number: 0,
+                hash: indexed_hash,
+                timestamp: 100,
+                transactions: Vec::new(),
+            },
+        };
+        let config = ReferenceIndexConfig::new(dir.path(), 2818, B256::ZERO, 0);
+        let (mut runtime, handle) = ReferenceIndexRuntime::new(config, chain);
+        runtime.synchronize_once(false).unwrap();
+
+        let provider = TestProvider::new(
+            [ChainInfo {
+                best_hash: head_hash,
+                best_number: 1,
+            }],
+            BTreeMap::from([(head_hash, header(1, 101))]),
+        );
+        let outcomes = Arc::new(Mutex::new(Vec::new()));
+        let observed = outcomes.clone();
+        let handler = MorphRpcHandler::new(MorphRpc::new(handle, provider.clone()))
+            .with_wait_observer(move |timed_out| {
+                observed.lock().unwrap().push(timed_out);
+            });
+
+        // Drop the runtime while the RPC call is awaiting `progress_rx.changed()`.
+        let shutdown = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            drop(runtime);
+        });
+
+        let started = std::time::Instant::now();
+        let error = handler
+            .get_transaction_hashes_by_reference(args())
+            .await
+            .unwrap_err();
+        shutdown.await.unwrap();
+
+        assert_eq!(error.message(), "reference index is behind");
+        assert!(
+            started.elapsed() < Duration::from_millis(180),
+            "dropped watch sender must wake and exit before the 300ms timeout (elapsed {:?})",
+            started.elapsed()
+        );
+        assert_eq!(*outcomes.lock().unwrap(), [false]);
+        // Initial read + one final recheck after sender drop.
+        assert_eq!(provider.chain_info_calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn live_lag_wait_covers_a_200ms_catch_up() {
         let dir = tempfile::tempdir().unwrap();
         let indexed_hash = B256::repeat_byte(0x11);
         let head_hash = B256::repeat_byte(0x22);
@@ -828,23 +1246,29 @@ mod tests {
             }],
             BTreeMap::from([(head_hash, header(1, 101))]),
         );
-        let catch_up = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(200));
-            runtime.synchronize_once(false).unwrap();
+        let catch_up = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            tokio::task::spawn_blocking(move || {
+                runtime.synchronize_once(false).unwrap();
+                runtime
+            })
+            .await
+            .unwrap()
         });
-        let handler = MorphRpcHandler::new(MorphRpc::new(handle, provider));
+        let handler = MorphRpcHandler::new(MorphRpc::new(handle, provider.clone()));
 
-        let result = handler.get_transaction_hashes_by_reference(args());
-        catch_up.join().unwrap();
+        let result = handler.get_transaction_hashes_by_reference(args()).await;
+        let _runtime = catch_up.await.unwrap();
 
         assert!(
             result.is_ok(),
             "a live query should wait for a 200ms index catch-up: {result:?}"
         );
+        assert_eq!(provider.chain_info_calls(), 3);
     }
 
-    #[test]
-    fn deferred_transition_after_wait_is_not_counted_as_a_timeout() {
+    #[tokio::test]
+    async fn deferred_transition_after_wait_is_not_counted_as_a_timeout() {
         let dir = tempfile::tempdir().unwrap();
         let indexed_hash = B256::repeat_byte(0x11);
         let head_hash = B256::repeat_byte(0x22);
@@ -871,33 +1295,38 @@ mod tests {
             }],
             BTreeMap::from([(head_hash, header(1, 101))]),
         );
-        let (provider, second_attempt, transition_complete) = provider.gate_chain_info_call(2);
-        let transition = std::thread::spawn(move || {
-            second_attempt.wait();
-            runtime.synchronize_once(true).unwrap();
-            transition_complete.wait();
+        let transition = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            tokio::task::spawn_blocking(move || {
+                runtime.synchronize_once(true).unwrap();
+                runtime
+            })
+            .await
+            .unwrap()
         });
         let phase = handle.clone();
         let outcomes = Arc::new(Mutex::new(Vec::new()));
         let observed_outcomes = outcomes.clone();
-        let handler = MorphRpcHandler::new(MorphRpc::new(handle, provider)).with_wait_observer(
-            move |timed_out| {
+        let handler = MorphRpcHandler::new(MorphRpc::new(handle, provider.clone()))
+            .with_wait_observer(move |timed_out| {
                 observed_outcomes.lock().unwrap().push(timed_out);
-            },
-        );
+            });
 
         let error = handler
             .get_transaction_hashes_by_reference(args())
+            .await
             .unwrap_err();
-        transition.join().unwrap();
+        let _runtime = transition.await.unwrap();
 
         assert_eq!(error.message(), "reference index is behind");
         assert_eq!(phase.phase(), ReferenceIndexPhase::Deferred);
         assert_eq!(*outcomes.lock().unwrap(), [false]);
+        // Woke on watch transition to `Deferred` and exited without another blocking read.
+        assert_eq!(provider.chain_info_calls(), 1);
     }
 
-    #[test]
-    fn provider_failure_after_wait_is_observed_without_a_timeout() {
+    #[tokio::test]
+    async fn provider_failure_after_wait_is_observed_without_a_timeout() {
         let indexed_hash = B256::repeat_byte(0x11);
         let head_hash = B256::repeat_byte(0x22);
         let missing_header_hash = B256::repeat_byte(0x33);
@@ -925,6 +1354,7 @@ mod tests {
 
         let error = handler
             .get_transaction_hashes_by_reference(args())
+            .await
             .unwrap_err();
 
         assert_eq!(error.message(), "reference index is behind");
