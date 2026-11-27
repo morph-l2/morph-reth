@@ -367,3 +367,62 @@ async fn calldata_heavy_tx_below_eip7623_floor_accepted_and_mined() -> eyre::Res
     );
     Ok(())
 }
+
+/// M-M08: When the initial canonical block gas limit exceeds upstream `PoolConfig::default()`'s
+/// hardcoded 30M (e.g. 60M), both the validator and `AllTransactions` (`pool_config.gas_limit`)
+/// must initialize to 60M so a 45M-gas transaction is admitted and mined before the first new
+/// block arrives, while a >60M-gas transaction is still rejected.
+#[tokio::test(flavor = "multi_thread")]
+async fn startup_pool_accepts_tx_above_30m_before_first_block_and_mines_it() -> eyre::Result<()> {
+    use alloy_consensus::{SignableTransaction, TxEip1559};
+    use alloy_signer::SignerSync;
+    use reth_transaction_pool::TransactionPool;
+
+    reth_tracing::init_test_tracing();
+    let (mut nodes, wallet) = TestNodeBuilder::new()
+        .with_gas_limit(60_000_000)
+        .with_desired_gas_limit(60_000_000)
+        .build()
+        .await?;
+    let mut node = nodes.pop().unwrap();
+
+    assert_eq!(node.inner.pool.block_info().block_gas_limit, 60_000_000);
+
+    let sign_tx = |gas_limit: u64| -> eyre::Result<Bytes> {
+        let tx = TxEip1559 {
+            chain_id: wallet.chain_id,
+            nonce: 0,
+            gas_limit,
+            max_fee_per_gas: 20_000_000_000u128,
+            max_priority_fee_per_gas: 1_000_000_000u128,
+            to: TxKind::Call(Address::with_last_byte(0x42)),
+            value: U256::from(100),
+            access_list: Default::default(),
+            input: Bytes::new(),
+        };
+        let sig = wallet
+            .inner
+            .sign_hash_sync(&tx.signature_hash())
+            .map_err(|e| eyre::eyre!("{e}"))?;
+        Ok(MorphTxEnvelope::Eip1559(tx.into_signed(sig))
+            .encoded_2718()
+            .into())
+    };
+
+    // Above 60M -> must be rejected.
+    assert!(
+        node.rpc.inject_tx(sign_tx(60_000_001)?).await.is_err(),
+        "tx exceeding 60M block gas limit must be rejected"
+    );
+
+    // 45M (above default 30M, within 60M) -> must be admitted immediately before block 1.
+    node.rpc.inject_tx(sign_tx(45_000_000)?).await?;
+    let payload = node.advance_block().await?;
+    assert_eq!(
+        payload.block().body().transactions.len(),
+        1,
+        "45M-gas tx must be admitted before first block and mined"
+    );
+
+    Ok(())
+}

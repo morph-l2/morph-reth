@@ -10,9 +10,11 @@ use reth_node_builder::components::{TxPoolBuilder, spawn_maintenance_tasks};
 use reth_node_builder::{BuilderContext, components::PoolBuilder};
 use reth_provider::BlockReaderIdExt;
 use reth_tracing::tracing::{debug, info};
-use reth_transaction_pool::{TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore};
+use reth_transaction_pool::{
+    PoolConfig, TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore,
+};
 
-/// Resolves the initial block gas limit for the transaction pool validator from
+/// Resolves the initial block gas limit for the transaction pool and validator from
 /// the latest canonical header, falling back to genesis only if no latest header exists.
 fn initial_block_gas_limit<Provider>(provider: &Provider, genesis_gas_limit: u64) -> u64
 where
@@ -24,6 +26,22 @@ where
         .flatten()
         .map(|header| header.gas_limit())
         .unwrap_or(genesis_gas_limit)
+}
+
+/// Synchronizes `pool_config.gas_limit` with the resolved initial block gas limit so
+/// `AllTransactions` does not reject transactions above upstream `PoolConfig::default()`'s
+/// hardcoded 30M limit before the first canonical head update arrives.
+fn configure_initial_pool_config<Provider>(
+    mut pool_config: PoolConfig,
+    provider: &Provider,
+    genesis_gas_limit: u64,
+) -> (PoolConfig, u64)
+where
+    Provider: BlockReaderIdExt,
+{
+    let initial_gas_limit = initial_block_gas_limit(provider, genesis_gas_limit);
+    pool_config.gas_limit = initial_gas_limit;
+    (pool_config, initial_gas_limit)
 }
 
 /// Builder for Morph transaction pool.
@@ -52,7 +70,16 @@ where
         ctx: &BuilderContext<Node>,
         _evm_config: Evm,
     ) -> eyre::Result<Self::Pool> {
-        let pool_config = ctx.pool_config();
+        // Initialize both `pool_config.gas_limit` (enforced by `AllTransactions::insert_tx`)
+        // and the validator's `block_gas_limit` from the latest canonical header (falling back
+        // to genesis on an empty DB) so transactions above upstream `PoolConfig::default()`'s
+        // hardcoded 30M limit are accepted immediately on startup before a new block arrives.
+        let (pool_config, initial_gas_limit) = configure_initial_pool_config(
+            ctx.pool_config(),
+            ctx.provider(),
+            ctx.chain_spec().inner.genesis().gas_limit,
+        );
+        let max_tx_gas_limit = ctx.config().txpool.max_tx_gas_limit;
 
         // Use in-memory blob store (Morph doesn't support EIP-4844 blobs)
         let blob_store = InMemoryBlobStore::default();
@@ -60,9 +87,6 @@ where
         // Build the Morph-specific EVM config for the validator and the maintenance task
         let morph_evm_config =
             MorphEvmConfig::new(ctx.chain_spec(), morph_evm::MorphEvmFactory::default());
-
-        let initial_gas_limit =
-            initial_block_gas_limit(ctx.provider(), ctx.chain_spec().inner.genesis().gas_limit);
 
         // Build the transaction validator with Morph-specific checks
         let validator = TransactionValidationTaskExecutor::eth_builder(
@@ -72,7 +96,7 @@ where
         .with_max_tx_input_bytes(ctx.config().txpool.max_tx_input_bytes)
         .with_local_transactions_config(pool_config.local_transactions_config.clone())
         .set_tx_fee_cap(ctx.config().rpc.rpc_tx_fee_cap)
-        .with_max_tx_gas_limit(ctx.config().txpool.max_tx_gas_limit)
+        .with_max_tx_gas_limit(max_tx_gas_limit)
         .set_block_gas_limit(initial_gas_limit)
         .with_minimum_priority_fee(ctx.config().txpool.minimum_priority_fee)
         .with_additional_tasks(ctx.config().txpool.additional_validation_tasks)
@@ -92,7 +116,9 @@ where
         .build_with_tasks(ctx.task_executor().clone(), blob_store.clone());
 
         // Wrap with Morph-specific validator
-        let validator = validator.map(MorphTransactionValidator::new);
+        let validator = validator.map(|inner| {
+            MorphTransactionValidator::new(inner).with_max_tx_gas_limit(max_tx_gas_limit)
+        });
 
         // Build the transaction pool
         let pool = TxPoolBuilder::new(ctx)
@@ -214,6 +240,109 @@ mod tests {
     #[test]
     fn test_initial_block_gas_limit_falls_back_to_genesis_without_latest_header() {
         let provider = reth_provider::noop::NoopProvider::default();
-        assert_eq!(initial_block_gas_limit(&provider, 30_000_000), 30_000_000);
+        assert_eq!(PoolConfig::default().gas_limit, 30_000_000);
+
+        let (pool_config, initial_gas_limit) =
+            configure_initial_pool_config(PoolConfig::default(), &provider, 60_000_000);
+        assert_eq!(initial_gas_limit, 60_000_000);
+        assert_eq!(pool_config.gas_limit, 60_000_000);
+    }
+
+    #[cfg(feature = "test-utils")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_configure_initial_pool_config_uses_canonical_tip_above_30m_genesis()
+    -> eyre::Result<()> {
+        use crate::test_utils::{TestNodeBuilder, advance_empty_block};
+        use alloy_consensus::{SignableTransaction, TxEip1559};
+        use alloy_eips::eip2718::Encodable2718;
+        use alloy_primitives::{Address, Bytes, TxKind};
+        use alloy_signer::SignerSync;
+        use reth_chainspec::ChainSpecProvider;
+        use reth_payload_primitives::BuiltPayload;
+        use reth_transaction_pool::{CoinbaseTipOrdering, Pool, TransactionPool};
+
+        let (mut nodes, wallet) = TestNodeBuilder::new()
+            .with_gas_limit(30_000_000)
+            .with_desired_gas_limit(60_000_000)
+            .build()
+            .await?;
+        let mut node = nodes.pop().unwrap();
+
+        // Advance 1 block so canonical tip gas_limit ramps above both genesis (30M)
+        // and `PoolConfig::default().gas_limit` (30M).
+        let payload = advance_empty_block(&mut node).await?;
+        let tip_gas_limit = payload.block().header().gas_limit();
+        assert!(
+            tip_gas_limit > 30_000_000,
+            "tip gas limit should ramp above 30M, got {tip_gas_limit}"
+        );
+
+        let genesis_gas_limit = node.inner.provider.chain_spec().inner.genesis().gas_limit;
+        assert_eq!(genesis_gas_limit, 30_000_000);
+
+        // Simulate node restart pool initialization BEFORE `spawn_maintenance_tasks` runs:
+        let (pool_config, initial_gas_limit) = configure_initial_pool_config(
+            PoolConfig::default(),
+            &node.inner.provider,
+            genesis_gas_limit,
+        );
+        assert_eq!(initial_gas_limit, tip_gas_limit);
+        assert_eq!(pool_config.gas_limit, tip_gas_limit);
+
+        let blob_store = InMemoryBlobStore::default();
+        let evm_config = MorphEvmConfig::new(
+            node.inner.provider.chain_spec(),
+            morph_evm::MorphEvmFactory::default(),
+        );
+        let validator =
+            TransactionValidationTaskExecutor::eth_builder(node.inner.provider.clone(), evm_config)
+                .set_block_gas_limit(initial_gas_limit)
+                .with_custom_tx_type(morph_primitives::MORPH_TX_TYPE_ID)
+                .disable_balance_check()
+                .no_eip4844()
+                .build_with_tasks(node.inner.task_executor.clone(), blob_store.clone())
+                .map(MorphTransactionValidator::new);
+
+        // Build `Pool` directly without spawning `maintain_transaction_pool_future`,
+        // proving `AllTransactions::insert_tx` accepts `30M < gas <= tip_gas_limit`
+        // solely from `pool_config.gas_limit = initial_gas_limit`.
+        let restarted_pool = Pool::new(
+            validator,
+            CoinbaseTipOrdering::default(),
+            blob_store,
+            pool_config,
+        );
+        assert_eq!(restarted_pool.block_info().block_gas_limit, tip_gas_limit);
+
+        let tx_gas = 30_000_000 + (tip_gas_limit - 30_000_000) / 2;
+        let tx = TxEip1559 {
+            chain_id: wallet.chain_id,
+            nonce: 0,
+            gas_limit: tx_gas,
+            max_fee_per_gas: 20_000_000_000u128,
+            max_priority_fee_per_gas: 1_000_000_000u128,
+            to: TxKind::Call(Address::with_last_byte(0x42)),
+            value: U256::ZERO,
+            access_list: Default::default(),
+            input: Bytes::new(),
+        };
+        let sig = wallet
+            .inner
+            .sign_hash_sync(&tx.signature_hash())
+            .map_err(|e| eyre::eyre!("{e}"))?;
+        let signed = MorphTxEnvelope::Eip1559(tx.into_signed(sig));
+        let len = signed.encode_2718_len();
+        let pooled = MorphPooledTransaction::new(
+            Recovered::new_unchecked(signed, wallet.inner.address()),
+            len,
+        );
+
+        restarted_pool
+            .add_external_transaction(pooled)
+            .await
+            .expect("tx between 30M genesis and ramped tip must be admitted before maintenance");
+        assert_eq!(restarted_pool.pending_transactions().len(), 1);
+
+        Ok(())
     }
 }

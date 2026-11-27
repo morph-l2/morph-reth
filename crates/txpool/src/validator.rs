@@ -10,7 +10,13 @@
 //! - MorphTx (0x7F) ERC20 token balance validation
 
 use crate::MorphTxValidationError;
-use alloy_consensus::{BlockHeader, Sealable, Transaction};
+use alloy_consensus::{
+    BlockHeader, Sealable, Transaction,
+    constants::{
+        EIP1559_TX_TYPE_ID, EIP2930_TX_TYPE_ID, EIP4844_TX_TYPE_ID, EIP7702_TX_TYPE_ID,
+        LEGACY_TX_TYPE_ID,
+    },
+};
 use alloy_eips::{Encodable2718, Typed2718};
 use alloy_primitives::{Address, B256, U256};
 use morph_chainspec::hardfork::{MorphHardfork, MorphHardforks};
@@ -34,7 +40,8 @@ use reth_revm::{
 use reth_storage_api::{BlockReaderIdExt, StateProviderBox, StateProviderFactory};
 use reth_transaction_pool::{
     EthPoolTransaction, EthTransactionValidator, PoolTransaction, TransactionOrigin,
-    TransactionValidationOutcome, TransactionValidator, error::InvalidPoolTransactionError,
+    TransactionValidationOutcome, TransactionValidator,
+    error::{Eip7702PoolTransactionError, InvalidPoolTransactionError},
 };
 use std::sync::Arc;
 
@@ -209,9 +216,22 @@ pub struct MorphTransactionValidator<Client, Tx, Evm = morph_evm::MorphEvmConfig
     inner: EthTransactionValidator<Client, Tx, Evm>,
     /// Additional block info required for validation.
     block_info: Arc<MorphL1BlockInfo>,
+    /// Maximum gas limit for individual transactions (`--txpool.max-tx-gas`).
+    max_tx_gas_limit: Option<u64>,
 }
 
 impl<Client, Tx, Evm> MorphTransactionValidator<Client, Tx, Evm> {
+    /// Configures the maximum gas limit for individual transactions.
+    pub const fn with_max_tx_gas_limit(mut self, max_tx_gas_limit: Option<u64>) -> Self {
+        self.max_tx_gas_limit = max_tx_gas_limit;
+        self
+    }
+
+    /// Returns the configured maximum gas limit for individual transactions.
+    pub const fn max_tx_gas_limit(&self) -> Option<u64> {
+        self.max_tx_gas_limit
+    }
+
     /// Returns the configured chain spec.
     pub fn chain_spec(&self) -> Arc<Client::ChainSpec>
     where
@@ -229,6 +249,19 @@ impl<Client, Tx, Evm> MorphTransactionValidator<Client, Tx, Evm> {
     pub fn block_info(&self) -> &Arc<MorphL1BlockInfo> {
         &self.block_info
     }
+}
+
+/// Preserves `max_tx_gas_limit` when callers construct [`MorphTransactionValidator::new`]
+/// from an [`EthTransactionValidator`] without also calling
+/// [`MorphTransactionValidator::with_max_tx_gas_limit`] (upstream `reth` keeps the field
+/// private on `EthTransactionValidator` while exposing it in `Debug`).
+fn inner_max_tx_gas_limit<Client, Tx, Evm>(
+    inner: &EthTransactionValidator<Client, Tx, Evm>,
+) -> Option<u64> {
+    let debug = format!("{inner:?}");
+    let rest = debug.split("max_tx_gas_limit: Some(").nth(1)?;
+    let digits = rest.split(')').next()?;
+    digits.parse().ok()
 }
 
 fn insufficient_funds_outcome<Tx: PoolTransaction>(
@@ -276,9 +309,11 @@ where
         inner: EthTransactionValidator<Client, Tx, Evm>,
         block_info: MorphL1BlockInfo,
     ) -> Self {
+        let max_tx_gas_limit = inner_max_tx_gas_limit(&inner);
         Self {
             inner,
             block_info: Arc::new(block_info),
+            max_tx_gas_limit,
         }
     }
 
@@ -476,68 +511,8 @@ where
             return TransactionValidationOutcome::Invalid(transaction, err);
         }
 
-        // Token-fee MorphTx reports only its ETH value through cost(), so reth's
-        // cost() - value() fee-cap check sees zero. Preserve the configured local
-        // fee cap using the gas budget, independently of the pool's ETH budget.
-        if is_morph_tx
-            && self
-                .inner
-                .local_transactions_config()
-                .is_local(origin, transaction.sender_ref())
-            && let Some(tx_fee_cap_wei) = self.inner.tx_fee_cap().filter(|cap| *cap != 0)
-        {
-            let max_tx_fee_wei = U256::from(transaction.gas_limit())
-                .saturating_mul(U256::from(transaction.max_fee_per_gas()));
-            if max_tx_fee_wei > U256::from(tx_fee_cap_wei) {
-                return TransactionValidationOutcome::Invalid(
-                    transaction,
-                    InvalidPoolTransactionError::ExceedsFeeCap {
-                        max_tx_fee_wei: max_tx_fee_wei.saturating_to(),
-                        tx_fee_cap_wei,
-                    },
-                );
-            }
-        }
-
-        match self.inner.validate_stateless(origin, &transaction) {
-            Ok(()) => {
-                // Upstream's `ensure_intrinsic_gas` uses `fork_tracker`, which falls back to
-                // `SpecId::MERGE` pre-Viridian (Morph genesis uses `shanghaiBlock: 0` rather
-                // than `shanghaiTime`) and therefore omits the EIP-3860 initcode word cost.
-                // Re-check against Morph's actual execution `cfg_env` so pre-Viridian
-                // contract creations still enforce initcode word gas.
-                if let Err(err) = ensure_morph_intrinsic_gas(&transaction, &head.evm_env.cfg_env) {
-                    return TransactionValidationOutcome::Invalid(transaction, err);
-                }
-            }
-            Err(InvalidPoolTransactionError::IntrinsicGasTooLow) => {
-                // Every stateless check in upstream `EthTransactionValidator::validate_stateless`
-                // prior to `ensure_intrinsic_gas` (tx type, EIP-2681 nonce, size limits,
-                // block/tx gas limits, fee caps, minimum priority fee, chain ID, and EIP-7702
-                // Prague/auth-list rules) has already passed. Upstream `ensure_intrinsic_gas`
-                // ignores `cfg_env.disable_eip7623` and rejects valid post-Viridian
-                // calldata-heavy txs below the EIP-7623 floor. Re-evaluate intrinsic gas
-                // against Morph's actual execution `cfg_env` (EIP-7623 disabled, EIP-3860 and
-                // EIP-7702 costs preserved).
-                if let Err(err) = ensure_morph_intrinsic_gas(&transaction, &head.evm_env.cfg_env) {
-                    return TransactionValidationOutcome::Invalid(transaction, err);
-                }
-                // Run the remaining applicable check after `ensure_intrinsic_gas` in upstream
-                // `validate_stateless` (EIP-4844 was already rejected above, and Morph does
-                // not attach `additional_stateless_validation`): `tx_gas_limit_cap`.
-                let tx_gas_limit_cap = self
-                    .inner
-                    .fork_tracker()
-                    .tx_gas_limit_cap
-                    .load(std::sync::atomic::Ordering::Relaxed);
-                if tx_gas_limit_cap > 0 && transaction.gas_limit() > tx_gas_limit_cap {
-                    return TransactionValidationOutcome::Invalid(
-                        transaction,
-                        InvalidTransactionError::GasLimitTooHigh.into(),
-                    );
-                }
-            }
-            Err(err) => return TransactionValidationOutcome::Invalid(transaction, err),
+        if let Err(err) = self.validate_stateless(origin, &transaction, &head.evm_env.cfg_env) {
+            return TransactionValidationOutcome::Invalid(transaction, err);
         }
         let outcome = self
             .inner
@@ -670,6 +645,154 @@ where
             .into_iter()
             .map(|(origin, tx)| self.validate_one_with_state(origin, tx, &mut state))
             .collect()
+    }
+
+    /// Performs Morph-aware stateless validation directly without delegating to
+    /// `self.inner.validate_stateless`.
+    ///
+    /// Upstream `EthTransactionValidator::validate_stateless` evaluates intrinsic gas via
+    /// `ForkTracker` (ignoring `cfg_env.disable_eip7623` post-Viridian and omitting EIP-3860
+    /// initcode word cost pre-Viridian) and, in newer upstream versions, increments
+    /// `rejected_intrinsic_gas_too_low` before returning `Err(IntrinsicGasTooLow)`. Running
+    /// the stateless checks here against `self.inner`'s configuration and `cfg_env` preserves
+    /// exact error precedence without false EIP-7623 rejections or metric pollution.
+    fn validate_stateless(
+        &self,
+        origin: TransactionOrigin,
+        transaction: &Tx,
+        cfg_env: &CfgEnv<MorphHardfork>,
+    ) -> Result<(), InvalidPoolTransactionError> {
+        match transaction.ty() {
+            EIP2930_TX_TYPE_ID if !self.inner.eip2718() => {
+                return Err(InvalidTransactionError::Eip2930Disabled.into());
+            }
+            EIP1559_TX_TYPE_ID if !self.inner.eip1559() => {
+                return Err(InvalidTransactionError::Eip1559Disabled.into());
+            }
+            EIP4844_TX_TYPE_ID => {
+                return Err(InvalidTransactionError::Eip4844Disabled.into());
+            }
+            EIP7702_TX_TYPE_ID if !self.inner.eip7702() => {
+                return Err(InvalidTransactionError::Eip7702Disabled.into());
+            }
+            LEGACY_TX_TYPE_ID
+            | EIP2930_TX_TYPE_ID
+            | EIP1559_TX_TYPE_ID
+            | EIP7702_TX_TYPE_ID
+            | morph_primitives::MORPH_TX_TYPE_ID => {}
+            _ => {
+                return Err(InvalidTransactionError::TxTypeNotSupported.into());
+            }
+        }
+
+        // Reject transactions with a nonce equal to u64::MAX according to EIP-2681.
+        if transaction.nonce() == u64::MAX {
+            return Err(InvalidPoolTransactionError::Eip2681);
+        }
+
+        // Reject non-blob transactions over the configured maximum encoded byte size.
+        let tx_size = transaction.encoded_length();
+        let max_tx_input_bytes = self.inner.max_tx_input_bytes();
+        if tx_size > max_tx_input_bytes {
+            return Err(InvalidPoolTransactionError::OversizedData {
+                size: tx_size,
+                limit: max_tx_input_bytes,
+            });
+        }
+
+        // Respect any stricter `cfg_env` initcode cap in addition to `MAX_INITCODE_SIZE`.
+        transaction.ensure_max_init_code_size(cfg_env.max_initcode_size())?;
+
+        // Enforce block gas limit and optional per-transaction gas limit (`--txpool.max-tx-gas`).
+        let transaction_gas_limit = transaction.gas_limit();
+        let block_gas_limit = self.inner.block_gas_limit();
+        if transaction_gas_limit > block_gas_limit {
+            return Err(InvalidPoolTransactionError::ExceedsGasLimit(
+                transaction_gas_limit,
+                block_gas_limit,
+            ));
+        }
+
+        if let Some(max_tx_gas_limit) = self.max_tx_gas_limit
+            && transaction_gas_limit > max_tx_gas_limit
+        {
+            return Err(InvalidPoolTransactionError::MaxTxGasLimitExceeded(
+                transaction_gas_limit,
+                max_tx_gas_limit,
+            ));
+        }
+
+        // Ensure max_priority_fee_per_gas (if dynamic fee) does not exceed max_fee_per_gas.
+        if transaction.max_priority_fee_per_gas() > Some(transaction.max_fee_per_gas()) {
+            return Err(InvalidTransactionError::TipAboveFeeCap.into());
+        }
+
+        let is_local = self
+            .inner
+            .local_transactions_config()
+            .is_local(origin, transaction.sender_ref());
+
+        // Enforce configured local transaction fee cap. Token-fee MorphTx reports only its
+        // ETH value through `cost()`, so compute the gas budget directly for MorphTx.
+        if is_local && let Some(tx_fee_cap_wei) = (*self.inner.tx_fee_cap()).filter(|cap| *cap != 0)
+        {
+            let max_tx_fee_wei = if is_morph_tx(transaction) {
+                U256::from(transaction_gas_limit)
+                    .saturating_mul(U256::from(transaction.max_fee_per_gas()))
+            } else {
+                transaction.cost().saturating_sub(transaction.value())
+            };
+            if max_tx_fee_wei > U256::from(tx_fee_cap_wei) {
+                return Err(InvalidPoolTransactionError::ExceedsFeeCap {
+                    max_tx_fee_wei: max_tx_fee_wei.saturating_to(),
+                    tx_fee_cap_wei,
+                });
+            }
+        }
+
+        // Drop non-local dynamic-fee transactions below the configured minimum priority fee.
+        if !is_local
+            && transaction.is_dynamic_fee()
+            && let Some(minimum_priority_fee) = *self.inner.minimum_priority_fee()
+            && transaction.max_priority_fee_per_gas() < Some(minimum_priority_fee)
+        {
+            return Err(InvalidPoolTransactionError::PriorityFeeBelowMinimum {
+                minimum_priority_fee,
+            });
+        }
+
+        // Enforce chain ID when present (allowing pre-EIP-155 legacy transactions).
+        if let Some(chain_id) = transaction.chain_id()
+            && chain_id != self.inner.chain_id()
+        {
+            return Err(InvalidTransactionError::ChainIdMismatch.into());
+        }
+
+        if transaction.is_eip7702() {
+            if !self.inner.fork_tracker().is_prague_activated() {
+                return Err(InvalidTransactionError::TxTypeNotSupported.into());
+            }
+
+            if transaction
+                .authorization_list()
+                .is_none_or(|l| l.is_empty())
+            {
+                return Err(Eip7702PoolTransactionError::MissingEip7702AuthorizationList.into());
+            }
+        }
+
+        ensure_morph_intrinsic_gas(transaction, cfg_env)?;
+
+        let tx_gas_limit_cap = self
+            .inner
+            .fork_tracker()
+            .tx_gas_limit_cap
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if tx_gas_limit_cap > 0 && transaction_gas_limit > tx_gas_limit_cap {
+            return Err(InvalidTransactionError::GasLimitTooHigh.into());
+        }
+
+        Ok(())
     }
 }
 
@@ -2610,5 +2733,348 @@ mod tests {
             ),
             "tx above 60M tip must fail with ExceedsGasLimit: {outcome:?}"
         );
+    }
+
+    /// M-M08: End-to-end `Pool::add_external_transaction` test verifying that initializing
+    /// `PoolConfig.gas_limit` alongside the validator's `block_gas_limit` allows `30M < gas <= 60M`
+    /// transactions to enter `AllTransactions` immediately on startup before any `set_block_info`
+    /// / new canonical block arrives (whereas `PoolConfig::default()`'s hardcoded 30M rejects them
+    /// at `AllTransactions::insert_tx`).
+    #[tokio::test]
+    async fn pool_insertion_with_initialized_pool_config_gas_limit_accepts_tx_above_30m() {
+        use reth_transaction_pool::{PoolConfig, error::PoolErrorKind};
+
+        let signer = address!("0000000000000000000000000000000000000001");
+        let client = new_mock_provider();
+        let tip_header = morph_primitives::MorphHeader::from(alloy_consensus::Header {
+            number: 10,
+            timestamp: 1_767_765_600,
+            gas_limit: 60_000_000,
+            base_fee_per_gas: Some(10),
+            ..Default::default()
+        });
+        client.add_block(
+            tip_header.hash_slow(),
+            morph_primitives::Block {
+                header: tip_header,
+                body: Default::default(),
+            },
+        );
+        client.add_account(signer, ExtendedAccount::new(0, U256::from(10u128.pow(18))));
+
+        let make_validator = || {
+            MorphTransactionValidator::new(
+                EthTransactionValidatorBuilder::new(
+                    client.clone(),
+                    MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone()),
+                )
+                .set_block_gas_limit(60_000_000)
+                .disable_balance_check()
+                .build::<crate::MorphPooledTransaction, _>(InMemoryBlobStore::default()),
+            )
+        };
+        let make_tx = |gas_limit: u64, nonce: u64| {
+            let tx = TxEip1559 {
+                chain_id: 2818,
+                nonce,
+                gas_limit,
+                max_fee_per_gas: 1_000_000_000,
+                max_priority_fee_per_gas: 1_000_000_000,
+                to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
+                value: U256::ZERO,
+                access_list: Default::default(),
+                input: Bytes::new(),
+            };
+            let recovered = Recovered::new_unchecked(
+                MorphTxEnvelope::Eip1559(Signed::new_unhashed(tx, Signature::test_signature())),
+                signer,
+            );
+            let len = recovered.encode_2718_len();
+            crate::MorphPooledTransaction::new(recovered, len)
+        };
+
+        // Control: with unpatched `PoolConfig::default()` (`gas_limit == 30_000_000`),
+        // `AllTransactions::insert_tx` rejects a 45M-gas tx even though `validator` allows 60M.
+        let unpatched_pool = Pool::new(
+            make_validator(),
+            CoinbaseTipOrdering::default(),
+            InMemoryBlobStore::default(),
+            PoolConfig::default(),
+        );
+        let err = unpatched_pool
+            .add_external_transaction(make_tx(45_000_000, 0))
+            .await
+            .expect_err("unpatched PoolConfig::default() has 30M gas_limit");
+        assert!(
+            matches!(
+                err.kind,
+                PoolErrorKind::InvalidTransaction(InvalidPoolTransactionError::ExceedsGasLimit(
+                    45_000_000, 30_000_000
+                ))
+            ),
+            "expected AllTransactions 30M rejection, got: {err:?}"
+        );
+
+        // Fix: with `pool_config.gas_limit` initialized from latest canonical tip (60M),
+        // `AllTransactions::insert_tx` accepts 45M immediately before any block arrives.
+        let pool_config = PoolConfig {
+            gas_limit: 60_000_000,
+            ..PoolConfig::default()
+        };
+        let pool = Pool::new(
+            make_validator(),
+            CoinbaseTipOrdering::default(),
+            InMemoryBlobStore::default(),
+            pool_config,
+        );
+        assert_eq!(pool.block_info().block_gas_limit, 60_000_000);
+
+        pool.add_external_transaction(make_tx(45_000_000, 0))
+            .await
+            .expect("45M gas tx must be admitted into pool immediately at 60M tip");
+        assert_eq!(pool.pending_transactions().len(), 1);
+
+        let err = pool
+            .add_external_transaction(make_tx(60_000_001, 1))
+            .await
+            .expect_err("tx above 60M tip must still be rejected");
+        assert!(matches!(
+            err.kind,
+            PoolErrorKind::InvalidTransaction(InvalidPoolTransactionError::ExceedsGasLimit(
+                60_000_001, 60_000_000
+            ))
+        ));
+    }
+
+    /// Verifies that `MorphTransactionValidator`'s direct stateless pipeline preserves every
+    /// stateless constraint (`Eip2681`, `OversizedData`, `MaxTxGasLimitExceeded` from both
+    /// inner builder and wrapper, `TipAboveFeeCap`, `ExceedsFeeCap`, `PriorityFeeBelowMinimum`,
+    /// `MissingEip7702AuthorizationList`, `GasLimitTooHigh`, and pre-EIP-155 legacy chain-ID
+    /// handling) without delegating to `inner.validate_stateless`.
+    #[test]
+    fn morph_stateless_validation_preserves_all_limits_and_error_variants() {
+        use alloy_consensus::TxEip7702;
+
+        let signer = address!("0000000000000000000000000000000000000001");
+        let client = new_mock_provider();
+        let header = morph_primitives::MorphHeader::from(alloy_consensus::Header {
+            number: 1,
+            timestamp: 1_793_772_000, // post-Celadon
+            gas_limit: 30_000_000,
+            base_fee_per_gas: Some(10),
+            ..Default::default()
+        });
+        client.add_block(
+            header.hash_slow(),
+            morph_primitives::Block {
+                header,
+                body: Default::default(),
+            },
+        );
+        client.add_account(signer, ExtendedAccount::new(0, U256::from(10u128.pow(18))));
+
+        // Build via inner `with_max_tx_gas_limit` alone to verify `inner_max_tx_gas_limit`
+        // preserves builder-configured per-tx gas caps even without calling
+        // `MorphTransactionValidator::with_max_tx_gas_limit`.
+        let validator = MorphTransactionValidator::new(
+            EthTransactionValidatorBuilder::new(
+                client,
+                MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone()),
+            )
+            .with_max_tx_input_bytes(4_096)
+            .with_max_tx_gas_limit(Some(500_000))
+            .set_tx_fee_cap(1_000_000)
+            .with_minimum_priority_fee(Some(25))
+            .disable_balance_check()
+            .build::<crate::MorphPooledTransaction, _>(InMemoryBlobStore::default()),
+        );
+        assert_eq!(validator.max_tx_gas_limit(), Some(500_000));
+
+        // 1,024 non-zero calldata bytes (standard intrinsic 37,384 < gas_limit 40,000 < EIP-7623 floor 61,960)
+        let calldata = Bytes::from(vec![0xab; 1_024]);
+        let make_1559 = |nonce: u64,
+                         gas_limit: u64,
+                         max_fee: u128,
+                         max_prio: u128,
+                         encoded_len: Option<usize>| {
+            let tx = TxEip1559 {
+                chain_id: 2818,
+                nonce,
+                gas_limit,
+                max_fee_per_gas: max_fee,
+                max_priority_fee_per_gas: max_prio,
+                to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
+                value: U256::ZERO,
+                access_list: Default::default(),
+                input: calldata.clone(),
+            };
+            let recovered = Recovered::new_unchecked(
+                MorphTxEnvelope::Eip1559(Signed::new_unhashed(tx, Signature::test_signature())),
+                signer,
+            );
+            let len = encoded_len.unwrap_or_else(|| recovered.encode_2718_len());
+            crate::MorphPooledTransaction::new(recovered, len)
+        };
+
+        // 1. Valid calldata-heavy tx meeting minimum_priority_fee passes externally.
+        assert!(matches!(
+            validator.validate_one(
+                TransactionOrigin::External,
+                make_1559(0, 40_000, 100, 25, None)
+            ),
+            TransactionValidationOutcome::Valid { .. }
+        ));
+
+        // 2. EIP-2681 nonce == u64::MAX rejected.
+        assert!(matches!(
+            validator.validate_one(
+                TransactionOrigin::External,
+                make_1559(u64::MAX, 40_000, 100, 25, None)
+            ),
+            TransactionValidationOutcome::Invalid(_, InvalidPoolTransactionError::Eip2681)
+        ));
+
+        // 3. OversizedData when encoded_length > max_tx_input_bytes (4,096).
+        assert!(matches!(
+            validator.validate_one(
+                TransactionOrigin::External,
+                make_1559(0, 40_000, 100, 25, Some(4_097))
+            ),
+            TransactionValidationOutcome::Invalid(
+                _,
+                InvalidPoolTransactionError::OversizedData {
+                    size: 4_097,
+                    limit: 4_096
+                }
+            )
+        ));
+
+        // 4. MaxTxGasLimitExceeded when gas_limit > max_tx_gas_limit (500,000).
+        assert!(matches!(
+            validator.validate_one(
+                TransactionOrigin::External,
+                make_1559(0, 500_001, 100, 25, None)
+            ),
+            TransactionValidationOutcome::Invalid(
+                _,
+                InvalidPoolTransactionError::MaxTxGasLimitExceeded(500_001, 500_000)
+            )
+        ));
+
+        // 5. TipAboveFeeCap when max_priority_fee_per_gas > max_fee_per_gas.
+        assert!(matches!(
+            validator.validate_one(
+                TransactionOrigin::External,
+                make_1559(0, 40_000, 20, 25, None)
+            ),
+            TransactionValidationOutcome::Invalid(
+                _,
+                InvalidPoolTransactionError::Consensus(InvalidTransactionError::TipAboveFeeCap)
+            )
+        ));
+
+        // 6. Local ETH tx exceeding tx_fee_cap (40_000 * 30 = 1_200_000 > 1_000_000).
+        assert!(matches!(
+            validator.validate_one(TransactionOrigin::Local, make_1559(0, 40_000, 30, 10, None)),
+            TransactionValidationOutcome::Invalid(
+                _,
+                InvalidPoolTransactionError::ExceedsFeeCap {
+                    max_tx_fee_wei: 1_200_000,
+                    tx_fee_cap_wei: 1_000_000
+                }
+            )
+        ));
+
+        // 7. PriorityFeeBelowMinimum for external dynamic-fee tx (24 < 25), while local is exempt.
+        assert!(matches!(
+            validator.validate_one(
+                TransactionOrigin::External,
+                make_1559(0, 40_000, 25, 24, None)
+            ),
+            TransactionValidationOutcome::Invalid(
+                _,
+                InvalidPoolTransactionError::PriorityFeeBelowMinimum {
+                    minimum_priority_fee: 25
+                }
+            )
+        ));
+        assert!(matches!(
+            validator.validate_one(TransactionOrigin::Local, make_1559(0, 40_000, 25, 24, None)),
+            TransactionValidationOutcome::Valid { .. }
+        ));
+
+        // 8. Pre-EIP-155 Legacy tx (`chain_id: None`) is allowed.
+        let legacy = TxLegacy {
+            chain_id: None,
+            nonce: 0,
+            gas_limit: 21_000,
+            to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
+            value: U256::ZERO,
+            input: Bytes::new(),
+            gas_price: 25,
+        };
+        let legacy_recovered = Recovered::new_unchecked(
+            MorphTxEnvelope::Legacy(Signed::new_unhashed(legacy, Signature::test_signature())),
+            signer,
+        );
+        let legacy_len = legacy_recovered.encode_2718_len();
+        assert!(matches!(
+            validator.validate_one(
+                TransactionOrigin::External,
+                crate::MorphPooledTransaction::new(legacy_recovered, legacy_len)
+            ),
+            TransactionValidationOutcome::Valid { .. }
+        ));
+
+        // 9. EIP-7702 with empty authorization list -> MissingEip7702AuthorizationList.
+        let empty_7702 = TxEip7702 {
+            chain_id: 2818,
+            nonce: 0,
+            gas_limit: 40_000,
+            max_fee_per_gas: 100,
+            max_priority_fee_per_gas: 25,
+            to: address!("0000000000000000000000000000000000000002"),
+            value: U256::ZERO,
+            access_list: Default::default(),
+            authorization_list: Vec::new(),
+            input: Bytes::new(),
+        };
+        let empty_7702_recovered = Recovered::new_unchecked(
+            MorphTxEnvelope::Eip7702(Signed::new_unhashed(
+                empty_7702,
+                Signature::test_signature(),
+            )),
+            signer,
+        );
+        let empty_7702_len = empty_7702_recovered.encode_2718_len();
+        assert!(matches!(
+            validator.validate_one(
+                TransactionOrigin::External,
+                crate::MorphPooledTransaction::new(empty_7702_recovered, empty_7702_len)
+            ),
+            TransactionValidationOutcome::Invalid(
+                _,
+                InvalidPoolTransactionError::Eip7702(
+                    Eip7702PoolTransactionError::MissingEip7702AuthorizationList
+                )
+            )
+        ));
+
+        // 10. `tx_gas_limit_cap` enforced on calldata-heavy tx.
+        validator
+            .inner
+            .fork_tracker()
+            .tx_gas_limit_cap
+            .store(39_999, std::sync::atomic::Ordering::Relaxed);
+        assert!(matches!(
+            validator.validate_one(
+                TransactionOrigin::External,
+                make_1559(0, 40_000, 100, 25, None)
+            ),
+            TransactionValidationOutcome::Invalid(
+                _,
+                InvalidPoolTransactionError::Consensus(InvalidTransactionError::GasLimitTooHigh)
+            )
+        ));
     }
 }
