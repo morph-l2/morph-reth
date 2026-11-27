@@ -70,12 +70,11 @@ pub fn validate_morph_tx<DB: Database>(
     })
 }
 
-/// Validates stateless MorphTx fork gates and structural invariants without any DB access.
+/// Validates MorphTx hardfork version gates (Jade V1 / Celadon V2) without any DB access.
 ///
-/// Called early in [`MorphTransactionValidator`](crate::MorphTransactionValidator) before
-/// state lookups, and again inside [`validate_morph_tx_with`] so background revalidation
-/// enforces the exact same rules.
-pub(crate) fn validate_morph_tx_stateless(
+/// Runs before `EthTransactionValidator::validate_stateless` so peers one block ahead across
+/// a hardfork boundary always receive non-penalizing [`MorphTxError::ForkNotActive`].
+pub(crate) fn validate_morph_tx_fork_gate(
     morph_tx: &TxMorph,
     hardfork: MorphHardfork,
 ) -> Result<(), MorphTxError> {
@@ -96,6 +95,16 @@ pub(crate) fn validate_morph_tx_stateless(
         });
     }
 
+    Ok(())
+}
+
+/// Validates MorphTx-specific structural invariants (`TxMorph::validate`) without any DB access.
+///
+/// Runs after `EthTransactionValidator::validate_stateless` (so shared checks like
+/// `max_priority_fee_per_gas > max_fee_per_gas` return upstream `TipAboveFeeCap` with
+/// `is_bad_transaction() == false`, matching EIP-1559/EIP-7702) and before
+/// `EthTransactionValidator::validate_stateful` (so malformed payloads skip DB lookups).
+pub(crate) fn validate_morph_tx_format(morph_tx: &TxMorph) -> Result<(), MorphTxError> {
     if let Err(reason) = morph_tx.validate() {
         return Err(MorphTxError::InvalidFormat {
             reason: reason.to_string(),
@@ -103,6 +112,18 @@ pub(crate) fn validate_morph_tx_stateless(
     }
 
     Ok(())
+}
+
+/// Validates stateless MorphTx fork gates and structural invariants without any DB access.
+///
+/// Used inside [`validate_morph_tx_with`] so background revalidation enforces the exact
+/// same rules as initial admission.
+pub(crate) fn validate_morph_tx_stateless(
+    morph_tx: &TxMorph,
+    hardfork: MorphHardfork,
+) -> Result<(), MorphTxError> {
+    validate_morph_tx_fork_gate(morph_tx, hardfork)?;
+    validate_morph_tx_format(morph_tx)
 }
 
 /// Validates a MorphTx transaction using a caller-supplied fee-token resolver.

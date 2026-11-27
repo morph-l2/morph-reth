@@ -11,7 +11,9 @@
 
 use crate::{
     MorphTxError, MorphTxValidationError,
-    morph_tx_validation::{validate_morph_tx_stateless, validate_morph_tx_with},
+    morph_tx_validation::{
+        validate_morph_tx_fork_gate, validate_morph_tx_format, validate_morph_tx_with,
+    },
     state_cache::{StateCache, StateCacheDb, TokenFeeValidator},
 };
 use alloy_consensus::{BlockHeader, Sealable, Transaction};
@@ -456,17 +458,17 @@ where
 
         let hardfork = head.evm_env.spec;
 
-        // Run stateless MorphTx fork gates (Jade V1 / Celadon V2) and structural checks
-        // (`TxMorph::validate`) BEFORE `inner.validate_stateful` so malformed or pre-fork
-        // MorphTx payloads are rejected without paying for DB / account / authority reads.
+        // Run MorphTx hardfork version gates (Jade V1 / Celadon V2) before upstream
+        // stateless validation so peers one block ahead across a fork boundary always
+        // get non-penalizing `ForkNotActive`.
         if is_morph_tx {
-            let stateless_res = match transaction.consensus_ref().into_inner() {
+            let fork_gate_res = match transaction.consensus_ref().into_inner() {
                 MorphTxEnvelope::Morph(signed) => {
-                    validate_morph_tx_stateless(signed.tx(), hardfork)
+                    validate_morph_tx_fork_gate(signed.tx(), hardfork)
                 }
                 _ => Err(MorphTxError::InvalidTokenId),
             };
-            if let Err(err) = stateless_res {
+            if let Err(err) = fork_gate_res {
                 return TransactionValidationOutcome::Invalid(transaction, err.into());
             }
         }
@@ -520,6 +522,22 @@ where
         if let Err(err) = self.inner.validate_stateless(origin, &transaction) {
             return TransactionValidationOutcome::Invalid(transaction, err);
         }
+
+        // Run MorphTx-specific structural checks (`TxMorph::validate`) AFTER
+        // `inner.validate_stateless` — so shared checks like `tip > feeCap` keep
+        // upstream `InvalidTransactionError::TipAboveFeeCap` (`is_bad_transaction() == false`,
+        // standard RPC error, and metrics) — and BEFORE `inner.validate_stateful` so
+        // malformed MorphTx payloads never pay for DB / account / authority reads.
+        if is_morph_tx {
+            let format_res = match transaction.consensus_ref().into_inner() {
+                MorphTxEnvelope::Morph(signed) => validate_morph_tx_format(signed.tx()),
+                _ => Err(MorphTxError::InvalidTokenId),
+            };
+            if let Err(err) = format_res {
+                return TransactionValidationOutcome::Invalid(transaction, err.into());
+            }
+        }
+
         let outcome = self
             .inner
             .validate_stateful(origin, transaction, &state.provider);
@@ -1029,6 +1047,57 @@ mod tests {
         assert!(
             err.to_string().contains("invalid MorphTx format"),
             "expected InvalidFormat before stateful check, got: {err}"
+        );
+    }
+
+    #[test]
+    fn morph_tx_tip_above_fee_cap_returns_standard_non_penalizing_error() {
+        use alloy_primitives::TxHash;
+        use reth_transaction_pool::error::PoolError;
+
+        let client = new_mock_provider();
+        let validator = validator_at_head(client, head_at(1, 2_000_000_000, 30_000_000), 0);
+
+        let tx = TxMorph {
+            chain_id: MORPH_MAINNET.chain().id(),
+            nonce: 0,
+            gas_limit: 21_000,
+            max_fee_per_gas: 100,
+            max_priority_fee_per_gas: 200,
+            to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
+            value: U256::ZERO,
+            access_list: Default::default(),
+            version: 1,
+            fee_token_id: 0,
+            fee_limit: U256::ZERO,
+            reference: None,
+            memo: None,
+            authorization_list: Vec::new(),
+            input: Bytes::new(),
+        };
+        let envelope = MorphTxEnvelope::Morph(Signed::new_unchecked(
+            tx,
+            Signature::test_signature(),
+            B256::ZERO,
+        ));
+        let recovered = Recovered::new_unchecked(envelope, SIGNER);
+        let len = recovered.encode_2718_len();
+        let pooled = MorphPooledTransaction::new(recovered, len);
+
+        let outcome = validator.validate_one(TransactionOrigin::External, pooled);
+        let TransactionValidationOutcome::Invalid(_, err) = outcome else {
+            panic!("expected tip > feeCap MorphTx to be rejected");
+        };
+        assert!(
+            matches!(
+                err,
+                InvalidPoolTransactionError::Consensus(InvalidTransactionError::TipAboveFeeCap)
+            ),
+            "expected upstream TipAboveFeeCap error, got: {err:?}"
+        );
+        assert!(
+            !PoolError::new(TxHash::ZERO, err).is_bad_transaction(),
+            "MorphTx tip > feeCap must match EIP-1559 and not penalize peers"
         );
     }
 
