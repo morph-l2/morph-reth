@@ -43,5 +43,6 @@ tracing.workspace = true
 [dev-dependencies]
 tokio.workspace = true
 tokio-stream = { workspace = true, features = ["sync"] }
+reth-db-api.workspace = true
 reth-evm-ethereum.workspace = true
 reth-provider = { workspace = true, features = ["test-utils"] }
