@@ -1511,3 +1511,315 @@ async fn new_safe_l2_block_rejects_v2_morph_tx_before_celadon() -> eyre::Result<
 
     Ok(())
 }
+
+/// `engine_newSafeL2Block` must exempt `VerifyHeader` rules (`TimestampIsInFuture`,
+/// `TimestampIsInPast`, 1/1024 `GasLimit` bound, and `BaseFeeOverLimit`) and the local
+/// per-block DA byte cap (`max_tx_payload_bytes_per_block`) across empty, non-empty, and
+/// derivation-reorg blocks, matching morph-geth's `NewSafeL2Block` (`safe = true`).
+#[tokio::test(flavor = "multi_thread")]
+async fn new_safe_l2_block_exempts_header_bounds_and_da_size_limit() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    // Set a tiny 128-byte consensus payload cap so any 256-byte L2 calldata tx would fail
+    // `MorphConsensus::validate_block_pre_execution` unless `Safe` mode exempts it.
+    let (mut nodes, wallet) = TestNodeBuilder::new()
+        .with_genesis_max_tx_payload_bytes(128)
+        .build()
+        .await?;
+    let node = nodes.pop().unwrap();
+    let client = node.auth_server_handle().http_client();
+
+    let genesis = canonical_snapshot(&node)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    // 1. Empty safe block (skips `InsertExecutedBlock`, goes through `new_payload -> validate_payload`):
+    //    - timestamp 120s in the future,
+    //    - gas_limit = 60_000_000 (2x genesis 30_000_000, > 1/1024 bound),
+    //    - base_fee = 15 Gwei (> 10 Gwei `MORPH_MAXIMUM_BASE_FEE`).
+    let high_base_fee = 15_000_000_000u128;
+    let safe_block1 = SafeL2Data {
+        number: 1,
+        gas_limit: 60_000_000,
+        base_fee_per_gas: Some(high_base_fee),
+        timestamp: now + 120,
+        transactions: vec![],
+        parent_hash: Some(genesis.hash),
+    };
+    let h1: MorphHeader = client
+        .request("engine_newSafeL2Block", (safe_block1,))
+        .await?;
+    let h1_hash = h1.hash_slow();
+    assert_eq!(canonical_snapshot(&node)?.hash, h1_hash);
+    assert_eq!(canonical_snapshot(&node)?.safe_hash, Some(h1_hash));
+
+    // 2. Non-empty safe block (goes through `on_inserted_executed_block`) with oversized L2 calldata
+    //    (> 128-byte genesis DA limit), another 2x gas_limit jump, high base_fee, and future timestamp.
+    let oversized_tx0 = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
+        .with_v1_eth_fee()
+        .with_to(Address::with_last_byte(0x42))
+        .with_data(vec![0xab; 256])
+        .with_fees(25_000_000_000, 1_000_000_000)
+        .with_gas_limit(100_000)
+        .build_signed()?;
+    let safe_block2 = SafeL2Data {
+        number: 2,
+        gas_limit: 120_000_000,
+        base_fee_per_gas: Some(high_base_fee),
+        timestamp: now + 240,
+        transactions: vec![oversized_tx0.clone()],
+        parent_hash: Some(h1_hash),
+    };
+    let h2: MorphHeader = client
+        .request("engine_newSafeL2Block", (safe_block2,))
+        .await?;
+    assert_eq!(canonical_snapshot(&node)?.hash, h2.hash_slow());
+
+    // 3. Safe derivation reorg at `number <= canonical_head` (skips `InsertExecutedBlock` even
+    //    though non-empty!) with `timestamp < parent.timestamp`, sharp gas_limit drop, and
+    //    oversized L2 payload.
+    let safe_block2_reorg = SafeL2Data {
+        number: 2,
+        gas_limit: 20_000_000,
+        base_fee_per_gas: Some(high_base_fee),
+        timestamp: now + 115,
+        transactions: vec![oversized_tx0],
+        parent_hash: Some(h1_hash),
+    };
+    let h2_reorg: MorphHeader = client
+        .request("engine_newSafeL2Block", (safe_block2_reorg,))
+        .await?;
+    let h2_reorg_hash = h2_reorg.hash_slow();
+    assert_ne!(h2_reorg_hash, h2.hash_slow());
+    assert_eq!(canonical_snapshot(&node)?.hash, h2_reorg_hash);
+    assert_eq!(canonical_snapshot(&node)?.safe_hash, Some(h2_reorg_hash));
+
+    Ok(())
+}
+
+/// Verifies both fixes to `validate_next_l1_message_index`:
+/// 1. Pre-Jade blocks with NO L1 messages and `next_l1_message_index < parent.next_l1_msg_index`
+///    are accepted (live and `AlreadySeen`), while Pre-Jade blocks WITH L1 messages still reject
+///    `next_l1_message_index < last_queue_index + 1`.
+/// 2. Unpersisted in-memory `tree_state` parents (`provider.sealed_header_by_hash(parent) == None`)
+///    are resolved via `TreeHeaderCache` so tampered `next_l1_message_index` on an `AlreadySeen`
+///    child is rejected.
+#[tokio::test(flavor = "multi_thread")]
+async fn validate_next_l1_msg_index_pre_jade_empty_l1_and_unpersisted_tree_parent()
+-> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+    use reth_provider::HeaderProvider;
+
+    // --- Part 1: Pre-Jade empty-L1-message block with decreased `next_l1_message_index` ---
+    let (mut pre_jade_nodes, _wallet) = TestNodeBuilder::new()
+        .with_schedule(HardforkSchedule::PreJade)
+        .build()
+        .await?;
+    let pre_jade = pre_jade_nodes.pop().unwrap();
+    let pre_client = pre_jade.auth_server_handle().http_client();
+
+    let genesis = canonical_snapshot(&pre_jade)?;
+    let b1 = assemble_l2_block_v2(
+        &pre_jade,
+        AssembleL2BlockV2Params {
+            parent_hash: genesis.hash,
+            transactions: L1MessageBuilder::build_sequential(0, 2),
+            timestamp: Some(1),
+        },
+    )
+    .await?;
+    assert_eq!(b1.next_l1_message_index, 2);
+    import_l2_block(&pre_jade, b1.clone()).await?;
+
+    // Build Block 2 with NO L1 messages, then set `next_l1_message_index = 0` (< parent's 2).
+    let mut b2_no_l1 = assemble_l2_block_v2(
+        &pre_jade,
+        AssembleL2BlockV2Params {
+            parent_hash: b1.hash,
+            transactions: vec![],
+            timestamp: Some(2),
+        },
+    )
+    .await?;
+    b2_no_l1.next_l1_message_index = 0;
+
+    let v_res: GenericResponse = pre_client
+        .request("engine_validateL2Block", (b2_no_l1.clone(),))
+        .await?;
+    assert!(
+        v_res.success,
+        "pre-Jade block without L1 messages must allow next_l1_message_index < parent"
+    );
+    // AlreadySeen re-validation of the same Pre-Jade block (before FCU advances head) must also succeed.
+    let v_seen: GenericResponse = pre_client
+        .request("engine_validateL2Block", (b2_no_l1.clone(),))
+        .await?;
+    assert!(v_seen.success);
+
+    // Pre-Jade block on `b1` WITH L1 messages `[2, 3]` (`expected >= 4`) and `actual = 1` MUST
+    // fail both `validateL2Block` and `newL2BlockV2`.
+    let mut b2_with_l1 = assemble_l2_block_v2(
+        &pre_jade,
+        AssembleL2BlockV2Params {
+            parent_hash: b1.hash,
+            transactions: L1MessageBuilder::build_sequential(2, 2),
+            timestamp: Some(3),
+        },
+    )
+    .await?;
+    b2_with_l1.next_l1_message_index = 1;
+    let bad_with_l1: GenericResponse = pre_client
+        .request("engine_validateL2Block", (b2_with_l1.clone(),))
+        .await?;
+    assert!(!bad_with_l1.success);
+    assert!(import_l2_block(&pre_jade, b2_with_l1).await.is_err());
+
+    let imported_b2 = import_l2_block(&pre_jade, b2_no_l1).await?;
+    assert_eq!(imported_b2.next_l1_msg_index, 0);
+
+    // --- Part 2: Post-Jade unpersisted `tree_state` parent lookup via `TreeHeaderCache` ---
+    let (mut nodes, wallet) = TestNodeBuilder::new().with_num_nodes(2).build().await?;
+    let follower = nodes.pop().expect("two nodes requested");
+    let sequencer = nodes.pop().expect("two nodes requested");
+
+    let seq_genesis = canonical_snapshot(&sequencer)?;
+    // Advance `follower` onto canonical chain `Genesis -> a1 -> a2` so side-branch `parent_p`
+    // (height 1) will stay non-canonical in `tree_state` (`provider.sealed_header_by_hash == None`).
+    let a1 = assemble_l2_block_v2(
+        &follower,
+        AssembleL2BlockV2Params {
+            parent_hash: seq_genesis.hash,
+            transactions: vec![],
+            timestamp: Some(10),
+        },
+    )
+    .await?;
+    import_l2_block(&follower, a1.clone()).await?;
+    let a2 = assemble_l2_block_v2(
+        &follower,
+        AssembleL2BlockV2Params {
+            parent_hash: a1.hash,
+            transactions: vec![],
+            timestamp: Some(11),
+        },
+    )
+    .await?;
+    import_l2_block(&follower, a2).await?;
+
+    // Build side branch `Genesis -> parent_p (L1 msgs [0, 1]) -> child_c (tx0, non-empty)` on `sequencer`.
+    let parent_p = assemble_l2_block_v2(
+        &sequencer,
+        AssembleL2BlockV2Params {
+            parent_hash: seq_genesis.hash,
+            transactions: L1MessageBuilder::build_sequential(0, 2),
+            timestamp: Some(1),
+        },
+    )
+    .await?;
+    assert_eq!(parent_p.next_l1_message_index, 2);
+    import_l2_block(&sequencer, parent_p.clone()).await?;
+
+    let raw_tx0 = make_transfer_tx(wallet.chain_id, wallet.inner.clone(), 0).await;
+    let tx0_hash = sequencer.rpc.inject_tx(raw_tx0).await?;
+    wait_until_pooled(&sequencer, tx0_hash).await?;
+    let child_c = assemble_l2_block_v2(
+        &sequencer,
+        AssembleL2BlockV2Params {
+            parent_hash: parent_p.hash,
+            transactions: vec![],
+            timestamp: Some(2),
+        },
+    )
+    .await?;
+    assert_eq!(child_c.next_l1_message_index, 2);
+
+    // Insert `parent_p` and `child_c` into `follower`'s `tree_state` via `beacon_engine_handle.new_payload`
+    // WITHOUT FCU, so `parent_p` resides ONLY in `tree_state` (not in `CanonicalInMemoryState` or MDBX)
+    // and `child_c` is armed as `AlreadySeen` in `follower`'s `tree_state`.
+    let decode_sealed =
+        |data: &ExecutableL2Data| -> eyre::Result<morph_payload_types::MorphExecutionData> {
+            use alloy_consensus::proofs;
+            use reth_primitives_traits::SealedBlock;
+            let txs = data
+                .transactions
+                .iter()
+                .map(|raw| {
+                    let mut slice = raw.as_ref();
+                    Ok(morph_primitives::MorphTxEnvelope::decode_2718(&mut slice)?)
+                })
+                .collect::<eyre::Result<Vec<_>>>()?;
+            let header = MorphHeader {
+                inner: alloy_consensus::Header {
+                    parent_hash: data.parent_hash,
+                    beneficiary: data.miner,
+                    state_root: data.state_root,
+                    transactions_root: proofs::calculate_transaction_root(&txs),
+                    receipts_root: data.receipts_root,
+                    logs_bloom: alloy_primitives::Bloom::from_slice(&data.logs_bloom),
+                    number: data.number,
+                    gas_limit: data.gas_limit,
+                    gas_used: data.gas_used,
+                    timestamp: data.timestamp,
+                    base_fee_per_gas: data.base_fee_per_gas.map(|f| f as u64),
+                    ..Default::default()
+                },
+                next_l1_msg_index: data.next_l1_message_index,
+            };
+            let sealed = SealedBlock::seal_slow(morph_primitives::Block::new(
+                header,
+                morph_primitives::BlockBody {
+                    transactions: txs,
+                    ommers: vec![],
+                    withdrawals: None,
+                },
+            ));
+            assert_eq!(sealed.hash(), data.hash);
+            Ok(MorphPayloadTypes::block_to_payload(sealed, None))
+        };
+
+    let p_status = follower
+        .inner
+        .add_ons_handle
+        .beacon_engine_handle
+        .new_payload(decode_sealed(&parent_p)?)
+        .await?;
+    assert!(p_status.is_valid());
+    assert!(
+        follower
+            .inner
+            .provider
+            .sealed_header_by_hash(parent_p.hash)?
+            .is_none(),
+        "precondition: parent_p must reside only in tree_state, not in provider/MDBX"
+    );
+
+    let c_status = follower
+        .inner
+        .add_ons_handle
+        .beacon_engine_handle
+        .new_payload(decode_sealed(&child_c)?)
+        .await?;
+    assert!(c_status.is_valid());
+
+    // `child_c` is now `AlreadySeen` in `follower`'s `tree_state`, and its parent `parent_p`
+    // is only in `tree_state` (`TreeHeaderCache`): tampering `next_l1_message_index` on
+    // `engine_newL2BlockV2` MUST fail!
+    let mut child_c_tampered = child_c.clone();
+    child_c_tampered.next_l1_message_index = 99;
+    let err = import_l2_block(&follower, child_c_tampered)
+        .await
+        .expect_err(
+            "newL2BlockV2 must reject tampered next_l1_message_index with tree_state parent",
+        )
+        .to_string();
+    assert!(err.contains("invalid block.NextL1MsgIndex"), "got: {err}");
+
+    // Honest `child_c` reorgs `follower` onto `Genesis -> parent_p -> child_c` cleanly.
+    let imported_c = import_l2_block(&follower, child_c.clone()).await?;
+    assert_eq!(imported_c.hash_slow(), child_c.hash);
+    assert_eq!(canonical_snapshot(&follower)?.hash, child_c.hash);
+
+    Ok(())
+}

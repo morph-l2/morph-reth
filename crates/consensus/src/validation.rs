@@ -116,6 +116,151 @@ impl MorphConsensus {
     pub fn chain_spec(&self) -> &MorphChainSpec {
         &self.chain_spec
     }
+
+    /// Validates structural header invariants that apply even to locally built and
+    /// L1-derived safe blocks (exempting wall-clock `TimestampIsInFuture`, `MAX_GAS_LIMIT`,
+    /// and `MORPH_MAXIMUM_BASE_FEE`).
+    pub fn validate_header_structural(
+        &self,
+        header: &SealedHeader<MorphHeader>,
+    ) -> Result<(), ConsensusError> {
+        if !header.extra_data().is_empty() {
+            return Err(ConsensusError::ExtraDataExceedsMax {
+                len: header.extra_data().len(),
+            });
+        }
+
+        if !header.nonce().is_some_and(|nonce| nonce.is_zero()) {
+            return Err(ConsensusError::TheMergeNonceIsNotZero);
+        }
+
+        if header.ommers_hash() != EMPTY_OMMER_ROOT_HASH {
+            return Err(ConsensusError::TheMergeOmmerRootIsNotEmpty);
+        }
+
+        if !header.difficulty().is_zero() {
+            return Err(ConsensusError::TheMergeDifficultyIsNotZero);
+        }
+
+        if self.chain_spec.is_fee_vault_enabled()
+            && header.beneficiary() != alloy_primitives::Address::ZERO
+        {
+            return Err(ConsensusError::other(MorphConsensusError::InvalidCoinbase(
+                header.beneficiary(),
+            )));
+        }
+
+        if header.gas_used() > header.gas_limit() {
+            return Err(ConsensusError::HeaderGasUsedExceedsGasLimit {
+                gas_used: header.gas_used(),
+                gas_limit: header.gas_limit(),
+            });
+        }
+
+        if header.base_fee_per_gas().is_none() {
+            return Err(ConsensusError::BaseFeeMissing);
+        }
+
+        Ok(())
+    }
+
+    /// Validates structural parent-header continuity (`parent_hash`, `number == parent + 1`,
+    /// and from Jade onward L1 message index monotonicity), exempting timestamp and 1/1024
+    /// gas-limit bounds.
+    pub fn validate_header_against_parent_structural(
+        &self,
+        header: &SealedHeader<MorphHeader>,
+        parent: &SealedHeader<MorphHeader>,
+    ) -> Result<(), ConsensusError> {
+        validate_against_parent_hash_number(header.header(), parent)?;
+
+        // From Jade onward, `next_l1_msg_index` must never decrease across blocks.
+        // Pre-Jade historical blocks without L1 messages are permitted to carry an older/zero
+        // `next_l1_msg_index` (matching morph-geth's `blockchain_l2.go` pre-Jade skip and
+        // `MorphTreeEngineValidator::validate_l1_msg_index_against_parent`); pre-Jade blocks
+        // that DO contain L1 messages remain constrained by `first_queue_index >= parent.next`
+        // and `header.next >= last_queue_index + 1`.
+        if self
+            .chain_spec
+            .is_jade_active_at_timestamp(header.timestamp())
+            && header.next_l1_msg_index < parent.next_l1_msg_index
+        {
+            return Err(ConsensusError::other(
+                MorphConsensusError::InvalidNextL1MessageIndex {
+                    expected: parent.next_l1_msg_index,
+                    actual: header.next_l1_msg_index,
+                },
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Validates parent-header continuity and timestamp progression for locally assembled blocks
+    /// (exempting the 1/1024 gas-limit bound).
+    pub fn validate_header_against_parent_locally_built(
+        &self,
+        header: &SealedHeader<MorphHeader>,
+        parent: &SealedHeader<MorphHeader>,
+    ) -> Result<(), ConsensusError> {
+        self.validate_header_against_parent_structural(header, parent)?;
+        let is_emerald = self
+            .chain_spec
+            .is_emerald_active_at_timestamp(header.timestamp());
+        validate_against_parent_timestamp(header.header(), parent.header(), is_emerald)
+    }
+
+    /// Validates pre-execution body invariants except the local per-block DA byte limit
+    /// (`max_tx_payload_bytes_per_block`), matching morph-geth's `verified` and `NewSafeL2Block`
+    /// (`safe = true`) exemptions.
+    pub fn validate_block_pre_execution_without_da_limit(
+        &self,
+        block: &SealedBlock<Block>,
+    ) -> Result<(), ConsensusError> {
+        let ommers_len = block.body().ommers().map(|o| o.len()).unwrap_or_default();
+        if ommers_len > 0 {
+            return Err(ConsensusError::msg("uncles not allowed"));
+        }
+
+        if block.ommers_hash() != EMPTY_OMMER_ROOT_HASH {
+            return Err(ConsensusError::BodyOmmersHashDiff(
+                GotExpected {
+                    got: block.ommers_hash(),
+                    expected: EMPTY_OMMER_ROOT_HASH,
+                }
+                .into(),
+            ));
+        }
+
+        if let Err(error) = block.ensure_transaction_root_valid() {
+            return Err(ConsensusError::BodyTransactionRootDiff(error.into()));
+        }
+
+        if block.body().withdrawals().is_some() {
+            return Err(ConsensusError::other(
+                MorphConsensusError::WithdrawalsNonEmpty,
+            ));
+        }
+
+        let is_emerald = self
+            .chain_spec
+            .is_emerald_active_at_timestamp(block.header().timestamp());
+        let is_jade = self
+            .chain_spec
+            .is_jade_active_at_timestamp(block.header().timestamp());
+        let is_celadon = self
+            .chain_spec
+            .is_celadon_active_at_timestamp(block.header().timestamp());
+        validate_morph_txs(&block.body().transactions, is_emerald, is_jade, is_celadon)?;
+
+        validate_l1_messages_in_block(
+            &block.body().transactions,
+            block.header().next_l1_msg_index,
+            is_jade,
+        )?;
+
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -137,36 +282,7 @@ impl HeaderValidator<MorphHeader> for MorphConsensus {
     /// 8. **Gas Used**: Must be <= gas limit
     /// 9. **Base Fee**: Must always be set (EIP-1559 is always active) and <= 10 Gwei
     fn validate_header(&self, header: &SealedHeader<MorphHeader>) -> Result<(), ConsensusError> {
-        // Extra data must be empty (Morph L2 specific - stricter than max length)
-        if !header.extra_data().is_empty() {
-            return Err(ConsensusError::ExtraDataExceedsMax {
-                len: header.extra_data().len(),
-            });
-        }
-
-        // Nonce must be 0 (same as post-merge Ethereum)
-        if !header.nonce().is_some_and(|nonce| nonce.is_zero()) {
-            return Err(ConsensusError::TheMergeNonceIsNotZero);
-        }
-
-        // Ommers hash must be empty (same as post-merge Ethereum)
-        if header.ommers_hash() != EMPTY_OMMER_ROOT_HASH {
-            return Err(ConsensusError::TheMergeOmmerRootIsNotEmpty);
-        }
-
-        // Difficulty must be 0 (same as post-merge Ethereum)
-        if !header.difficulty().is_zero() {
-            return Err(ConsensusError::TheMergeDifficultyIsNotZero);
-        }
-
-        // Coinbase must be zero if FeeVault is enabled (Morph L2 specific)
-        if self.chain_spec.is_fee_vault_enabled()
-            && header.beneficiary() != alloy_primitives::Address::ZERO
-        {
-            return Err(ConsensusError::other(MorphConsensusError::InvalidCoinbase(
-                header.beneficiary(),
-            )));
-        }
+        self.validate_header_structural(header)?;
 
         // Check timestamp is not in the future
         let now = std::time::SystemTime::now()
@@ -188,15 +304,7 @@ impl HeaderValidator<MorphHeader> for MorphConsensus {
             });
         }
 
-        // Gas used must be <= gas limit
-        if header.gas_used() > header.gas_limit() {
-            return Err(ConsensusError::HeaderGasUsedExceedsGasLimit {
-                gas_used: header.gas_used(),
-                gas_limit: header.gas_limit(),
-            });
-        }
-
-        // Validate base fee (always required, EIP-1559 is always active)
+        // Validate base fee upper bound (presence is checked in validate_header_structural)
         let base_fee = header
             .base_fee_per_gas()
             .ok_or(ConsensusError::BaseFeeMissing)?;
@@ -222,8 +330,8 @@ impl HeaderValidator<MorphHeader> for MorphConsensus {
         header: &SealedHeader<MorphHeader>,
         parent: &SealedHeader<MorphHeader>,
     ) -> Result<(), ConsensusError> {
-        // Validate parent hash and block number
-        validate_against_parent_hash_number(header.header(), parent)?;
+        // Validate parent hash, block number, and (from Jade onward) L1 message index monotonicity
+        self.validate_header_against_parent_structural(header, parent)?;
 
         // Validate timestamp against parent (pre-Emerald: strict >, post-Emerald: >=)
         let is_emerald = self
@@ -233,18 +341,6 @@ impl HeaderValidator<MorphHeader> for MorphConsensus {
 
         // Validate gas limit change
         validate_against_parent_gas_limit(header.header(), parent.header())?;
-
-        // Cross-block L1 message index monotonicity: next_l1_msg_index must never
-        // decrease across blocks. This is the header-only half of L1 message
-        // validation; the body-level half is in validate_block_pre_execution.
-        if header.next_l1_msg_index < parent.next_l1_msg_index {
-            return Err(ConsensusError::other(
-                MorphConsensusError::InvalidNextL1MessageIndex {
-                    expected: parent.next_l1_msg_index,
-                    actual: header.next_l1_msg_index,
-                },
-            ));
-        }
 
         Ok(())
     }
@@ -282,63 +378,13 @@ impl Consensus<Block> for MorphConsensus {
         &self,
         block: &SealedBlock<Block>,
     ) -> Result<(), ConsensusError> {
-        // Check no uncles allowed (Morph L2 has no uncle blocks)
-        let ommers_len = block.body().ommers().map(|o| o.len()).unwrap_or_default();
-        if ommers_len > 0 {
-            return Err(ConsensusError::msg("uncles not allowed"));
-        }
-
-        // Check ommers hash must be empty root hash
-        if block.ommers_hash() != EMPTY_OMMER_ROOT_HASH {
-            return Err(ConsensusError::BodyOmmersHashDiff(
-                GotExpected {
-                    got: block.ommers_hash(),
-                    expected: EMPTY_OMMER_ROOT_HASH,
-                }
-                .into(),
-            ));
-        }
-
-        // Check transaction root
-        if let Err(error) = block.ensure_transaction_root_valid() {
-            return Err(ConsensusError::BodyTransactionRootDiff(error.into()));
-        }
-
-        // Check withdrawals are empty
-        if block.body().withdrawals().is_some() {
-            return Err(ConsensusError::other(
-                MorphConsensusError::WithdrawalsNonEmpty,
-            ));
-        }
+        // Check no uncles, ommers hash, tx root, withdrawals, MorphTx, and L1 message rules.
+        self.validate_block_pre_execution_without_da_limit(block)?;
 
         // Matches go-ethereum's BlockValidator.ValidateBody() → IsValidBlockSize().
         validate_l2_tx_payload_size(
             &block.body().transactions,
             self.chain_spec.max_tx_payload_bytes_per_block(),
-        )?;
-
-        // Validate MorphTx activation, version and field constraints.
-        // Matches go-ethereum's BlockValidator.ValidateBody() → ValidateMorphTxVersion().
-        let is_emerald = self
-            .chain_spec
-            .is_emerald_active_at_timestamp(block.header().timestamp());
-        let is_jade = self
-            .chain_spec
-            .is_jade_active_at_timestamp(block.header().timestamp());
-        let is_celadon = self
-            .chain_spec
-            .is_celadon_active_at_timestamp(block.header().timestamp());
-        validate_morph_txs(&block.body().transactions, is_emerald, is_jade, is_celadon)?;
-
-        // Validate L1 messages ordering and internal consistency with header.
-        // This is the body-level half of L1 validation; it verifies that the L1
-        // messages within this block are internally consistent with the header's
-        // next_l1_msg_index. The cross-block monotonicity check (ensuring
-        // next_l1_msg_index >= parent's value) is in validate_header_against_parent.
-        validate_l1_messages_in_block(
-            &block.body().transactions,
-            block.header().next_l1_msg_index,
-            is_jade,
         )?;
 
         Ok(())
@@ -2490,5 +2536,133 @@ mod tests {
             post_result,
             Err(ConsensusError::BlockGasUsed { .. })
         ));
+    }
+
+    #[test]
+    fn test_structural_and_locally_built_exemptions_preserve_hard_invariants() {
+        let consensus = MorphConsensus::new(create_test_chainspec_with_payload_limit(64));
+
+        let parent = SealedHeader::seal_slow(create_valid_morph_header(1000, 30_000_000, 100));
+
+        // Future timestamp, doubled gas_limit (> 1/1024), and base_fee > MORPH_MAXIMUM_BASE_FEE:
+        // full validation rejects each, while structural / locally-built exempts the intended checks.
+        let future_ts = u64::MAX - 10;
+        let mut child = create_valid_morph_header(future_ts, 60_000_000, 101);
+        child.inner.parent_hash = parent.hash();
+        child.inner.base_fee_per_gas = Some(MORPH_MAXIMUM_BASE_FEE + 1);
+        let child_sealed = SealedHeader::seal_slow(child.clone());
+
+        assert!(matches!(
+            consensus.validate_header(&child_sealed),
+            Err(ConsensusError::TimestampIsInFuture { .. })
+        ));
+        assert!(consensus.validate_header_structural(&child_sealed).is_ok());
+
+        assert!(matches!(
+            consensus.validate_header_against_parent(&child_sealed, &parent),
+            Err(ConsensusError::GasLimitInvalidIncrease { .. })
+        ));
+        assert!(
+            consensus
+                .validate_header_against_parent_locally_built(&child_sealed, &parent)
+                .is_ok()
+        );
+        assert!(
+            consensus
+                .validate_header_against_parent_structural(&child_sealed, &parent)
+                .is_ok()
+        );
+
+        // Timestamp behind parent: rejected for LocallyBuilt, exempted for Safe (structural).
+        let mut past_child = child;
+        past_child.inner.timestamp = 999;
+        let past_sealed = SealedHeader::seal_slow(past_child);
+        assert!(matches!(
+            consensus.validate_header_against_parent_locally_built(&past_sealed, &parent),
+            Err(ConsensusError::TimestampIsInPast { .. })
+        ));
+        assert!(
+            consensus
+                .validate_header_against_parent_structural(&past_sealed, &parent)
+                .is_ok()
+        );
+
+        // Structural violations (e.g. non-empty extra_data or gas_used > gas_limit) still fail.
+        let mut bad_extra = create_valid_morph_header(1001, 30_000_000, 101);
+        bad_extra.inner.extra_data = Bytes::from_static(b"bad");
+        assert!(
+            consensus
+                .validate_header_structural(&SealedHeader::seal_slow(bad_extra))
+                .is_err()
+        );
+
+        // Oversized L2 payload: rejected by full pre-execution, accepted by without_da_limit.
+        let oversized_tx = create_legacy_tx_with_input(Bytes::from(vec![0xab; 256]));
+        let oversized_block = create_sealed_block(0, vec![oversized_tx]);
+        assert!(
+            consensus
+                .validate_block_pre_execution(&oversized_block)
+                .is_err()
+        );
+        assert!(
+            consensus
+                .validate_block_pre_execution_without_da_limit(&oversized_block)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_validate_header_against_parent_allows_pre_jade_decreased_l1_msg_index() {
+        let genesis_json = serde_json::json!({
+            "config": {
+                "chainId": 1337,
+                "homesteadBlock": 0,
+                "eip150Block": 0,
+                "eip155Block": 0,
+                "eip158Block": 0,
+                "byzantiumBlock": 0,
+                "constantinopleBlock": 0,
+                "petersburgBlock": 0,
+                "istanbulBlock": 0,
+                "berlinBlock": 0,
+                "londonBlock": 0,
+                "bernoulliBlock": 0,
+                "curieBlock": 0,
+                "morph203Time": 0,
+                "viridianTime": 0,
+                "emeraldTime": 0,
+                "jadeForkTime": 2000,
+                "morph": {}
+            },
+            "alloc": {}
+        });
+        let genesis: Genesis = serde_json::from_value(genesis_json).unwrap();
+        let consensus = MorphConsensus::new(Arc::new(MorphChainSpec::from(genesis)));
+
+        let mut parent = create_valid_morph_header(1000, 30_000_000, 100);
+        parent.next_l1_msg_index = 10;
+        let parent_sealed = SealedHeader::seal_slow(parent);
+
+        // Pre-Jade (timestamp 1001 < 2000): decreased next_l1_msg_index is allowed on headers.
+        let mut pre_jade_child = create_valid_morph_header(1001, 30_000_000, 101);
+        pre_jade_child.inner.parent_hash = parent_sealed.hash();
+        pre_jade_child.next_l1_msg_index = 0;
+        let pre_jade_sealed = SealedHeader::seal_slow(pre_jade_child);
+        assert!(
+            consensus
+                .validate_header_against_parent(&pre_jade_sealed, &parent_sealed)
+                .is_ok()
+        );
+
+        // Post-Jade (timestamp 2000 >= 2000): decreased next_l1_msg_index is rejected.
+        let mut post_jade_child = create_valid_morph_header(2000, 30_000_000, 101);
+        post_jade_child.inner.parent_hash = parent_sealed.hash();
+        post_jade_child.next_l1_msg_index = 0;
+        let post_jade_sealed = SealedHeader::seal_slow(post_jade_child);
+        assert!(
+            consensus
+                .validate_header_against_parent(&post_jade_sealed, &parent_sealed)
+                .is_err()
+        );
     }
 }

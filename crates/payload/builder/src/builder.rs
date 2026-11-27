@@ -3,7 +3,7 @@
 use crate::metrics::MorphPayloadBuilderMetrics;
 use crate::{MorphBuilderConfig, MorphPayloadBuilderError, config::PayloadBuildingBreaker};
 use alloy_consensus::{BlockHeader, Transaction, Typed2718, transaction::TxHashRef};
-use alloy_eips::eip2718::Encodable2718;
+use alloy_eips::{BlockId, eip2718::Encodable2718};
 use alloy_primitives::{Address, B256, Bytes, U256};
 use morph_chainspec::{
     L2_MESSAGE_QUEUE_ADDRESS, L2_MESSAGE_QUEUE_WITHDRAW_TRIE_ROOT_SLOT, MorphChainSpec,
@@ -32,7 +32,7 @@ use reth_execution_types::BlockExecutionOutput;
 use reth_payload_builder::PayloadId;
 use reth_payload_primitives::{BuiltPayloadExecutedBlock, PayloadBuilderError};
 use reth_payload_util::{BestPayloadTransactions, NoopPayloadTransactions, PayloadTransactions};
-use reth_primitives_traits::{FastInstant as Instant, RecoveredBlock, SealedHeader};
+use reth_primitives_traits::{FastInstant as Instant, Recovered, RecoveredBlock, SealedHeader};
 use reth_revm::{database::StateProviderDatabase, db::State};
 use reth_storage_api::{StateProvider, StateProviderFactory};
 use reth_transaction_pool::{BestTransactionsAttributes, PoolTransaction, TransactionPool};
@@ -250,12 +250,26 @@ where
             payload_id,
         };
 
+        // Only evict failing pool transactions when building on the current canonical head
+        // AND the pool has not moved onto a different head: a non-canonical parent (e.g.,
+        // `assembleL2BlockV2` rebuilding on an older block before a token was activated)
+        // must never remove transactions that are valid on the canonical chain.
+        let canonical_head_hash = self
+            .client
+            .block_hash_for_id(BlockId::latest())
+            .ok()
+            .flatten();
+        let pool_seen_hash = self.pool.block_info().last_seen_block_hash;
+        let can_evict_from_pool = canonical_head_hash == Some(parent_hash)
+            && (pool_seen_hash.is_zero() || pool_seen_hash == parent_hash);
+
         let ctx = MorphPayloadBuilderCtx {
             evm_config: self.evm_config.clone(),
             config: builder_config,
             cancel,
             best_payload,
             builder_config: self.config.clone(),
+            can_evict_from_pool,
             metrics: MorphPayloadBuilderMetrics::default(),
         };
 
@@ -355,6 +369,9 @@ struct MorphPayloadBuilderCtx {
     best_payload: Option<MorphBuiltPayload>,
     /// Builder configuration with limits.
     builder_config: MorphBuilderConfig,
+    /// Whether this build targets the current canonical head synchronized with the pool,
+    /// permitting deterministic token-fee eviction from the global pool.
+    can_evict_from_pool: bool,
     /// Prometheus metrics for this payload build job.
     metrics: MorphPayloadBuilderMetrics,
 }
@@ -411,6 +428,7 @@ impl MorphPayloadBuilderCtx {
         let supplied_tx_count = self.attributes().transactions.len();
         let mut executed_txs: Vec<Bytes> = Vec::with_capacity(supplied_tx_count);
         let mut saw_l2_transaction = false;
+        let mut first_l1_msg = true;
 
         for (tx_idx, tx_with_encoded) in self.attributes().transactions.iter().enumerate() {
             // The transaction is already recovered in `try_new` via `try_into_recovered()`.
@@ -444,7 +462,20 @@ impl MorphPayloadBuilderCtx {
                         },
                     )
                 })?;
-                if queue_index != info.next_l1_message_index {
+                // Sequencer assembly (`!no_tx_pool`) requires exact continuity with
+                // `info.next_l1_message_index` (matching morph-geth's `miner/worker.go`).
+                // Deterministic L1 derivation (`no_tx_pool`) permits the leading L1 message
+                // to skip past `parent.next_l1_msg_index` when L1 messages were skipped,
+                // while still rejecting cross-block replays (`<`) and requiring strict
+                // sequential indices for subsequent L1 messages in the same block.
+                let allow_forward_skip = self.attributes().no_tx_pool && first_l1_msg;
+                first_l1_msg = false;
+                let invalid_queue_index = if allow_forward_skip {
+                    queue_index < info.next_l1_message_index
+                } else {
+                    queue_index != info.next_l1_message_index
+                };
+                if invalid_queue_index {
                     return Err(PayloadBuilderError::other(
                         MorphPayloadBuilderError::InvalidSuppliedTransaction {
                             error: format!(
@@ -591,6 +622,10 @@ impl MorphPayloadBuilderCtx {
             // L1-message gas to the block gas pool. Regular transactions do return unused gas.
             info.gas_pool_used += if is_l1_msg { tx_gas } else { gas_used };
 
+            // Track sender only after successful execution so later pool txs from the same
+            // sender are never evicted if they fail against in-block mutated sender state.
+            info.executed_senders.insert(recovered_tx.signer());
+
             // Increment transaction count
             info.transaction_count += 1;
 
@@ -605,9 +640,12 @@ impl MorphPayloadBuilderCtx {
     ///
     /// Returns `Ok(Some(()))` if the job was cancelled or breaker triggered, `Ok(None)` otherwise.
     /// Executed transaction bytes are appended to the provided vector.
+    #[expect(clippy::too_many_arguments)]
     fn execute_pool_transactions<BestTxs, Pool>(
         &self,
         builder: &mut impl BlockBuilder<Primitives = morph_primitives::MorphPrimitives>,
+        state_provider: &(impl StateProvider + ?Sized),
+        next_block_attrs: &MorphNextBlockEnvAttributes,
         info: &mut ExecutionInfo,
         executed_txs: &mut Vec<Bytes>,
         best_txs: BestTxs,
@@ -624,12 +662,31 @@ impl MorphPayloadBuilderCtx {
             executed_txs,
             best_txs,
             breaker,
+            |tx| {
+                let Ok(evm_env) = self
+                    .evm_config
+                    .next_evm_env(self.parent(), next_block_attrs)
+                else {
+                    return false;
+                };
+                let tx_env = self.evm_config.tx_env(tx);
+                let mut clean_evm = self
+                    .evm_config
+                    .evm_with_env(StateProviderDatabase::new(state_provider), evm_env);
+                match clean_evm.validate_only(tx_env) {
+                    Err(revm::context::result::EVMError::Transaction(morph_err)) => {
+                        is_evictable_token_fee_error(&morph_err)
+                    }
+                    _ => false,
+                }
+            },
             |tx_hash| {
                 pool.remove_transactions(vec![tx_hash]);
             },
         )
     }
 
+    #[expect(clippy::too_many_arguments)]
     fn execute_pool_transactions_with_evictor<BestTxs>(
         &self,
         builder: &mut impl BlockBuilder<Primitives = morph_primitives::MorphPrimitives>,
@@ -637,6 +694,7 @@ impl MorphPayloadBuilderCtx {
         executed_txs: &mut Vec<Bytes>,
         mut best_txs: BestTxs,
         breaker: &PayloadBuildingBreaker,
+        mut confirm_eviction_on_clean_parent: impl FnMut(&Recovered<MorphTxEnvelope>) -> bool,
         mut evict_from_pool: impl FnMut(B256),
     ) -> Result<Option<()>, PayloadBuilderError>
     where
@@ -644,7 +702,6 @@ impl MorphPayloadBuilderCtx {
     {
         let block_gas_limit = builder.evm().block().gas_limit();
         let base_fee = builder.evm().block().basefee();
-        let mut executed_senders: HashSet<Address> = HashSet::new();
 
         while let Some(tx) = best_txs.next(()) {
             // Check if the job was cancelled
@@ -754,8 +811,11 @@ impl MorphPayloadBuilderCtx {
                             "skipping invalid transaction and its descendants"
                         );
                         best_txs.mark_invalid(tx.signer(), tx.nonce());
-                        if is_evictable_token_fee_error(error.as_ref())
-                            && !executed_senders.contains(&tx.signer())
+                        if self.can_evict_from_pool
+                            && is_evictable_token_fee_error(error.as_ref())
+                            && !info.executed_senders.contains(&tx.signer())
+                            && (info.transaction_count == 0
+                                || confirm_eviction_on_clean_parent(&tx))
                         {
                             tracing::debug!(
                                 target: "payload_builder",
@@ -796,7 +856,7 @@ impl MorphPayloadBuilderCtx {
             self.metrics
                 .commit_tx_apply_duration_seconds
                 .record(apply_started.elapsed());
-            executed_senders.insert(tx.signer());
+            info.executed_senders.insert(tx.signer());
 
             // Update execution info
             info.cumulative_gas_used += gas_used;
@@ -837,13 +897,15 @@ struct ExecutionInfo {
     next_l1_message_index: u64,
     /// Number of transactions executed (including both sequencer and pool transactions).
     transaction_count: u64,
+    /// Senders that have already executed at least one transaction (supplied or pool) in this block.
+    executed_senders: HashSet<Address>,
     /// Maximum DA block size from the builder config.
     max_da_block_size: Option<u64>,
 }
 
 impl ExecutionInfo {
     /// Creates a new [`ExecutionInfo`] with the initial next L1 message index from parent.
-    const fn new(next_l1_message_index: u64, max_da_block_size: Option<u64>) -> Self {
+    fn new(next_l1_message_index: u64, max_da_block_size: Option<u64>) -> Self {
         Self {
             cumulative_gas_used: 0,
             gas_pool_used: 0,
@@ -851,6 +913,7 @@ impl ExecutionInfo {
             total_fees: U256::ZERO,
             next_l1_message_index,
             transaction_count: 0,
+            executed_senders: HashSet::new(),
             max_da_block_size,
         }
     }
@@ -930,7 +993,7 @@ where
     // Create block builder
     let mut builder = ctx
         .evm_config
-        .builder_for_next_block(&mut db, ctx.parent(), next_block_attrs)
+        .builder_for_next_block(&mut db, ctx.parent(), next_block_attrs.clone())
         .map_err(PayloadBuilderError::other)?;
 
     // If the engine tree provided a sparse-trie state root handle, wire the
@@ -975,6 +1038,8 @@ where
         if ctx
             .execute_pool_transactions(
                 &mut builder,
+                state_provider,
+                &next_block_attrs,
                 &mut info,
                 &mut executed_txs,
                 best_txs,
@@ -1342,6 +1407,7 @@ mod tests {
             cancel: Default::default(),
             best_payload,
             builder_config: MorphBuilderConfig::default(),
+            can_evict_from_pool: true,
             metrics: MorphPayloadBuilderMetrics::default(),
         }
     }
@@ -1625,6 +1691,7 @@ mod tests {
             cancel: Default::default(),
             best_payload: None,
             builder_config: MorphBuilderConfig::default(),
+            can_evict_from_pool: true,
             metrics: MorphPayloadBuilderMetrics::default(),
         }
     }
@@ -1861,6 +1928,7 @@ mod tests {
             &mut executed_txs,
             best_txs,
             &breaker,
+            |_| true,
             |hash| evicted.push(hash),
         )
         .expect("pool execution should complete");
@@ -2079,6 +2147,7 @@ mod tests {
             &mut executed_txs,
             best_txs,
             &breaker,
+            |_| true,
             |hash| evicted.push(hash),
         )
         .expect("pool execution should complete");
@@ -2089,5 +2158,280 @@ mod tests {
         // - sender_already_executed nonce 1 (had nonce 0 succeed in this block) must NOT be evicted.
         assert_eq!(evicted, vec![h_transfer_fail, h_inactive]);
         assert_eq!(executed_txs.len(), 1);
+    }
+
+    #[test]
+    fn test_execute_pool_transactions_does_not_evict_when_non_canonical_or_caused_by_in_block_state()
+     {
+        use alloy_consensus::{Sealable, Signed, TxEip1559};
+        use alloy_primitives::{Signature, TxKind};
+        use morph_primitives::{TxL1Msg, TxMorph};
+        use morph_txpool::MorphPooledTransaction;
+        use reth_primitives_traits::Recovered;
+        use std::collections::{HashMap, VecDeque};
+
+        let make_morph_tx = |signer: Address, nonce: u64, tag: u8| {
+            let tx = TxMorph {
+                chain_id: 2818,
+                nonce,
+                gas_limit: 50_000,
+                max_fee_per_gas: 100,
+                max_priority_fee_per_gas: 10,
+                to: TxKind::Call(Address::repeat_byte(0xee)),
+                fee_token_id: 1,
+                ..Default::default()
+            };
+            let hash = B256::repeat_byte(tag);
+            let env = MorphTxEnvelope::Morph(Signed::new_unchecked(
+                tx,
+                Signature::test_signature(),
+                hash,
+            ));
+            let recovered = Recovered::new_unchecked(env, signer);
+            let len = recovered.encode_2718_len();
+            (hash, MorphPooledTransaction::new(recovered, len))
+        };
+
+        let make_eth_tx = |signer: Address, nonce: u64, tag: u8| {
+            let tx = TxEip1559 {
+                chain_id: 2818,
+                nonce,
+                gas_limit: 21_000,
+                max_fee_per_gas: 100,
+                max_priority_fee_per_gas: 10,
+                to: TxKind::Call(Address::repeat_byte(0xee)),
+                ..Default::default()
+            };
+            let hash = B256::repeat_byte(tag);
+            let env = MorphTxEnvelope::Eip1559(Signed::new_unchecked(
+                tx,
+                Signature::test_signature(),
+                hash,
+            ));
+            let recovered = Recovered::new_unchecked(env, signer);
+            let len = recovered.encode_2718_len();
+            (hash, MorphPooledTransaction::new(recovered, len))
+        };
+
+        // 1. Non-canonical parent build (`can_evict_from_pool == false`): never evicts even
+        //    at `transaction_count == 0`.
+        let sender_a = Address::repeat_byte(0x10);
+        let (h_stale_inactive, tx_stale_inactive) = make_morph_tx(sender_a, 0, 0xa1);
+        let mut outcomes = HashMap::new();
+        outcomes.insert(
+            h_stale_inactive,
+            Err(MorphInvalidTransaction::TokenNotActive(1)),
+        );
+        let mut builder = ScriptedBlockBuilder::new(outcomes);
+        let mut info = ExecutionInfo::default();
+        let mut executed_txs = Vec::new();
+        let mut ctx = test_ctx_with_timestamp_and_txs(1_800_000_000, vec![]);
+        ctx.can_evict_from_pool = false;
+        let breaker = ctx.builder_config.breaker(30_000_000);
+        let mut evicted = Vec::new();
+
+        ctx.execute_pool_transactions_with_evictor(
+            &mut builder,
+            &mut info,
+            &mut executed_txs,
+            ScriptedPoolTxs {
+                txs: VecDeque::from([tx_stale_inactive]),
+                marked_invalid: Vec::new(),
+            },
+            &breaker,
+            |_| panic!("clean-parent check should not run when can_evict_from_pool is false"),
+            |hash| evicted.push(hash),
+        )
+        .expect("pool execution should complete");
+        assert!(
+            evicted.is_empty(),
+            "non-canonical parent build must never evict from global pool"
+        );
+
+        // 2. In-block state mutation by an earlier transaction from another sender:
+        //    `h_mutated_in_block` is valid on clean parent (`confirm == false` -> NOT evicted),
+        //    whereas `h_broken_on_parent` also fails on clean parent (`confirm == true` -> evicted).
+        let sender_mutator = Address::repeat_byte(0x20);
+        let sender_victim = Address::repeat_byte(0x21);
+        let sender_broken = Address::repeat_byte(0x22);
+        let (h_mutator, tx_mutator) = make_eth_tx(sender_mutator, 0, 0xb1);
+        let (h_mutated_in_block, tx_mutated_in_block) = make_morph_tx(sender_victim, 0, 0xb2);
+        let (h_broken_on_parent, tx_broken_on_parent) = make_morph_tx(sender_broken, 0, 0xb3);
+
+        let mut outcomes = HashMap::new();
+        outcomes.insert(h_mutator, Ok(21_000));
+        outcomes.insert(
+            h_mutated_in_block,
+            Err(MorphInvalidTransaction::TokenTransferFailed {
+                reason: "paused mid-block".into(),
+            }),
+        );
+        outcomes.insert(
+            h_broken_on_parent,
+            Err(MorphInvalidTransaction::TokenBalanceQueryFailed),
+        );
+        let mut builder = ScriptedBlockBuilder::new(outcomes);
+        let mut info = ExecutionInfo::default();
+        let mut executed_txs = Vec::new();
+        let ctx = test_ctx_with_timestamp_and_txs(1_800_000_000, vec![]);
+        let breaker = ctx.builder_config.breaker(30_000_000);
+        let mut evicted = Vec::new();
+
+        ctx.execute_pool_transactions_with_evictor(
+            &mut builder,
+            &mut info,
+            &mut executed_txs,
+            ScriptedPoolTxs {
+                txs: VecDeque::from([tx_mutator, tx_mutated_in_block, tx_broken_on_parent]),
+                marked_invalid: Vec::new(),
+            },
+            &breaker,
+            |tx| *tx.tx_hash() == h_broken_on_parent,
+            |hash| evicted.push(hash),
+        )
+        .expect("pool execution should complete");
+        assert_eq!(
+            evicted,
+            vec![h_broken_on_parent],
+            "only tx confirmed invalid on clean parent may be evicted after earlier txs ran"
+        );
+
+        // 3. Supplied L1 message from `sender_l1` seeds `info.executed_senders`, preventing
+        //    eviction of a subsequent failing pool tx from `sender_l1`.
+        let sender_l1 = Address::repeat_byte(0x30);
+        let l1_msg = TxL1Msg {
+            queue_index: 0,
+            gas_limit: 50_000,
+            to: Address::repeat_byte(0xaa),
+            value: U256::ZERO,
+            sender: sender_l1,
+            input: Bytes::new(),
+        };
+        let l1_sealed = l1_msg.seal_slow();
+        let l1_hash = l1_sealed.hash();
+        let l1_encoded = Bytes::from(MorphTxEnvelope::L1Msg(l1_sealed).encoded_2718());
+        let (h_l1_sender_pool_tx, tx_l1_sender_pool_tx) = make_morph_tx(sender_l1, 0, 0xc1);
+
+        let mut outcomes = HashMap::new();
+        outcomes.insert(l1_hash, Ok(21_000));
+        outcomes.insert(
+            h_l1_sender_pool_tx,
+            Err(MorphInvalidTransaction::TokenTransferFailed {
+                reason: "l1 msg changed sender state".into(),
+            }),
+        );
+        let mut builder = ScriptedBlockBuilder::new(outcomes);
+        let mut info = ExecutionInfo::default();
+        let ctx = test_ctx_with_timestamp_and_txs(1_800_000_000, vec![l1_encoded]);
+        let mut executed_txs = ctx
+            .execute_supplied_transactions(&mut builder, &mut info)
+            .expect("supplied L1 msg should execute");
+        assert!(info.executed_senders.contains(&sender_l1));
+
+        let breaker = ctx.builder_config.breaker(30_000_000);
+        let mut evicted = Vec::new();
+        ctx.execute_pool_transactions_with_evictor(
+            &mut builder,
+            &mut info,
+            &mut executed_txs,
+            ScriptedPoolTxs {
+                txs: VecDeque::from([tx_l1_sender_pool_tx]),
+                marked_invalid: Vec::new(),
+            },
+            &breaker,
+            |_| true,
+            |hash| evicted.push(hash),
+        )
+        .expect("pool execution should complete");
+        assert!(
+            evicted.is_empty(),
+            "sender with executed supplied L1 message in block must not be evicted"
+        );
+    }
+
+    #[test]
+    fn test_execute_supplied_transactions_no_tx_pool_allows_leading_l1_forward_skip_only() {
+        use alloy_consensus::Sealable;
+        use morph_primitives::TxL1Msg;
+        use std::collections::HashMap;
+
+        let make_l1 = |queue_index: u64| {
+            let sealed = TxL1Msg {
+                queue_index,
+                gas_limit: 50_000,
+                to: Address::repeat_byte(0xaa),
+                value: U256::ZERO,
+                sender: Address::repeat_byte(0xbb),
+                input: Bytes::new(),
+            }
+            .seal_slow();
+            let hash = sealed.hash();
+            let bytes = Bytes::from(MorphTxEnvelope::L1Msg(sealed).encoded_2718());
+            (hash, bytes)
+        };
+
+        let make_no_pool_ctx = |txs: Vec<Bytes>| {
+            let mut rpc_attrs = morph_payload_types::MorphPayloadAttributes::default();
+            rpc_attrs.inner.timestamp = 1_800_000_000;
+            rpc_attrs.transactions = Some(txs);
+            rpc_attrs.no_tx_pool = true;
+            let attrs = MorphPayloadBuilderAttributes::try_new(
+                B256::ZERO,
+                rpc_attrs,
+                morph_payload_types::MORPH_PAYLOAD_BUILDER_VERSION,
+            )
+            .unwrap();
+            let payload_id = attrs.payload_id();
+            MorphPayloadBuilderCtx {
+                evm_config: test_evm_config(),
+                config: PayloadConfig::new(
+                    Arc::new(SealedHeader::seal_slow(MorphHeader::default())),
+                    attrs,
+                    payload_id,
+                ),
+                cancel: Default::default(),
+                best_payload: None,
+                builder_config: MorphBuilderConfig::default(),
+                can_evict_from_pool: false,
+                metrics: MorphPayloadBuilderMetrics::default(),
+            }
+        };
+
+        // Forward skip on leading L1 msg (parent next=2, msgs=[5, 6]) succeeds under `no_tx_pool`.
+        let (h5, b5) = make_l1(5);
+        let (h6, b6) = make_l1(6);
+        let mut outcomes = HashMap::new();
+        outcomes.insert(h5, Ok(21_000));
+        outcomes.insert(h6, Ok(21_000));
+        let mut builder = ScriptedBlockBuilder::new(outcomes);
+        let mut info = ExecutionInfo::new(2, None);
+        let ctx = make_no_pool_ctx(vec![b5.clone(), b6]);
+        let executed = ctx
+            .execute_supplied_transactions(&mut builder, &mut info)
+            .expect("leading forward skip in deterministic safe build must succeed");
+        assert_eq!(executed.len(), 2);
+        assert_eq!(info.next_l1_message_index, 7);
+
+        // Cross-block replay (`queue_index = 1 < parent next = 2`) still fails.
+        let (_h1, b1) = make_l1(1);
+        let mut builder = ScriptedBlockBuilder::new(HashMap::new());
+        let mut info = ExecutionInfo::new(2, None);
+        let ctx = make_no_pool_ctx(vec![b1]);
+        assert!(
+            ctx.execute_supplied_transactions(&mut builder, &mut info)
+                .is_err()
+        );
+
+        // Non-contiguous second L1 message (`[5, 8]`) still fails.
+        let (_h8, b8) = make_l1(8);
+        let mut outcomes = HashMap::new();
+        outcomes.insert(h5, Ok(21_000));
+        let mut builder = ScriptedBlockBuilder::new(outcomes);
+        let mut info = ExecutionInfo::new(2, None);
+        let ctx = make_no_pool_ctx(vec![b5, b8]);
+        assert!(
+            ctx.execute_supplied_transactions(&mut builder, &mut info)
+                .is_err()
+        );
     }
 }

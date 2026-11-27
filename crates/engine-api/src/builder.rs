@@ -14,16 +14,26 @@ use alloy_rpc_types_engine::{PayloadAttributes, PayloadStatus, PayloadStatusEnum
 use morph_chainspec::{MorphChainSpec, MorphHardforks};
 use morph_payload_types::{
     AssembleL2BlockParams, AssembleL2BlockV2Params, ExecutableL2Data, GenericResponse,
-    MorphBuiltPayload, MorphExecutionData, MorphPayloadTypes, SafeL2Data,
+    MorphBuiltPayload, MorphExecutionData, MorphPayloadTypes, MorphPayloadValidationMode,
+    SafeL2Data, TreeHeaderCache,
 };
 use morph_primitives::{Block, BlockBody, MorphHeader, MorphTxEnvelope};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use reth_payload_builder::{BuildNewPayload, PayloadBuilderHandle};
 #[cfg(test)]
 use reth_primitives_traits::RecoveredBlock;
 use reth_primitives_traits::{FastInstant as Instant, SealedBlock, SealedHeader};
 use reth_provider::{BlockNumReader, BlockReaderIdExt, CanonChainTracker, HeaderProvider};
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::Arc,
+};
+
+#[derive(Debug, Default)]
+struct VerifiedBlocksCache {
+    entries: HashMap<B256, B256>,
+    order: VecDeque<B256>,
+}
 
 // =============================================================================
 // Real Implementation
@@ -49,6 +59,15 @@ pub struct RealMorphL2EngineApi<Provider> {
 
     /// Tracks L1-derived finalized block tags for FCU updates.
     block_tag_tracker: Arc<BlockTagTracker>,
+
+    /// Shared cache of unpersisted in-memory `tree_state` headers populated by the
+    /// engine tree validator.
+    tree_headers: Arc<TreeHeaderCache>,
+
+    /// Locally assembled block hashes mapped to their computed `withdraw_trie_root`,
+    /// mirroring morph-geth's `api.verified` cache for `AssembleL2Block(V2)` ->
+    /// `ValidateL2Block` / `NewL2Block(V2)`.
+    verified_blocks: Mutex<VerifiedBlocksCache>,
 
     /// Serializes payload builds to prevent concurrent deterministic `PayloadId`
     /// collisions in reth's `PayloadBuilderService`.
@@ -162,6 +181,8 @@ fn payload_timestamp(
 }
 
 impl<Provider> RealMorphL2EngineApi<Provider> {
+    const MAX_VERIFIED_BLOCKS: usize = 1024;
+
     /// Creates a new [`RealMorphL2EngineApi`].
     pub fn new(
         provider: Provider,
@@ -176,10 +197,44 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
             chain_spec,
             engine_handle,
             block_tag_tracker,
+            tree_headers: Arc::new(TreeHeaderCache::new()),
+            verified_blocks: Mutex::new(VerifiedBlocksCache::default()),
             build_lock: tokio::sync::Mutex::new(()),
             fcu_lock: tokio::sync::Mutex::new(()),
             metrics: MorphEngineApiMetrics::default(),
         }
+    }
+
+    /// Attaches a shared [`TreeHeaderCache`] so unpersisted in-memory `tree_state`
+    /// headers are visible during parent lookups.
+    pub fn with_tree_headers(mut self, tree_headers: Arc<TreeHeaderCache>) -> Self {
+        self.tree_headers = tree_headers;
+        self
+    }
+
+    fn record_verified_block(&self, block_hash: B256, withdraw_trie_root: B256) {
+        let mut cache = self.verified_blocks.lock();
+        let is_new = cache
+            .entries
+            .insert(block_hash, withdraw_trie_root)
+            .is_none();
+        if is_new {
+            cache.order.push_back(block_hash);
+            while cache.entries.len() > Self::MAX_VERIFIED_BLOCKS {
+                let Some(evicted) = cache.order.pop_front() else {
+                    break;
+                };
+                cache.entries.remove(&evicted);
+            }
+        }
+    }
+
+    fn verified_withdraw_trie_root(&self, block_hash: B256) -> Option<B256> {
+        self.verified_blocks
+            .lock()
+            .entries
+            .get(&block_hash)
+            .copied()
     }
 
     /// Updates `head_block_timegap_seconds` gauge after a successful block import.
@@ -237,6 +292,7 @@ where
             self.metrics.assemble_l2_block_failures_total.increment(1);
         })?;
         let executable_data = built_payload.executable_data;
+        self.record_verified_block(executable_data.hash, executable_data.withdraw_trie_root);
 
         tracing::debug!(
             target: "morph::engine",
@@ -260,9 +316,7 @@ where
         // looked up by hash and need not be the canonical head — that is the point of V2
         // (the sequencer can build on a parent that diverges from its current head).
         let parent = self
-            .provider
-            .sealed_header_by_hash(parent_hash)
-            .map_err(|e| MorphEngineApiError::Database(e.to_string()))?
+            .lookup_sealed_header_by_hash(parent_hash)?
             .ok_or_else(|| {
                 MorphEngineApiError::Internal(format!("parent block not found: {parent_hash}"))
             })?;
@@ -290,6 +344,7 @@ where
             self.metrics.assemble_l2_block_failures_total.increment(1);
         })?;
         let executable_data = built_payload.executable_data;
+        self.record_verified_block(executable_data.hash, executable_data.withdraw_trie_root);
 
         tracing::debug!(
             target: "morph::engine",
@@ -351,7 +406,7 @@ where
         }
 
         // 2. Convert and forward to reth engine tree (`newPayload` path).
-        let (payload, _) = match self.execution_payload_from_executable_data(&data) {
+        let (mut payload, _) = match self.execution_payload_from_executable_data(&data) {
             Ok(v) => v,
             Err(err) => {
                 tracing::warn!(
@@ -383,6 +438,27 @@ where
                 .validate_l2_block_duration_seconds
                 .record(validate_started.elapsed());
             return Ok(GenericResponse { success: false });
+        }
+
+        // 2c. Match morph-geth's `isVerified` branch: if this exact block hash was assembled
+        //     locally, cross-check any non-zero `withdraw_trie_root` immediately and mark the
+        //     payload `LocallyBuilt` so empty/reorg builds do not fail wall-clock checks.
+        if let Some(actual_wtr) = self.verified_withdraw_trie_root(payload.block.hash()) {
+            if !data.withdraw_trie_root.is_zero() && data.withdraw_trie_root != actual_wtr {
+                tracing::warn!(
+                    target: "morph::engine",
+                    block_hash = %data.hash,
+                    expected = %actual_wtr,
+                    actual = %data.withdraw_trie_root,
+                    "validate_l2_block failed: wrong withdraw_trie_root on locally verified block"
+                );
+                self.metrics.validate_l2_block_failures_total.increment(1);
+                self.metrics
+                    .validate_l2_block_duration_seconds
+                    .record(validate_started.elapsed());
+                return Ok(GenericResponse { success: false });
+            }
+            payload = payload.with_validation_mode(MorphPayloadValidationMode::LocallyBuilt);
         }
 
         let status = match self.engine_handle.new_payload(payload).await {
@@ -488,7 +564,7 @@ where
         let block_hash = data.hash;
         let block_number = data.number;
         let block_timestamp = data.timestamp;
-        self.import_l2_block_via_engine(data, B256::ZERO)
+        self.import_l2_block_via_engine(data, B256::ZERO, MorphPayloadValidationMode::Full)
             .await
             .inspect_err(|_| {
                 self.metrics.new_l2_block_failures_total.increment(1);
@@ -528,9 +604,7 @@ where
         //    chain onto this block. This is the centralized-sequencer import path,
         //    where the sequencer may rebuild and replace recent blocks.
         let parent = self
-            .provider
-            .sealed_header_by_hash(data.parent_hash)
-            .map_err(|e| MorphEngineApiError::Database(e.to_string()))?
+            .lookup_sealed_header_by_hash(data.parent_hash)?
             .ok_or_else(|| {
                 MorphEngineApiError::Internal(format!(
                     "parent block not found: {}",
@@ -556,7 +630,7 @@ where
         //    FCU advances or reorgs the canonical head onto data.hash.
         let block_timestamp = data.timestamp;
         let header = self
-            .import_l2_block_via_engine(data, B256::ZERO)
+            .import_l2_block_via_engine(data, B256::ZERO, MorphPayloadValidationMode::Full)
             .await
             .inspect_err(|_| {
                 self.metrics.new_l2_block_failures_total.increment(1);
@@ -623,12 +697,16 @@ where
         let block_hash = executable_data.hash;
 
         // 3. Import the block through reth engine tree, marking the imported block safe
-        // in the same FCU. Do not mark it finalized: L1 derivation can still reorg this
-        // block, and finalized is only authoritative when supplied by BlockTagService via
-        // set_block_tags. Return the in-path header (do not rely on immediate DB
-        // visibility after FCU).
+        // in the same FCU. Pass `MorphPayloadValidationMode::Safe` to match morph-geth's
+        // `NewSafeL2Block` (`safe = true`), exempting `VerifyHeader` and `ValidateBody`
+        // DA byte-limit checks so follower clock skew or L1 batch parameter updates
+        // cannot stall L1 derivation.
         let header = self
-            .import_l2_block_via_engine(executable_data, block_hash)
+            .import_l2_block_via_engine(
+                executable_data,
+                block_hash,
+                MorphPayloadValidationMode::Safe,
+            )
             .await
             .inspect_err(|_| {
                 self.metrics.new_safe_l2_block_failures_total.increment(1);
@@ -767,6 +845,23 @@ where
 }
 
 impl<Provider> RealMorphL2EngineApi<Provider> {
+    /// Looks up a sealed header by hash, checking the shared in-memory `tree_state`
+    /// header cache first before falling back to `self.provider` (canonical memory + DB).
+    fn lookup_sealed_header_by_hash(
+        &self,
+        hash: B256,
+    ) -> EngineApiResult<Option<SealedHeader<MorphHeader>>>
+    where
+        Provider: HeaderProvider<Header = MorphHeader>,
+    {
+        if let Some(header) = self.tree_headers.get(&hash) {
+            return Ok(Some(header));
+        }
+        self.provider
+            .sealed_header_by_hash(hash)
+            .map_err(|e| MorphEngineApiError::Database(e.to_string()))
+    }
+
     /// Looks up a sealed header by hash and verifies that it belongs to the current
     /// canonical chain.
     ///
@@ -834,9 +929,7 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
         let (parent_number, parent_hash, parent_timestamp) = match parent_override {
             Some(parent_hash) => {
                 let parent = self
-                    .provider
-                    .sealed_header_by_hash(parent_hash)
-                    .map_err(|e| MorphEngineApiError::Database(e.to_string()))?
+                    .lookup_sealed_header_by_hash(parent_hash)?
                     .ok_or_else(|| {
                         MorphEngineApiError::Internal(format!(
                             "parent block not found: {parent_hash}"
@@ -955,11 +1048,7 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
     where
         Provider: HeaderProvider<Header = MorphHeader>,
     {
-        let Some(parent) = self
-            .provider
-            .sealed_header_by_hash(block.parent_hash())
-            .map_err(|e| MorphEngineApiError::Database(e.to_string()))?
-        else {
+        let Some(parent) = self.lookup_sealed_header_by_hash(block.parent_hash())? else {
             return Ok(());
         };
 
@@ -994,14 +1083,18 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
             };
         }
 
+        let has_l1_msgs = !first_l1_msg;
         let actual = block.header().next_l1_msg_index;
         let is_jade = self
             .chain_spec
             .is_jade_active_at_timestamp(block.header().timestamp());
+        // Pre-Jade historical blocks without L1 messages are exempt from parent-index
+        // comparison, matching morph-geth `blockchain_l2.go` and
+        // `MorphTreeEngineValidator::validate_l1_msg_index_against_parent`.
         let invalid = if is_jade {
             actual != expected
         } else {
-            actual < expected
+            has_l1_msgs && actual < expected
         };
         if invalid {
             return Err(MorphEngineApiError::ValidationFailed(format!(
@@ -1016,6 +1109,7 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
         &self,
         data: ExecutableL2Data,
         safe_block_hash: B256,
+        mut validation_mode: MorphPayloadValidationMode,
     ) -> EngineApiResult<MorphHeader>
     where
         Provider: HeaderProvider<Header = MorphHeader>
@@ -1024,6 +1118,20 @@ impl<Provider> RealMorphL2EngineApi<Provider> {
     {
         let (payload, header) = self.execution_payload_from_executable_data(&data)?;
         self.validate_next_l1_message_index(payload.block.as_ref())?;
+
+        if validation_mode == MorphPayloadValidationMode::Full
+            && let Some(actual_wtr) = self.verified_withdraw_trie_root(payload.block.hash())
+        {
+            if !data.withdraw_trie_root.is_zero() && data.withdraw_trie_root != actual_wtr {
+                return Err(MorphEngineApiError::ValidationFailed(format!(
+                    "withdraw trie root mismatch: expected {}, got {}",
+                    data.withdraw_trie_root, actual_wtr
+                )));
+            }
+            validation_mode = MorphPayloadValidationMode::LocallyBuilt;
+        }
+
+        let payload = payload.with_validation_mode(validation_mode);
 
         let payload_status = self
             .engine_handle

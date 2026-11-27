@@ -61,6 +61,9 @@ pub struct MorphAddOns<
     /// Held as one unit because the limit is only ever enforced by the RPC that this storage
     /// installs; there is no way to configure one without the other.
     proof_history: Option<(MorphProofsStorage<Arc<MdbxProofsStorage>>, usize)>,
+    /// Shared cache of validated in-memory `tree_state` headers populated by the engine tree
+    /// validator and read by `RealMorphL2EngineApi`.
+    tree_headers: Arc<morph_payload_types::TreeHeaderCache>,
 }
 
 impl<N> MorphAddOns<NodeAdapter<N>, MorphEthApiBuilder>
@@ -73,16 +76,18 @@ where
     /// Creates a new [`MorphAddOns`] with default configuration.
     pub fn new() -> Self {
         let pvb = MorphEngineValidatorBuilder::default();
+        let tree_headers = Arc::new(morph_payload_types::TreeHeaderCache::new());
         Self {
             inner: RpcAddOns::new(
                 MorphEthApiBuilder::default(),
                 pvb.clone(),
                 NoopEngineApiBuilder::default(),
-                MorphTreeEngineValidatorBuilder::new(pvb),
+                MorphTreeEngineValidatorBuilder::new(pvb).with_tree_headers(tree_headers.clone()),
                 Identity::default(),
                 Identity::default(),
             ),
             proof_history: None,
+            tree_headers,
         }
     }
 
@@ -201,6 +206,7 @@ where
         let morph_rpc_ctx = MorphRpc::new(reference_index_handle, provider.clone());
         let reference_rpc_handler = MorphRpcHandler::new(morph_rpc_ctx);
         let proof_history = self.proof_history;
+        let tree_headers = self.tree_headers;
 
         // Use launch_add_ons_with to register custom Engine API and eth_config
         self.inner
@@ -286,7 +292,8 @@ where
                         chain_spec,
                         beacon_engine_handle,
                         block_tag_tracker,
-                    );
+                    )
+                    .with_tree_headers(tree_headers);
 
                 // Create the RPC handler
                 let handler = morph_engine_api::MorphL2EngineRpcHandler::new(engine_api);

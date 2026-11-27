@@ -1626,3 +1626,245 @@ async fn morph_tx_v2_self_delegation_executes_delegate_code_in_same_tx() -> eyre
 
     Ok(())
 }
+
+// =============================================================================
+// M-M12 regression tests: Call-mode alt-token fee pool eviction safety
+// =============================================================================
+
+/// Building a candidate block via `engine_assembleL2BlockV2` on an older non-canonical
+/// ancestor (where a Call-mode token was NOT yet active) must NOT evict a `MorphTx` that
+/// IS valid on the current canonical head.
+#[tokio::test(flavor = "multi_thread")]
+async fn assemble_on_non_canonical_parent_does_not_evict_canonical_valid_morph_tx()
+-> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+    use alloy_consensus::TxReceipt;
+    use morph_payload_types::AssembleL2BlockV2Params;
+    use reth_provider::ReceiptProvider;
+    use reth_transaction_pool::TransactionPool;
+
+    let registry = alloy_primitives::address!("5300000000000000000000000000000000000021");
+    // Token 1 `decimals | isActive` packed slot in `test-genesis.json`:
+    // `0x1200` = decimals 18, `isActive = false`; `0x1201` = decimals 18, `isActive = true`.
+    let active_slot: B256 =
+        "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706f".parse()?;
+    let inactive_word = B256::from(U256::from(0x1200u64));
+    let active_word = B256::from(U256::from(0x1201u64));
+
+    // 7-byte runtime on L2TokenRegistry: `SSTORE(CALLDATALOAD(0), CALLDATALOAD(32))` (`6020355f355500`).
+    let (mut nodes, wallet) = TestNodeBuilder::new()
+        .with_account_code(registry, "0x6020355f355500")
+        .with_account_storage(registry, active_slot, inactive_word)
+        .build()
+        .await?;
+    let node = nodes.pop().unwrap();
+    let genesis = super::helpers::canonical_snapshot(&node)?;
+
+    // Block 1: activate `TEST_TOKEN_ID` on canonical chain.
+    let mut activate_calldata = Vec::with_capacity(64);
+    activate_calldata.extend_from_slice(active_slot.as_slice());
+    activate_calldata.extend_from_slice(active_word.as_slice());
+    let activate_tx = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
+        .with_v1_eth_fee()
+        .with_to(registry)
+        .with_data(activate_calldata)
+        .with_gas_limit(100_000)
+        .build_signed()?;
+    let activate_hash = node.rpc.inject_tx(activate_tx).await?;
+    super::helpers::wait_until_pooled(&node, activate_hash).await?;
+    let block1 = super::helpers::assemble_l2_block_v2(
+        &node,
+        AssembleL2BlockV2Params {
+            parent_hash: genesis.hash,
+            transactions: vec![],
+            timestamp: Some(1),
+        },
+    )
+    .await?;
+    super::helpers::import_l2_block(&node, block1.clone()).await?;
+    super::helpers::wait_until_evicted(&node, activate_hash).await?;
+
+    // Inject a valid Call-mode MorphTx (`fee_token_id = 1`) from account 1 on canonical Block 1.
+    let signer1 = wallet_at_index(1, wallet.chain_id);
+    let morph_tx = MorphTxBuilder::new(wallet.chain_id, signer1, 0)
+        .with_v0_token_fee(TEST_TOKEN_ID)
+        .with_to(Address::with_last_byte(0x77))
+        .build_signed()?;
+    let morph_tx_hash = node.rpc.inject_tx(morph_tx).await?;
+    super::helpers::wait_until_pooled(&node, morph_tx_hash).await?;
+
+    // Assemble a candidate block on Genesis (Block 0), where `TEST_TOKEN_ID` is inactive
+    // (`MorphInvalidTransaction::TokenNotActive(1)`).
+    let stale_branch = super::helpers::assemble_l2_block_v2(
+        &node,
+        AssembleL2BlockV2Params {
+            parent_hash: genesis.hash,
+            transactions: vec![],
+            timestamp: Some(10),
+        },
+    )
+    .await?;
+    assert!(
+        stale_branch.transactions.is_empty(),
+        "MorphTx must be skipped on stale parent where token was inactive"
+    );
+    assert!(
+        node.inner.pool.contains(&morph_tx_hash),
+        "non-canonical parent build must NOT evict canonical-valid MorphTx from global pool"
+    );
+
+    // Assembling & importing Block 2 on canonical Block 1 must include and execute the MorphTx cleanly.
+    let block2 = super::helpers::assemble_l2_block_v2(
+        &node,
+        AssembleL2BlockV2Params {
+            parent_hash: block1.hash,
+            transactions: vec![],
+            timestamp: Some(2),
+        },
+    )
+    .await?;
+    assert_eq!(block2.transactions.len(), 1);
+    super::helpers::import_l2_block(&node, block2).await?;
+    super::helpers::wait_until_evicted(&node, morph_tx_hash).await?;
+    let receipt = node
+        .inner
+        .provider
+        .receipt_by_hash(morph_tx_hash)?
+        .expect("MorphTx receipt must exist");
+    assert!(receipt.status());
+
+    Ok(())
+}
+
+/// An earlier transaction in the same block (either a supplied L1 message or a higher-priority
+/// pool transaction from another sender) mutating Call-mode token state so `transfer` reverts
+/// (`MorphInvalidTransaction::TokenTransferFailed`) must NOT evict a `MorphTx` that is valid on
+/// the clean canonical parent; once that mutation IS committed to the canonical parent, the now
+/// genuinely-broken `MorphTx` IS evicted on subsequent canonical builds.
+#[tokio::test(flavor = "multi_thread")]
+async fn in_block_token_mutation_does_not_evict_morph_tx_valid_on_clean_parent() -> eyre::Result<()>
+{
+    reth_tracing::init_test_tracing();
+    use morph_node::test_utils::L1MessageBuilder;
+    use morph_payload_types::AssembleL2BlockV2Params;
+    use reth_transaction_pool::TransactionPool;
+
+    let registry = alloy_primitives::address!("5300000000000000000000000000000000000021");
+    let token_addr_slot: B256 =
+        "0x53bdca72fa8d2e145a1b3bd11cde5bd75428acd18eac3d6adf4e06e7e637706d".parse()?;
+    let broken_token = Address::with_last_byte(0x99);
+    let mut broken_token_word = [0u8; 32];
+    broken_token_word[12..].copy_from_slice(broken_token.as_slice());
+
+    // `broken_token`: `balanceOf(address)` (`0x70a08231`) returns `U256::MAX` so balance checks
+    // pass, while `transfer(address,uint256)` reverts -> `TokenTransferFailed`.
+    let broken_token_runtime = "0x5f3560e01c6370a08231146011575f5ffd5b5f195f5260205ff3";
+
+    let (mut nodes, wallet) = TestNodeBuilder::new()
+        .with_account_code(registry, "0x6020355f355500")
+        .with_account_code(broken_token, broken_token_runtime)
+        .build()
+        .await?;
+    let node = nodes.pop().unwrap();
+    let genesis = super::helpers::canonical_snapshot(&node)?;
+
+    // Inject a valid Call-mode MorphTx (`fee_token_id = 1`) from account 1 (moderate priority fee).
+    let signer1 = wallet_at_index(1, wallet.chain_id);
+    let morph_tx = MorphTxBuilder::new(wallet.chain_id, signer1, 0)
+        .with_v0_token_fee(TEST_TOKEN_ID)
+        .with_to(Address::with_last_byte(0x77))
+        .with_fees(5_000_000_000, 1_000_000_000)
+        .build_signed()?;
+    let morph_tx_hash = node.rpc.inject_tx(morph_tx).await?;
+    super::helpers::wait_until_pooled(&node, morph_tx_hash).await?;
+
+    let mut point_to_broken_calldata = Vec::with_capacity(64);
+    point_to_broken_calldata.extend_from_slice(token_addr_slot.as_slice());
+    point_to_broken_calldata.extend_from_slice(&broken_token_word);
+
+    // 1. Supplied L1 message mutates `L2TokenRegistry` mid-block so `MorphTx` hits
+    //    `TokenTransferFailed` in-block, while still valid on clean Genesis parent.
+    let l1_mutator = L1MessageBuilder::new(0)
+        .with_sender(Address::with_last_byte(0xaa))
+        .with_target(registry)
+        .with_data(point_to_broken_calldata.clone())
+        .with_gas_limit(100_000)
+        .build_encoded();
+    let l1_candidate = super::helpers::assemble_l2_block_v2(
+        &node,
+        AssembleL2BlockV2Params {
+            parent_hash: genesis.hash,
+            transactions: vec![l1_mutator],
+            timestamp: Some(1),
+        },
+    )
+    .await?;
+    assert_eq!(
+        l1_candidate.transactions.len(),
+        1,
+        "only the supplied L1 message should execute; MorphTx fails in-block"
+    );
+    assert!(
+        node.inner.pool.contains(&morph_tx_hash),
+        "supplied L1 message state mutation must NOT evict MorphTx valid on clean parent"
+    );
+
+    // 2. Higher-priority pool tx from `wallet` (account 0) mutates `L2TokenRegistry` mid-block.
+    let high_prio_mutator = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
+        .with_v1_eth_fee()
+        .with_to(registry)
+        .with_data(point_to_broken_calldata)
+        .with_fees(50_000_000_000, 50_000_000_000)
+        .with_gas_limit(100_000)
+        .build_signed()?;
+    let mutator_hash = node.rpc.inject_tx(high_prio_mutator).await?;
+    super::helpers::wait_until_pooled(&node, mutator_hash).await?;
+
+    let pool_candidate = super::helpers::assemble_l2_block_v2(
+        &node,
+        AssembleL2BlockV2Params {
+            parent_hash: genesis.hash,
+            transactions: vec![],
+            timestamp: Some(2),
+        },
+    )
+    .await?;
+    assert_eq!(
+        pool_candidate.transactions.len(),
+        1,
+        "only the high-priority mutator tx should execute"
+    );
+    assert!(
+        node.inner.pool.contains(&morph_tx_hash),
+        "in-block state mutation by another sender's pool tx must NOT evict MorphTx valid on clean parent"
+    );
+
+    // 3. Once `pool_candidate` IS imported as canonical Block 1, `TEST_TOKEN_ID` now fails
+    //    `TokenTransferFailed` on the clean canonical parent itself, so assembling Block 2
+    //    on Block 1 MUST evict `morph_tx_hash` from the global pool.
+    super::helpers::import_l2_block(&node, pool_candidate.clone()).await?;
+    super::helpers::wait_until_evicted(&node, mutator_hash).await?;
+
+    let deadline = tokio::time::Instant::now() + super::helpers::LOCAL_POLL_BUDGET;
+    while node.inner.pool.block_info().last_seen_block_hash != pool_candidate.hash {
+        assert!(tokio::time::Instant::now() < deadline);
+        tokio::time::sleep(super::helpers::POLL_INTERVAL).await;
+    }
+
+    let block2 = super::helpers::assemble_l2_block_v2(
+        &node,
+        AssembleL2BlockV2Params {
+            parent_hash: pool_candidate.hash,
+            transactions: vec![],
+            timestamp: Some(3),
+        },
+    )
+    .await?;
+    assert!(block2.transactions.is_empty());
+    assert!(
+        !node.inner.pool.contains(&morph_tx_hash),
+        "genuinely broken MorphTx on clean canonical head MUST be evicted"
+    );
+
+    Ok(())
+}
