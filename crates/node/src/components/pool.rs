@@ -343,6 +343,150 @@ mod tests {
             .expect("tx between 30M genesis and ramped tip must be admitted before maintenance");
         assert_eq!(restarted_pool.pending_transactions().len(), 1);
 
+        // Also verify disk-backed `backup_local_transactions_task` journal replay (which
+        // `spawn_maintenance_tasks` spawns *before* `maintain_transaction_pool_future`):
+        // - Unpatched `PoolConfig::default()` silently drops a >30M local tx and deletes the
+        //   journal file.
+        // - `configure_initial_pool_config` replays and admits both a >30M local tx and a
+        //   calldata-heavy local tx below EIP-7623 floor gas before maintenance ever runs.
+        use reth_transaction_pool::{
+            TransactionOrigin,
+            maintain::{LocalTransactionBackupConfig, TxBackup, backup_local_transactions_task},
+        };
+
+        let make_backup_rlp = |nonce: u64, gas_limit: u64, input: Bytes| -> eyre::Result<Bytes> {
+            let tx = TxEip1559 {
+                chain_id: wallet.chain_id,
+                nonce,
+                gas_limit,
+                max_fee_per_gas: 20_000_000_000u128,
+                max_priority_fee_per_gas: 1_000_000_000u128,
+                to: TxKind::Call(Address::with_last_byte(0x42)),
+                value: U256::ZERO,
+                access_list: Default::default(),
+                input,
+            };
+            let sig = wallet
+                .inner
+                .sign_hash_sync(&tx.signature_hash())
+                .map_err(|e| eyre::eyre!("{e}"))?;
+            Ok(MorphTxEnvelope::Eip1559(tx.into_signed(sig))
+                .encoded_2718()
+                .into())
+        };
+
+        let backup_entries_json = serde_json::to_vec(&vec![
+            TxBackup {
+                rlp: make_backup_rlp(0, tx_gas, Bytes::new())?,
+                origin: TransactionOrigin::Local,
+            },
+            TxBackup {
+                rlp: make_backup_rlp(1, 40_000, Bytes::from(vec![0xab; 1_024]))?,
+                origin: TransactionOrigin::Local,
+            },
+        ])?;
+
+        // 1. Control: unpatched `PoolConfig::default()` drops nonce 0 (>30M) during journal
+        //    replay and deletes the backup file!
+        let temp_dir = tempfile::tempdir()?;
+        let unpatched_backup_path = temp_dir.path().join("unpatched_txs.json");
+        std::fs::write(&unpatched_backup_path, &backup_entries_json)?;
+        let unpatched_evm = MorphEvmConfig::new(
+            node.inner.provider.chain_spec(),
+            morph_evm::MorphEvmFactory::default(),
+        );
+        let unpatched_blob_store = InMemoryBlobStore::default();
+        let unpatched_validator = TransactionValidationTaskExecutor::eth_builder(
+            node.inner.provider.clone(),
+            unpatched_evm,
+        )
+        .set_block_gas_limit(initial_gas_limit)
+        .with_custom_tx_type(morph_primitives::MORPH_TX_TYPE_ID)
+        .disable_balance_check()
+        .no_eip4844()
+        .build_with_tasks::<MorphPooledTransaction, _>(
+            node.inner.task_executor.clone(),
+            unpatched_blob_store.clone(),
+        )
+        .map(MorphTransactionValidator::new);
+        let unpatched_pool = Pool::new(
+            unpatched_validator,
+            CoinbaseTipOrdering::default(),
+            unpatched_blob_store,
+            PoolConfig::default(),
+        );
+        let unpatched_rt = reth_tasks::Runtime::test();
+        let unpatched_pool_for_task = unpatched_pool.clone();
+        let unpatched_cfg =
+            LocalTransactionBackupConfig::with_local_txs_backup(unpatched_backup_path.clone());
+        unpatched_rt.spawn_critical_with_graceful_shutdown_signal("unpatched-backup", |shutdown| {
+            backup_local_transactions_task(shutdown, unpatched_pool_for_task, unpatched_cfg)
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while unpatched_backup_path.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        assert!(
+            unpatched_pool.pending_transactions().is_empty(),
+            "unpatched PoolConfig::default() drops >30M backed-up tx (and strands nonce 1)"
+        );
+        unpatched_rt.graceful_shutdown();
+
+        // 2. Patched `configure_initial_pool_config`: replays and admits BOTH local txs into
+        //    pending immediately before `maintain_transaction_pool_future` ever runs!
+        let patched_backup_path = temp_dir.path().join("patched_txs.json");
+        std::fs::write(&patched_backup_path, &backup_entries_json)?;
+        let (patched_pool_config, patched_gas_limit) = configure_initial_pool_config(
+            PoolConfig::default(),
+            &node.inner.provider,
+            genesis_gas_limit,
+        );
+        let patched_evm = MorphEvmConfig::new(
+            node.inner.provider.chain_spec(),
+            morph_evm::MorphEvmFactory::default(),
+        );
+        let patched_blob_store = InMemoryBlobStore::default();
+        let patched_validator = TransactionValidationTaskExecutor::eth_builder(
+            node.inner.provider.clone(),
+            patched_evm,
+        )
+        .set_block_gas_limit(patched_gas_limit)
+        .with_custom_tx_type(morph_primitives::MORPH_TX_TYPE_ID)
+        .disable_balance_check()
+        .no_eip4844()
+        .build_with_tasks::<MorphPooledTransaction, _>(
+            node.inner.task_executor.clone(),
+            patched_blob_store.clone(),
+        )
+        .map(MorphTransactionValidator::new);
+        let patched_pool = Pool::new(
+            patched_validator,
+            CoinbaseTipOrdering::default(),
+            patched_blob_store,
+            patched_pool_config,
+        );
+        let patched_rt = reth_tasks::Runtime::test();
+        let patched_pool_for_task = patched_pool.clone();
+        let patched_cfg =
+            LocalTransactionBackupConfig::with_local_txs_backup(patched_backup_path.clone());
+        patched_rt.spawn_critical_with_graceful_shutdown_signal("patched-backup", |shutdown| {
+            backup_local_transactions_task(shutdown, patched_pool_for_task, patched_cfg)
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while patched_backup_path.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        assert_eq!(
+            patched_pool.pending_transactions().len(),
+            2,
+            "both >30M and calldata-heavy local txs must be replayed into pending before maintenance"
+        );
+        patched_rt.graceful_shutdown();
+
         Ok(())
     }
 }

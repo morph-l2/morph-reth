@@ -42,6 +42,7 @@ use reth_transaction_pool::{
     EthPoolTransaction, EthTransactionValidator, PoolTransaction, TransactionOrigin,
     TransactionValidationOutcome, TransactionValidator,
     error::{Eip7702PoolTransactionError, InvalidPoolTransactionError},
+    validate::StatelessValidationFn,
 };
 use std::sync::Arc;
 
@@ -51,7 +52,8 @@ use std::sync::Arc;
 /// reth's `EthTransactionValidator` uses — so it stays pinned to the EIP-170
 /// code-size base instead of a hand-copied literal. Enforced unconditionally at
 /// the txpool layer because Morph has been post-Shanghai since genesis; see
-/// `validate_one_with_state` for why we can't rely on reth's Shanghai-gated check.
+/// `MorphTransactionValidator::validate_stateless` for why we can't rely on
+/// reth's Shanghai-gated check.
 const MAX_INITCODE_SIZE: usize = reth_revm::revm::primitives::eip3860::MAX_INITCODE_SIZE;
 
 /// A complete set of fee-validation inputs for one block.
@@ -210,7 +212,6 @@ impl std::fmt::Debug for MorphValidationState {
 /// When using MorphTx, the inner `EthTransactionValidator` should have balance
 /// checking disabled via `disable_balance_check()`, since MorphTx users may have
 /// zero ETH balance but sufficient ERC20 tokens for gas payment.
-#[derive(Debug)]
 pub struct MorphTransactionValidator<Client, Tx, Evm = morph_evm::MorphEvmConfig> {
     /// The type that performs the actual validation.
     inner: EthTransactionValidator<Client, Tx, Evm>,
@@ -218,6 +219,26 @@ pub struct MorphTransactionValidator<Client, Tx, Evm = morph_evm::MorphEvmConfig
     block_info: Arc<MorphL1BlockInfo>,
     /// Maximum gas limit for individual transactions (`--txpool.max-tx-gas`).
     max_tx_gas_limit: Option<u64>,
+    /// Whether `inner` registered `MORPH_TX_TYPE_ID` (`0x7F`) via `with_custom_tx_type`.
+    morph_tx_enabled: bool,
+    /// Optional additional stateless validation check applied at the end of
+    /// [`Self::validate_stateless`].
+    additional_stateless_validation: Option<StatelessValidationFn<Tx>>,
+}
+
+impl<Client, Tx, Evm> std::fmt::Debug for MorphTransactionValidator<Client, Tx, Evm> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MorphTransactionValidator")
+            .field("inner", &self.inner)
+            .field("block_info", &self.block_info)
+            .field("max_tx_gas_limit", &self.max_tx_gas_limit)
+            .field("morph_tx_enabled", &self.morph_tx_enabled)
+            .field(
+                "additional_stateless_validation",
+                &self.additional_stateless_validation.as_ref().map(|_| "..."),
+            )
+            .finish()
+    }
 }
 
 impl<Client, Tx, Evm> MorphTransactionValidator<Client, Tx, Evm> {
@@ -230,6 +251,37 @@ impl<Client, Tx, Evm> MorphTransactionValidator<Client, Tx, Evm> {
     /// Returns the configured maximum gas limit for individual transactions.
     pub const fn max_tx_gas_limit(&self) -> Option<u64> {
         self.max_tx_gas_limit
+    }
+
+    /// Sets an additional stateless validation check applied at the end of
+    /// [`Self::validate_stateless`].
+    pub fn set_additional_stateless_validation<F>(&mut self, f: F)
+    where
+        F: Fn(TransactionOrigin, &Tx) -> Result<(), InvalidPoolTransactionError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.set_additional_stateless_validation_fn(Arc::new(f));
+    }
+
+    /// Sets the additional stateless validation check from an already shared
+    /// [`StatelessValidationFn`].
+    pub fn set_additional_stateless_validation_fn(&mut self, f: StatelessValidationFn<Tx>) {
+        self.inner
+            .set_additional_stateless_validation_fn(Arc::clone(&f));
+        self.additional_stateless_validation = Some(f);
+    }
+
+    /// Sets or clears the additional stateless validation check from an optional
+    /// [`StatelessValidationFn`].
+    pub fn set_additional_stateless_validation_fn_opt(
+        &mut self,
+        f: Option<StatelessValidationFn<Tx>>,
+    ) {
+        self.inner
+            .set_additional_stateless_validation_fn_opt(f.clone());
+        self.additional_stateless_validation = f;
     }
 
     /// Returns the configured chain spec.
@@ -262,6 +314,41 @@ fn inner_max_tx_gas_limit<Client, Tx, Evm>(
     let rest = debug.split("max_tx_gas_limit: Some(").nth(1)?;
     let digits = rest.split(')').next()?;
     digits.parse().ok()
+}
+
+/// Checks whether `inner` allows `MORPH_TX_TYPE_ID` (`0x7F`) in `other_tx_types` by
+/// probing `EthTransactionValidator::validate_stateless` once at construction time
+/// with a `nonce == u64::MAX` `TxMorph`.
+///
+/// Upstream `validate_stateless` checks `other_tx_types` first (returning
+/// `TxTypeNotSupported` when unregistered) and EIP-2681 (`nonce == u64::MAX` ->
+/// `Eip2681`) immediately second — without touching any metrics or state.
+fn inner_morph_tx_enabled<Client, Tx, Evm>(inner: &EthTransactionValidator<Client, Tx, Evm>) -> bool
+where
+    Client: ChainSpecProvider<ChainSpec: MorphHardforks> + StateProviderFactory,
+    Tx: EthPoolTransaction<Consensus = MorphTxEnvelope>,
+    Evm: ConfigureEvm,
+{
+    let probe_tx = morph_primitives::TxMorph {
+        nonce: u64::MAX,
+        ..Default::default()
+    };
+    let sig = alloy_primitives::Signature::new(U256::ZERO, U256::ZERO, false);
+    let envelope = MorphTxEnvelope::Morph(alloy_consensus::Signed::new_unchecked(
+        probe_tx,
+        sig,
+        B256::ZERO,
+    ));
+    let recovered = reth_primitives_traits::Recovered::new_unchecked(envelope, Address::ZERO);
+    let Ok(pooled) = Tx::try_from_consensus(recovered) else {
+        return false;
+    };
+    !matches!(
+        inner.validate_stateless(TransactionOrigin::External, &pooled),
+        Err(InvalidPoolTransactionError::Consensus(
+            InvalidTransactionError::TxTypeNotSupported
+        ))
+    )
 }
 
 fn insufficient_funds_outcome<Tx: PoolTransaction>(
@@ -310,10 +397,13 @@ where
         block_info: MorphL1BlockInfo,
     ) -> Self {
         let max_tx_gas_limit = inner_max_tx_gas_limit(&inner);
+        let morph_tx_enabled = inner_morph_tx_enabled(&inner);
         Self {
             inner,
             block_info: Arc::new(block_info),
             max_tx_gas_limit,
+            morph_tx_enabled,
+            additional_stateless_validation: None,
         }
     }
 
@@ -359,7 +449,7 @@ where
         if let Some(ref head) = cached_head {
             let matches_tip = canonical_tip
                 .as_ref()
-                .is_none_or(|tip| tip.best_hash == head.hash);
+                .is_none_or(|tip| tip.best_hash.is_zero() || tip.best_hash == head.hash);
             if matches_tip {
                 match self.client().state_by_block_hash(head.hash) {
                     Ok(provider) => {
@@ -486,29 +576,6 @@ where
                 transaction,
                 InvalidTransactionError::TxTypeNotSupported.into(),
             );
-        }
-
-        // EIP-3860: enforce max initcode size on contract-creation transactions.
-        //
-        // Morph has been post-Shanghai since genesis (morph-geth's
-        // `shanghaiBlock = 0` / `IsShanghai(num)`), so this check must always
-        // fire. We can't reuse reth's `EthTransactionValidator` Shanghai gating
-        // because morph-mainnet/hoodi genesis uses the non-standard
-        // `shanghaiBlock` field (inherited from scroll-tech), which alloy's
-        // `Genesis` parser ignores in favour of `shanghaiTime`. Force-activating
-        // Shanghai/Cancun in the chainspec would also flip
-        // `is_shanghai_active_at_timestamp` for `EthStorage::read_block_bodies`,
-        // making body.withdrawals leak into RPC responses and diverging from
-        // morph-geth, which has no withdrawals slot. Enforcing the bound here
-        // keeps the chainspec untouched and the RPC output bit-identical to
-        // morph-geth.
-        //
-        // Placed after the L1-message / EIP-7702 / MorphTx type gates so a
-        // transaction rejected purely on its type still surfaces that type error
-        // (matching morph-geth), and before the inner validator so we skip its
-        // state lookups for oversized payloads.
-        if let Err(err) = transaction.ensure_max_init_code_size(MAX_INITCODE_SIZE) {
-            return TransactionValidationOutcome::Invalid(transaction, err);
         }
 
         if let Err(err) = self.validate_stateless(origin, &transaction, &head.evm_env.cfg_env) {
@@ -675,11 +742,8 @@ where
             EIP7702_TX_TYPE_ID if !self.inner.eip7702() => {
                 return Err(InvalidTransactionError::Eip7702Disabled.into());
             }
-            LEGACY_TX_TYPE_ID
-            | EIP2930_TX_TYPE_ID
-            | EIP1559_TX_TYPE_ID
-            | EIP7702_TX_TYPE_ID
-            | morph_primitives::MORPH_TX_TYPE_ID => {}
+            LEGACY_TX_TYPE_ID | EIP2930_TX_TYPE_ID | EIP1559_TX_TYPE_ID | EIP7702_TX_TYPE_ID => {}
+            morph_primitives::MORPH_TX_TYPE_ID if self.morph_tx_enabled => {}
             _ => {
                 return Err(InvalidTransactionError::TxTypeNotSupported.into());
             }
@@ -700,8 +764,15 @@ where
             });
         }
 
-        // Respect any stricter `cfg_env` initcode cap in addition to `MAX_INITCODE_SIZE`.
-        transaction.ensure_max_init_code_size(cfg_env.max_initcode_size())?;
+        // EIP-3860: enforce max initcode size on contract-creation transactions.
+        //
+        // Morph has been post-Shanghai since genesis (`shanghaiBlock = 0`), whereas
+        // morph-mainnet/hoodi genesis lacks `shanghaiTime`, leaving `fork_tracker.shanghai`
+        // false pre-Viridian. Placed right after `tx_type`, `Eip2681`, and `OversizedData`
+        // to match upstream `EthTransactionValidator::validate_stateless` error precedence
+        // while still running unconditionally before any stateful DB lookups.
+        transaction
+            .ensure_max_init_code_size(MAX_INITCODE_SIZE.min(cfg_env.max_initcode_size()))?;
 
         // Enforce block gas limit and optional per-transaction gas limit (`--txpool.max-tx-gas`).
         let transaction_gas_limit = transaction.gas_limit();
@@ -792,6 +863,10 @@ where
             return Err(InvalidTransactionError::GasLimitTooHigh.into());
         }
 
+        if let Some(check) = &self.additional_stateless_validation {
+            check(origin, transaction)?;
+        }
+
         Ok(())
     }
 }
@@ -830,13 +905,24 @@ where
         // Compute the new L1/EVM validation state outside the write lock, then publish
         // `self.inner` and `self.block_info.head` together under the write lock so a
         // concurrent `current_validation_state` fallback cannot race and downgrade
-        // `self.inner` to an older block.
+        // `self.inner` or `self.block_info.head` to an older block.
         let refreshed = validation_state_for_header(
             self.client(),
             self.inner.evm_config(),
             new_tip_block.header(),
         );
         let mut guard = self.block_info.head.write();
+        if guard
+            .as_ref()
+            .is_some_and(|current| current.number > new_tip_block.number())
+            && self.client().chain_info().is_ok_and(|tip| {
+                !tip.best_hash.is_zero()
+                    && tip.best_hash != new_tip_block.hash()
+                    && tip.best_number > new_tip_block.number()
+            })
+        {
+            return;
+        }
         self.inner.on_new_head_block(new_tip_block);
         match refreshed {
             Ok(state) => *guard = Some(state.head),
@@ -2023,6 +2109,7 @@ mod tests {
     struct PrunableMockProvider {
         inner: MockEthProvider<MorphPrimitives, MorphChainSpec>,
         pruned_hashes: Arc<parking_lot::Mutex<std::collections::HashSet<B256>>>,
+        override_chain_info: Arc<parking_lot::Mutex<Option<reth_chainspec::ChainInfo>>>,
     }
 
     impl PrunableMockProvider {
@@ -2030,11 +2117,16 @@ mod tests {
             Self {
                 inner,
                 pruned_hashes: Arc::new(parking_lot::Mutex::new(Default::default())),
+                override_chain_info: Arc::new(parking_lot::Mutex::new(None)),
             }
         }
 
         fn prune_hash(&self, hash: B256) {
             self.pruned_hashes.lock().insert(hash);
+        }
+
+        fn set_chain_info(&self, info: Option<reth_chainspec::ChainInfo>) {
+            *self.override_chain_info.lock() = info;
         }
     }
 
@@ -2062,6 +2154,9 @@ mod tests {
 
     impl reth_storage_api::BlockNumReader for PrunableMockProvider {
         fn chain_info(&self) -> reth_provider::ProviderResult<reth_chainspec::ChainInfo> {
+            if let Some(info) = *self.override_chain_info.lock() {
+                return Ok(info);
+            }
             self.inner.chain_info()
         }
 
@@ -2615,6 +2710,13 @@ mod tests {
                 },
             );
             if prune_old_head {
+                // Keep `chain_info()` reporting `header1` so `matches_tip` is `true` and
+                // `current_validation_state` must recover specifically from the failed
+                // `state_by_block_hash(header1)` lookup via `latest_header()`.
+                client.set_chain_info(Some(reth_chainspec::ChainInfo {
+                    best_hash: header1.hash_slow(),
+                    best_number: header1.number(),
+                }));
                 client.prune_hash(header1.hash_slow());
             }
 
@@ -3076,5 +3178,322 @@ mod tests {
                 InvalidPoolTransactionError::Consensus(InvalidTransactionError::GasLimitTooHigh)
             )
         ));
+    }
+
+    /// Regression test:
+    /// 1. `MorphTransactionValidator` built over an inner validator WITHOUT
+    ///    `.with_custom_tx_type(MORPH_TX_TYPE_ID)` must reject `MorphTx` (`0x7F`) with
+    ///    `TxTypeNotSupported` even after Emerald.
+    /// 2. Oversized initcode (`CREATE` > `MAX_INITCODE_SIZE`) must NOT mask earlier
+    ///    stateless errors (`Eip1559Disabled`, `TxTypeNotSupported`, `Eip2681`, `OversizedData`).
+    /// 3. `set_additional_stateless_validation` on `MorphTransactionValidator` is invoked.
+    #[test]
+    fn stateless_validation_respects_morph_tx_registration_error_precedence_and_hooks() {
+        let signer = address!("0000000000000000000000000000000000000001");
+        let client = new_mock_provider();
+        let header = morph_primitives::MorphHeader::from(alloy_consensus::Header {
+            number: 1,
+            timestamp: 1_793_772_000, // post-Celadon (Emerald active)
+            gas_limit: 30_000_000,
+            base_fee_per_gas: Some(10),
+            ..Default::default()
+        });
+        client.add_block(
+            header.hash_slow(),
+            morph_primitives::Block {
+                header,
+                body: Default::default(),
+            },
+        );
+        client.add_account(signer, ExtendedAccount::new(0, U256::from(10u128.pow(18))));
+
+        // Inner validator WITHOUT `.with_custom_tx_type(MORPH_TX_TYPE_ID)` and WITH `.no_eip1559()`
+        let mut validator = MorphTransactionValidator::new(
+            EthTransactionValidatorBuilder::new(
+                client,
+                MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone()),
+            )
+            .no_eip1559()
+            .with_max_tx_input_bytes(60_000)
+            .disable_balance_check()
+            .build::<crate::MorphPooledTransaction, _>(InMemoryBlobStore::default()),
+        );
+
+        // 1. Unregistered MorphTx at post-Emerald head -> TxTypeNotSupported (and even with
+        //    oversized initcode, TxTypeNotSupported still wins over CreateInitCodeSizeLimit).
+        let morph_create = TxMorph {
+            chain_id: 2818,
+            nonce: 0,
+            gas_limit: 10_000_000,
+            max_fee_per_gas: 100,
+            max_priority_fee_per_gas: 10,
+            to: TxKind::Create,
+            value: U256::ZERO,
+            input: Bytes::from(vec![0u8; MAX_INITCODE_SIZE + 1]),
+            ..Default::default()
+        };
+        let morph_rec = Recovered::new_unchecked(
+            MorphTxEnvelope::Morph(Signed::new_unhashed(
+                morph_create,
+                Signature::test_signature(),
+            )),
+            signer,
+        );
+        let morph_len = morph_rec.encode_2718_len();
+        assert!(matches!(
+            validator.validate_one(
+                TransactionOrigin::External,
+                crate::MorphPooledTransaction::new(morph_rec, morph_len)
+            ),
+            TransactionValidationOutcome::Invalid(
+                _,
+                InvalidPoolTransactionError::Consensus(InvalidTransactionError::TxTypeNotSupported)
+            )
+        ));
+
+        // 2a. Disabled EIP-1559 + oversized initcode -> Eip1559Disabled wins over CreateInitCodeSizeLimit.
+        let eip1559_create = TxEip1559 {
+            chain_id: 2818,
+            nonce: 0,
+            gas_limit: 10_000_000,
+            max_fee_per_gas: 100,
+            max_priority_fee_per_gas: 10,
+            to: TxKind::Create,
+            value: U256::ZERO,
+            access_list: Default::default(),
+            input: Bytes::from(vec![0u8; MAX_INITCODE_SIZE + 1]),
+        };
+        let eip1559_rec = Recovered::new_unchecked(
+            MorphTxEnvelope::Eip1559(Signed::new_unhashed(
+                eip1559_create,
+                Signature::test_signature(),
+            )),
+            signer,
+        );
+        let eip1559_len = eip1559_rec.encode_2718_len();
+        assert!(matches!(
+            validator.validate_one(
+                TransactionOrigin::External,
+                crate::MorphPooledTransaction::new(eip1559_rec, eip1559_len)
+            ),
+            TransactionValidationOutcome::Invalid(
+                _,
+                InvalidPoolTransactionError::Consensus(InvalidTransactionError::Eip1559Disabled)
+            )
+        ));
+
+        // 2b. Legacy CREATE with nonce == u64::MAX + oversized initcode -> Eip2681 wins.
+        let make_legacy_create =
+            |nonce: u64, initcode_len: usize, encoded_override: Option<usize>| {
+                let tx = TxLegacy {
+                    chain_id: Some(2818),
+                    nonce,
+                    gas_limit: 10_000_000,
+                    gas_price: 100,
+                    to: TxKind::Create,
+                    value: U256::ZERO,
+                    input: Bytes::from(vec![0u8; initcode_len]),
+                };
+                let rec = Recovered::new_unchecked(
+                    MorphTxEnvelope::Legacy(Signed::new_unhashed(tx, Signature::test_signature())),
+                    signer,
+                );
+                let len = encoded_override.unwrap_or_else(|| rec.encode_2718_len());
+                crate::MorphPooledTransaction::new(rec, len)
+            };
+        assert!(matches!(
+            validator.validate_one(
+                TransactionOrigin::External,
+                make_legacy_create(u64::MAX, MAX_INITCODE_SIZE + 1, None)
+            ),
+            TransactionValidationOutcome::Invalid(_, InvalidPoolTransactionError::Eip2681)
+        ));
+
+        // 2c. Legacy CREATE exceeding max_tx_input_bytes (60,000) + oversized initcode (49,153)
+        //     -> OversizedData wins over CreateInitCodeSizeLimit.
+        assert!(matches!(
+            validator.validate_one(
+                TransactionOrigin::External,
+                make_legacy_create(0, MAX_INITCODE_SIZE + 1, Some(60_001))
+            ),
+            TransactionValidationOutcome::Invalid(
+                _,
+                InvalidPoolTransactionError::OversizedData {
+                    size: 60_001,
+                    limit: 60_000
+                }
+            )
+        ));
+
+        // 3. Additional stateless validation hook is invoked and can reject valid txs.
+        validator.set_additional_stateless_validation(|origin, tx| {
+            if origin.is_external() && tx.gas_limit() == 21_000 {
+                return Err(InvalidPoolTransactionError::OversizedData { size: 1, limit: 0 });
+            }
+            Ok(())
+        });
+        let legacy_call = TxLegacy {
+            chain_id: Some(2818),
+            nonce: 0,
+            gas_limit: 21_000,
+            gas_price: 100,
+            to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
+            value: U256::ZERO,
+            input: Bytes::new(),
+        };
+        let call_rec = Recovered::new_unchecked(
+            MorphTxEnvelope::Legacy(Signed::new_unhashed(
+                legacy_call,
+                Signature::test_signature(),
+            )),
+            signer,
+        );
+        let call_len = call_rec.encode_2718_len();
+        assert!(matches!(
+            validator.validate_one(
+                TransactionOrigin::External,
+                crate::MorphPooledTransaction::new(call_rec, call_len)
+            ),
+            TransactionValidationOutcome::Invalid(
+                _,
+                InvalidPoolTransactionError::OversizedData { size: 1, limit: 0 }
+            )
+        ));
+    }
+
+    /// Regression test:
+    /// 1. `with_block_info` retains its published head when `chain_info()` returns
+    ///    `best_hash == B256::ZERO` (e.g. `NoopProvider` / uncheckpointed provider).
+    /// 2. A delayed `on_new_head_block(B)` notification does NOT downgrade `self.inner`
+    ///    or `self.block_info.head` after `current_validation_state` already published
+    ///    a newer canonical tip `C`.
+    #[test]
+    fn zero_best_hash_retains_published_head_and_stale_on_new_head_block_does_not_downgrade() {
+        let signer = address!("0000000000000000000000000000000000000001");
+        let base = new_mock_provider();
+        let header1 = morph_primitives::MorphHeader::from(alloy_consensus::Header {
+            number: 1,
+            timestamp: 1_767_765_600,
+            gas_limit: 30_000_000,
+            base_fee_per_gas: Some(10),
+            ..Default::default()
+        });
+        base.add_block(
+            header1.hash_slow(),
+            morph_primitives::Block {
+                header: header1.clone(),
+                body: Default::default(),
+            },
+        );
+        base.add_account(signer, ExtendedAccount::new(0, U256::from(10u128.pow(18))));
+
+        // Part 1: `with_block_info` + `best_hash == B256::ZERO` must use `block_info`'s head
+        // even if `latest_header()` would point elsewhere or be unavailable.
+        let evm_config = MorphEvmConfig::new_with_default_factory(MORPH_MAINNET.clone());
+        let zero_tip_client = PrunableMockProvider::new(base);
+        zero_tip_client.set_chain_info(Some(reth_chainspec::ChainInfo::default()));
+        let block_info = MorphL1BlockInfo::new();
+        block_info.update(
+            L1BlockInfo::default(),
+            &header1,
+            evm_config.evm_env(&header1).unwrap(),
+        );
+        let inner =
+            EthTransactionValidatorBuilder::new(zero_tip_client.clone(), evm_config.clone())
+                .set_block_gas_limit(30_000_000)
+                .disable_balance_check()
+                .build::<crate::MorphPooledTransaction, _>(InMemoryBlobStore::default());
+        // Clear headers after builder creation to simulate `NoopProvider` returning `None`
+        // from `latest_header()` while `state_by_block_hash` still works.
+        zero_tip_client.inner.headers.lock().clear();
+        let zero_tip_validator = MorphTransactionValidator::with_block_info(inner, block_info);
+
+        let make_tx = |gas_limit: u64| {
+            let tx = TxEip1559 {
+                chain_id: 2818,
+                nonce: 0,
+                gas_limit,
+                max_fee_per_gas: 100,
+                max_priority_fee_per_gas: 10,
+                to: TxKind::Call(address!("0000000000000000000000000000000000000002")),
+                value: U256::ZERO,
+                access_list: Default::default(),
+                input: Bytes::new(),
+            };
+            let rec = Recovered::new_unchecked(
+                MorphTxEnvelope::Eip1559(Signed::new_unhashed(tx, Signature::test_signature())),
+                signer,
+            );
+            let len = rec.encode_2718_len();
+            crate::MorphPooledTransaction::new(rec, len)
+        };
+        assert!(
+            matches!(
+                zero_tip_validator.validate_one(TransactionOrigin::External, make_tx(21_000)),
+                TransactionValidationOutcome::Valid { .. }
+            ),
+            "published head must be retained when chain_info().best_hash is zero"
+        );
+
+        // Part 2: Canonical tip advances A(1, 30M) -> B(2, 30M) -> C(3, 60M).
+        // `current_validation_state` refreshes to C(3, 60M), then delayed `on_new_head_block(B)`
+        // arrives and must NOT downgrade `block_info` or `inner.block_gas_limit` back to B(30M).
+        let race_base = new_mock_provider();
+        race_base.add_block(
+            header1.hash_slow(),
+            morph_primitives::Block {
+                header: header1,
+                body: Default::default(),
+            },
+        );
+        race_base.add_account(signer, ExtendedAccount::new(0, U256::from(10u128.pow(18))));
+        let validator = MorphTransactionValidator::new(
+            EthTransactionValidatorBuilder::new(race_base.clone(), evm_config)
+                .disable_balance_check()
+                .build::<crate::MorphPooledTransaction, _>(InMemoryBlobStore::default()),
+        );
+        assert_eq!(validator.block_info().number(), 1);
+
+        let header2 = morph_primitives::MorphHeader::from(alloy_consensus::Header {
+            number: 2,
+            timestamp: 1_767_765_602,
+            gas_limit: 30_000_000,
+            base_fee_per_gas: Some(10),
+            ..Default::default()
+        });
+        let block2 = morph_primitives::Block {
+            header: header2.clone(),
+            body: Default::default(),
+        };
+        race_base.add_block(header2.hash_slow(), block2.clone());
+
+        let header3 = morph_primitives::MorphHeader::from(alloy_consensus::Header {
+            number: 3,
+            timestamp: 1_767_765_604,
+            gas_limit: 60_000_000,
+            base_fee_per_gas: Some(10),
+            ..Default::default()
+        });
+        race_base.add_block(
+            header3.hash_slow(),
+            morph_primitives::Block {
+                header: header3,
+                body: Default::default(),
+            },
+        );
+
+        // Trigger demand refresh to C(3, 60M).
+        assert!(matches!(
+            validator.validate_one(TransactionOrigin::External, make_tx(45_000_000)),
+            TransactionValidationOutcome::Valid { .. }
+        ));
+        assert_eq!(validator.block_info().number(), 3);
+        assert_eq!(validator.inner.block_gas_limit(), 60_000_000);
+
+        // Delayed notification for B(2, 30M) arrives after C(3, 60M) is already published.
+        let sealed_b = SealedBlock::seal_slow(block2);
+        TransactionValidator::on_new_head_block(&validator, &sealed_b);
+        assert_eq!(validator.block_info().number(), 3);
+        assert_eq!(validator.inner.block_gas_limit(), 60_000_000);
     }
 }
