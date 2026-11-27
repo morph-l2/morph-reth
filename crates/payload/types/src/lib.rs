@@ -21,10 +21,13 @@ mod safe_l2_data;
 use alloy_consensus::BlockHeader as _;
 use alloy_eips::eip4895::Withdrawal;
 use alloy_primitives::{B256, Bytes};
-use morph_primitives::Block;
+use morph_primitives::{Block, MorphHeader};
 use reth_payload_primitives::{BuiltPayload, ExecutionPayload, PayloadTypes};
-use reth_primitives_traits::{NodePrimitives, SealedBlock};
-use std::sync::Arc;
+use reth_primitives_traits::{NodePrimitives, SealedBlock, SealedHeader};
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::{Arc, Mutex},
+};
 
 // Feature unification: Ensure reth-ethereum-primitives' serde features are enabled
 // for transitive dependencies (via reth-payload-primitives → reth-chain-state).
@@ -52,7 +55,76 @@ pub use safe_l2_data::SafeL2Data;
 #[non_exhaustive]
 pub struct MorphPayloadTypes;
 
-/// Execution data for Morph node: a sealed block plus an optional expected withdraw trie root.
+/// Consensus validation mode applied when importing a [`MorphExecutionData`] payload.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MorphPayloadValidationMode {
+    /// Standard untrusted payload validation (`VerifyHeader` + `ValidateBody` + execution).
+    #[default]
+    Full,
+    /// Locally assembled block (`AssembleL2Block` / `AssembleL2BlockV2` `verified` path in
+    /// morph-geth). Skips wall-clock `TimestampIsInFuture`, `GasLimit` 1/1024 bound, and local
+    /// DA payload byte limit.
+    LocallyBuilt,
+    /// L1-derived safe block (`NewSafeL2Block` with `safe = true` in morph-geth). Skips
+    /// `VerifyHeader` (`TimestampIsInFuture`, `TimestampIsInPast`, `GasLimit` bounds,
+    /// `BaseFeeOverLimit`) and `ValidateBody`'s local DA payload byte limit.
+    Safe,
+}
+
+/// Bounded in-memory cache of validated [`SealedHeader<MorphHeader>`] entries currently held in
+/// the engine tree, shared between the tree validator and the custom Morph L2 Engine API so
+/// unpersisted in-memory parent headers are visible before MDBX persistence.
+#[derive(Debug, Default)]
+pub struct TreeHeaderCache {
+    inner: Mutex<TreeHeaderCacheInner>,
+}
+
+#[derive(Debug, Default)]
+struct TreeHeaderCacheInner {
+    entries: HashMap<B256, SealedHeader<MorphHeader>>,
+    order: VecDeque<B256>,
+}
+
+impl TreeHeaderCache {
+    /// Maximum number of sealed headers retained in memory.
+    pub const MAX_ENTRIES: usize = 8192;
+
+    /// Creates an empty [`TreeHeaderCache`].
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records a validated sealed header in the cache.
+    pub fn insert(&self, header: SealedHeader<MorphHeader>) {
+        let hash = header.hash();
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let is_new = inner.entries.insert(hash, header).is_none();
+        if is_new {
+            inner.order.push_back(hash);
+            while inner.entries.len() > Self::MAX_ENTRIES {
+                let Some(evicted) = inner.order.pop_front() else {
+                    break;
+                };
+                inner.entries.remove(&evicted);
+            }
+        }
+    }
+
+    /// Looks up a sealed header by block hash.
+    pub fn get(&self, hash: &B256) -> Option<SealedHeader<MorphHeader>> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entries
+            .get(hash)
+            .cloned()
+    }
+}
+
+/// Execution data for Morph node: a sealed block plus optional cross-check metadata.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MorphExecutionData {
     /// The built block.
@@ -60,6 +132,12 @@ pub struct MorphExecutionData {
     /// Optional expected withdraw trie root supplied by custom engine APIs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_withdraw_trie_root: Option<B256>,
+    /// Validation mode governing consensus header/body exemptions.
+    ///
+    /// Strictly internal in-process metadata (`#[serde(skip)]`) so external JSON/serde
+    /// payloads can never deserialize `LocallyBuilt` or `Safe`.
+    #[serde(skip)]
+    pub validation_mode: MorphPayloadValidationMode,
 }
 
 impl MorphExecutionData {
@@ -68,6 +146,7 @@ impl MorphExecutionData {
         Self {
             block,
             expected_withdraw_trie_root: None,
+            validation_mode: MorphPayloadValidationMode::Full,
         }
     }
 
@@ -79,7 +158,17 @@ impl MorphExecutionData {
         Self {
             block,
             expected_withdraw_trie_root: Some(expected_withdraw_trie_root),
+            validation_mode: MorphPayloadValidationMode::Full,
         }
+    }
+
+    /// Sets the consensus validation mode for this payload.
+    pub const fn with_validation_mode(
+        mut self,
+        validation_mode: MorphPayloadValidationMode,
+    ) -> Self {
+        self.validation_mode = validation_mode;
+        self
     }
 }
 
@@ -247,5 +336,80 @@ mod tests {
         let data = MorphPayloadTypes::block_to_payload(block, None);
         assert_eq!(data.block_hash(), hash);
         assert!(data.expected_withdraw_trie_root.is_none());
+        assert_eq!(data.validation_mode, MorphPayloadValidationMode::Full);
+    }
+
+    #[test]
+    fn test_execution_data_validation_mode_builder() {
+        let block = Arc::new(create_test_block());
+        let data = MorphExecutionData::new(block);
+        assert_eq!(data.validation_mode, MorphPayloadValidationMode::Full);
+
+        let local = data
+            .clone()
+            .with_validation_mode(MorphPayloadValidationMode::LocallyBuilt);
+        assert_eq!(
+            local.validation_mode,
+            MorphPayloadValidationMode::LocallyBuilt
+        );
+
+        let safe = data.with_validation_mode(MorphPayloadValidationMode::Safe);
+        assert_eq!(safe.validation_mode, MorphPayloadValidationMode::Safe);
+    }
+
+    #[test]
+    fn test_execution_data_serde_skips_and_ignores_validation_mode() {
+        let block = Arc::new(create_test_block());
+        let safe =
+            MorphExecutionData::new(block).with_validation_mode(MorphPayloadValidationMode::Safe);
+
+        let mut json_val = serde_json::to_value(&safe).expect("serialize MorphExecutionData");
+        assert!(
+            json_val.get("validation_mode").is_none() && json_val.get("validationMode").is_none(),
+            "validation_mode must never be serialized"
+        );
+
+        json_val["validation_mode"] = serde_json::json!("Safe");
+        json_val["validationMode"] = serde_json::json!("LocallyBuilt");
+        let decoded: MorphExecutionData =
+            serde_json::from_value(json_val).expect("deserialize MorphExecutionData");
+        assert_eq!(
+            decoded.validation_mode,
+            MorphPayloadValidationMode::Full,
+            "untrusted serde input must never set LocallyBuilt or Safe"
+        );
+    }
+
+    #[test]
+    fn test_tree_header_cache_insert_get_and_bounded_eviction() {
+        let cache = TreeHeaderCache::new();
+        let mut first_hash = B256::ZERO;
+        let mut last_hash = B256::ZERO;
+
+        for number in 0..=(TreeHeaderCache::MAX_ENTRIES as u64) {
+            let header = SealedHeader::seal_slow(MorphHeader {
+                inner: Header {
+                    number,
+                    ..Default::default()
+                },
+                next_l1_msg_index: number + 1,
+            });
+            if number == 0 {
+                first_hash = header.hash();
+            }
+            if number == TreeHeaderCache::MAX_ENTRIES as u64 {
+                last_hash = header.hash();
+            }
+            cache.insert(header);
+        }
+
+        assert!(
+            cache.get(&first_hash).is_none(),
+            "oldest entry must be evicted once MAX_ENTRIES is exceeded"
+        );
+        assert_eq!(
+            cache.get(&last_hash).unwrap().next_l1_msg_index,
+            TreeHeaderCache::MAX_ENTRIES as u64 + 1
+        );
     }
 }

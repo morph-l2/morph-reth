@@ -282,6 +282,36 @@ impl TestNodeBuilder {
         self
     }
 
+    /// Override a storage slot for an account in the test genesis.
+    pub fn with_account_storage(mut self, address: Address, slot: B256, value: B256) -> Self {
+        let alloc = self
+            .genesis_json
+            .get_mut("alloc")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("test genesis alloc must be an object");
+        let address = address.to_string().to_ascii_lowercase();
+        let entry = alloc
+            .entry(address)
+            .or_insert_with(|| serde_json::json!({ "balance": "0x0" }));
+        let entry = entry
+            .as_object_mut()
+            .expect("test genesis account entry must be an object");
+        let storage = entry
+            .entry("storage".to_string())
+            .or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()
+            .expect("test genesis account storage must be an object");
+        storage.insert(slot.to_string(), serde_json::json!(value.to_string()));
+        self
+    }
+
+    /// Override `config.morph.maxTxPayloadBytesPerBlock` in the test genesis.
+    pub fn with_genesis_max_tx_payload_bytes(mut self, max_bytes: u64) -> Self {
+        self.genesis_json["config"]["morph"]["maxTxPayloadBytesPerBlock"] =
+            serde_json::json!(max_bytes);
+        self
+    }
+
     /// Set the number of nodes to start.
     ///
     /// When `num_nodes > 1`, all nodes are interconnected via a simulated P2P network.
