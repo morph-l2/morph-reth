@@ -730,3 +730,139 @@ async fn locally_built_and_safe_modes_still_reject_structural_consensus_violatio
 
     Ok(())
 }
+
+/// When a `Safe` payload arrives while its parent is not yet in the engine tree,
+/// `EngineApiTreeHandler` converts it via `convert_payload_to_block`, buffers the
+/// `SealedBlock`, and later validates it via `MorphTreeEngineValidator::validate_block`
+/// once the parent connects (`try_connect_buffered_blocks`). The `Safe` validation
+/// mode must survive buffering (and not be clobbered by `validate_block`), otherwise
+/// valid L1-derived blocks with future timestamps, >1/1024 gas-limit jumps, high base
+/// fees, or oversized DA payloads would be rejected and poison `invalid_headers`.
+#[tokio::test(flavor = "multi_thread")]
+async fn buffered_safe_payload_preserves_validation_mode_when_parent_connects() -> eyre::Result<()>
+{
+    reth_tracing::init_test_tracing();
+    use alloy_primitives::Address;
+    use alloy_rpc_types_engine::ForkchoiceState;
+    use jsonrpsee::core::client::ClientT;
+    use morph_node::test_utils::MorphTxBuilder;
+    use morph_payload_types::{MorphPayloadTypes, MorphPayloadValidationMode, SafeL2Data};
+    use morph_primitives::MorphHeader;
+    use reth_node_api::PayloadTypes;
+    use reth_primitives_traits::SealedBlock;
+    use reth_provider::BlockReader;
+
+    let (mut producer_nodes, wallet) = TestNodeBuilder::new()
+        .with_genesis_max_tx_payload_bytes(128)
+        .build()
+        .await?;
+    let producer = producer_nodes.pop().unwrap();
+    let prod_client = producer.auth_server_handle().http_client();
+
+    let (mut follower_nodes, _) = TestNodeBuilder::new()
+        .with_genesis_max_tx_payload_bytes(128)
+        .build()
+        .await?;
+    let follower = follower_nodes.pop().unwrap();
+
+    let genesis = canonical_snapshot(&producer)?;
+    assert_eq!(genesis.hash, canonical_snapshot(&follower)?.hash);
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    // Build Block 1 (normal empty block) on `producer`.
+    let safe_b1 = SafeL2Data {
+        number: 1,
+        gas_limit: 30_000_000,
+        base_fee_per_gas: Some(1_000_000),
+        timestamp: genesis.number + 1,
+        transactions: vec![],
+        parent_hash: Some(genesis.hash),
+    };
+    let h1: MorphHeader = prod_client
+        .request("engine_newSafeL2Block", (safe_b1,))
+        .await?;
+    let b1_hash = h1.hash_slow();
+    let sealed_b1 = SealedBlock::seal_slow(
+        producer
+            .inner
+            .provider
+            .block_by_number(1)?
+            .expect("block 1 in producer"),
+    );
+
+    // Build Block 2 on `producer` requiring `Safe` exemptions on every axis:
+    // - future timestamp (`now + 180`),
+    // - 2x gas_limit jump (`60_000_000`, > 1/1024 bound),
+    // - base_fee > MORPH_MAXIMUM_BASE_FEE (`15 Gwei`),
+    // - 256-byte L2 calldata (`> 128`-byte genesis DA payload limit).
+    let oversized_tx = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), 0)
+        .with_v1_eth_fee()
+        .with_to(Address::with_last_byte(0x42))
+        .with_data(vec![0xcd; 256])
+        .with_fees(25_000_000_000, 1_000_000_000)
+        .with_gas_limit(100_000)
+        .build_signed()?;
+    let safe_b2 = SafeL2Data {
+        number: 2,
+        gas_limit: 60_000_000,
+        base_fee_per_gas: Some(15_000_000_000),
+        timestamp: now + 180,
+        transactions: vec![oversized_tx],
+        parent_hash: Some(b1_hash),
+    };
+    let h2: MorphHeader = prod_client
+        .request("engine_newSafeL2Block", (safe_b2,))
+        .await?;
+    let b2_hash = h2.hash_slow();
+    let sealed_b2 = SealedBlock::seal_slow(
+        producer
+            .inner
+            .provider
+            .block_by_number(2)?
+            .expect("block 2 in producer"),
+    );
+
+    // 1. Submit Block 2 (`Safe`) to `follower` BEFORE Block 1 so `follower` buffers it via
+    //    `convert_payload_to_block` -> `self.state.buffer` (`Syncing`).
+    let follower_engine = &follower.inner.add_ons_handle.beacon_engine_handle;
+    let b2_safe_payload = MorphPayloadTypes::block_to_payload(sealed_b2, None)
+        .with_validation_mode(MorphPayloadValidationMode::Safe);
+    let b2_buffered_status = follower_engine.new_payload(b2_safe_payload).await?;
+    assert!(
+        b2_buffered_status.is_syncing(),
+        "disconnected Safe block 2 must buffer as Syncing: {b2_buffered_status:?}"
+    );
+
+    // 2. Now submit Block 1 (`Full`) to `follower`: `try_connect_buffered_blocks` immediately
+    //    validates buffered Block 2 through `MorphTreeEngineValidator::validate_block`.
+    let b1_payload = MorphPayloadTypes::block_to_payload(sealed_b1, None);
+    let b1_status = follower_engine.new_payload(b1_payload).await?;
+    assert!(
+        b1_status.is_valid(),
+        "connecting parent block 1 must succeed: {b1_status:?}"
+    );
+
+    // 3. Forkchoice update to Block 2 must succeed (`Valid`), proving buffered Block 2
+    //    kept its `Safe` exemptions during `validate_block` and did not poison `invalid_headers`.
+    let fcu = follower_engine
+        .fork_choice_updated(
+            ForkchoiceState {
+                head_block_hash: b2_hash,
+                safe_block_hash: b2_hash,
+                finalized_block_hash: alloy_primitives::B256::ZERO,
+            },
+            None,
+        )
+        .await?;
+    assert!(
+        fcu.is_valid(),
+        "FCU to connected Safe block 2 must be Valid (not LinksToRejectedPayload): {fcu:?}"
+    );
+    assert_eq!(canonical_snapshot(&follower)?.hash, b2_hash);
+
+    Ok(())
+}

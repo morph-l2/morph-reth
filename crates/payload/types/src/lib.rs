@@ -56,7 +56,7 @@ pub use safe_l2_data::SafeL2Data;
 pub struct MorphPayloadTypes;
 
 /// Consensus validation mode applied when importing a [`MorphExecutionData`] payload.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MorphPayloadValidationMode {
     /// Standard untrusted payload validation (`VerifyHeader` + `ValidateBody` + execution).
     #[default]
@@ -133,7 +133,10 @@ pub struct MorphExecutionData {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_withdraw_trie_root: Option<B256>,
     /// Validation mode governing consensus header/body exemptions.
-    #[serde(default)]
+    ///
+    /// Strictly internal in-process metadata (`#[serde(skip)]`) so external JSON/serde
+    /// payloads can never deserialize `LocallyBuilt` or `Safe`.
+    #[serde(skip)]
     pub validation_mode: MorphPayloadValidationMode,
 }
 
@@ -352,6 +355,29 @@ mod tests {
 
         let safe = data.with_validation_mode(MorphPayloadValidationMode::Safe);
         assert_eq!(safe.validation_mode, MorphPayloadValidationMode::Safe);
+    }
+
+    #[test]
+    fn test_execution_data_serde_skips_and_ignores_validation_mode() {
+        let block = Arc::new(create_test_block());
+        let safe =
+            MorphExecutionData::new(block).with_validation_mode(MorphPayloadValidationMode::Safe);
+
+        let mut json_val = serde_json::to_value(&safe).expect("serialize MorphExecutionData");
+        assert!(
+            json_val.get("validation_mode").is_none() && json_val.get("validationMode").is_none(),
+            "validation_mode must never be serialized"
+        );
+
+        json_val["validation_mode"] = serde_json::json!("Safe");
+        json_val["validationMode"] = serde_json::json!("LocallyBuilt");
+        let decoded: MorphExecutionData =
+            serde_json::from_value(json_val).expect("deserialize MorphExecutionData");
+        assert_eq!(
+            decoded.validation_mode,
+            MorphPayloadValidationMode::Full,
+            "untrusted serde input must never set LocallyBuilt or Safe"
+        );
     }
 
     #[test]

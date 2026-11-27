@@ -1747,7 +1747,7 @@ async fn in_block_token_mutation_does_not_evict_morph_tx_valid_on_clean_parent()
     reth_tracing::init_test_tracing();
     use morph_node::test_utils::L1MessageBuilder;
     use morph_payload_types::AssembleL2BlockV2Params;
-    use reth_transaction_pool::TransactionPool;
+    use reth_transaction_pool::{TransactionPool, TransactionPoolExt};
 
     let registry = alloy_primitives::address!("5300000000000000000000000000000000000021");
     let token_addr_slot: B256 =
@@ -1851,12 +1851,40 @@ async fn in_block_token_mutation_does_not_evict_morph_tx_valid_on_clean_parent()
         tokio::time::sleep(super::helpers::POLL_INTERVAL).await;
     }
 
-    let block2 = super::helpers::assemble_l2_block_v2(
+    // 3a. Simulate the async txpool maintenance lag window right after FCU advanced the
+    //     canonical head to `pool_candidate.hash` while `pool.block_info().last_seen_block_hash`
+    //     still points at `genesis.hash`: eviction is suppressed for that lagged tick.
+    let mut lagged_info = node.inner.pool.block_info();
+    lagged_info.last_seen_block_hash = genesis.hash;
+    node.inner.pool.set_block_info(lagged_info);
+
+    let lagged_block2 = super::helpers::assemble_l2_block_v2(
         &node,
         AssembleL2BlockV2Params {
             parent_hash: pool_candidate.hash,
             transactions: vec![],
             timestamp: Some(3),
+        },
+    )
+    .await?;
+    assert!(lagged_block2.transactions.is_empty());
+    assert!(
+        node.inner.pool.contains(&morph_tx_hash),
+        "pool maintenance lag window (pool last_seen_block_hash != parent_hash) must suppress eviction"
+    );
+
+    // 3b. Once `pool.block_info().last_seen_block_hash` catches up to `pool_candidate.hash`,
+    //     the next canonical build evicts the genuinely broken MorphTx cleanly.
+    let mut synced_info = node.inner.pool.block_info();
+    synced_info.last_seen_block_hash = pool_candidate.hash;
+    node.inner.pool.set_block_info(synced_info);
+
+    let block2 = super::helpers::assemble_l2_block_v2(
+        &node,
+        AssembleL2BlockV2Params {
+            parent_hash: pool_candidate.hash,
+            transactions: vec![],
+            timestamp: Some(4),
         },
     )
     .await?;

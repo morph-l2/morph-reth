@@ -62,6 +62,23 @@ fn is_evictable_token_fee_error(error: &dyn InvalidTxError) -> bool {
     )
 }
 
+/// Returns true when `parent_hash` is still the current canonical head and the pool's
+/// `last_seen_block_hash` has not moved onto a different head.
+fn is_synchronized_canonical_parent<Pool, Client>(
+    client: &Client,
+    pool: &Pool,
+    parent_hash: B256,
+) -> bool
+where
+    Pool: TransactionPool,
+    Client: StateProviderFactory,
+{
+    let canonical_head_hash = client.block_hash_for_id(BlockId::latest()).ok().flatten();
+    let pool_seen_hash = pool.block_info().last_seen_block_hash;
+    canonical_head_hash == Some(parent_hash)
+        && (pool_seen_hash.is_zero() || pool_seen_hash == parent_hash)
+}
+
 /// Validates MorphTx (0x7F) hardfork activation gates and structural field rules against
 /// the target block timestamp, matching `MorphConsensus::validate_block_pre_execution`.
 fn validate_morph_tx_for_block(
@@ -254,14 +271,8 @@ where
         // AND the pool has not moved onto a different head: a non-canonical parent (e.g.,
         // `assembleL2BlockV2` rebuilding on an older block before a token was activated)
         // must never remove transactions that are valid on the canonical chain.
-        let canonical_head_hash = self
-            .client
-            .block_hash_for_id(BlockId::latest())
-            .ok()
-            .flatten();
-        let pool_seen_hash = self.pool.block_info().last_seen_block_hash;
-        let can_evict_from_pool = canonical_head_hash == Some(parent_hash)
-            && (pool_seen_hash.is_zero() || pool_seen_hash == parent_hash);
+        let can_evict_from_pool =
+            is_synchronized_canonical_parent(&self.client, &self.pool, parent_hash);
 
         let ctx = MorphPayloadBuilderCtx {
             evm_config: self.evm_config.clone(),
@@ -299,6 +310,7 @@ where
         build_payload_inner(
             cached_reads.as_db_mut(state),
             state_provider.as_ref(),
+            &self.client,
             &self.pool,
             ctx,
             best,
@@ -641,7 +653,7 @@ impl MorphPayloadBuilderCtx {
     /// Returns `Ok(Some(()))` if the job was cancelled or breaker triggered, `Ok(None)` otherwise.
     /// Executed transaction bytes are appended to the provided vector.
     #[expect(clippy::too_many_arguments)]
-    fn execute_pool_transactions<BestTxs, Pool>(
+    fn execute_pool_transactions<BestTxs, Client, Pool>(
         &self,
         builder: &mut impl BlockBuilder<Primitives = morph_primitives::MorphPrimitives>,
         state_provider: &(impl StateProvider + ?Sized),
@@ -649,19 +661,23 @@ impl MorphPayloadBuilderCtx {
         info: &mut ExecutionInfo,
         executed_txs: &mut Vec<Bytes>,
         best_txs: BestTxs,
+        client: &Client,
         pool: &Pool,
         breaker: &PayloadBuildingBreaker,
     ) -> Result<Option<()>, PayloadBuilderError>
     where
         BestTxs: PayloadTransactions<Transaction: PoolTransaction<Consensus = MorphTxEnvelope>>,
+        Client: StateProviderFactory,
         Pool: TransactionPool<Transaction: PoolTransaction<Consensus = MorphTxEnvelope>>,
     {
+        let parent_hash = self.parent().hash();
         self.execute_pool_transactions_with_evictor(
             builder,
             info,
             executed_txs,
             best_txs,
             breaker,
+            || is_synchronized_canonical_parent(client, pool, parent_hash),
             |tx| {
                 let Ok(evm_env) = self
                     .evm_config
@@ -694,6 +710,7 @@ impl MorphPayloadBuilderCtx {
         executed_txs: &mut Vec<Bytes>,
         mut best_txs: BestTxs,
         breaker: &PayloadBuildingBreaker,
+        mut is_still_canonical_parent: impl FnMut() -> bool,
         mut confirm_eviction_on_clean_parent: impl FnMut(&Recovered<MorphTxEnvelope>) -> bool,
         mut evict_from_pool: impl FnMut(B256),
     ) -> Result<Option<()>, PayloadBuilderError>
@@ -811,11 +828,16 @@ impl MorphPayloadBuilderCtx {
                             "skipping invalid transaction and its descendants"
                         );
                         best_txs.mark_invalid(tx.signer(), tx.nonce());
+                        // Re-check canonical/pool head alignment right before evicting so a
+                        // canonical head advance or reorg while this build job was running
+                        // cannot delete a transaction valid on the new head.
                         if self.can_evict_from_pool
                             && is_evictable_token_fee_error(error.as_ref())
                             && !info.executed_senders.contains(&tx.signer())
+                            && is_still_canonical_parent()
                             && (info.transaction_count == 0
-                                || confirm_eviction_on_clean_parent(&tx))
+                                || (confirm_eviction_on_clean_parent(&tx)
+                                    && is_still_canonical_parent()))
                         {
                             tracing::debug!(
                                 target: "payload_builder",
@@ -943,9 +965,10 @@ impl ExecutionInfo {
 }
 
 /// Builds the payload on top of the state.
-fn build_payload_inner<'a, DB, BestTxs, Pool>(
+fn build_payload_inner<'a, DB, BestTxs, Client, Pool>(
     db: DB,
     state_provider: &(impl StateProvider + ?Sized),
+    client: &Client,
     pool: &Pool,
     ctx: MorphPayloadBuilderCtx,
     best: impl FnOnce(BestTransactionsAttributes) -> BestTxs + Send + Sync + 'a,
@@ -954,6 +977,7 @@ fn build_payload_inner<'a, DB, BestTxs, Pool>(
 where
     DB: Database<Error = reth_evm::execute::ProviderError>,
     BestTxs: PayloadTransactions<Transaction: PoolTransaction<Consensus = MorphTxEnvelope>> + 'a,
+    Client: StateProviderFactory,
     Pool: TransactionPool<Transaction: PoolTransaction<Consensus = MorphTxEnvelope>>,
 {
     let build_started = Instant::now();
@@ -1043,6 +1067,7 @@ where
                 &mut info,
                 &mut executed_txs,
                 best_txs,
+                client,
                 pool,
                 &breaker,
             )?
@@ -1928,6 +1953,7 @@ mod tests {
             &mut executed_txs,
             best_txs,
             &breaker,
+            || true,
             |_| true,
             |hash| evicted.push(hash),
         )
@@ -2147,6 +2173,7 @@ mod tests {
             &mut executed_txs,
             best_txs,
             &breaker,
+            || true,
             |_| true,
             |hash| evicted.push(hash),
         )
@@ -2239,6 +2266,7 @@ mod tests {
                 marked_invalid: Vec::new(),
             },
             &breaker,
+            || panic!("live canonical recheck should not run when can_evict_from_pool is false"),
             |_| panic!("clean-parent check should not run when can_evict_from_pool is false"),
             |hash| evicted.push(hash),
         )
@@ -2286,6 +2314,7 @@ mod tests {
                 marked_invalid: Vec::new(),
             },
             &breaker,
+            || true,
             |tx| *tx.tx_hash() == h_broken_on_parent,
             |hash| evicted.push(hash),
         )
@@ -2339,6 +2368,7 @@ mod tests {
                 marked_invalid: Vec::new(),
             },
             &breaker,
+            || true,
             |_| true,
             |hash| evicted.push(hash),
         )
@@ -2346,6 +2376,79 @@ mod tests {
         assert!(
             evicted.is_empty(),
             "sender with executed supplied L1 message in block must not be evicted"
+        );
+
+        // 4. Mid-build canonical head advance / reorg (`can_evict_from_pool == true` at build
+        //    start, but `is_still_canonical_parent` flips to `false` before or during the
+        //    clean-parent check): must suppress global pool eviction in both cases.
+        let sender_race_zero = Address::repeat_byte(0x40);
+        let (h_race_zero, tx_race_zero) = make_morph_tx(sender_race_zero, 0, 0xd1);
+        let mut outcomes = HashMap::new();
+        outcomes.insert(
+            h_race_zero,
+            Err(MorphInvalidTransaction::TokenNotRegistered(99)),
+        );
+        let mut builder = ScriptedBlockBuilder::new(outcomes);
+        let mut info = ExecutionInfo::default();
+        let mut executed_txs = Vec::new();
+        let ctx = test_ctx_with_timestamp_and_txs(1_800_000_000, vec![]);
+        let breaker = ctx.builder_config.breaker(30_000_000);
+        let mut evicted = Vec::new();
+        ctx.execute_pool_transactions_with_evictor(
+            &mut builder,
+            &mut info,
+            &mut executed_txs,
+            ScriptedPoolTxs {
+                txs: VecDeque::from([tx_race_zero]),
+                marked_invalid: Vec::new(),
+            },
+            &breaker,
+            || false,
+            |_| panic!("clean-parent check should not run once canonical head moved"),
+            |hash| evicted.push(hash),
+        )
+        .expect("pool execution should complete");
+        assert!(
+            evicted.is_empty(),
+            "canonical head advance mid-build must suppress pool eviction at transaction_count == 0"
+        );
+
+        // Also test head advancing *during* `confirm_eviction_on_clean_parent` (`transaction_count > 0`):
+        let sender_prev = Address::repeat_byte(0x41);
+        let sender_race_mid = Address::repeat_byte(0x42);
+        let (h_prev, tx_prev) = make_eth_tx(sender_prev, 0, 0xd2);
+        let (h_race_mid, tx_race_mid) = make_morph_tx(sender_race_mid, 0, 0xd3);
+        let mut outcomes = HashMap::new();
+        outcomes.insert(h_prev, Ok(21_000));
+        outcomes.insert(h_race_mid, Err(MorphInvalidTransaction::TokenNotActive(99)));
+        let mut builder = ScriptedBlockBuilder::new(outcomes);
+        let mut info = ExecutionInfo::default();
+        let mut executed_txs = Vec::new();
+        let mut canonical_checks = 0usize;
+        let mut evicted = Vec::new();
+        ctx.execute_pool_transactions_with_evictor(
+            &mut builder,
+            &mut info,
+            &mut executed_txs,
+            ScriptedPoolTxs {
+                txs: VecDeque::from([tx_prev, tx_race_mid]),
+                marked_invalid: Vec::new(),
+            },
+            &breaker,
+            || {
+                canonical_checks += 1;
+                // First check (before clean-parent EVM) sees head unchanged; second check
+                // (after clean-parent EVM) sees head moved to a newer block.
+                canonical_checks == 1
+            },
+            |_| true,
+            |hash| evicted.push(hash),
+        )
+        .expect("pool execution should complete");
+        assert_eq!(canonical_checks, 2);
+        assert!(
+            evicted.is_empty(),
+            "canonical head advance during clean-parent recheck must suppress pool eviction"
         );
     }
 
