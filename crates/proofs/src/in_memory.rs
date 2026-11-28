@@ -56,6 +56,9 @@ struct InMemoryStorageInner {
 
     /// The anchor block (initial state) of the store.
     anchor_block: Option<(u64, B256)>,
+
+    /// Block hashes by block number.
+    block_hashes: BTreeMap<u64, B256>,
 }
 
 impl InMemoryStorageInner {
@@ -575,7 +578,27 @@ impl MorphProofsStore for InMemoryProofsStorage {
         let inner = self.inner.read();
         // Find the latest block number from trie_updates
         let latest_block = inner.trie_updates.keys().max().copied();
-        Ok(latest_block.map_or(inner.earliest_block, |block| Some((block, B256::ZERO))))
+        Ok(latest_block.map_or(inner.earliest_block, |block| {
+            let hash = inner
+                .block_hashes
+                .get(&block)
+                .copied()
+                .unwrap_or(B256::ZERO);
+            Some((block, hash))
+        }))
+    }
+
+    fn get_block_hash(&self, block_number: u64) -> MorphProofsStorageResult<Option<B256>> {
+        let inner = self.inner.read();
+        if let Some(&hash) = inner.block_hashes.get(&block_number) {
+            return Ok(Some(hash));
+        }
+        if let Some((earliest_num, earliest_hash)) = inner.earliest_block
+            && earliest_num == block_number
+        {
+            return Ok(Some(earliest_hash));
+        }
+        Ok(None)
     }
 
     fn get_earliest_block_number_with_tx<'tx, 'db>(
@@ -706,6 +729,9 @@ impl MorphProofsStore for InMemoryProofsStorage {
         block_state_diff: BlockStateDiff,
     ) -> MorphProofsStorageResult<WriteCounts> {
         let mut inner = self.inner.write();
+        inner
+            .block_hashes
+            .insert(block_ref.block.number, block_ref.block.hash);
 
         Ok(inner.store_trie_updates(block_ref.block.number, block_state_diff))
     }
@@ -806,13 +832,17 @@ impl MorphProofsStore for InMemoryProofsStorage {
         }
 
         // Update earliest block pointer
-        if let Some((_, hash)) = inner.earliest_block {
-            inner.earliest_block = Some((new_earliest, hash));
+        if inner.earliest_block.is_some() {
+            inner.earliest_block = Some((new_earliest, new_earliest_block_ref.block.hash));
+            inner
+                .block_hashes
+                .insert(new_earliest, new_earliest_block_ref.block.hash);
         }
 
         // 5. Cleanup Metadata
         inner.trie_updates.retain(|block, _| *block > new_earliest);
         inner.post_states.retain(|block, _| *block > new_earliest);
+        inner.block_hashes.retain(|block, _| *block >= new_earliest);
 
         Ok(write_counts)
     }
@@ -827,6 +857,9 @@ impl MorphProofsStore for InMemoryProofsStorage {
             .retain(|block, _| *block <= unwind_upto_block_number);
         inner
             .post_states
+            .retain(|block, _| *block <= unwind_upto_block_number);
+        inner
+            .block_hashes
             .retain(|block, _| *block <= unwind_upto_block_number);
         inner
             .account_branches
@@ -860,6 +893,9 @@ impl MorphProofsStore for InMemoryProofsStorage {
             .post_states
             .retain(|block, _| *block <= latest_common_block_number);
         inner
+            .block_hashes
+            .retain(|block, _| *block <= latest_common_block_number);
+        inner
             .account_branches
             .retain(|(block, _), _| *block <= latest_common_block_number);
         inner
@@ -873,6 +909,9 @@ impl MorphProofsStore for InMemoryProofsStorage {
             .retain(|(block, _, _), _| *block <= latest_common_block_number);
 
         for (block, block_state_diff) in blocks_to_add {
+            inner
+                .block_hashes
+                .insert(block.block.number, block.block.hash);
             inner.store_trie_updates(block.block.number, block_state_diff);
         }
 
@@ -886,6 +925,7 @@ impl MorphProofsStore for InMemoryProofsStorage {
     ) -> MorphProofsStorageResult<()> {
         let mut inner = self.inner.write();
         inner.earliest_block = Some((block_number, hash));
+        inner.block_hashes.insert(block_number, hash);
         Ok(())
     }
 }

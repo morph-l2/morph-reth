@@ -9,17 +9,10 @@ use tokio::{
 use tracing::{info, warn};
 
 use crate::{
-    MorphProofsStorage, MorphProofsStore, metrics::ProofHistoryMetrics,
-    prune::MorphProofStoragePruner,
+    MorphProofsStorage, MorphProofsStore,
+    metrics::ProofHistoryMetrics,
+    prune::{DEFAULT_PRUNE_BATCH_SIZE, MorphProofStoragePruner},
 };
-
-/// Number of blocks pruned per MDBX write transaction.
-///
-/// Each batch is its own write tx, so the per-tx overhead (page allocation, freelist mgmt,
-/// fsync at commit) amortizes over this many blocks. The previous value of 200 caused tx
-/// overhead to dominate catch-up pruning runs; 2000 amortizes the fixed cost ~10x while
-/// keeping per-tx dirty-page sets and free-page reclamation lag bounded.
-const PRUNE_BATCH_SIZE: u64 = 2000;
 
 /// Periodic pruner task: constructs the pruner and runs it every interval.
 #[derive(Debug)]
@@ -41,8 +34,12 @@ where
         retention_blocks: u64,
         task_run_interval: Duration,
     ) -> Self {
-        let pruner =
-            MorphProofStoragePruner::new(provider, hash_reader, retention_blocks, PRUNE_BATCH_SIZE);
+        let pruner = MorphProofStoragePruner::new(
+            provider,
+            hash_reader,
+            retention_blocks,
+            DEFAULT_PRUNE_BATCH_SIZE,
+        );
         Self {
             pruner,
             retention_blocks,

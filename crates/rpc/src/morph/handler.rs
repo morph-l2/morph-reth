@@ -562,6 +562,7 @@ mod tests {
             block: CanonicalBlock {
                 number: 0,
                 hash,
+                parent_hash: B256::ZERO,
                 timestamp: block_timestamp,
                 transactions: Vec::new(),
             },
@@ -697,6 +698,7 @@ mod tests {
             block: CanonicalBlock {
                 number: 0,
                 hash,
+                parent_hash: B256::ZERO,
                 timestamp: 100,
                 transactions: Vec::new(),
             },
@@ -766,6 +768,7 @@ mod tests {
         let chain = GrowingTestChain::new(CanonicalBlock {
             number: 0,
             hash: indexed_hash,
+            parent_hash: B256::ZERO,
             timestamp: 100,
             transactions: Vec::new(),
         });
@@ -775,6 +778,7 @@ mod tests {
         chain.push(CanonicalBlock {
             number: 1,
             hash: head_hash,
+            parent_hash: indexed_hash,
             timestamp: 101,
             transactions: Vec::new(),
         });
@@ -808,6 +812,7 @@ mod tests {
         let chain = GrowingTestChain::new(CanonicalBlock {
             number: 0,
             hash: indexed_hash,
+            parent_hash: B256::ZERO,
             timestamp: 100,
             transactions: Vec::new(),
         });
@@ -817,6 +822,7 @@ mod tests {
         chain.push(CanonicalBlock {
             number: 1,
             hash: head_hash,
+            parent_hash: indexed_hash,
             timestamp: 101,
             transactions: Vec::new(),
         });
@@ -851,6 +857,7 @@ mod tests {
         let chain = GrowingTestChain::new(CanonicalBlock {
             number: 0,
             hash: indexed_hash,
+            parent_hash: B256::ZERO,
             timestamp: 100,
             transactions: Vec::new(),
         });
@@ -860,6 +867,7 @@ mod tests {
         chain.push(CanonicalBlock {
             number: 1,
             hash: head_hash,
+            parent_hash: indexed_hash,
             timestamp: 101,
             transactions: Vec::new(),
         });

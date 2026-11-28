@@ -90,4 +90,15 @@ tables! {
         type Key = u64; // Block number
         type Value = ChangeSet;
     }
+
+    /// Maps each block number within the proof window to its stored block hash.
+    ///
+    /// Used to verify parent/common-ancestor lineage during unwinds, replacements,
+    /// pruning, and startup reconciliation. Existing proof databases upgraded in
+    /// place create this table automatically and fall back to `ProofWindow` bounds
+    /// when a legacy block has no entry.
+    table BlockHashes {
+        type Key = u64; // Block number
+        type Value = B256; // Block hash
+    }
 }

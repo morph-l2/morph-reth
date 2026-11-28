@@ -32,7 +32,7 @@ use crate::{
         MdbxAccountCursor, MdbxBatchSession, MdbxStorageCursor, MdbxTrieCursor,
         cursor::Dup,
         models::{
-            AccountTrieHistory, BlockChangeSet, ChangeSet, HashedAccountHistory,
+            AccountTrieHistory, BlockChangeSet, BlockHashes, ChangeSet, HashedAccountHistory,
             HashedStorageHistory, HashedStorageKey, IntoKV, MaybeDeleted, StorageTrieHistory,
             StorageTrieKey, StorageValue, VersionedValue,
         },
@@ -249,7 +249,8 @@ impl MdbxProofsStorage {
             && tx.entries::<HashedAccountHistory>()? == 0
             && tx.entries::<HashedStorageHistory>()? == 0
             && tx.entries::<ProofWindow>()? == 0
-            && tx.entries::<BlockChangeSet>()? == 0)
+            && tx.entries::<BlockChangeSet>()? == 0
+            && tx.entries::<BlockHashes>()? == 0)
     }
 
     /// Runs a proof-database update and commits only after the operation succeeds.
@@ -334,6 +335,51 @@ impl MdbxProofsStorage {
         })
     }
 
+    /// Internal helper to look up the stored block hash for `block_number`.
+    ///
+    /// Falls back to `ProofWindow`'s `EarliestBlock` / `LatestBlock` hashes when `BlockHashes` has
+    /// no entry (for blocks persisted prior to the `BlockHashes` table being introduced).
+    pub(crate) fn inner_get_block_hash(
+        &self,
+        tx: &impl DbTx,
+        block_number: u64,
+    ) -> MorphProofsStorageResult<Option<B256>> {
+        if let Some(hash) = tx.get::<BlockHashes>(block_number)? {
+            return Ok(Some(hash));
+        }
+        if let Some(window) = self.inner_get_proof_window(tx)? {
+            if window.earliest.number == block_number {
+                return Ok(Some(window.earliest.hash));
+            }
+            if window.latest.number == block_number {
+                return Ok(Some(window.latest.hash));
+            }
+        }
+        Ok(None)
+    }
+
+    fn inner_put_block_hash(
+        tx: &(impl DbTxMut + DbTx),
+        block_number: u64,
+        hash: B256,
+    ) -> MorphProofsStorageResult<()> {
+        tx.put::<BlockHashes>(block_number, hash)?;
+        Ok(())
+    }
+
+    fn inner_delete_block_hashes_range(
+        tx: &(impl DbTxMut + DbTx),
+        block_range: impl RangeBounds<u64>,
+    ) -> MorphProofsStorageResult<()> {
+        let mut cursor = tx.cursor_write::<BlockHashes>()?;
+        let mut walker = cursor.walk_range(block_range)?;
+        while let Some(row) = walker.next() {
+            row?;
+            walker.delete_current()?;
+        }
+        Ok(())
+    }
+
     /// Internal helper to set earliest block number hash within an existing transaction
     fn inner_set_earliest_block_number(
         tx: &(impl DbTxMut + DbTx),
@@ -345,6 +391,7 @@ impl MdbxProofsStorage {
             ProofWindowKey::EarliestBlock,
             &BlockNumberHash::new(block_number, hash),
         )?;
+        Self::inner_put_block_hash(tx, block_number, hash)?;
         Ok(())
     }
 
@@ -517,6 +564,9 @@ impl MdbxProofsStorage {
         let walker = cs_cursor.walk_back(Some(target_block))?;
         for row in walker {
             let (block_number, cs) = row?;
+            if block_number > target_block {
+                continue;
+            }
             if block_number <= earliest {
                 break;
             }
@@ -553,11 +603,14 @@ impl MdbxProofsStorage {
 
     /// Delete history versions for `cutoff_items` that are strictly older than the provided block
     /// number. `cutoff_items` is a list of (Key, `SurvivorBlock`). Everything strictly older than
-    /// `SurvivorBlock` is deleted. Returns the number of entries deleted.
+    /// `SurvivorBlock` is deleted, as well as the survivor itself when `is_deleted` holds (such as
+    /// a `None` tombstone or a legacy `Some(StorageValue(U256::ZERO))` cleared storage slot).
+    /// Returns the number of entries deleted.
     fn prune_history_preceding<T, V>(
         &self,
         tx: &(impl DbTxMut + DbTx),
         cutoff_items: Vec<(T::Key, u64)>,
+        is_deleted: impl Fn(&Option<V>) -> bool,
     ) -> MorphProofsStorageResult<u64>
     where
         T: Table<Value = VersionedValue<V>> + DupSort<SubKey = u64>,
@@ -576,10 +629,10 @@ impl MdbxProofsStorage {
             loop {
                 if entry.block_number >= survivor_block {
                     // Reached the survivor version (or newer). Stop deleting for this key.
-                    // If the survivor is a tombstone (None), delete it too — with all older
-                    // history already gone, a tombstone at the new earliest is redundant
-                    // (it implies "does not exist").
-                    if entry.block_number == survivor_block && entry.value.0.is_none() {
+                    // If the survivor is a tombstone (None) or a legacy zeroed storage slot,
+                    // delete it too — with all older history already gone, a deletion marker at
+                    // the new earliest is redundant (it implies "does not exist").
+                    if entry.block_number == survivor_block && is_deleted(&entry.value.0) {
                         cur.delete_current()?;
                         deleted_count += 1;
                     }
@@ -707,16 +760,17 @@ impl MdbxProofsStorage {
     fn delete_history_ranged(
         &self,
         tx: &(impl DbTxMut + DbTx),
-        block_range: impl RangeBounds<u64>,
+        block_range: impl RangeBounds<u64> + Clone,
         history: HistoryDeleteBatch,
     ) -> MorphProofsStorageResult<WriteCounts> {
         let mut change_set_cursor = tx.cursor_write::<BlockChangeSet>()?;
-        let mut walker = change_set_cursor.walk_range(block_range)?;
+        let mut walker = change_set_cursor.walk_range(block_range.clone())?;
 
         while let Some(row) = walker.next() {
             row?;
             walker.delete_current()?;
         }
+        Self::inner_delete_block_hashes_range(tx, block_range)?;
 
         let counts = WriteCounts {
             account_trie_updates_written_total: history.account_trie.len() as u64,
@@ -765,14 +819,17 @@ impl MdbxProofsStorage {
 
         let mut storage_trie_keys = Vec::<StorageTrieKey>::with_capacity(storage_trie_len);
         for (hashed_address, nodes) in sorted_trie_updates.storage_tries_ref() {
-            if nodes.is_deleted && append_mode {
+            if nodes.is_deleted
+                && append_mode
+                && let Some(prev_block) = block_number.checked_sub(1)
+            {
                 // Lookback must use the active tx so it sees uncommitted writes from earlier
                 // blocks in the same batch session. Opening a fresh RO tx here would read the
                 // pre-batch committed snapshot and emit wrong tombstones for wipe blocks whose
                 // parent is staged in the same batch.
                 let mut ro = MdbxTrieCursor::<StorageTrieHistory, _>::new(
                     tx.cursor_dup_read::<StorageTrieHistory>()?,
-                    block_number - 1,
+                    prev_block,
                     Some(*hashed_address),
                 );
                 let keys = self.wipe_and_overlay(
@@ -801,11 +858,14 @@ impl MdbxProofsStorage {
 
         let mut hashed_storage_keys = Vec::<HashedStorageKey>::with_capacity(hashed_storage_len);
         for (hashed_address, storage) in sorted_post_state.storages {
-            if append_mode && storage.is_wiped() {
+            if append_mode
+                && storage.is_wiped()
+                && let Some(prev_block) = block_number.checked_sub(1)
+            {
                 // See lookback note above: must use the active tx, not a fresh RO tx.
                 let mut ro = MdbxStorageCursor::new(
                     tx.cursor_dup_read::<HashedStorageHistory>()?,
-                    block_number - 1,
+                    prev_block,
                     hashed_address,
                 );
                 let keys = self.wipe_and_overlay(
@@ -816,7 +876,7 @@ impl MdbxProofsStorage {
                     storage
                         .storage_slots_ref()
                         .iter()
-                        .map(|(slot, val)| (*slot, Some(StorageValue(*val)))),
+                        .map(|(slot, val)| (*slot, (!val.is_zero()).then_some(StorageValue(*val)))),
                 )?;
                 hashed_storage_keys.extend(keys);
                 continue;
@@ -824,10 +884,13 @@ impl MdbxProofsStorage {
             let keys = self.persist_history_batch(
                 tx,
                 block_number,
-                storage
-                    .storage_slots_ref()
-                    .iter()
-                    .map(|(key, val)| (hashed_address, *key, Some(StorageValue(*val)))),
+                storage.storage_slots_ref().iter().map(|(key, val)| {
+                    (
+                        hashed_address,
+                        *key,
+                        (!val.is_zero()).then_some(StorageValue(*val)),
+                    )
+                }),
                 append_mode,
             )?;
             hashed_storage_keys.extend(keys);
@@ -870,6 +933,9 @@ impl MdbxProofsStorage {
         // Cursor for recording all changes made in this block for all history tables
         let mut change_set_cursor = tx.new_cursor::<BlockChangeSet>()?;
         change_set_cursor.append(block_number, change_set)?;
+
+        // Record the block hash for lineage validation on unwind / replace / prune
+        Self::inner_put_block_hash(tx, block_number, block_ref.block.hash)?;
 
         // Update proof window's latest block
         Self::inner_set_latest_block_number(tx, block_number, block_ref.block.hash)?;
@@ -938,6 +1004,11 @@ impl MorphProofsStore for MdbxProofsStorage {
     fn get_latest_block_number(&self) -> MorphProofsStorageResult<Option<(u64, B256)>> {
         self.env
             .view(|tx| self.inner_get_latest_block_number_hash(tx))?
+    }
+
+    fn get_block_hash(&self, block_number: u64) -> MorphProofsStorageResult<Option<B256>> {
+        self.env
+            .view(|tx| self.inner_get_block_hash(tx, block_number))?
     }
 
     fn get_earliest_block_number_with_tx<'tx, 'db>(
@@ -1214,21 +1285,44 @@ impl MorphProofsStore for MdbxProofsStorage {
                 return Ok(WriteCounts::default());
             };
 
-            // 1. Execute Sparse Deletions and track actual deleted rows
-            let acc_deleted =
-                self.prune_history_preceding::<AccountTrieHistory, _>(tx, plan.acc_survivors)?;
+            // Verify target block hash against stored lineage before advancing `EarliestBlock`
+            // so a pruner reading another branch can never stamp a mismatched hash onto our
+            // pruned baseline state.
+            if let Some(stored_target_hash) = self.inner_get_block_hash(tx, target_block)?
+                && stored_target_hash != new_earliest_block_ref.block.hash
+            {
+                return Err(MorphProofsStorageError::BlockHashMismatch {
+                    block_number: target_block,
+                    stored_block_hash: stored_target_hash,
+                    expected_block_hash: new_earliest_block_ref.block.hash,
+                });
+            }
 
-            let st_deleted =
-                self.prune_history_preceding::<StorageTrieHistory, _>(tx, plan.storage_survivors)?;
+            // 1. Execute Sparse Deletions and track actual deleted rows
+            let acc_deleted = self.prune_history_preceding::<AccountTrieHistory, _>(
+                tx,
+                plan.acc_survivors,
+                Option::is_none,
+            )?;
+
+            let st_deleted = self.prune_history_preceding::<StorageTrieHistory, _>(
+                tx,
+                plan.storage_survivors,
+                Option::is_none,
+            )?;
 
             let ha_deleted = self.prune_history_preceding::<HashedAccountHistory, _>(
                 tx,
                 plan.hashed_acc_survivors,
+                Option::is_none,
             )?;
 
+            // Prune both explicit `None` tombstones and legacy `Some(StorageValue(U256::ZERO))`
+            // entries persisted prior to zero-value tombstoning.
             let hs_deleted = self.prune_history_preceding::<HashedStorageHistory, _>(
                 tx,
                 plan.hashed_storage_survivors,
+                |value| value.is_none() || value.is_some_and(|val| val.0.is_zero()),
             )?;
 
             let counts = WriteCounts {
@@ -1238,7 +1332,7 @@ impl MorphProofsStore for MdbxProofsStorage {
                 hashed_storages_written_total: hs_deleted,
             };
 
-            // 2. Delete ChangeSets
+            // 2. Delete ChangeSets and pruned BlockHashes strictly below `target_block`
             let range = (plan.earliest_block + 1)..=target_block;
             let mut cs_cursor = tx.cursor_write::<BlockChangeSet>()?;
             let mut walker = cs_cursor.walk_range(range)?;
@@ -1246,8 +1340,9 @@ impl MorphProofsStore for MdbxProofsStorage {
                 row?;
                 walker.delete_current()?;
             }
+            Self::inner_delete_block_hashes_range(tx, ..target_block)?;
 
-            // 3. Update Earliest Pointer
+            // 3. Update Earliest Pointer (and ensure `BlockHashes[target_block]` is recorded)
             Self::inner_set_earliest_block_number(
                 tx,
                 target_block,
@@ -1278,11 +1373,22 @@ impl MorphProofsStore for MdbxProofsStorage {
                     earliest_block_number: proof_window.earliest.number,
                 });
             }
+
+            let parent_number = to.block.number.saturating_sub(1);
+            if let Some(stored_parent_hash) = self.inner_get_block_hash(tx, parent_number)?
+                && stored_parent_hash != to.parent
+            {
+                return Err(MorphProofsStorageError::BlockHashMismatch {
+                    block_number: parent_number,
+                    stored_block_hash: stored_parent_hash,
+                    expected_block_hash: to.parent,
+                });
+            }
+
             let history_to_delete = self.collect_history_ranged(tx, to.block.number..)?;
             self.delete_history_ranged(tx, to.block.number.., history_to_delete)?;
 
-            let new_latest_block =
-                BlockNumberHash::new(to.block.number.saturating_sub(1), to.parent);
+            let new_latest_block = BlockNumberHash::new(parent_number, to.parent);
 
             // Update proof window's Latest block
             Self::inner_set_latest_block_number(
@@ -1304,11 +1410,38 @@ impl MorphProofsStore for MdbxProofsStorage {
         blocks_to_add.sort_unstable_by_key(|(bwp, _)| bwp.block.number);
 
         self.commit_update(|tx| {
-            let history_to_delete =
-                self.collect_history_ranged(tx, latest_common_block.number + 1..)?;
+            let Some(proof_window) = self.inner_get_proof_window(tx)? else {
+                return Err(MorphProofsStorageError::NoBlocksFound);
+            };
+            if latest_common_block.number < proof_window.earliest.number {
+                return Err(MorphProofsStorageError::UnwindBeyondEarliest {
+                    unwind_block_number: latest_common_block.number.saturating_add(1),
+                    earliest_block_number: proof_window.earliest.number,
+                });
+            }
+            if latest_common_block.number > proof_window.latest.number {
+                return Err(MorphProofsStorageError::MissingParentBlock {
+                    block_number: latest_common_block.number.saturating_add(1),
+                    parent_block_number: latest_common_block.number,
+                    latest_block_number: proof_window.latest.number,
+                });
+            }
+            if let Some(stored_common_hash) =
+                self.inner_get_block_hash(tx, latest_common_block.number)?
+                && stored_common_hash != latest_common_block.hash
+            {
+                return Err(MorphProofsStorageError::BlockHashMismatch {
+                    block_number: latest_common_block.number,
+                    stored_block_hash: stored_common_hash,
+                    expected_block_hash: latest_common_block.hash,
+                });
+            }
 
-            // Remove the old history
-            self.delete_history_ranged(tx, latest_common_block.number + 1.., history_to_delete)?;
+            if let Some(delete_from) = latest_common_block.number.checked_add(1) {
+                let history_to_delete = self.collect_history_ranged(tx, delete_from..)?;
+                // Remove the old history
+                self.delete_history_ranged(tx, delete_from.., history_to_delete)?;
+            }
 
             // Update the ProofWindow Latest Block to latest_common_block so we can perform
             // `store_trie_updates_append_only`.
@@ -4840,5 +4973,382 @@ mod tests {
             .expect("latest exists");
         assert_eq!(latest.1.number(), b3.block.number);
         assert_eq!(*latest.1.hash(), b3.block.hash);
+    }
+
+    #[test]
+    fn zeroed_storage_slot_is_stored_as_tombstone_and_pruned() {
+        let dir = TempDir::new().unwrap();
+        let store = MdbxProofsStorage::new(dir.path()).expect("env");
+        let b0_hash = B256::repeat_byte(0x00);
+        store.set_earliest_block_number(0, b0_hash).unwrap();
+
+        let addr = B256::repeat_byte(0xAA);
+        let slot = B256::repeat_byte(0x11);
+        let key = HashedStorageKey::new(addr, slot);
+
+        let b1 = BlockWithParent::new(b0_hash, NumHash::new(1, B256::repeat_byte(0x01)));
+        let b2 = BlockWithParent::new(b1.block.hash, NumHash::new(2, B256::repeat_byte(0x02)));
+
+        // Block 1 sets slot = 42.
+        let mut s1 = HashedStorage::default();
+        s1.storage.insert(slot, U256::from(42));
+        let mut ps1 = HashedPostState::default();
+        ps1.storages.insert(addr, s1);
+        store
+            .store_trie_updates(
+                b1,
+                BlockStateDiff {
+                    sorted_trie_updates: TrieUpdatesSorted::default(),
+                    sorted_post_state: ps1.into_sorted(),
+                },
+            )
+            .unwrap();
+
+        // Block 2 clears slot = 0.
+        let mut s2 = HashedStorage::default();
+        s2.storage.insert(slot, U256::ZERO);
+        let mut ps2 = HashedPostState::default();
+        ps2.storages.insert(addr, s2);
+        store
+            .store_trie_updates(
+                b2,
+                BlockStateDiff {
+                    sorted_trie_updates: TrieUpdatesSorted::default(),
+                    sorted_post_state: ps2.into_sorted(),
+                },
+            )
+            .unwrap();
+
+        // Raw row at block 2 must be a None tombstone, not Some(StorageValue(0)).
+        {
+            let tx = store.env.tx().unwrap();
+            let mut cur = tx.new_cursor::<HashedStorageHistory>().unwrap();
+            let vv = cur.seek_by_key_subkey(key.clone(), 2).unwrap().unwrap();
+            assert_eq!(vv.block_number, 2);
+            assert!(
+                vv.value.0.is_none(),
+                "zeroed storage slot must be stored as a None tombstone"
+            );
+        }
+
+        // Cursor reads 42 at block 1 and skips cleared slot at block 2.
+        assert_eq!(
+            store
+                .storage_hashed_cursor(addr, 1)
+                .unwrap()
+                .seek(slot)
+                .unwrap(),
+            Some((slot, U256::from(42)))
+        );
+        assert_eq!(
+            store
+                .storage_hashed_cursor(addr, 2)
+                .unwrap()
+                .seek(slot)
+                .unwrap(),
+            None
+        );
+
+        // `fetch_trie_updates` still reconstructs U256::ZERO for block 2.
+        let fetched = store.fetch_trie_updates(2).unwrap();
+        assert_eq!(
+            fetched.sorted_post_state.storages[&addr].storage_slots_ref(),
+            &[(slot, U256::ZERO)]
+        );
+
+        // Pruning through block 2 removes both block 1 and the block 2 tombstone completely.
+        store.prune_earliest_state(b2).unwrap();
+        let tx = store.env.tx().unwrap();
+        let mut cur = tx.new_cursor::<HashedStorageHistory>().unwrap();
+        assert!(
+            cur.seek_by_key_subkey(key, 0).unwrap().is_none(),
+            "cleared storage slot must be completely deleted on prune"
+        );
+    }
+
+    #[test]
+    fn wiped_storage_with_zero_overlay_tombstones_and_prunes() {
+        let dir = TempDir::new().unwrap();
+        let store = MdbxProofsStorage::new(dir.path()).expect("env");
+        let b0_hash = B256::repeat_byte(0x00);
+        store.set_earliest_block_number(0, b0_hash).unwrap();
+
+        let addr = B256::repeat_byte(0xBB);
+        let s_zeroed = B256::repeat_byte(0x01);
+        let s_recreated = B256::repeat_byte(0x02);
+
+        let b1 = BlockWithParent::new(b0_hash, NumHash::new(1, B256::repeat_byte(0x01)));
+        let b2 = BlockWithParent::new(b1.block.hash, NumHash::new(2, B256::repeat_byte(0x02)));
+
+        let mut hs1 = HashedStorage::default();
+        hs1.storage.insert(s_zeroed, U256::from(10));
+        hs1.storage.insert(s_recreated, U256::from(20));
+        let mut ps1 = HashedPostState::default();
+        ps1.storages.insert(addr, hs1);
+        store
+            .store_trie_updates(
+                b1,
+                BlockStateDiff {
+                    sorted_trie_updates: TrieUpdatesSorted::default(),
+                    sorted_post_state: ps1.into_sorted(),
+                },
+            )
+            .unwrap();
+
+        // Block 2 wipes storage while carrying explicit U256::ZERO for `s_zeroed` (as emitted by
+        // `zero_destroyed_account_storage`) and a fresh non-zero value for `s_recreated`.
+        let mut hs2 = HashedStorage::new(true);
+        hs2.storage.insert(s_zeroed, U256::ZERO);
+        hs2.storage.insert(s_recreated, U256::from(99));
+        let mut ps2 = HashedPostState::default();
+        ps2.storages.insert(addr, hs2);
+        store
+            .store_trie_updates(
+                b2,
+                BlockStateDiff {
+                    sorted_trie_updates: TrieUpdatesSorted::default(),
+                    sorted_post_state: ps2.into_sorted(),
+                },
+            )
+            .unwrap();
+
+        store.prune_earliest_state(b2).unwrap();
+
+        let tx = store.env.tx().unwrap();
+        let mut cur = tx.new_cursor::<HashedStorageHistory>().unwrap();
+        assert!(
+            cur.seek_by_key_subkey(HashedStorageKey::new(addr, s_zeroed), 0)
+                .unwrap()
+                .is_none(),
+            "zeroed slot on wiped path must be pruned"
+        );
+        let recreated = cur
+            .seek_by_key_subkey(HashedStorageKey::new(addr, s_recreated), 0)
+            .unwrap()
+            .expect("recreated slot must survive");
+        assert_eq!(recreated.block_number, 2);
+        assert_eq!(recreated.value.0, Some(StorageValue(U256::from(99))));
+    }
+
+    #[test]
+    fn prune_reclaims_legacy_some_zero_storage_rows() {
+        let dir = TempDir::new().unwrap();
+        let store = MdbxProofsStorage::new(dir.path()).expect("env");
+        let b0_hash = B256::repeat_byte(0x00);
+        store.set_earliest_block_number(0, b0_hash).unwrap();
+
+        let addr = B256::repeat_byte(0xCC);
+        let slot = B256::repeat_byte(0x33);
+        let key = HashedStorageKey::new(addr, slot);
+        let b1 = BlockWithParent::new(b0_hash, NumHash::new(1, B256::repeat_byte(0x01)));
+        let b2 = BlockWithParent::new(b1.block.hash, NumHash::new(2, B256::repeat_byte(0x02)));
+
+        // Store block 1 normally, then simulate a legacy upgraded DB that wrote block 2 as
+        // `Some(StorageValue(U256::ZERO))`.
+        let mut hs1 = HashedStorage::default();
+        hs1.storage.insert(slot, U256::from(7));
+        let mut ps1 = HashedPostState::default();
+        ps1.storages.insert(addr, hs1);
+        store
+            .store_trie_updates(
+                b1,
+                BlockStateDiff {
+                    sorted_trie_updates: TrieUpdatesSorted::default(),
+                    sorted_post_state: ps1.into_sorted(),
+                },
+            )
+            .unwrap();
+        store
+            .store_trie_updates(b2, BlockStateDiff::default())
+            .unwrap();
+        {
+            let tx = store.env.tx_mut().unwrap();
+            let mut cur = tx.cursor_dup_write::<HashedStorageHistory>().unwrap();
+            cur.append_dup(
+                key.clone(),
+                VersionedValue::new(2, MaybeDeleted(Some(StorageValue(U256::ZERO)))),
+            )
+            .unwrap();
+            let cs = ChangeSet {
+                hashed_storage_keys: vec![key.clone()],
+                ..Default::default()
+            };
+            tx.put::<BlockChangeSet>(2, cs).unwrap();
+            tx.commit().unwrap();
+        }
+
+        store.prune_earliest_state(b2).unwrap();
+
+        let tx = store.env.tx().unwrap();
+        let mut cur = tx.new_cursor::<HashedStorageHistory>().unwrap();
+        assert!(
+            cur.seek_by_key_subkey(key, 0).unwrap().is_none(),
+            "legacy Some(StorageValue(0)) survivor must be deleted on prune"
+        );
+    }
+
+    #[test]
+    fn block_hashes_and_lineage_checks_guard_unwind_replace_and_prune() {
+        let dir = TempDir::new().unwrap();
+        let store = MdbxProofsStorage::new(dir.path()).expect("env");
+        let h0 = B256::repeat_byte(0x10);
+        let b1 = BlockWithParent::new(h0, NumHash::new(1, B256::repeat_byte(0x11)));
+        let b2 = BlockWithParent::new(b1.block.hash, NumHash::new(2, B256::repeat_byte(0x12)));
+        let b3 = BlockWithParent::new(b2.block.hash, NumHash::new(3, B256::repeat_byte(0x13)));
+
+        store.set_earliest_block_number(0, h0).unwrap();
+        store
+            .store_trie_updates(b1, BlockStateDiff::default())
+            .unwrap();
+        store
+            .store_trie_updates(b2, BlockStateDiff::default())
+            .unwrap();
+        store
+            .store_trie_updates(b3, BlockStateDiff::default())
+            .unwrap();
+
+        assert_eq!(store.get_block_hash(0).unwrap(), Some(h0));
+        assert_eq!(store.get_block_hash(1).unwrap(), Some(b1.block.hash));
+        assert_eq!(store.get_block_hash(2).unwrap(), Some(b2.block.hash));
+        assert_eq!(store.get_block_hash(3).unwrap(), Some(b3.block.hash));
+
+        // 1. Unwind with wrong parent hash must fail closed and leave DB unchanged.
+        let wrong_parent = B256::repeat_byte(0xEE);
+        let err = store
+            .unwind_history(BlockWithParent::new(
+                wrong_parent,
+                NumHash::new(3, B256::repeat_byte(0xFF)),
+            ))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            MorphProofsStorageError::BlockHashMismatch {
+                block_number: 2,
+                stored_block_hash,
+                expected_block_hash,
+            } if stored_block_hash == b2.block.hash && expected_block_hash == wrong_parent
+        ));
+        assert_eq!(
+            store.get_latest_block_number().unwrap(),
+            Some((3, b3.block.hash))
+        );
+
+        // 2. Prune with mismatched target block hash must fail closed.
+        let err = store
+            .prune_earliest_state(BlockWithParent::new(
+                h0,
+                NumHash::new(1, B256::repeat_byte(0xDD)),
+            ))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            MorphProofsStorageError::BlockHashMismatch {
+                block_number: 1,
+                ..
+            }
+        ));
+        assert_eq!(store.get_earliest_block_number().unwrap(), Some((0, h0)));
+
+        // 3. Valid prune to block 1 deletes BlockHashes[0] and retains BlockHashes[1..=3].
+        store.prune_earliest_state(b1).unwrap();
+        assert_eq!(store.get_block_hash(0).unwrap(), None);
+        assert_eq!(store.get_block_hash(1).unwrap(), Some(b1.block.hash));
+
+        // 4. `replace_updates` below earliest must return UnwindBeyondEarliest.
+        let err = store
+            .replace_updates(BlockNumHash::new(0, h0), vec![])
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            MorphProofsStorageError::UnwindBeyondEarliest {
+                unwind_block_number: 1,
+                earliest_block_number: 1,
+            }
+        ));
+
+        // 5. `replace_updates` with wrong common-block hash must return BlockHashMismatch.
+        let err = store
+            .replace_updates(BlockNumHash::new(2, B256::repeat_byte(0xCC)), vec![])
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            MorphProofsStorageError::BlockHashMismatch {
+                block_number: 2,
+                ..
+            }
+        ));
+
+        // 6. `replace_updates` beyond latest must return MissingParentBlock.
+        let err = store
+            .replace_updates(BlockNumHash::new(4, B256::repeat_byte(0x44)), vec![])
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            MorphProofsStorageError::MissingParentBlock { .. }
+        ));
+
+        // 7. Valid unwind to block 3 removes BlockHashes[3] and restores LatestBlock = (2, b2).
+        store.unwind_history(b3).unwrap();
+        assert_eq!(store.get_block_hash(3).unwrap(), None);
+        assert_eq!(store.get_block_hash(2).unwrap(), Some(b2.block.hash));
+        assert_eq!(
+            store.get_latest_block_number().unwrap(),
+            Some((2, b2.block.hash))
+        );
+    }
+
+    #[test]
+    fn legacy_db_without_block_hashes_stays_backwards_compatible() {
+        let dir = TempDir::new().unwrap();
+        let store = MdbxProofsStorage::new(dir.path()).expect("env");
+        let h0 = B256::repeat_byte(0x20);
+        let b1 = BlockWithParent::new(h0, NumHash::new(1, B256::repeat_byte(0x21)));
+        let b2 = BlockWithParent::new(b1.block.hash, NumHash::new(2, B256::repeat_byte(0x22)));
+        let b3 = BlockWithParent::new(b2.block.hash, NumHash::new(3, B256::repeat_byte(0x23)));
+
+        store.set_earliest_block_number(0, h0).unwrap();
+        store
+            .store_trie_updates(b1, BlockStateDiff::default())
+            .unwrap();
+        store
+            .store_trie_updates(b2, BlockStateDiff::default())
+            .unwrap();
+        store
+            .store_trie_updates(b3, BlockStateDiff::default())
+            .unwrap();
+
+        // Wipe `BlockHashes` to simulate a v1 DB upgraded in place before `BlockHashes` existed.
+        {
+            let tx = store.env.tx_mut().unwrap();
+            MdbxProofsStorage::inner_delete_block_hashes_range(&tx, ..).unwrap();
+            tx.commit().unwrap();
+        }
+
+        // Window bounds still fall back to `ProofWindow` hashes.
+        assert_eq!(store.get_block_hash(0).unwrap(), Some(h0));
+        assert_eq!(store.get_block_hash(1).unwrap(), None);
+        assert_eq!(store.get_block_hash(3).unwrap(), Some(b3.block.hash));
+
+        // Unwinding to block 1 with wrong earliest parent hash is STILL caught via fallback.
+        let err = store
+            .unwind_history(BlockWithParent::new(
+                B256::repeat_byte(0xFF),
+                NumHash::new(1, b1.block.hash),
+            ))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            MorphProofsStorageError::BlockHashMismatch {
+                block_number: 0,
+                ..
+            }
+        ));
+
+        // Unwinding to an interior legacy block without a `BlockHashes` row remains allowed.
+        store.unwind_history(b2).unwrap();
+        assert_eq!(
+            store.get_latest_block_number().unwrap(),
+            Some((1, b1.block.hash))
+        );
     }
 }

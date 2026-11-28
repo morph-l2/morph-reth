@@ -114,7 +114,8 @@ impl ProofHistoryMetrics {
         Self::default().prune_errors_total.increment(1);
     }
 
-    pub(crate) fn set_prune_consecutive_failures(failures: u64) {
+    /// Records the number of consecutive periodic prune failures since the latest success.
+    pub fn set_prune_consecutive_failures(failures: u64) {
         Self::default()
             .prune_consecutive_failures
             .set(failures as f64);

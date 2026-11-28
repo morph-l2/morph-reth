@@ -123,6 +123,18 @@ pub enum MorphProofsStorageError {
         /// Current latest block.
         latest_block_number: u64,
     },
+    /// Stored block hash does not match the expected hash for an unwind, replacement, or prune.
+    #[error(
+        "Block hash mismatch at block {block_number} (stored: {stored_block_hash}, expected: {expected_block_hash})"
+    )]
+    BlockHashMismatch {
+        /// Block number where the mismatch was detected.
+        block_number: u64,
+        /// Hash stored in the proof database.
+        stored_block_hash: B256,
+        /// Expected hash provided by the caller.
+        expected_block_hash: B256,
+    },
     /// Error occurred while interacting with the database.
     #[error(transparent)]
     DatabaseError(DatabaseError),

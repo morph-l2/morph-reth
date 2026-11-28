@@ -15,7 +15,7 @@ use reth_db::{
 use reth_primitives_traits::{Account, StorageEntry};
 use reth_trie_common::{
     BranchNodeCompact, Nibbles, PackedStorageTrieEntry, PackedStoredNibbles,
-    PackedStoredNibblesSubKey, StoredNibbles,
+    PackedStoredNibblesSubKey, StorageTrieEntry, StoredNibbles, StoredNibblesSubKey,
 };
 use tracing::{debug, info};
 
@@ -31,7 +31,25 @@ const INITIALIZE_STORAGE_THRESHOLD: usize = 100000;
 /// Threshold for logging progress during initialization
 const INITIALIZE_LOG_THRESHOLD: usize = 100000;
 
-/// Initialization job for external storage backed by Reth Storage V2 tables.
+/// Controls which physical Reth trie-table encoding initialization reads.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RethTrieStorageLayout {
+    /// Storage-v2 packed trie keys (`PackedAccountsTrie` / `PackedStoragesTrie`).
+    #[default]
+    Packed,
+    /// Storage-v1 legacy trie keys (`AccountsTrie` / `StoragesTrie`).
+    Legacy,
+}
+
+impl RethTrieStorageLayout {
+    /// Selects the trie layout matching `StorageSettings::is_v2()`.
+    pub const fn from_is_v2(is_v2: bool) -> Self {
+        if is_v2 { Self::Packed } else { Self::Legacy }
+    }
+}
+
+/// Initialization job for external storage backed by either Reth Storage V2 (packed) or
+/// Storage V1 (legacy) trie tables.
 // `Constructor` emits `field: field`. Clippy 1.99 reports that on the field span
 // (rust-lang/rust-clippy#17525); the derive forwards this allow onto `new`.
 #[allow(clippy::redundant_field_names)]
@@ -39,6 +57,7 @@ const INITIALIZE_LOG_THRESHOLD: usize = 100000;
 pub struct InitializationJob<Tx: DbTx, S: MorphProofsStore + Send> {
     storage: S,
     tx: Tx,
+    trie_layout: RethTrieStorageLayout,
 }
 
 /// Macro to generate simple cursor iterators for tables
@@ -96,7 +115,7 @@ macro_rules! define_dup_cursor_iter {
     };
 }
 
-// Generate iterators for the hashed-state and Storage V2 trie tables.
+// Generate iterators for the hashed-state, Storage V2 (packed), and Storage V1 (legacy) trie tables.
 define_simple_cursor_iter!(HashedAccountsInit, tables::HashedAccounts, B256, Account);
 define_dup_cursor_iter!(
     HashedStoragesInit,
@@ -115,6 +134,18 @@ define_dup_cursor_iter!(
     tables::PackedStoragesTrie,
     B256,
     PackedStorageTrieEntry
+);
+define_simple_cursor_iter!(
+    LegacyAccountsTrieInit,
+    tables::AccountsTrie,
+    StoredNibbles,
+    BranchNodeCompact
+);
+define_dup_cursor_iter!(
+    LegacyStoragesTrieInit,
+    tables::StoragesTrie,
+    B256,
+    StorageTrieEntry
 );
 
 /// Trait to estimate the progress of a initialization job based on the key.
@@ -152,6 +183,12 @@ impl CompletionEstimatable for Nibbles {
 }
 
 impl CompletionEstimatable for PackedStoredNibbles {
+    fn estimate_progress(&self) -> f64 {
+        self.0.estimate_progress()
+    }
+}
+
+impl CompletionEstimatable for StoredNibbles {
     fn estimate_progress(&self) -> f64 {
         self.0.estimate_progress()
     }
@@ -293,22 +330,43 @@ impl<Tx: DbTx + Sync, S: MorphProofsStore + MorphProofsInitialStateStore + Send>
         &self,
         start_key: Option<StoredNibbles>,
     ) -> Result<(), MorphProofsStorageError> {
-        let mut start_cursor = self.tx.cursor_read::<tables::PackedAccountsTrie>()?;
+        match self.trie_layout {
+            RethTrieStorageLayout::Packed => {
+                let mut start_cursor = self.tx.cursor_read::<tables::PackedAccountsTrie>()?;
 
-        if let Some(latest_key) = start_key {
-            let packed_key = PackedStoredNibbles::from(latest_key.0);
-            start_cursor
-                .seek(packed_key.clone())?
-                .filter(|(key, _)| *key == packed_key)
-                .ok_or(MorphProofsStorageError::InitializeStorageInconsistentState)?;
+                if let Some(latest_key) = start_key {
+                    let packed_key = PackedStoredNibbles::from(latest_key.0);
+                    start_cursor
+                        .seek(packed_key.clone())?
+                        .filter(|(key, _)| *key == packed_key)
+                        .ok_or(MorphProofsStorageError::InitializeStorageInconsistentState)?;
+                }
+
+                self.initialize(
+                    "accounts trie",
+                    PackedAccountsTrieInit::new(start_cursor),
+                    INITIALIZE_STORAGE_THRESHOLD,
+                    INITIALIZE_LOG_THRESHOLD,
+                )?;
+            }
+            RethTrieStorageLayout::Legacy => {
+                let mut start_cursor = self.tx.cursor_read::<tables::AccountsTrie>()?;
+
+                if let Some(latest_key) = start_key {
+                    start_cursor
+                        .seek(latest_key.clone())?
+                        .filter(|(key, _)| *key == latest_key)
+                        .ok_or(MorphProofsStorageError::InitializeStorageInconsistentState)?;
+                }
+
+                self.initialize(
+                    "accounts trie",
+                    LegacyAccountsTrieInit::new(start_cursor),
+                    INITIALIZE_STORAGE_THRESHOLD,
+                    INITIALIZE_LOG_THRESHOLD,
+                )?;
+            }
         }
-
-        self.initialize(
-            "accounts trie",
-            PackedAccountsTrieInit::new(start_cursor),
-            INITIALIZE_STORAGE_THRESHOLD,
-            INITIALIZE_LOG_THRESHOLD,
-        )?;
 
         Ok(())
     }
@@ -318,22 +376,44 @@ impl<Tx: DbTx + Sync, S: MorphProofsStore + MorphProofsInitialStateStore + Send>
         &self,
         start_key: Option<StorageTrieKey>,
     ) -> Result<(), MorphProofsStorageError> {
-        let mut start_cursor = self.tx.cursor_dup_read::<tables::PackedStoragesTrie>()?;
+        match self.trie_layout {
+            RethTrieStorageLayout::Packed => {
+                let mut start_cursor = self.tx.cursor_dup_read::<tables::PackedStoragesTrie>()?;
 
-        if let Some(latest_key) = start_key {
-            let packed_subkey = PackedStoredNibblesSubKey::from(latest_key.path.0);
-            start_cursor
-                .seek_by_key_subkey(latest_key.hashed_address, packed_subkey)?
-                .filter(|value| value.nibbles.0 == latest_key.path.0)
-                .ok_or(MorphProofsStorageError::InitializeStorageInconsistentState)?;
+                if let Some(latest_key) = start_key {
+                    let packed_subkey = PackedStoredNibblesSubKey::from(latest_key.path.0);
+                    start_cursor
+                        .seek_by_key_subkey(latest_key.hashed_address, packed_subkey)?
+                        .filter(|value| value.nibbles.0 == latest_key.path.0)
+                        .ok_or(MorphProofsStorageError::InitializeStorageInconsistentState)?;
+                }
+
+                self.initialize(
+                    "storage trie",
+                    PackedStoragesTrieInit::new(start_cursor),
+                    INITIALIZE_STORAGE_THRESHOLD,
+                    INITIALIZE_LOG_THRESHOLD,
+                )?;
+            }
+            RethTrieStorageLayout::Legacy => {
+                let mut start_cursor = self.tx.cursor_dup_read::<tables::StoragesTrie>()?;
+
+                if let Some(latest_key) = start_key {
+                    let legacy_subkey = StoredNibblesSubKey::from(latest_key.path.0);
+                    start_cursor
+                        .seek_by_key_subkey(latest_key.hashed_address, legacy_subkey)?
+                        .filter(|value| value.nibbles.0 == latest_key.path.0)
+                        .ok_or(MorphProofsStorageError::InitializeStorageInconsistentState)?;
+                }
+
+                self.initialize(
+                    "storage trie",
+                    LegacyStoragesTrieInit::new(start_cursor),
+                    INITIALIZE_STORAGE_THRESHOLD,
+                    INITIALIZE_LOG_THRESHOLD,
+                )?;
+            }
         }
-
-        self.initialize(
-            "storage trie",
-            PackedStoragesTrieInit::new(start_cursor),
-            INITIALIZE_STORAGE_THRESHOLD,
-            INITIALIZE_LOG_THRESHOLD,
-        )?;
 
         Ok(())
     }
@@ -470,6 +550,52 @@ impl<C> InitTable for PackedAccountsTrieInit<C> {
 impl<C> InitTable for PackedStoragesTrieInit<C> {
     type Key = B256;
     type Value = PackedStorageTrieEntry;
+
+    fn store_entries(
+        store: &impl MorphProofsInitialStateStore,
+        entries: impl IntoIterator<Item = (Self::Key, Self::Value)>,
+    ) -> Result<(), MorphProofsStorageError> {
+        let mut grouped = Vec::new();
+        let mut current_address = None;
+        let mut current_nodes = Vec::new();
+
+        for (address, entry) in entries {
+            if current_address.as_ref() != Some(&address)
+                && let Some(address) = current_address.replace(address)
+            {
+                grouped.push((address, std::mem::take(&mut current_nodes)));
+            }
+            current_nodes.push((entry.nibbles.0, Some(entry.node)));
+        }
+        if let Some(address) = current_address {
+            grouped.push((address, current_nodes));
+        }
+        store.store_storage_branches_bulk(grouped)?;
+        Ok(())
+    }
+}
+
+impl<C> InitTable for LegacyAccountsTrieInit<C> {
+    type Key = StoredNibbles;
+    type Value = BranchNodeCompact;
+
+    fn store_entries(
+        store: &impl MorphProofsInitialStateStore,
+        entries: impl IntoIterator<Item = (Self::Key, Self::Value)>,
+    ) -> Result<(), MorphProofsStorageError> {
+        store.store_account_branches(
+            entries
+                .into_iter()
+                .map(|(path, branch)| (path.0, Some(branch)))
+                .collect(),
+        )?;
+        Ok(())
+    }
+}
+
+impl<C> InitTable for LegacyStoragesTrieInit<C> {
+    type Key = B256;
+    type Value = StorageTrieEntry;
 
     fn store_entries(
         store: &impl MorphProofsInitialStateStore,
@@ -733,7 +859,11 @@ mod tests {
 
                     // Run initialization
                     let tx = db.tx().unwrap();
-                    let job = InitializationJob::new(Arc::clone(&storage), tx);
+                    let job = InitializationJob::new(
+                        Arc::clone(&storage),
+                        tx,
+                        RethTrieStorageLayout::Packed,
+                    );
                     job.initialize_hashed_accounts(None).unwrap();
 
                     // Verify data was stored (will be in sorted order)
@@ -793,7 +923,11 @@ mod tests {
 
                     // Run initialization
                     let tx = db.tx().unwrap();
-                    let job = InitializationJob::new(Arc::clone(&storage), tx);
+                    let job = InitializationJob::new(
+                        Arc::clone(&storage),
+                        tx,
+                        RethTrieStorageLayout::Packed,
+                    );
                     job.initialize_hashed_storages(None).unwrap();
 
                     // Verify data was stored for addr1
@@ -859,7 +993,11 @@ mod tests {
 
                     // Run initialization
                     let tx = db.tx().unwrap();
-                    let job = InitializationJob::new(Arc::clone(&storage), tx);
+                    let job = InitializationJob::new(
+                        Arc::clone(&storage),
+                        tx,
+                        RethTrieStorageLayout::Packed,
+                    );
                     job.initialize_accounts_trie(None).unwrap();
 
                     // Verify data was stored
@@ -924,7 +1062,11 @@ mod tests {
 
                     // Run initialization
                     let tx = db.tx().unwrap();
-                    let job = InitializationJob::new(Arc::clone(&storage), tx);
+                    let job = InitializationJob::new(
+                        Arc::clone(&storage),
+                        tx,
+                        RethTrieStorageLayout::Packed,
+                    );
                     job.initialize_storages_trie(None).unwrap();
 
                     // Verify data was stored for addr1
@@ -1013,7 +1155,11 @@ mod tests {
 
                     // Run full initialization
                     let tx = db.tx().unwrap();
-                    let job = InitializationJob::new(Arc::clone(&storage), tx);
+                    let job = InitializationJob::new(
+                        Arc::clone(&storage),
+                        tx,
+                        RethTrieStorageLayout::Packed,
+                    );
                     let best_number = 100;
                     let best_hash = B256::repeat_byte(0x42);
 
@@ -1056,7 +1202,11 @@ mod tests {
                     storage.commit_initial_state().expect("commit anchor");
 
                     let tx = db.tx().unwrap();
-                    let job = InitializationJob::new(Arc::clone(&storage), tx);
+                    let job = InitializationJob::new(
+                        Arc::clone(&storage),
+                        tx,
+                        RethTrieStorageLayout::Packed,
+                    );
 
                     // Run initialization - should skip
                     job.run(100, B256::repeat_byte(0x42)).unwrap();
@@ -1119,7 +1269,11 @@ mod tests {
                     // Initialization #1
                     {
                         let tx = db.tx().unwrap();
-                        let job = InitializationJob::new(Arc::clone(&store), tx);
+                        let job = InitializationJob::new(
+                            Arc::clone(&store),
+                            tx,
+                            RethTrieStorageLayout::Packed,
+                        );
                         job.initialize_hashed_accounts(None).unwrap();
                     }
 
@@ -1162,7 +1316,11 @@ mod tests {
                     // Initialization #2 (restart)
                     {
                         let tx = db.tx().unwrap();
-                        let job = InitializationJob::new(Arc::clone(&store), tx);
+                        let job = InitializationJob::new(
+                            Arc::clone(&store),
+                            tx,
+                            RethTrieStorageLayout::Packed,
+                        );
                         job.initialize_hashed_accounts(Some(k2)).unwrap();
                     }
 
@@ -1249,7 +1407,11 @@ mod tests {
                     // Initialization #1
                     {
                         let tx = db.tx().unwrap();
-                        let job = InitializationJob::new(Arc::clone(&store), tx);
+                        let job = InitializationJob::new(
+                            Arc::clone(&store),
+                            tx,
+                            RethTrieStorageLayout::Packed,
+                        );
                         job.initialize_hashed_storages(None).unwrap();
                     }
 
@@ -1280,7 +1442,11 @@ mod tests {
                     // Initialization #2
                     {
                         let tx = db.tx().unwrap();
-                        let job = InitializationJob::new(Arc::clone(&store), tx);
+                        let job = InitializationJob::new(
+                            Arc::clone(&store),
+                            tx,
+                            RethTrieStorageLayout::Packed,
+                        );
                         job.initialize_hashed_storages(Some(HashedStorageKey::new(a2, s21)))
                             .unwrap();
                     }
@@ -1352,7 +1518,11 @@ mod tests {
                     // Initialization #1
                     {
                         let tx = db.tx().unwrap();
-                        let job = InitializationJob::new(Arc::clone(&store), tx);
+                        let job = InitializationJob::new(
+                            Arc::clone(&store),
+                            tx,
+                            RethTrieStorageLayout::Packed,
+                        );
                         job.initialize_accounts_trie(None).unwrap();
                     }
 
@@ -1384,7 +1554,11 @@ mod tests {
                     // Initialization #2
                     {
                         let tx = db.tx().unwrap();
-                        let job = InitializationJob::new(Arc::clone(&store), tx);
+                        let job = InitializationJob::new(
+                            Arc::clone(&store),
+                            tx,
+                            RethTrieStorageLayout::Packed,
+                        );
                         job.initialize_accounts_trie(Some(p2.clone())).unwrap();
                     }
 
@@ -1452,7 +1626,11 @@ mod tests {
                     // Initialization #1
                     {
                         let tx = db.tx().unwrap();
-                        let job = InitializationJob::new(Arc::clone(&store), tx);
+                        let job = InitializationJob::new(
+                            Arc::clone(&store),
+                            tx,
+                            RethTrieStorageLayout::Packed,
+                        );
                         job.initialize_storages_trie(None).unwrap();
                     }
 
@@ -1483,7 +1661,11 @@ mod tests {
                     // Initialization #2
                     {
                         let tx = db.tx().unwrap();
-                        let job = InitializationJob::new(Arc::clone(&store), tx);
+                        let job = InitializationJob::new(
+                            Arc::clone(&store),
+                            tx,
+                            RethTrieStorageLayout::Packed,
+                        );
                         job.initialize_storages_trie(Some(StorageTrieKey::new(
                             a2,
                             StoredNibbles::from(n2.clone()),
@@ -1524,6 +1706,208 @@ mod tests {
                         }
                         assert_eq!(got, vec![n2, n3]);
                     }
+                }
+
+                #[test]
+                fn test_full_initialize_run_legacy_layout() {
+                    let db = create_test_rw_db();
+                    let dir = TempDir::new().unwrap();
+                    let storage = Arc::new($storage::new(dir.path()).expect("env"));
+
+                    let tx = db.tx_mut().unwrap();
+                    let addr = keccak256(Address::repeat_byte(0x01));
+
+                    let mut acc_cur = tx.cursor_write::<tables::HashedAccounts>().unwrap();
+                    acc_cur
+                        .append(
+                            addr,
+                            &Account {
+                                nonce: 5,
+                                balance: U256::from(500),
+                                bytecode_hash: None,
+                            },
+                        )
+                        .unwrap();
+                    drop(acc_cur);
+
+                    let mut stor_cur = tx.cursor_dup_write::<tables::HashedStorages>().unwrap();
+                    stor_cur
+                        .upsert(
+                            addr,
+                            &StorageEntry {
+                                key: keccak256(B256::repeat_byte(0x10)),
+                                value: U256::from(123),
+                            },
+                        )
+                        .unwrap();
+                    drop(stor_cur);
+
+                    // Populate Storage-V1 legacy trie tables (`AccountsTrie` / `StoragesTrie`).
+                    let p1 = Nibbles::from_nibbles_unchecked(vec![1]);
+                    let p2 = Nibbles::from_nibbles_unchecked(vec![2, 3]);
+                    let mut acc_trie_cur = tx.cursor_write::<tables::AccountsTrie>().unwrap();
+                    acc_trie_cur
+                        .append(StoredNibbles(p1), &create_test_branch_node())
+                        .unwrap();
+                    acc_trie_cur
+                        .append(StoredNibbles(p2), &create_test_branch_node())
+                        .unwrap();
+                    drop(acc_trie_cur);
+
+                    let mut stor_trie_cur = tx.cursor_dup_write::<tables::StoragesTrie>().unwrap();
+                    stor_trie_cur
+                        .upsert(
+                            addr,
+                            &StorageTrieEntry {
+                                nibbles: StoredNibblesSubKey::from(p1),
+                                node: create_test_branch_node(),
+                            },
+                        )
+                        .unwrap();
+                    stor_trie_cur
+                        .upsert(
+                            addr,
+                            &StorageTrieEntry {
+                                nibbles: StoredNibblesSubKey::from(p2),
+                                node: create_test_branch_node(),
+                            },
+                        )
+                        .unwrap();
+                    drop(stor_trie_cur);
+                    tx.commit().unwrap();
+
+                    let tx = db.tx().unwrap();
+                    let job = InitializationJob::new(
+                        Arc::clone(&storage),
+                        tx,
+                        RethTrieStorageLayout::Legacy,
+                    );
+                    let best_number = 42;
+                    let best_hash = B256::repeat_byte(0x77);
+                    job.run(best_number, best_hash).unwrap();
+
+                    assert_eq!(
+                        storage.get_earliest_block_number().unwrap(),
+                        Some((best_number, best_hash))
+                    );
+                    assert_eq!(
+                        storage.get_block_hash(best_number).unwrap(),
+                        Some(best_hash)
+                    );
+
+                    let mut got_acc_trie = Vec::new();
+                    let mut acc_trie = storage.account_trie_cursor(best_number).unwrap();
+                    while let Some((path, _)) = acc_trie.next().unwrap() {
+                        got_acc_trie.push(path);
+                    }
+                    assert_eq!(got_acc_trie, vec![p1, p2]);
+
+                    let mut got_stor_trie = Vec::new();
+                    let mut stor_trie = storage.storage_trie_cursor(addr, best_number).unwrap();
+                    while let Some((path, _)) = stor_trie.next().unwrap() {
+                        got_stor_trie.push(path);
+                    }
+                    assert_eq!(got_stor_trie, vec![p1, p2]);
+                }
+
+                #[test]
+                fn test_initialize_resumes_legacy_tries_with_no_dups() {
+                    let db = create_test_rw_db();
+                    let dir = TempDir::new().unwrap();
+                    let store = Arc::new($storage::new(dir.path()).expect("env"));
+                    store
+                        .set_initial_state_anchor(BlockNumHash::new(0, B256::default()))
+                        .unwrap();
+
+                    let addr = k(0x10);
+                    let n1 = Nibbles::from_nibbles_unchecked(vec![1]);
+                    let n2 = Nibbles::from_nibbles_unchecked(vec![2]);
+                    let n3 = Nibbles::from_nibbles_unchecked(vec![3]);
+
+                    // Phase 1: n1, n2
+                    {
+                        let tx = db.tx_mut().unwrap();
+                        let mut acc = tx.cursor_write::<tables::AccountsTrie>().unwrap();
+                        acc.append(StoredNibbles(n1), &create_test_branch_node())
+                            .unwrap();
+                        acc.append(StoredNibbles(n2), &create_test_branch_node())
+                            .unwrap();
+                        let mut stor = tx.cursor_dup_write::<tables::StoragesTrie>().unwrap();
+                        stor.upsert(
+                            addr,
+                            &StorageTrieEntry {
+                                nibbles: StoredNibblesSubKey::from(n1),
+                                node: create_test_branch_node(),
+                            },
+                        )
+                        .unwrap();
+                        stor.upsert(
+                            addr,
+                            &StorageTrieEntry {
+                                nibbles: StoredNibblesSubKey::from(n2),
+                                node: create_test_branch_node(),
+                            },
+                        )
+                        .unwrap();
+                        tx.commit().unwrap();
+                    }
+                    {
+                        let tx = db.tx().unwrap();
+                        let job = InitializationJob::new(
+                            Arc::clone(&store),
+                            tx,
+                            RethTrieStorageLayout::Legacy,
+                        );
+                        job.initialize_accounts_trie(None).unwrap();
+                        job.initialize_storages_trie(None).unwrap();
+                    }
+
+                    // Phase 2: append n3 and resume from n2
+                    {
+                        let tx = db.tx_mut().unwrap();
+                        let mut acc = tx.cursor_write::<tables::AccountsTrie>().unwrap();
+                        acc.append(StoredNibbles(n3), &create_test_branch_node())
+                            .unwrap();
+                        let mut stor = tx.cursor_dup_write::<tables::StoragesTrie>().unwrap();
+                        stor.upsert(
+                            addr,
+                            &StorageTrieEntry {
+                                nibbles: StoredNibblesSubKey::from(n3),
+                                node: create_test_branch_node(),
+                            },
+                        )
+                        .unwrap();
+                        tx.commit().unwrap();
+                    }
+                    {
+                        let tx = db.tx().unwrap();
+                        let job = InitializationJob::new(
+                            Arc::clone(&store),
+                            tx,
+                            RethTrieStorageLayout::Legacy,
+                        );
+                        job.initialize_accounts_trie(Some(StoredNibbles(n2)))
+                            .unwrap();
+                        job.initialize_storages_trie(Some(StorageTrieKey::new(
+                            addr,
+                            StoredNibbles(n2),
+                        )))
+                        .unwrap();
+                    }
+
+                    let mut acc_got = Vec::new();
+                    let mut c = store.account_trie_cursor(0).unwrap();
+                    while let Some((p, _)) = c.next().unwrap() {
+                        acc_got.push(p);
+                    }
+                    assert_eq!(acc_got, vec![n1, n2, n3]);
+
+                    let mut stor_got = Vec::new();
+                    let mut c = store.storage_trie_cursor(addr, 0).unwrap();
+                    while let Some((p, _)) = c.next().unwrap() {
+                        stor_got.push(p);
+                    }
+                    assert_eq!(stor_got, vec![n1, n2, n3]);
                 }
             }
         };
