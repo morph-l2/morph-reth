@@ -402,7 +402,7 @@ impl MdbxProofsStorage {
         if append_mode {
             // Append all entries (including tombstones) to preserve full history
             for (k, vv) in pairs {
-                cur.append_dup(k.clone(), vv)?;
+                cur.append_dup(k, vv)?;
             }
             return Ok(keys);
         }

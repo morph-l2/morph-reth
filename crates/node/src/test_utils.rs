@@ -123,6 +123,8 @@ impl HardforkSchedule {
     /// - `AllActive`: no changes (test genesis already has all forks at 0)
     /// - `PreCeladon`: set `celadonTime` to `u64::MAX`
     /// - `PreJade`: set `jadeForkTime` and `celadonTime` to `u64::MAX`
+    /// - `PreViridian`: set `viridianTime`, `emeraldTime`, `jadeForkTime` and
+    ///   `celadonTime` to `u64::MAX`
     /// - `Hoodi`/`Mainnet`: compare each `*Time` key against the reference network;
     ///   forks active now → 0, forks not yet active → `u64::MAX`.
     ///   Block-based forks (`*Block`) are always kept at 0.

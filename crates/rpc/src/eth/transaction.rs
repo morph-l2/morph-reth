@@ -192,7 +192,8 @@ fn morph_envelope_from_ethereum(
 /// `Ok(None)` if this should be a standard Ethereum transaction,
 /// or `Err(...)` if there's a validation error.
 ///
-/// A MorphTx is constructed when any of these Morph fields is set:
+/// Unless the request sets legacy `gasPrice` (always a standard transaction),
+/// a MorphTx is constructed when any of these Morph fields is set:
 /// - `feeTokenID > 0` (ERC20 gas payment)
 /// - a non-zero `reference`
 /// - a non-empty `memo`
