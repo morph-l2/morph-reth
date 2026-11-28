@@ -27,7 +27,7 @@ impl TryFrom<&OtherFields> for MorphGenesisInfo {
     type Error = serde_json::Error;
 
     fn try_from(others: &OtherFields) -> Result<Self, Self::Error> {
-        let hard_fork_info = MorphHardforkInfo::try_from(others).ok();
+        let hard_fork_info = Some(MorphHardforkInfo::try_from(others)?);
         let morph_chain_info = MorphChainConfig::try_from(others)?;
 
         Ok(Self {
@@ -134,10 +134,9 @@ impl TryFrom<&OtherFields> for MorphChainConfig {
     type Error = serde_json::Error;
 
     fn try_from(others: &OtherFields) -> Result<Self, Self::Error> {
-        if let Some(Ok(morph_config)) = others.get_deserialized::<Self>("morph") {
-            Ok(morph_config)
-        } else {
-            Err(serde_json::Error::missing_field("morph"))
+        match others.get_deserialized::<Self>("morph") {
+            Some(res) => res,
+            None => Err(serde_json::Error::missing_field("morph")),
         }
     }
 }
@@ -263,5 +262,69 @@ mod tests {
             Some(address!("530000000000000000000000000000000000000a"))
         );
         assert_eq!(config.max_tx_payload_bytes_per_block, 122_880);
+    }
+
+    #[test]
+    fn test_morph_genesis_info_rejects_malformed_hardfork_field() {
+        for raw in [
+            r#"{"celadonTime": "1750000000", "morph": {}}"#,
+            r#"{"bernoulliBlock": -1, "morph": {}}"#,
+            r#"{"viridianTime": true, "morph": {}}"#,
+        ] {
+            let others: OtherFields = serde_json::from_str(raw).unwrap();
+            let err = MorphGenesisInfo::try_from(&others)
+                .expect_err("malformed Morph hardfork field must fail deserialization");
+            let msg = err.to_string();
+            assert!(
+                !msg.contains("missing field `morph`"),
+                "expected hardfork deserialization error, got: {msg}"
+            );
+            assert!(
+                MorphGenesisInfo::extract_from(&others).is_none(),
+                "extract_from must not silently drop malformed hardforks"
+            );
+        }
+    }
+
+    #[test]
+    fn test_morph_genesis_info_allows_empty_hardfork_fields() {
+        let others: OtherFields = serde_json::from_str(r#"{"morph": {}}"#).unwrap();
+        let info = MorphGenesisInfo::try_from(&others).expect("empty hardforks must succeed");
+
+        assert_eq!(info.hard_fork_info, Some(MorphHardforkInfo::default()));
+        assert_eq!(info.morph_chain_info, MorphChainConfig::default());
+    }
+
+    #[test]
+    fn test_morph_chain_config_preserves_inner_serde_error() {
+        // Missing `morph` key reports missing field `morph`.
+        let missing: OtherFields = serde_json::from_str(r#"{}"#).unwrap();
+        let err = MorphChainConfig::try_from(&missing).unwrap_err();
+        assert!(
+            err.to_string().contains("missing field `morph`"),
+            "expected missing field error, got: {err}"
+        );
+
+        // Malformed subfields or wrong type for `morph` preserve the real serde error.
+        for raw in [
+            r#"{"morph": {"feeVaultAddress": "not-an-address"}}"#,
+            r#"{"morph": {"maxTxPayloadBytesPerBlock": "122880"}}"#,
+            r#"{"morph": "not-an-object"}"#,
+        ] {
+            let others: OtherFields = serde_json::from_str(raw).unwrap();
+            let err = MorphChainConfig::try_from(&others)
+                .expect_err("malformed morph config must fail deserialization");
+            let msg = err.to_string();
+            assert!(
+                !msg.contains("missing field `morph`"),
+                "inner serde error for `{raw}` must not be replaced by missing field: {msg}"
+            );
+            let genesis_err = MorphGenesisInfo::try_from(&others)
+                .expect_err("MorphGenesisInfo::try_from must propagate inner morph error");
+            assert!(
+                !genesis_err.to_string().contains("missing field `morph`"),
+                "MorphGenesisInfo error for `{raw}` must preserve inner error: {genesis_err}"
+            );
+        }
     }
 }
