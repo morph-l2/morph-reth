@@ -222,6 +222,7 @@ pub struct TestNodeBuilder {
     debug_tip: Option<B256>,
     trusted_peer: Option<String>,
     http_api: Option<RpcModuleSelection>,
+    minimal_protocol_basefee: u64,
     morph_args: Option<MorphArgs>,
 }
 
@@ -250,6 +251,7 @@ impl TestNodeBuilder {
             debug_tip: None,
             trusted_peer: None,
             http_api: None,
+            minimal_protocol_basefee: morph_chainspec::MORPH_BASE_FEE,
             morph_args: None,
         }
     }
@@ -367,6 +369,14 @@ impl TestNodeBuilder {
         self
     }
 
+    /// Override the txpool minimal protocol base fee, as `--txpool.minimal-protocol-fee` would.
+    ///
+    /// Defaults to [`morph_chainspec::MORPH_BASE_FEE`] to match the `morph-reth` CLI.
+    pub fn with_minimal_protocol_basefee(mut self, fee: u64) -> Self {
+        self.minimal_protocol_basefee = fee;
+        self
+    }
+
     /// Override the maximum pool-transaction payload bytes included in a block.
     ///
     /// Restricted to single-node setups.
@@ -396,9 +406,14 @@ impl TestNodeBuilder {
                     self.num_nodes
                 ));
             }
-            let (node, wallet) =
-                launch_test_node_with_args(Arc::new(chain_spec), self.is_dev, args, self.http_api)
-                    .await?;
+            let (node, wallet) = launch_test_node_with_args(
+                Arc::new(chain_spec),
+                self.is_dev,
+                self.minimal_protocol_basefee,
+                args,
+                self.http_api,
+            )
+            .await?;
             return Ok((vec![node], wallet));
         }
 
@@ -409,6 +424,7 @@ impl TestNodeBuilder {
         let debug_tip = self.debug_tip;
         let trusted_peer = self.trusted_peer;
         let http_api = self.http_api;
+        let minimal_protocol_basefee = self.minimal_protocol_basefee;
         reth_e2e_test_utils::E2ETestSetupBuilder::<MorphNode, _>::new(
             self.num_nodes,
             Arc::new(chain_spec),
@@ -417,6 +433,7 @@ impl TestNodeBuilder {
         .with_node_config_modifier(move |mut config| {
             config.builder.gas_limit = desired_gas_limit;
             config.debug.tip = debug_tip;
+            config.txpool.minimal_protocol_basefee = minimal_protocol_basefee;
             if let Some(ref enode) = trusted_peer {
                 config.network.trusted_peers = vec![enode.parse().expect("valid trusted enode")];
             }
@@ -440,6 +457,7 @@ impl TestNodeBuilder {
 async fn launch_test_node_with_args(
     chain_spec: Arc<morph_chainspec::MorphChainSpec>,
     is_dev: bool,
+    minimal_protocol_basefee: u64,
     args: MorphArgs,
     http_api: Option<RpcModuleSelection>,
 ) -> eyre::Result<(MorphTestNode, Wallet)> {
@@ -453,7 +471,7 @@ async fn launch_test_node_with_args(
         },
         ..NetworkArgs::default()
     };
-    let node_config = NodeConfig::new(chain_spec.clone())
+    let mut node_config = NodeConfig::new(chain_spec.clone())
         .with_network(network)
         .with_unused_ports()
         .with_rpc(
@@ -463,6 +481,7 @@ async fn launch_test_node_with_args(
                 .with_http_api(http_api.unwrap_or(RpcModuleSelection::All)),
         )
         .set_dev(is_dev);
+    node_config.txpool.minimal_protocol_basefee = minimal_protocol_basefee;
     let node = MorphNode::new(args);
     let tree_config = TreeConfig::default().with_cross_block_cache_size(1024 * 1024);
     let span = span!(Level::INFO, "node", idx = 0);
