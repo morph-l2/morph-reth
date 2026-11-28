@@ -283,7 +283,14 @@ impl TestNodeBuilder {
     }
 
     /// Override a storage slot for an account in the test genesis.
-    pub fn with_account_storage(mut self, address: Address, slot: U256, value: U256) -> Self {
+    pub fn with_account_storage(
+        mut self,
+        address: Address,
+        slot: impl Into<B256>,
+        value: impl Into<B256>,
+    ) -> Self {
+        let slot: B256 = slot.into();
+        let value: B256 = value.into();
         let alloc = self
             .genesis_json
             .get_mut("alloc")
@@ -307,10 +314,14 @@ impl TestNodeBuilder {
         let storage = storage
             .as_object_mut()
             .expect("test genesis account storage must be an object");
-        storage.insert(
-            format!("{slot:#066x}"),
-            serde_json::json!(format!("{value:#066x}")),
-        );
+        storage.insert(slot.to_string(), serde_json::json!(value.to_string()));
+        self
+    }
+
+    /// Override `config.morph.maxTxPayloadBytesPerBlock` in the test genesis.
+    pub fn with_genesis_max_tx_payload_bytes(mut self, max_bytes: u64) -> Self {
+        self.genesis_json["config"]["morph"]["maxTxPayloadBytesPerBlock"] =
+            serde_json::json!(max_bytes);
         self
     }
 

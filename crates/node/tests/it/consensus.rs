@@ -441,6 +441,65 @@ async fn next_l1_msg_index_first_msg_skips_parent_allowed_pre_jade() -> eyre::Re
     Ok(())
 }
 
+/// Cross-block L1 message replay (`first_queue_index < parent.next_l1_msg_index`) must be
+/// rejected post-Jade, even when in-block indices are contiguous and `header.next_l1_msg_index`
+/// equals `last_queue_index + 1` and `>= parent.next_l1_msg_index`.
+#[tokio::test(flavor = "multi_thread")]
+async fn l1_message_cross_block_replay_rejected_post_jade() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+    let (mut nodes, _wallet) = TestNodeBuilder::new()
+        .with_schedule(HardforkSchedule::AllActive)
+        .build()
+        .await?;
+    let mut node = nodes.pop().unwrap();
+
+    // Block 1 includes queue indices 0, 1 -> parent.next_l1_msg_index = 2.
+    advance_block_with_l1_messages(&mut node, L1MessageBuilder::build_sequential(0, 2)).await?;
+
+    // Build a valid continuation block (queue 2, 3) then rewrite its L1 messages to replay
+    // index 1 (i.e. [1, 2], next_l1_msg_index = 3 >= parent's 2).
+    let base = build_block_no_submit(&mut node, L1MessageBuilder::build_sequential(2, 2)).await?;
+    let accepted = craft_and_try_import_block(&mut node, &base, |block| {
+        rewrite_l1_queue_indices_from(block, 1);
+        block.header.next_l1_msg_index = 3;
+    })
+    .await?;
+
+    assert!(
+        !accepted,
+        "post-Jade: cross-block L1 message replay ([1, 2] after parent next=2) must be rejected"
+    );
+    Ok(())
+}
+
+/// Cross-block L1 message replay must also be rejected pre-Jade.
+#[tokio::test(flavor = "multi_thread")]
+async fn l1_message_cross_block_replay_rejected_pre_jade() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+    let (mut nodes, _wallet) = TestNodeBuilder::new()
+        .with_schedule(HardforkSchedule::PreJade)
+        .build()
+        .await?;
+    let mut node = nodes.pop().unwrap();
+
+    // Block 1 includes queue indices 0, 1 -> parent.next_l1_msg_index = 2.
+    advance_block_with_l1_messages(&mut node, L1MessageBuilder::build_sequential(0, 2)).await?;
+
+    // Rewrite block 2's L1 messages to replay [0, 1] with header.next_l1_msg_index = 2.
+    let base = build_block_no_submit(&mut node, L1MessageBuilder::build_sequential(2, 2)).await?;
+    let accepted = craft_and_try_import_block(&mut node, &base, |block| {
+        rewrite_l1_queue_indices_from(block, 0);
+        block.header.next_l1_msg_index = 2;
+    })
+    .await?;
+
+    assert!(
+        !accepted,
+        "pre-Jade: cross-block L1 message replay ([0, 1] after parent next=2) must be rejected"
+    );
+    Ok(())
+}
+
 /// Shift every leading L1 message's `queue_index` up by `delta`, re-sealing each tx.
 ///
 /// Used to craft a block whose L1 stream no longer continues the parent's queue index
@@ -455,6 +514,22 @@ fn rewrite_l1_queue_indices(block: &mut morph_primitives::Block, delta: u64) {
         if let MorphTxEnvelope::L1Msg(sealed) = tx {
             let mut inner = sealed.inner().clone();
             inner.queue_index += delta;
+            *sealed = inner.seal_slow();
+        }
+    }
+}
+
+/// Rewrite every leading L1 message's `queue_index` sequentially starting from `start`.
+fn rewrite_l1_queue_indices_from(block: &mut morph_primitives::Block, start: u64) {
+    use alloy_consensus::Sealable;
+    use morph_primitives::MorphTxEnvelope;
+
+    let mut next = start;
+    for tx in block.body.transactions.iter_mut() {
+        if let MorphTxEnvelope::L1Msg(sealed) = tx {
+            let mut inner = sealed.inner().clone();
+            inner.queue_index = next;
+            next += 1;
             *sealed = inner.seal_slow();
         }
     }

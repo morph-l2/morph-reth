@@ -113,6 +113,21 @@ impl<DB: Database, I> MorphEvm<DB, I> {
     pub fn cached_l1_data_fee(&self) -> alloy_primitives::U256 {
         self.inner.cached_l1_data_fee()
     }
+
+    /// Runs only the handler's pre-execution validation and fee-deduction phase
+    /// (including call-mode alt-token `balanceOf` and `transfer`), without executing
+    /// the main transaction body.
+    pub fn validate_only(
+        &mut self,
+        tx: MorphTxEnv,
+    ) -> Result<(), EVMError<DB::Error, MorphInvalidTransaction>> {
+        use alloy_evm::revm::{context::ContextSetters, handler::Handler};
+
+        self.inner.inner.ctx.set_tx(tx);
+        morph_revm::handler::MorphEvmHandler::new()
+            .validate(&mut self.inner)
+            .map(|_| ())
+    }
 }
 
 impl<DB: Database, I> Deref for MorphEvm<DB, I>

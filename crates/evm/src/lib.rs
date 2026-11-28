@@ -92,7 +92,7 @@ use crate::{block::MorphBlockExecutorFactory, evm::MorphEvm};
 use morph_chainspec::MorphChainSpec;
 use morph_revm::evm::MorphContext;
 
-pub use morph_revm::{MorphBlockEnv, MorphHaltReason};
+pub use morph_revm::{MorphBlockEnv, MorphHaltReason, MorphInvalidTransaction};
 
 /// Morph EVM configuration and block executor factory.
 ///

@@ -428,11 +428,23 @@ where
             return Ok(());
         }
 
+        // Enforce the Celadon hardfork gate for MorphTx V2 during real execution
+        // (including V2 with an empty authorization list). When fee charging is
+        // disabled (`eth_call` / `eth_estimateGas` simulation), preserve pre-Celadon
+        // Prague simulation compatibility (matching morph-geth `transaction_args.go:234`).
+        let hardfork = *evm.ctx_ref().cfg().spec();
+        if !evm.ctx_ref().cfg().is_fee_charge_disabled() && !hardfork.is_celadon() {
+            return Err(MorphInvalidTransaction::EthInvalidTransaction(
+                InvalidTransaction::Eip7702NotSupported,
+            )
+            .into());
+        }
+
         if auth_list_len == 0 {
             return Ok(());
         }
 
-        let spec: SpecId = (*evm.ctx_ref().cfg().spec()).into();
+        let spec: SpecId = hardfork.into();
         if !spec.is_enabled_in(SpecId::PRAGUE) {
             return Err(MorphInvalidTransaction::EthInvalidTransaction(
                 InvalidTransaction::Eip7702NotSupported,
@@ -1856,6 +1868,44 @@ mod tests {
                 InvalidTransaction::Eip7702NotSupported
             ))
         ));
+    }
+
+    #[test]
+    fn validate_env_rejects_v2_morph_tx_before_celadon_during_execution() {
+        // Jade has Prague/Osaka active, so `SpecId::PRAGUE` alone would miss the
+        // Celadon gate. Real execution (`disable_fee_charge = false`) must reject
+        // MorphTx V2 before Celadon both with and without authorizations.
+        for auths in [vec![], vec![Either::Left(sample_signed_authorization())]] {
+            let mut evm = evm_with_spec(MorphHardfork::Jade);
+            evm.tx = morph_tx_env_with_authorizations(
+                Some(MORPH_TX_VERSION_2),
+                TxKind::Call(Address::ZERO),
+                auths,
+            );
+
+            let err = validate_env_of(&mut evm).unwrap_err();
+            assert!(matches!(
+                err,
+                EVMError::Transaction(MorphInvalidTransaction::EthInvalidTransaction(
+                    InvalidTransaction::Eip7702NotSupported
+                ))
+            ));
+        }
+    }
+
+    #[test]
+    fn validate_env_allows_v2_morph_tx_simulation_before_celadon() {
+        // RPC simulation (`disable_fee_charge = true`) preserves pre-Celadon Prague
+        // compatibility, matching morph-geth `transaction_args.go`.
+        let mut evm = evm_with_spec(MorphHardfork::Jade);
+        evm.cfg.disable_fee_charge = true;
+        evm.tx = morph_tx_env_with_authorizations(
+            Some(MORPH_TX_VERSION_2),
+            TxKind::Call(Address::ZERO),
+            vec![Either::Left(sample_signed_authorization())],
+        );
+
+        assert!(validate_env_of(&mut evm).is_ok());
     }
 
     #[test]
