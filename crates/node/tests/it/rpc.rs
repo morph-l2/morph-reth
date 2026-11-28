@@ -2035,3 +2035,186 @@ async fn simulate_v1_validation_true_legacy_gas_price_with_fee_token_id_executes
 
     Ok(())
 }
+
+/// `eth_maxPriorityFeePerGas` and `eth_gasPrice` must never collapse to zero on
+/// empty blocks, and must scale above the median tip when a block reaches capacity.
+#[tokio::test(flavor = "multi_thread")]
+async fn gas_price_oracle_returns_floor_on_empty_blocks_and_scales_at_capacity() -> eyre::Result<()>
+{
+    use alloy_consensus::TxEip1559;
+    use morph_chainspec::{MORPH_BASE_FEE, MORPH_DEFAULT_PRIORITY_FEE};
+
+    reth_tracing::init_test_tracing();
+
+    // 1. Genesis and consecutive empty blocks must return MORPH_DEFAULT_PRIORITY_FEE,
+    //    not 0x0 (which upstream `GasPriceOracle::suggest_tip_cap` produced).
+    let (mut nodes, _wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+    let client = node
+        .rpc_client()
+        .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
+
+    let expected_tip = U256::from(MORPH_DEFAULT_PRIORITY_FEE);
+    let expected_gas_price = U256::from(MORPH_BASE_FEE + MORPH_DEFAULT_PRIORITY_FEE);
+
+    // Block 0 (genesis)
+    let genesis_tip: U256 = client
+        .request("eth_maxPriorityFeePerGas", jsonrpsee::rpc_params![])
+        .await?;
+    let genesis_gas_price: U256 = client
+        .request("eth_gasPrice", jsonrpsee::rpc_params![])
+        .await?;
+    assert_eq!(genesis_tip, expected_tip);
+    assert_eq!(genesis_gas_price, expected_gas_price);
+
+    // Advance 3 consecutive empty blocks.
+    for _ in 0..3 {
+        let payload = node.advance_block().await?;
+        assert!(payload.block().body().transactions.is_empty());
+    }
+
+    let empty_tip: U256 = client
+        .request("eth_maxPriorityFeePerGas", jsonrpsee::rpc_params![])
+        .await?;
+    let empty_gas_price: U256 = client
+        .request("eth_gasPrice", jsonrpsee::rpc_params![])
+        .await?;
+    assert_eq!(
+        empty_tip, expected_tip,
+        "empty blocks must keep MORPH_DEFAULT_PRIORITY_FEE floor"
+    );
+    assert_eq!(empty_gas_price, expected_gas_price);
+
+    // 2. When a block reaches capacity (`gas_used + max_tx_gas_used > gas_limit`),
+    //    `eth_maxPriorityFeePerGas` scales up to 110% of the block's median tip.
+    let (mut cap_nodes, cap_wallet) = TestNodeBuilder::new()
+        .with_gas_limit(30_000)
+        .build()
+        .await?;
+    let mut cap_node = cap_nodes.pop().unwrap();
+    let cap_client = cap_node
+        .rpc_client()
+        .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
+
+    let high_tip = 10_000_000u128; // 0.01 Gwei > MORPH_DEFAULT_PRIORITY_FEE
+    let tx = TxEip1559 {
+        chain_id: cap_wallet.chain_id,
+        nonce: 0,
+        gas_limit: 21_000,
+        max_fee_per_gas: 20_000_000,
+        max_priority_fee_per_gas: high_tip,
+        to: TxKind::Call(Address::with_last_byte(0x42)),
+        value: U256::ZERO,
+        access_list: Default::default(),
+        input: Bytes::new(),
+    };
+    let sig = cap_wallet
+        .inner
+        .sign_hash_sync(&tx.signature_hash())
+        .map_err(|e| eyre::eyre!("{e}"))?;
+    let raw: Bytes = MorphTxEnvelope::Eip1559(tx.into_signed(sig))
+        .encoded_2718()
+        .into();
+
+    cap_node.rpc.inject_tx(raw).await?;
+    let payload = cap_node.advance_block().await?;
+    assert_eq!(payload.block().body().transactions.len(), 1);
+    assert_eq!(payload.block().header().gas_used(), 21_000);
+    assert!(
+        payload.block().header().gas_used() + 21_000 > payload.block().header().gas_limit(),
+        "test block must be at capacity"
+    );
+
+    let congested_tip: U256 = cap_client
+        .request("eth_maxPriorityFeePerGas", jsonrpsee::rpc_params![])
+        .await?;
+    let congested_gas_price: U256 = cap_client
+        .request("eth_gasPrice", jsonrpsee::rpc_params![])
+        .await?;
+    let expected_congested_tip = U256::from(high_tip + high_tip / 10);
+    assert_eq!(congested_tip, expected_congested_tip);
+    assert_eq!(
+        congested_gas_price,
+        expected_congested_tip + U256::from(MORPH_BASE_FEE)
+    );
+
+    // Next empty block immediately returns to the floor.
+    cap_node.advance_block().await?;
+    let recovered_tip: U256 = cap_client
+        .request("eth_maxPriorityFeePerGas", jsonrpsee::rpc_params![])
+        .await?;
+    assert_eq!(recovered_tip, expected_tip);
+
+    Ok(())
+}
+
+/// `eth_estimateGas` / `eth_call` with `maxPriorityFeePerGas: 0x0` and omitted
+/// `maxFeePerGas` must treat the call as zero-priced (matching `morph-geth`),
+/// rather than pricing it at `base_fee` and failing zero-balance senders with
+/// `insufficient funds for l1 fee`.
+#[tokio::test(flavor = "multi_thread")]
+async fn estimate_gas_allows_zero_priority_fee_without_max_fee_for_zero_balance_sender()
+-> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, wallet) = TestNodeBuilder::new().build().await?;
+    let mut node = nodes.pop().unwrap();
+    advance_chain(1, &mut node, wallet_to_arc(wallet)).await?;
+
+    let client = node
+        .rpc_client()
+        .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
+
+    let zero_balance_sender = Address::random();
+    let recipient = Address::random();
+
+    // 1. Omitted maxFeePerGas + maxPriorityFeePerGas = 0 -> succeeds for 0-balance sender.
+    let zero_tip_req = serde_json::json!({
+        "from": zero_balance_sender,
+        "to": recipient,
+        "maxPriorityFeePerGas": "0x0",
+    });
+    let gas: U256 = client
+        .request("eth_estimateGas", (zero_tip_req.clone(),))
+        .await?;
+    assert_eq!(gas, U256::from(21_000u64));
+
+    let call_res: Bytes = client.request("eth_call", (zero_tip_req, "latest")).await?;
+    assert!(call_res.is_empty());
+
+    // 2. Explicit non-zero maxFeePerGas + maxPriorityFeePerGas = 0 -> still checks balance/L1 fee.
+    let explicit_max_fee_req = serde_json::json!({
+        "from": zero_balance_sender,
+        "to": recipient,
+        "maxFeePerGas": "0x3b9aca00",
+        "maxPriorityFeePerGas": "0x0",
+    });
+    let err = client
+        .request::<Value, _>("eth_estimateGas", (explicit_max_fee_req,))
+        .await
+        .expect_err("explicit non-zero maxFeePerGas must still enforce L1 fee / balance check")
+        .to_string();
+    assert!(
+        err.contains("insufficient funds for l1 fee"),
+        "expected insufficient funds for l1 fee, got: {err}"
+    );
+
+    // 3. Unregistered feeTokenID with maxPriorityFeePerGas = 0 -> still rejected.
+    let bad_token_req = serde_json::json!({
+        "from": zero_balance_sender,
+        "to": recipient,
+        "feeTokenID": "0xffff",
+        "maxPriorityFeePerGas": "0x0",
+    });
+    let err = client
+        .request::<Value, _>("eth_estimateGas", (bad_token_req,))
+        .await
+        .expect_err("unregistered fee token must still be rejected")
+        .to_string();
+    assert!(
+        err.contains("Token with ID 65535 is not registered"),
+        "expected unregistered fee token error, got: {err}"
+    );
+
+    Ok(())
+}
