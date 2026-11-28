@@ -19,13 +19,16 @@ use reth_evm::EvmEnv;
 /// [`try_build_morph_tx_from_request`].
 impl TryIntoSimTx<MorphTxEnvelope> for MorphTransactionRequest {
     fn try_into_sim_tx(self) -> Result<MorphTxEnvelope, alloy_consensus::error::ValueError<Self>> {
-        // Try to build a MorphTx; returns None if this should be a standard Ethereum tx
+        // Try to build a MorphTx; returns None if this should be a standard Ethereum tx.
+        // Simulation preserves Morph fields even when legacy `gasPrice` is set, matching
+        // `TryIntoTxEnv` and geth's `ToMessage`.
         let morph_tx_result = try_build_morph_tx_from_request(
             &self.inner,
             self.fee_token_id.unwrap_or_default(),
             self.fee_limit.unwrap_or_default(),
             self.reference,
             self.memo.clone(),
+            true,
         );
 
         match morph_tx_result {
@@ -63,13 +66,15 @@ impl SignableTxRequest<MorphTxEnvelope> for MorphTransactionRequest {
         self,
         signer: impl TxSigner<Signature> + Send,
     ) -> Result<MorphTxEnvelope, SignTxRequestError> {
-        // Try to build a MorphTx; returns None if this should be a standard Ethereum tx
+        // Try to build a MorphTx; returns None if this should be a standard Ethereum tx.
+        // Real transaction signing keeps legacy `gasPrice` as a standard Ethereum tx.
         let morph_tx_result = try_build_morph_tx_from_request(
             &self.inner,
             self.fee_token_id.unwrap_or_default(),
             self.fee_limit.unwrap_or_default(),
             self.reference,
             self.memo,
+            false,
         );
 
         match morph_tx_result {
@@ -192,8 +197,15 @@ fn morph_envelope_from_ethereum(
 /// `Ok(None)` if this should be a standard Ethereum transaction,
 /// or `Err(...)` if there's a validation error.
 ///
-/// Unless the request sets legacy `gasPrice` (always a standard transaction),
-/// a MorphTx is constructed when any of these Morph fields is set:
+/// When `allow_legacy_gas_price` is `false` (real transaction signing via
+/// [`SignableTxRequest`]), setting legacy `gasPrice` forces a standard Ethereum
+/// transaction. When `allow_legacy_gas_price` is `true` (simulation via
+/// [`TryIntoSimTx`]), Morph fields take precedence and a legacy `gasPrice` maps
+/// onto both `max_fee_per_gas` and `max_priority_fee_per_gas` (rejecting
+/// requests that specify both `gasPrice` and EIP-1559 fee fields), matching
+/// [`TryIntoTxEnv`] and geth's `ToMessage`.
+///
+/// A MorphTx is constructed when any of these Morph fields is set:
 /// - `feeTokenID > 0` (ERC20 gas payment)
 /// - a non-zero `reference`
 /// - a non-empty `memo`
@@ -210,9 +222,10 @@ fn try_build_morph_tx_from_request(
     fee_limit: U256,
     reference: Option<B256>,
     memo: Option<alloy_primitives::Bytes>,
+    allow_legacy_gas_price: bool,
 ) -> Result<Option<TxMorph>, &'static str> {
     let reference = normalize_reference(reference);
-    if req.gas_price.is_some() {
+    if !allow_legacy_gas_price && req.gas_price.is_some() {
         return Ok(None);
     }
 
@@ -227,6 +240,18 @@ fn try_build_morph_tx_from_request(
         return Ok(None);
     }
 
+    let (max_fee_per_gas, max_priority_fee_per_gas) = if let Some(gas_price) = req.gas_price {
+        if req.max_fee_per_gas.is_some() || req.max_priority_fee_per_gas.is_some() {
+            return Err("both gasPrice and (maxFeePerGas or maxPriorityFeePerGas) specified");
+        }
+        (gas_price, gas_price)
+    } else {
+        (
+            req.max_fee_per_gas.unwrap_or_default(),
+            req.max_priority_fee_per_gas.unwrap_or_default(),
+        )
+    };
+
     let authorization_list = req.authorization_list.clone().unwrap_or_default();
     let version = TxMorph::inferred_version(!authorization_list.is_empty());
 
@@ -236,8 +261,6 @@ fn try_build_morph_tx_from_request(
         .ok_or("missing chain_id for morph transaction")?;
     let gas_limit = req.gas.unwrap_or_default();
     let nonce = req.nonce.unwrap_or_default();
-    let max_fee_per_gas = req.max_fee_per_gas.unwrap_or_default();
-    let max_priority_fee_per_gas = req.max_priority_fee_per_gas.unwrap_or_default();
     let access_list: AccessList = req.access_list.clone().unwrap_or_default();
     let input = req
         .input
@@ -846,7 +869,8 @@ mod tests {
     #[test]
     fn try_build_morph_tx_returns_none_for_standard_tx() {
         let req = create_basic_transaction_request();
-        let result = try_build_morph_tx_from_request(&req, U64::ZERO, U256::ZERO, None, None);
+        let result =
+            try_build_morph_tx_from_request(&req, U64::ZERO, U256::ZERO, None, None, false);
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
     }
@@ -854,8 +878,14 @@ mod tests {
     #[test]
     fn try_build_morph_tx_with_fee_token_id() {
         let req = create_morph_transaction_request();
-        let result =
-            try_build_morph_tx_from_request(&req, U64::from(1), U256::from(1_000_000), None, None);
+        let result = try_build_morph_tx_from_request(
+            &req,
+            U64::from(1),
+            U256::from(1_000_000),
+            None,
+            None,
+            false,
+        );
         assert!(result.is_ok());
         let tx = result.unwrap().unwrap();
         assert_eq!(tx.fee_token_id, 1);
@@ -866,8 +896,14 @@ mod tests {
     #[test]
     fn try_build_morph_tx_treats_gas_price_with_morph_fields_as_standard_tx() {
         let req = create_basic_transaction_request();
-        let result =
-            try_build_morph_tx_from_request(&req, U64::from(1), U256::from(1_000_000), None, None);
+        let result = try_build_morph_tx_from_request(
+            &req,
+            U64::from(1),
+            U256::from(1_000_000),
+            None,
+            None,
+            false,
+        );
 
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
@@ -877,8 +913,14 @@ mod tests {
     fn try_build_morph_tx_with_reference_only() {
         let req = create_morph_transaction_request();
         let reference = B256::random();
-        let result =
-            try_build_morph_tx_from_request(&req, U64::ZERO, U256::ZERO, Some(reference), None);
+        let result = try_build_morph_tx_from_request(
+            &req,
+            U64::ZERO,
+            U256::ZERO,
+            Some(reference),
+            None,
+            false,
+        );
         assert!(result.is_ok());
         let tx = result.unwrap().unwrap();
         assert_eq!(tx.reference, Some(reference));
@@ -888,8 +930,14 @@ mod tests {
     #[test]
     fn try_build_morph_tx_treats_zero_reference_as_absent() {
         let req = create_morph_transaction_request();
-        let result =
-            try_build_morph_tx_from_request(&req, U64::from(1), U256::ZERO, Some(B256::ZERO), None);
+        let result = try_build_morph_tx_from_request(
+            &req,
+            U64::from(1),
+            U256::ZERO,
+            Some(B256::ZERO),
+            None,
+            false,
+        );
 
         assert!(result.is_ok());
         let tx = result.unwrap().unwrap();
@@ -901,8 +949,14 @@ mod tests {
     fn try_build_morph_tx_with_memo_only() {
         let req = create_morph_transaction_request();
         let memo = Bytes::from("hello world");
-        let result =
-            try_build_morph_tx_from_request(&req, U64::ZERO, U256::ZERO, None, Some(memo.clone()));
+        let result = try_build_morph_tx_from_request(
+            &req,
+            U64::ZERO,
+            U256::ZERO,
+            None,
+            Some(memo.clone()),
+            false,
+        );
         assert!(result.is_ok());
         let tx = result.unwrap().unwrap();
         assert_eq!(tx.memo, Some(memo));
@@ -911,8 +965,14 @@ mod tests {
     #[test]
     fn try_build_morph_tx_empty_memo_is_not_trigger() {
         let req = create_morph_transaction_request();
-        let result =
-            try_build_morph_tx_from_request(&req, U64::ZERO, U256::ZERO, None, Some(Bytes::new()));
+        let result = try_build_morph_tx_from_request(
+            &req,
+            U64::ZERO,
+            U256::ZERO,
+            None,
+            Some(Bytes::new()),
+            false,
+        );
         assert!(result.is_ok());
         // Empty memo should NOT trigger MorphTx creation
         assert!(result.unwrap().is_none());
@@ -941,10 +1001,16 @@ mod tests {
     #[test]
     fn try_build_morph_tx_with_authorization_list_selects_v2() {
         let req = create_v2_transaction_request();
-        let tx =
-            try_build_morph_tx_from_request(&req, U64::from(1), U256::from(1_000_000), None, None)
-                .unwrap()
-                .expect("fee token + authorization list builds a MorphTx");
+        let tx = try_build_morph_tx_from_request(
+            &req,
+            U64::from(1),
+            U256::from(1_000_000),
+            None,
+            None,
+            false,
+        )
+        .unwrap()
+        .expect("fee token + authorization list builds a MorphTx");
 
         assert_eq!(tx.version, MORPH_TX_VERSION_2);
         assert_eq!(tx.fee_token_id, 1);
@@ -956,7 +1022,8 @@ mod tests {
     fn try_build_morph_tx_authorization_list_without_morph_fields_is_standard_tx() {
         // No Morph field → stays a standard (EIP-7702) transaction.
         let req = create_v2_transaction_request();
-        let result = try_build_morph_tx_from_request(&req, U64::ZERO, U256::ZERO, None, None);
+        let result =
+            try_build_morph_tx_from_request(&req, U64::ZERO, U256::ZERO, None, None, false);
         assert!(result.unwrap().is_none());
     }
 
@@ -969,6 +1036,7 @@ mod tests {
             U256::ZERO,
             None,
             Some(Bytes::from("memo")),
+            false,
         )
         .unwrap()
         .expect("memo + authorization list builds a MorphTx");
@@ -993,6 +1061,7 @@ mod tests {
                 U256::ZERO,
                 None,
                 Some(Bytes::from("memo")),
+                false,
             )
             .unwrap()
             .expect("memo builds a MorphTx");
@@ -1009,9 +1078,10 @@ mod tests {
         req.to = None;
         req.input = TransactionInput::new(Bytes::from_static(&[0x60, 0x80]));
 
-        let tx = try_build_morph_tx_from_request(&req, U64::from(1), U256::from(100), None, None)
-            .unwrap()
-            .expect("token fee builds a MorphTx");
+        let tx =
+            try_build_morph_tx_from_request(&req, U64::from(1), U256::from(100), None, None, false)
+                .unwrap()
+                .expect("token fee builds a MorphTx");
         assert_eq!(tx.version, MORPH_TX_VERSION_1);
         assert!(tx.to.is_create());
         assert!(tx.validate().is_ok());
@@ -1023,9 +1093,10 @@ mod tests {
             authorization_list: Some(vec![]),
             ..create_morph_transaction_request()
         };
-        let tx = try_build_morph_tx_from_request(&req, U64::from(1), U256::from(100), None, None)
-            .unwrap()
-            .unwrap();
+        let tx =
+            try_build_morph_tx_from_request(&req, U64::from(1), U256::from(100), None, None, false)
+                .unwrap()
+                .unwrap();
         assert_eq!(tx.version, MORPH_TX_VERSION_1);
         assert!(tx.authorization_list.is_empty());
     }
@@ -1037,7 +1108,7 @@ mod tests {
         req.input = TransactionInput::new(Bytes::from_static(&[0x60, 0x80]));
 
         let result =
-            try_build_morph_tx_from_request(&req, U64::from(1), U256::from(100), None, None);
+            try_build_morph_tx_from_request(&req, U64::from(1), U256::from(100), None, None, false);
         assert_eq!(
             result.unwrap_err(),
             "MorphTx with an authorization list cannot create a contract"
@@ -1290,7 +1361,7 @@ mod tests {
         let mut req = create_morph_transaction_request();
         req.chain_id = None;
         let result =
-            try_build_morph_tx_from_request(&req, U64::from(1), U256::from(100), None, None);
+            try_build_morph_tx_from_request(&req, U64::from(1), U256::from(100), None, None, false);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("chain_id"));
     }
@@ -1304,7 +1375,7 @@ mod tests {
         };
 
         let result =
-            try_build_morph_tx_from_request(&req, U64::from(1), U256::from(100), None, None);
+            try_build_morph_tx_from_request(&req, U64::from(1), U256::from(100), None, None, false);
 
         assert_eq!(result.unwrap_err(), "data and input fields must match");
     }
@@ -1315,7 +1386,7 @@ mod tests {
         req.to = None;
 
         let result =
-            try_build_morph_tx_from_request(&req, U64::from(1), U256::from(100), None, None);
+            try_build_morph_tx_from_request(&req, U64::from(1), U256::from(100), None, None, false);
 
         assert_eq!(result.unwrap_err(), "contract creation requires initcode");
     }
@@ -1329,6 +1400,7 @@ mod tests {
             U256::from(500_000),
             Some(B256::random()),
             Some(Bytes::from("memo")),
+            false,
         );
         let tx = result.unwrap().unwrap();
         assert_eq!(tx.chain_id, 2818);
@@ -1336,6 +1408,163 @@ mod tests {
         assert_eq!(tx.nonce, 1);
         assert_eq!(tx.max_fee_per_gas, 1_000_000_000);
         assert_eq!(tx.value, U256::from(1000));
+    }
+
+    #[test]
+    fn try_into_sim_tx_preserves_morph_fields_with_legacy_gas_price() {
+        // 1. feeTokenID + legacy gasPrice builds a MorphTx with both caps set to gasPrice.
+        let req = MorphTransactionRequest {
+            inner: create_basic_transaction_request(),
+            fee_token_id: Some(U64::from(1)),
+            fee_limit: Some(U256::from(1_000_000)),
+            reference: None,
+            memo: None,
+        };
+        let env = req
+            .try_into_sim_tx()
+            .expect("simulation with feeTokenID + gasPrice must build MorphTx");
+        let MorphTxEnvelope::Morph(signed) = env else {
+            panic!("expected MorphTxEnvelope::Morph, got {env:?}");
+        };
+        assert_eq!(signed.tx().fee_token_id, 1);
+        assert_eq!(signed.tx().fee_limit, U256::from(1_000_000));
+        assert_eq!(signed.tx().max_fee_per_gas, 1_000_000_000);
+        assert_eq!(signed.tx().max_priority_fee_per_gas, 1_000_000_000);
+        assert_eq!(
+            *signed.signature(),
+            Signature::new(U256::ZERO, U256::ZERO, false)
+        );
+
+        // 2. reference + legacy gasPrice preserves reference as MorphTx.
+        let reference = B256::repeat_byte(0x42);
+        let req = MorphTransactionRequest {
+            inner: create_basic_transaction_request(),
+            fee_token_id: None,
+            fee_limit: None,
+            reference: Some(reference),
+            memo: None,
+        };
+        let env = req
+            .try_into_sim_tx()
+            .expect("simulation with reference + gasPrice must build MorphTx");
+        let MorphTxEnvelope::Morph(signed) = env else {
+            panic!("expected MorphTxEnvelope::Morph, got {env:?}");
+        };
+        assert_eq!(signed.tx().reference, Some(reference));
+        assert_eq!(signed.tx().fee_token_id, 0);
+        assert_eq!(signed.tx().max_fee_per_gas, 1_000_000_000);
+        assert_eq!(signed.tx().max_priority_fee_per_gas, 1_000_000_000);
+
+        // 3. memo + legacy gasPrice preserves memo as MorphTx.
+        let memo = Bytes::from_static(b"hello");
+        let req = MorphTransactionRequest {
+            inner: create_basic_transaction_request(),
+            fee_token_id: None,
+            fee_limit: None,
+            reference: None,
+            memo: Some(memo.clone()),
+        };
+        let env = req
+            .try_into_sim_tx()
+            .expect("simulation with memo + gasPrice must build MorphTx");
+        let MorphTxEnvelope::Morph(signed) = env else {
+            panic!("expected MorphTxEnvelope::Morph, got {env:?}");
+        };
+        assert_eq!(signed.tx().memo, Some(memo));
+        assert_eq!(signed.tx().max_fee_per_gas, 1_000_000_000);
+        assert_eq!(signed.tx().max_priority_fee_per_gas, 1_000_000_000);
+
+        // 4. Legacy gasPrice with NO Morph fields stays a standard Legacy tx.
+        let standard = MorphTransactionRequest {
+            inner: create_basic_transaction_request(),
+            fee_token_id: None,
+            fee_limit: None,
+            reference: None,
+            memo: None,
+        };
+        let env = standard
+            .try_into_sim_tx()
+            .expect("plain gasPrice request builds standard Legacy tx");
+        assert!(
+            matches!(env, MorphTxEnvelope::Legacy(_)),
+            "expected Legacy, got {env:?}"
+        );
+    }
+
+    #[test]
+    fn try_into_sim_tx_rejects_conflicting_gas_price_and_eip1559_fields_with_morph_fields() {
+        // gasPrice + maxFeePerGas + feeTokenID
+        let mut inner = create_basic_transaction_request();
+        inner.max_fee_per_gas = Some(2_000_000_000);
+        let req = MorphTransactionRequest {
+            inner,
+            fee_token_id: Some(U64::from(1)),
+            fee_limit: None,
+            reference: None,
+            memo: None,
+        };
+        let err = req
+            .try_into_sim_tx()
+            .expect_err("gasPrice + maxFeePerGas must fail");
+        assert!(
+            err.to_string()
+                .contains("both gasPrice and (maxFeePerGas or maxPriorityFeePerGas) specified"),
+            "unexpected error: {err}"
+        );
+
+        // gasPrice + maxPriorityFeePerGas + memo
+        let mut inner = create_basic_transaction_request();
+        inner.max_priority_fee_per_gas = Some(100_000_000);
+        let req = MorphTransactionRequest {
+            inner,
+            fee_token_id: None,
+            fee_limit: None,
+            reference: None,
+            memo: Some(Bytes::from_static(b"memo")),
+        };
+        let err = req
+            .try_into_sim_tx()
+            .expect_err("gasPrice + maxPriorityFeePerGas must fail");
+        assert!(
+            err.to_string()
+                .contains("both gasPrice and (maxFeePerGas or maxPriorityFeePerGas) specified"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn signable_tx_request_keeps_legacy_gas_price_with_morph_fields_as_standard_tx() {
+        struct DummySigner;
+
+        #[async_trait::async_trait]
+        impl TxSigner<Signature> for DummySigner {
+            fn address(&self) -> Address {
+                address!("0000000000000000000000000000000000000001")
+            }
+
+            async fn sign_transaction(
+                &self,
+                _tx: &mut dyn SignableTransaction<Signature>,
+            ) -> alloy_signer::Result<Signature> {
+                Ok(Signature::new(U256::from(1u64), U256::from(2u64), false))
+            }
+        }
+
+        let req = MorphTransactionRequest {
+            inner: create_basic_transaction_request(),
+            fee_token_id: Some(U64::from(1)),
+            fee_limit: Some(U256::from(1_000_000)),
+            reference: None,
+            memo: None,
+        };
+        let signed = req
+            .try_build_and_sign(DummySigner)
+            .await
+            .expect("real signing with legacy gasPrice must stay a standard Legacy tx");
+        assert!(
+            matches!(signed, MorphTxEnvelope::Legacy(_)),
+            "expected Legacy tx from SignableTxRequest, got {signed:?}"
+        );
     }
 
     // =========================================================================

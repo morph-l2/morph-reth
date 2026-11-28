@@ -1,26 +1,66 @@
-//! Morph `eth_call` / `eth_estimateGas` overrides.
+//! Morph `eth_call` / `eth_estimateGas` / `eth_simulateV1` overrides.
 //!
-//! [`Call::caller_gas_allowance`] is overridden so `eth_estimateGas` caps
-//! gas by `balance − value − l1_fee` (ETH path) or a token-denominated limit
-//! (MorphTx `fee_token_id > 0`, see `token_gas_allowance`). `eth_call` and
-//! `eth_createAccessList` are detected via `cfg_env.disable_block_gas_limit = true` and fall
-//! through to the upstream allowance without the L1-fee extension, except
-//! that fee-token callers are left uncapped for the handler.
+//! - [`Call::caller_gas_allowance`] is overridden so `eth_estimateGas` caps
+//!   gas by `balance − value − l1_fee` (ETH path) or a token-denominated limit
+//!   (MorphTx `fee_token_id > 0`, see `token_gas_allowance`). `eth_call` and
+//!   `eth_createAccessList` are detected via `cfg_env.disable_block_gas_limit = true` and fall
+//!   through to the upstream allowance without the L1-fee extension, except
+//!   that fee-token callers are left uncapped for the handler.
+//! - [`EthCall::simulate_v1`] is overridden so `eth_simulateV1` disables fee
+//!   charging (including Morph's non-zero L1 data fee) when `validation: false`
+//!   and encodes a copy of each simulated transaction with a full-size
+//!   placeholder signature when `validation: true` so Curie `commit + blob`
+//!   (and pre-Curie calldata) L1 fees are accurately charged and validated
+//!   without mutating the zero signature returned to callers.
 
 use crate::MorphEthApiError;
 use crate::eth::{MorphEthApi, MorphNodeCore};
-use alloy_evm::call::{CallError, caller_gas_allowance as upstream_caller_gas_allowance};
-use alloy_primitives::U256;
-use morph_chainspec::{MorphChainSpec, MorphHardforks};
-use morph_revm::{L1BlockInfo, MorphTxExt, TokenFeeInfo};
-use reth_evm::{EvmEnvFor, TxEnvFor};
-use reth_provider::ChainSpecProvider;
-use reth_rpc_eth_api::{
-    EthApiTypes, RpcNodeCore,
-    helpers::{Call, EthCall, estimate::EstimateCall},
+use alloy_consensus::{BlockHeader, Signed};
+use alloy_eips::eip2718::{Encodable2718, WithEncoded};
+use alloy_evm::{
+    block::TxResult,
+    call::{CallError, caller_gas_allowance as upstream_caller_gas_allowance},
+    overrides::{OverrideBlockHashes, apply_block_overrides, apply_state_overrides},
 };
-use reth_rpc_eth_types::EthApiError;
-use revm::{Database, context::Transaction as RevmTransaction};
+use alloy_network::TransactionBuilder;
+use alloy_primitives::{B256, Bytes, Signature, U256};
+use alloy_rpc_types_eth::{
+    BlockId,
+    simulate::{SimBlock, SimulatePayload, SimulatedBlock},
+};
+use morph_chainspec::{MorphChainSpec, MorphHardforks};
+use morph_primitives::{MorphPrimitives, MorphTxEnvelope};
+use morph_revm::{L1BlockInfo, MorphTxExt, TokenFeeInfo};
+use reth_chainspec::{EthChainSpec, EthereumHardforks};
+use reth_errors::RethError;
+use reth_evm::{
+    ConfigureEvm, Evm, EvmEnvFor, TxEnvFor,
+    env::BlockEnvironment,
+    execute::{BlockBuilder, BlockBuilderOutcome, BlockExecutor},
+};
+use reth_provider::ChainSpecProvider;
+use reth_revm::{database::StateProviderDatabase, db::State};
+use reth_rpc_convert::{RpcConvert, RpcTxReq};
+use reth_rpc_eth_api::{
+    EthApiTypes, RpcBlock, RpcNodeCore,
+    helpers::{
+        Call, EthCall, LoadBlock, LoadPendingBlock, SpawnBlocking, call::SimulatedBlocksResult,
+        estimate::EstimateCall,
+    },
+};
+use reth_rpc_eth_types::{
+    EthApiError,
+    error::{AsEthApiError, FromEthApiError},
+    simulate::{self, EthSimulateError},
+};
+use reth_storage_api::{StateProvider, noop::NoopProvider};
+use revm::{
+    Database,
+    context::{Block, Transaction as RevmTransaction},
+    context_interface::{Cfg, result::ExecutionResult},
+};
+use revm_inspectors::transfer::TransferInspector;
+use std::collections::BTreeMap;
 
 impl<N, Rpc> EthCall for MorphEthApi<N, Rpc>
 where
@@ -30,6 +70,393 @@ where
         reth_rpc_convert::RpcConvert<Primitives = N::Primitives, Error = EthApiError, Evm = N::Evm>,
     MorphEthApiError: reth_rpc_eth_types::error::FromEvmError<N::Evm>,
 {
+    async fn simulate_v1(
+        &self,
+        payload: SimulatePayload<RpcTxReq<<Self::RpcConvert as RpcConvert>::Network>>,
+        block: Option<BlockId>,
+    ) -> SimulatedBlocksResult<Self::NetworkTypes, Self::Error> {
+        if payload.block_state_calls.len() > self.max_simulate_blocks() as usize {
+            return Err(EthApiError::other(EthSimulateError::TooManyBlocks).into());
+        }
+
+        let block = block.unwrap_or_default();
+
+        let SimulatePayload {
+            block_state_calls,
+            trace_transfers,
+            validation,
+            return_full_transactions,
+        } = payload;
+
+        if block_state_calls.is_empty() {
+            return Err(EthApiError::InvalidParams(String::from("calls are empty.")).into());
+        }
+
+        let _permit = self
+            .acquire_owned_blocking_io()
+            .await
+            .map_err(|_| EthApiError::InternalEthError)?;
+
+        let base_block = self
+            .recovered_block(block)
+            .await?
+            .ok_or_else(|| EthApiError::other(EthSimulateError::BlockNotFound { block }))?;
+        let parent = base_block.sealed_header().clone();
+        let max_simulate_blocks = self.max_simulate_blocks();
+
+        self.spawn_with_state_at_block(block, move |this, db| {
+            let state_provider = db.database.0.0;
+            let mut db = State::builder()
+                .with_database(StateProviderDatabase::new(&state_provider))
+                .with_bundle_update()
+                .build();
+            let mut parent = parent;
+
+            let chain_id = this.provider().chain_spec().chain_id();
+
+            // Validate block ordering and fill gaps with empty blocks so every entry has an
+            // explicit `number` and `time` override and the chain is contiguous.
+            let block_state_calls = simulate::sanitize_chain(
+                block_state_calls,
+                &parent,
+                chain_id,
+                max_simulate_blocks,
+            )?;
+
+            let mut blocks: Vec<SimulatedBlock<RpcBlock<Self::NetworkTypes>>> =
+                Vec::with_capacity(block_state_calls.len());
+
+            let call_gas_limit = this.call_gas_limit();
+            let mut remaining_call_gas_limit = (call_gas_limit > 0).then_some(call_gas_limit);
+
+            for block in block_state_calls {
+                let SimBlock {
+                    block_overrides,
+                    state_overrides,
+                    calls,
+                } = block;
+
+                let attributes = this
+                    .pending_env_builder()
+                    .pending_env_attributes(&parent, block_overrides.as_ref())
+                    .map_err(Self::Error::from_eth_err)?;
+
+                let mut evm_env = this
+                    .evm_config()
+                    .next_evm_env(&parent, &attributes)
+                    .map_err(RethError::other)
+                    .map_err(Self::Error::from_eth_err)?;
+
+                // Always disable EIP-3607.
+                evm_env.cfg_env.disable_eip3607 = true;
+
+                // EIP-7825's transaction gas cap is only active with Amsterdam's
+                // regular/state-gas accounting.
+                if !evm_env.cfg_env.is_amsterdam_eip8037_enabled() {
+                    evm_env.cfg_env.tx_gas_limit_cap = Some(u64::MAX);
+                }
+
+                if !validation {
+                    // If not explicitly required, disable nonce check
+                    // <https://github.com/paradigmxyz/reth/issues/16108>.
+                    evm_env.cfg_env.disable_nonce_check = true;
+                    evm_env.cfg_env.disable_base_fee = true;
+                    // Unlike OP-Stack, Morph's post-Curie L1 commit fee is non-zero even for
+                    // empty RLP bytes. Disabling fee charging matches `eth_call` semantics so
+                    // `validation: false` does not reject zero-balance / omitted-`from`
+                    // callers or mutate caller / FeeVault balances or emit fee Transfer logs.
+                    evm_env.cfg_env.disable_fee_charge = true;
+                    evm_env.block_env.inner_mut().basefee = 0;
+                }
+
+                // Set prevrandao to zero for simulated blocks by default,
+                // matching spec behavior where MixDigest is zero-initialized.
+                // If user provides an override, it will be applied by apply_block_overrides.
+                evm_env.block_env.inner_mut().prevrandao = Some(B256::ZERO);
+                if !this
+                    .provider()
+                    .chain_spec()
+                    .is_paris_active_at_block(evm_env.block_env.number().saturating_to())
+                {
+                    evm_env.block_env.inner_mut().difficulty = parent.difficulty();
+                }
+
+                if let Some(block_overrides) = block_overrides {
+                    // Ensure we don't allow uncapped gas limit per block.
+                    if let Some(gas_limit_override) = block_overrides.gas_limit
+                        && gas_limit_override > evm_env.block_env.gas_limit()
+                        && gas_limit_override > this.call_gas_limit()
+                    {
+                        return Err(EthApiError::other(EthSimulateError::GasLimitReached).into());
+                    }
+                    apply_block_overrides(block_overrides, &mut db, evm_env.block_env.inner_mut());
+                }
+                if let Some(ref state_overrides) = state_overrides {
+                    apply_state_overrides(state_overrides.clone(), &mut db)
+                        .map_err(Self::Error::from_eth_err)?;
+                }
+
+                let chain_id = evm_env.cfg_env.chain_id;
+
+                let ctx = this
+                    .evm_config()
+                    .context_for_next_block(&parent, attributes)
+                    .map_err(RethError::other)
+                    .map_err(Self::Error::from_eth_err)?;
+                let map_err = |e: EthApiError| -> Self::Error {
+                    match e.as_simulate_error() {
+                        Some(sim_err) => Self::Error::from_eth_err(EthApiError::other(sim_err)),
+                        None => Self::Error::from_eth_err(e),
+                    }
+                };
+
+                let (result, results) = if trace_transfers {
+                    // Prepare inspector to capture transfers inside the EVM so they are
+                    // recorded and included in logs.
+                    let inspector = TransferInspector::new(false).with_logs(true);
+                    let evm = this
+                        .evm_config()
+                        .evm_with_env_and_inspector(&mut db, evm_env, inspector);
+                    let mut builder = this.evm_config().create_block_builder(evm, &parent, ctx);
+
+                    if let Some(ref state_overrides) = state_overrides {
+                        simulate::apply_precompile_overrides(
+                            state_overrides,
+                            builder.evm_mut().precompiles_mut(),
+                        )
+                        .map_err(|e| Self::Error::from_eth_err(EthApiError::other(e)))?;
+                    }
+
+                    execute_simulated_transactions(
+                        builder,
+                        &state_provider,
+                        calls,
+                        &mut remaining_call_gas_limit,
+                        chain_id,
+                        this.compute_state_root_for_eth_simulate(),
+                        validation,
+                        this.converter(),
+                    )
+                    .map_err(map_err)?
+                } else {
+                    let evm = this.evm_config().evm_with_env(&mut db, evm_env);
+                    let mut builder = this.evm_config().create_block_builder(evm, &parent, ctx);
+
+                    if let Some(ref state_overrides) = state_overrides {
+                        simulate::apply_precompile_overrides(
+                            state_overrides,
+                            builder.evm_mut().precompiles_mut(),
+                        )
+                        .map_err(|e| Self::Error::from_eth_err(EthApiError::other(e)))?;
+                    }
+
+                    execute_simulated_transactions(
+                        builder,
+                        &state_provider,
+                        calls,
+                        &mut remaining_call_gas_limit,
+                        chain_id,
+                        this.compute_state_root_for_eth_simulate(),
+                        validation,
+                        this.converter(),
+                    )
+                    .map_err(map_err)?
+                };
+
+                let simulated_header = result.block.clone_sealed_header();
+                db.override_block_hashes(BTreeMap::from([(
+                    simulated_header.number(),
+                    simulated_header.hash(),
+                )]));
+                parent = simulated_header;
+
+                let block = simulate::build_simulated_block::<Self::Error, _>(
+                    result.block,
+                    results,
+                    return_full_transactions.into(),
+                    this.converter(),
+                )?;
+
+                blocks.push(block);
+            }
+
+            Ok(blocks)
+        })
+        .await
+    }
+}
+
+/// Encodes a simulated transaction with a full-size placeholder signature for L1
+/// data fee sizing, without mutating the transaction itself.
+///
+/// `TryIntoSimTx` attaches `Signature::new(U256::ZERO, U256::ZERO, false)` (3 RLP
+/// bytes instead of 67 bytes) so `returnFullTransactions: true` exposes zero
+/// `r`/`s`/`v` per the Ethereum `eth_simulateV1` spec. Encoding that zero signature
+/// directly underestimates post-Curie blob fees by 64 bytes (and pre-Curie calldata
+/// gas by 64 non-zero bytes). Using the same 64-byte `0xff` + `yParity = 1`
+/// placeholder as [`morph_revm::MorphTxEnv::encode_for_l1_fee`] matches real signed
+/// transactions and `eth_estimateGas` while keeping `tx`'s zero signature intact.
+fn encode_simulated_tx_for_l1_fee(tx: &MorphTxEnvelope) -> Bytes {
+    let placeholder_sig = Signature::new(U256::MAX, U256::MAX, true);
+    let envelope = match tx {
+        MorphTxEnvelope::Legacy(signed) => MorphTxEnvelope::Legacy(Signed::new_unchecked(
+            signed.tx().clone(),
+            placeholder_sig,
+            B256::ZERO,
+        )),
+        MorphTxEnvelope::Eip2930(signed) => MorphTxEnvelope::Eip2930(Signed::new_unchecked(
+            signed.tx().clone(),
+            placeholder_sig,
+            B256::ZERO,
+        )),
+        MorphTxEnvelope::Eip1559(signed) => MorphTxEnvelope::Eip1559(Signed::new_unchecked(
+            signed.tx().clone(),
+            placeholder_sig,
+            B256::ZERO,
+        )),
+        MorphTxEnvelope::Eip7702(signed) => MorphTxEnvelope::Eip7702(Signed::new_unchecked(
+            signed.tx().clone(),
+            placeholder_sig,
+            B256::ZERO,
+        )),
+        MorphTxEnvelope::Morph(signed) => MorphTxEnvelope::Morph(Signed::new_unchecked(
+            signed.tx().clone(),
+            placeholder_sig,
+            B256::ZERO,
+        )),
+        MorphTxEnvelope::L1Msg(_) => return tx.encoded_2718().into(),
+    };
+    envelope.encoded_2718().into()
+}
+
+/// Morph-aware equivalent of [`simulate::execute_transactions`].
+///
+/// Mirrors upstream `eth_simulateV1` block execution, gas-cap accounting, and
+/// state-root handling, while wrapping resolved transactions with a full-size
+/// placeholder-signature EIP-2718 encoding when `validation == true` so Morph's
+/// L1 data fee charges the full Curie `commit + blob` (or pre-Curie calldata)
+/// cost without mutating the zero signature stored on `tx`.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn execute_simulated_transactions<S, T>(
+    mut builder: S,
+    state_provider: impl StateProvider,
+    calls: Vec<RpcTxReq<T::Network>>,
+    remaining_call_gas_limit: &mut Option<u64>,
+    chain_id: u64,
+    compute_state_root: bool,
+    validation: bool,
+    converter: &T,
+) -> Result<
+    (
+        BlockBuilderOutcome<S::Primitives>,
+        Vec<ExecutionResult<<<S::Executor as BlockExecutor>::Evm as Evm>::HaltReason>>,
+    ),
+    EthApiError,
+>
+where
+    S: BlockBuilder<
+            Primitives = MorphPrimitives,
+            Executor: BlockExecutor<Evm: Evm<DB: Database<Error: Into<EthApiError>>>>,
+        >,
+    T: RpcConvert<Primitives = S::Primitives>,
+{
+    builder.apply_pre_execution_changes()?;
+
+    let mut results = Vec::with_capacity(calls.len());
+    let mut cumulative_tx_gas_used: u64 = 0;
+    let mut block_regular_gas_used: u64 = 0;
+    let mut block_state_gas_used: u64 = 0;
+    let block_gas_limit = builder.evm().block().gas_limit();
+    let is_amsterdam = builder.evm().cfg_env().enable_amsterdam_eip8037;
+    let tx_gas_limit_cap = builder.evm().cfg_env().tx_gas_limit_cap.unwrap_or(u64::MAX);
+    for mut call in calls {
+        let block_gas_remaining = if is_amsterdam {
+            block_gas_limit
+                .saturating_sub(block_regular_gas_used)
+                .min(block_gas_limit.saturating_sub(block_state_gas_used))
+        } else {
+            block_gas_limit.saturating_sub(cumulative_tx_gas_used)
+        };
+        let mut default_gas_limit = block_gas_remaining;
+
+        if let Some(gas_limit) = call.as_ref().gas_limit() {
+            let exceeds_gas_limit = if is_amsterdam {
+                let regular_available_gas = block_gas_limit.saturating_sub(block_regular_gas_used);
+                let state_available_gas = block_gas_limit.saturating_sub(block_state_gas_used);
+                let regular_tx_gas_limit = gas_limit.min(tx_gas_limit_cap);
+
+                regular_tx_gas_limit > regular_available_gas || gas_limit > state_available_gas
+            } else {
+                gas_limit > block_gas_remaining
+            };
+
+            if exceeds_gas_limit {
+                return Err(EthApiError::other(EthSimulateError::BlockGasLimitExceeded));
+            }
+        }
+
+        if let Some(remaining_call_gas_limit) = *remaining_call_gas_limit {
+            if let Some(gas_limit) = call.as_ref().gas_limit() {
+                if gas_limit > remaining_call_gas_limit {
+                    call.as_mut().set_gas_limit(remaining_call_gas_limit);
+                }
+            } else {
+                default_gas_limit = default_gas_limit.min(remaining_call_gas_limit);
+            }
+        }
+
+        // Resolve transaction, populate missing fields and enforce calls
+        // correctness.
+        let tx = simulate::resolve_transaction(
+            call,
+            default_gas_limit,
+            builder.evm().block().basefee(),
+            chain_id,
+            builder.evm().cfg_env().disable_nonce_check,
+            builder.evm_mut().db_mut(),
+            converter,
+        )?;
+        // When `validation == true`, encode a copy of `tx` with a full-size
+        // placeholder signature (`r = s = U256::MAX, yParity = true`, matching
+        // `MorphTxEnv::encode_for_l1_fee`) so Morph's L1 fee calculation charges
+        // the full commit + blob (Curie) or calldata (pre-Curie) fee without
+        // mutating `tx`'s zero signature (`returnFullTransactions: true` keeps
+        // zero `r`/`s`/`v` per the Ethereum `eth_simulateV1` spec). When
+        // `validation == false`, `disable_fee_charge` skips L1 fee charging
+        // entirely, so an empty envelope avoids wasted encoding.
+        let encoded = if validation {
+            encode_simulated_tx_for_l1_fee(tx.inner())
+        } else {
+            Default::default()
+        };
+        let tx = WithEncoded::new(encoded, tx);
+
+        let mut tx_regular_gas_used = 0;
+        let gas_output = builder.execute_transaction_with_result_closure(tx, |result| {
+            tx_regular_gas_used = result.result().result.gas().block_regular_gas_used();
+            results.push(result.result().result.clone())
+        })?;
+
+        let gas_used = gas_output.tx_gas_used();
+        if let Some(remaining_call_gas_limit) = remaining_call_gas_limit.as_mut() {
+            if gas_used > *remaining_call_gas_limit {
+                return Err(EthApiError::other(EthSimulateError::GasLimitReached));
+            }
+            *remaining_call_gas_limit -= gas_used;
+        }
+
+        cumulative_tx_gas_used = cumulative_tx_gas_used.saturating_add(gas_used);
+        block_regular_gas_used = block_regular_gas_used.saturating_add(tx_regular_gas_used);
+        block_state_gas_used = block_state_gas_used.saturating_add(gas_output.state_gas_used());
+    }
+
+    let result = if compute_state_root {
+        builder.finish(state_provider, None)?
+    } else {
+        builder.finish(NoopProvider::default(), None)?
+    };
+
+    Ok((result, results))
 }
 
 impl<N, Rpc> EstimateCall for MorphEthApi<N, Rpc>
@@ -617,6 +1044,243 @@ mod tests {
         assert_eq!(
             token_amount_to_eth(U256::from(10u64), &info),
             Some(U256::from(3u64))
+        );
+    }
+
+    /// `encode_simulated_tx_for_l1_fee` must re-encode every signed `MorphTxEnvelope`
+    /// variant with the 64-byte `0xff` + `yParity = 1` placeholder signature (adding
+    /// 64 bytes vs `TryIntoSimTx`'s zero signature when the outer RLP header width is
+    /// unchanged), match `MorphTxEnv::encode_for_l1_fee` for EIP-1559 / EIP-7702 /
+    /// MorphTx, fall back to `encoded_2718` for `L1Msg`, and leave `tx`'s original
+    /// zero signature untouched.
+    #[test]
+    fn encode_simulated_tx_for_l1_fee_uses_full_placeholder_sig_without_mutating_tx() {
+        use alloy_consensus::{
+            Signed, Transaction as _, TxEip1559, TxEip2930, TxEip7702, TxLegacy,
+        };
+        use alloy_eips::{
+            eip2718::Decodable2718,
+            eip7702::{Authorization, SignedAuthorization},
+        };
+        use alloy_primitives::{Address, Sealed, TxKind, address};
+        use morph_primitives::{
+            TxL1Msg, TxMorph,
+            transaction::morph_transaction::{MORPH_TX_VERSION_1, MORPH_TX_VERSION_2},
+        };
+        use morph_revm::MorphTxEnv;
+
+        let chain_id = 2818u64;
+        let signer = address!("0000000000000000000000000000000000000001");
+        let to = address!("0000000000000000000000000000000000000002");
+        // 64 bytes of calldata keeps both zero-sig and placeholder-sig RLP payload
+        // lengths inside `[56, 255]` so the outer RLP list header is 2 bytes for both
+        // and the length delta is exactly +64 bytes.
+        let input = Bytes::from(vec![0xab; 64]);
+        let zero_sig = Signature::new(U256::ZERO, U256::ZERO, false);
+        let placeholder_sig = Signature::new(U256::MAX, U256::MAX, true);
+        let auth: SignedAuthorization = Authorization {
+            chain_id: U256::from(chain_id),
+            address: address!("0000000000000000000000000000000000000042"),
+            nonce: 1,
+        }
+        .into_signed(Signature::new(U256::from(1u64), U256::from(2u64), true));
+
+        let signed_cases: Vec<(&str, MorphTxEnvelope, bool)> = vec![
+            (
+                "legacy",
+                MorphTxEnvelope::Legacy(Signed::new_unchecked(
+                    TxLegacy {
+                        chain_id: Some(chain_id),
+                        nonce: 7,
+                        gas_price: 2_000_000_000,
+                        gas_limit: 50_000,
+                        to: TxKind::Call(to),
+                        value: U256::from(1u64),
+                        input: input.clone(),
+                    },
+                    zero_sig,
+                    B256::ZERO,
+                )),
+                false,
+            ),
+            (
+                "eip2930",
+                MorphTxEnvelope::Eip2930(Signed::new_unchecked(
+                    TxEip2930 {
+                        chain_id,
+                        nonce: 7,
+                        gas_price: 2_000_000_000,
+                        gas_limit: 50_000,
+                        to: TxKind::Call(to),
+                        value: U256::from(1u64),
+                        access_list: Default::default(),
+                        input: input.clone(),
+                    },
+                    zero_sig,
+                    B256::ZERO,
+                )),
+                false,
+            ),
+            (
+                "eip1559",
+                MorphTxEnvelope::Eip1559(Signed::new_unchecked(
+                    TxEip1559 {
+                        chain_id,
+                        nonce: 7,
+                        gas_limit: 50_000,
+                        max_fee_per_gas: 2_000_000_000,
+                        max_priority_fee_per_gas: 1_000_000_000,
+                        to: TxKind::Call(to),
+                        value: U256::from(1u64),
+                        access_list: Default::default(),
+                        input: input.clone(),
+                    },
+                    zero_sig,
+                    B256::ZERO,
+                )),
+                true,
+            ),
+            (
+                "eip7702",
+                MorphTxEnvelope::Eip7702(Signed::new_unchecked(
+                    TxEip7702 {
+                        chain_id,
+                        nonce: 7,
+                        gas_limit: 80_000,
+                        max_fee_per_gas: 2_000_000_000,
+                        max_priority_fee_per_gas: 1_000_000_000,
+                        to,
+                        value: U256::ZERO,
+                        access_list: Default::default(),
+                        authorization_list: vec![auth.clone()],
+                        input: input.clone(),
+                    },
+                    zero_sig,
+                    B256::ZERO,
+                )),
+                true,
+            ),
+            (
+                "morph_v1",
+                MorphTxEnvelope::Morph(Signed::new_unchecked(
+                    TxMorph {
+                        chain_id,
+                        nonce: 7,
+                        gas_limit: 50_000,
+                        max_fee_per_gas: 2_000_000_000,
+                        max_priority_fee_per_gas: 1_000_000_000,
+                        to: TxKind::Call(to),
+                        value: U256::ZERO,
+                        access_list: Default::default(),
+                        input: input.clone(),
+                        fee_token_id: 1,
+                        fee_limit: U256::from(10_000u64),
+                        version: MORPH_TX_VERSION_1,
+                        reference: Some(B256::repeat_byte(0x11)),
+                        memo: Some(Bytes::from_static(b"sim")),
+                        authorization_list: vec![],
+                    },
+                    zero_sig,
+                    B256::ZERO,
+                )),
+                true,
+            ),
+            (
+                "morph_v2",
+                MorphTxEnvelope::Morph(Signed::new_unchecked(
+                    TxMorph {
+                        chain_id,
+                        nonce: 7,
+                        gas_limit: 80_000,
+                        max_fee_per_gas: 2_000_000_000,
+                        max_priority_fee_per_gas: 1_000_000_000,
+                        to: TxKind::Call(to),
+                        value: U256::ZERO,
+                        access_list: Default::default(),
+                        input: input.clone(),
+                        fee_token_id: 1,
+                        fee_limit: U256::from(10_000u64),
+                        version: MORPH_TX_VERSION_2,
+                        reference: None,
+                        memo: None,
+                        authorization_list: vec![auth],
+                    },
+                    zero_sig,
+                    B256::ZERO,
+                )),
+                true,
+            ),
+        ];
+
+        for (label, tx, compare_tx_env) in signed_cases {
+            let zero_encoded = tx.encoded_2718();
+            let sized_encoded = encode_simulated_tx_for_l1_fee(&tx);
+
+            // Exactly +64 bytes (r and s expand from 1 byte 0x80 each to 33 bytes each).
+            assert_eq!(
+                sized_encoded.len(),
+                zero_encoded.len() + 64,
+                "{label}: expected +64 byte delta vs zero signature"
+            );
+
+            // Re-decoded envelope carries the exact placeholder signature.
+            let decoded = MorphTxEnvelope::decode_2718(&mut sized_encoded.as_ref())
+                .expect("placeholder encoding must decode cleanly");
+            let sig = match &decoded {
+                MorphTxEnvelope::Legacy(s) => s.signature(),
+                MorphTxEnvelope::Eip2930(s) => s.signature(),
+                MorphTxEnvelope::Eip1559(s) => s.signature(),
+                MorphTxEnvelope::Eip7702(s) => s.signature(),
+                MorphTxEnvelope::Morph(s) => s.signature(),
+                MorphTxEnvelope::L1Msg(_) => unreachable!(),
+            };
+            assert_eq!(
+                *sig, placeholder_sig,
+                "{label}: decoded signature must match placeholder"
+            );
+
+            // Original `tx` must still hold its zero signature untouched.
+            let orig_sig = match &tx {
+                MorphTxEnvelope::Legacy(s) => s.signature(),
+                MorphTxEnvelope::Eip2930(s) => s.signature(),
+                MorphTxEnvelope::Eip1559(s) => s.signature(),
+                MorphTxEnvelope::Eip7702(s) => s.signature(),
+                MorphTxEnvelope::Morph(s) => s.signature(),
+                MorphTxEnvelope::L1Msg(_) => unreachable!(),
+            };
+            assert_eq!(
+                *orig_sig, zero_sig,
+                "{label}: original tx signature must not be mutated"
+            );
+
+            // EIP-1559, EIP-7702, and Morph envelopes match `MorphTxEnv::encode_for_l1_fee`
+            // byte-for-byte (EIP-7702/MorphV2 authorization signatures differ only if recovered,
+            // and here `from_recovered_tx` keeps the signed auths or replaces with placeholder).
+            if compare_tx_env && tx.authorization_list().is_none_or(<[_]>::is_empty) {
+                let env_encoded =
+                    MorphTxEnv::from_recovered_tx(&tx, signer).encode_for_l1_fee(chain_id);
+                assert_eq!(
+                    sized_encoded, env_encoded,
+                    "{label}: must match MorphTxEnv::encode_for_l1_fee byte-for-byte"
+                );
+            }
+        }
+
+        // `L1Msg` has no signature and falls back to `encoded_2718`.
+        let l1_msg = MorphTxEnvelope::L1Msg(Sealed::new_unchecked(
+            TxL1Msg {
+                queue_index: 1,
+                gas_limit: 50_000,
+                to,
+                value: U256::ZERO,
+                input,
+                sender: Address::ZERO,
+            },
+            B256::ZERO,
+        ));
+        assert_eq!(
+            encode_simulated_tx_for_l1_fee(&l1_msg),
+            Bytes::from(l1_msg.encoded_2718())
         );
     }
 }
