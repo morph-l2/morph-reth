@@ -84,7 +84,7 @@ impl TokenRegistryEntry {
     }
 
     /// Reject registry entries that cannot produce a valid token-denominated fee.
-    pub(crate) fn ensure_usable(self, token_id: u16) -> Result<Self, MorphInvalidTransaction> {
+    pub fn ensure_usable(self, token_id: u16) -> Result<Self, MorphInvalidTransaction> {
         if !self.is_active {
             return Err(MorphInvalidTransaction::TokenNotActive(token_id));
         }
