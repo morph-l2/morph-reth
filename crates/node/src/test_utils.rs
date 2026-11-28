@@ -221,6 +221,7 @@ pub struct TestNodeBuilder {
     desired_gas_limit: Option<u64>,
     debug_tip: Option<B256>,
     trusted_peer: Option<String>,
+    http_api: Option<RpcModuleSelection>,
     morph_args: Option<MorphArgs>,
 }
 
@@ -248,6 +249,7 @@ impl TestNodeBuilder {
             desired_gas_limit: None,
             debug_tip: None,
             trusted_peer: None,
+            http_api: None,
             morph_args: None,
         }
     }
@@ -359,6 +361,12 @@ impl TestNodeBuilder {
         self
     }
 
+    /// Override the configured HTTP RPC modules (`--http.api`).
+    pub fn with_http_api(mut self, http_api: RpcModuleSelection) -> Self {
+        self.http_api = Some(http_api);
+        self
+    }
+
     /// Override the maximum pool-transaction payload bytes included in a block.
     ///
     /// Restricted to single-node setups.
@@ -389,7 +397,8 @@ impl TestNodeBuilder {
                 ));
             }
             let (node, wallet) =
-                launch_test_node_with_args(Arc::new(chain_spec), self.is_dev, args).await?;
+                launch_test_node_with_args(Arc::new(chain_spec), self.is_dev, args, self.http_api)
+                    .await?;
             return Ok((vec![node], wallet));
         }
 
@@ -399,6 +408,7 @@ impl TestNodeBuilder {
         let desired_gas_limit = self.desired_gas_limit;
         let debug_tip = self.debug_tip;
         let trusted_peer = self.trusted_peer;
+        let http_api = self.http_api;
         reth_e2e_test_utils::E2ETestSetupBuilder::<MorphNode, _>::new(
             self.num_nodes,
             Arc::new(chain_spec),
@@ -409,6 +419,9 @@ impl TestNodeBuilder {
             config.debug.tip = debug_tip;
             if let Some(ref enode) = trusted_peer {
                 config.network.trusted_peers = vec![enode.parse().expect("valid trusted enode")];
+            }
+            if let Some(ref http_api) = http_api {
+                config.rpc.http_api = Some(http_api.clone());
             }
             config.set_dev(is_dev)
         })
@@ -428,6 +441,7 @@ async fn launch_test_node_with_args(
     chain_spec: Arc<morph_chainspec::MorphChainSpec>,
     is_dev: bool,
     args: MorphArgs,
+    http_api: Option<RpcModuleSelection>,
 ) -> eyre::Result<(MorphTestNode, Wallet)> {
     use reth_chainspec::EthChainSpec;
 
@@ -446,7 +460,7 @@ async fn launch_test_node_with_args(
             RpcServerArgs::default()
                 .with_unused_ports()
                 .with_http()
-                .with_http_api(RpcModuleSelection::All),
+                .with_http_api(http_api.unwrap_or(RpcModuleSelection::All)),
         )
         .set_dev(is_dev);
     let node = MorphNode::new(args);

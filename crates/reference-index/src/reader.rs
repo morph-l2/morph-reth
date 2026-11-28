@@ -13,6 +13,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU8, Ordering},
 };
+use tokio::sync::watch;
 
 /// Runtime phase, exported for metrics and logs, and read by the RPC layer only
 /// to skip its bounded catch-up wait while `Deferred` or `PreJade`.
@@ -57,6 +58,29 @@ impl ReferenceIndexPhase {
     }
 }
 
+/// Snapshot of reference-index runtime progress published over a
+/// [`tokio::sync::watch`] channel so async RPC callers wake on cursor commits,
+/// phase transitions, or runtime shutdown without polling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReferenceIndexProgress {
+    /// Current runtime phase.
+    pub phase: ReferenceIndexPhase,
+    /// Latest durably committed `IndexedTo` block number observed by the runtime.
+    pub indexed_to: Option<u64>,
+    /// Whether the runtime has entered the terminal [`ReferenceIndexPhase::Unavailable`] state.
+    pub unavailable: bool,
+}
+
+impl ReferenceIndexProgress {
+    const fn opening() -> Self {
+        Self {
+            phase: ReferenceIndexPhase::Opening,
+            indexed_to: None,
+            unavailable: false,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct ReferenceIndexShared {
     db: RwLock<Option<ReferenceIndexDb>>,
@@ -67,6 +91,11 @@ struct ReferenceIndexShared {
     /// `IndexUnavailable` so clients stop retrying; in every other phase the
     /// tip comparison decides on its own (`IndexBehind` when the cursor lags).
     unavailable: AtomicBool,
+    /// Watch receiver cloned by RPC callers to wait asynchronously for cursor or
+    /// phase updates. The corresponding [`watch::Sender`] is owned exclusively by
+    /// [`crate::ReferenceIndexRuntime`] so runtime shutdown drops it and wakes
+    /// all waiters immediately.
+    progress_rx: watch::Receiver<ReferenceIndexProgress>,
     metrics: ReferenceIndexMetrics,
 }
 
@@ -84,22 +113,50 @@ pub struct ReferenceIndexHandle {
 }
 
 impl ReferenceIndexHandle {
-    /// Create a handle before the background runtime has opened the database.
+    /// Create a standalone handle without an attached background runtime.
+    ///
+    /// Its progress watch channel is immediately closed so async waiters do not
+    /// stall waiting for a nonexistent writer.
     pub fn new(jade_timestamp: u64) -> Self {
-        Self {
+        let (handle, _tx) = Self::new_with_progress(jade_timestamp);
+        handle
+    }
+
+    pub(crate) fn new_with_progress(
+        jade_timestamp: u64,
+    ) -> (Self, watch::Sender<ReferenceIndexProgress>) {
+        let (progress_tx, progress_rx) = watch::channel(ReferenceIndexProgress::opening());
+        let handle = Self {
             shared: Arc::new(ReferenceIndexShared {
                 db: RwLock::new(None),
                 phase: AtomicU8::new(ReferenceIndexPhase::Opening as u8),
                 unavailable: AtomicBool::new(false),
+                progress_rx,
                 metrics: ReferenceIndexMetrics::default(),
             }),
             jade_timestamp,
-        }
+        };
+        (handle, progress_tx)
     }
 
     /// Current in-memory runtime phase, exposed for logs and metrics.
     pub fn phase(&self) -> ReferenceIndexPhase {
         ReferenceIndexPhase::from_u8(self.shared.phase.load(Ordering::Acquire))
+    }
+
+    /// Latest runtime progress snapshot (phase, durable cursor height, and
+    /// unavailable flag).
+    pub fn progress(&self) -> ReferenceIndexProgress {
+        let mut progress = *self.shared.progress_rx.borrow();
+        progress.phase = self.phase();
+        progress.unavailable = self.shared.unavailable.load(Ordering::Acquire);
+        progress
+    }
+
+    /// Subscribe to runtime progress updates (cursor commits, phase transitions,
+    /// `Unavailable`, and runtime shutdown).
+    pub fn subscribe_progress(&self) -> watch::Receiver<ReferenceIndexProgress> {
+        self.shared.progress_rx.clone()
     }
 
     /// Whether a canonical tip at `timestamp` predates Jade.

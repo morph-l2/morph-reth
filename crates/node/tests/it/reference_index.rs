@@ -177,3 +177,99 @@ async fn reference_index_no_results_for_unrelated_reference() -> eyre::Result<()
 
     Ok(())
 }
+
+/// M-M06: `morph_` RPC methods must NOT be registered on HTTP transports that do not
+/// enable the `morph` module (e.g. `RpcModuleSelection::Standard` / `eth,net,web3`).
+#[tokio::test(flavor = "multi_thread")]
+async fn morph_rpc_not_exposed_when_morph_module_not_configured() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (mut nodes, _wallet) = TestNodeBuilder::new()
+        .with_http_api(reth_rpc_builder::RpcModuleSelection::Standard)
+        .build()
+        .await?;
+    let node = nodes.pop().unwrap();
+    let client = node
+        .rpc_client()
+        .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
+
+    // Standard `eth_` methods remain available.
+    let block_number: U64 = client
+        .request("eth_blockNumber", jsonrpsee::rpc_params![])
+        .await?;
+    assert_eq!(block_number, U64::ZERO);
+
+    // `morph_` namespace is not registered and must return Method Not Found (-32601).
+    let err = client
+        .request::<Vec<ReferenceTransactionResult>, _>(
+            "morph_getTransactionHashesByReference",
+            (query_args(B256::with_last_byte(0x42), None, None),),
+        )
+        .await
+        .expect_err("morph_ must not be registered under Standard HTTP modules");
+    match err {
+        jsonrpsee::core::ClientError::Call(obj) => {
+            assert_eq!(
+                obj.code(),
+                -32601,
+                "expected Method Not Found (-32601), got {obj:?}"
+            );
+        }
+        other => panic!("expected JSON-RPC Call error (-32601), got {other:?}"),
+    }
+
+    Ok(())
+}
+
+/// M-M06: `morph_` RPC methods ARE registered when `morph` is explicitly enabled via
+/// `--http.api eth,morph` (`RethRpcModule::Other("morph")`), while unconfigured modules
+/// remain disabled.
+#[tokio::test(flavor = "multi_thread")]
+async fn morph_rpc_exposed_when_morph_module_explicitly_configured() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let selection: reth_rpc_builder::RpcModuleSelection = "eth,morph".parse()?;
+    assert!(selection.contains(&reth_rpc_builder::RethRpcModule::Other("morph".into())));
+
+    let (mut nodes, wallet) = TestNodeBuilder::new()
+        .with_http_api(selection)
+        .build()
+        .await?;
+    let mut node = nodes.pop().unwrap();
+
+    let reference = B256::with_last_byte(0xdd);
+    let raw_tx = MorphTxBuilder::new(wallet.chain_id, wallet.inner.clone(), wallet.inner_nonce)
+        .with_v1_token_fee(TEST_TOKEN_ID)
+        .with_reference(reference)
+        .build_signed()?;
+    node.rpc.inject_tx(raw_tx).await?;
+    let payload = node.advance_block().await?;
+    let tx_hash = *payload
+        .block()
+        .body()
+        .transactions
+        .first()
+        .unwrap()
+        .tx_hash();
+
+    let results = wait_for_reference_query(&node, query_args(reference, None, None)).await?;
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].transaction_hash, tx_hash);
+
+    // Confirm unconfigured module (`txpool`) is not accidentally exposed.
+    let client = node
+        .rpc_client()
+        .ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
+    let err = client
+        .request::<serde_json::Value, _>("txpool_status", jsonrpsee::rpc_params![])
+        .await
+        .expect_err("unconfigured txpool module must not be registered");
+    match err {
+        jsonrpsee::core::ClientError::Call(obj) => {
+            assert_eq!(obj.code(), -32601);
+        }
+        other => panic!("expected JSON-RPC Call error (-32601), got {other:?}"),
+    }
+
+    Ok(())
+}
